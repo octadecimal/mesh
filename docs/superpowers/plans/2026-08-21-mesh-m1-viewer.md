@@ -51,7 +51,7 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `MeshConfig`, `loadConfig(repoRoot: string): Promise<MeshConfig>`, `saveConfig(repoRoot: string, config: MeshConfig): Promise<void>`, `DEFAULT_CONFIG`.
+- Produces: `MeshConfig`, `loadConfig(repoRoot: string): Promise<MeshConfig>`, `saveConfig(repoRoot: string, config: MeshConfig): Promise<void>`, `defaultConfig(repoRoot: string): MeshConfig`.
 
 - [ ] **Step 1: Verify Node runs TypeScript directly**
 
@@ -290,6 +290,13 @@ export async function loadConfig(repoRoot: string): Promise<MeshConfig> {
 
 Run: `node --test tests/config.test.ts`
 Expected: PASS, 3 tests.
+
+> **Ruling applied during execution (2026-08-21).** The `catch` in step 8 recovers from
+> *any* read or parse failure by overwriting the file with defaults, which destroys a
+> persisted `pm.sessionId` if the config is merely corrupt rather than missing. Task 9's
+> `--resume` depends on that value. The implementation narrows recovery to `ENOENT` and
+> propagates every other error, and a fourth test asserts a corrupt config survives on
+> disk. Step 8's code block above is the original, superseded text.
 
 - [ ] **Step 10: Commit**
 
