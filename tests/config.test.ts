@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, saveConfig } from '../src/config.ts';
@@ -35,4 +35,22 @@ test('loadConfig fills in keys missing from an older config file', async () => {
   const config = await loadConfig(dir);
   assert.equal(config.port, 9999);
   assert.equal(config.pm.sessionId, null);
+});
+
+test('loadConfig rejects corrupt config and preserves the file', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mesh-'));
+  const meshDir = join(dir, '.mesh');
+  const configPath = join(meshDir, 'config.json');
+  const corruptJson = '{ "invalid": json, "missing": "quotes" }';
+
+  await mkdir(meshDir, { recursive: true });
+  await writeFile(configPath, corruptJson, 'utf8');
+
+  await assert.rejects(
+    () => loadConfig(dir),
+    (err) => err instanceof Error && err.message.includes('Failed to parse config')
+  );
+
+  const preserved = await readFile(configPath, 'utf8');
+  assert.equal(preserved, corruptJson);
 });

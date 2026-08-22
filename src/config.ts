@@ -30,12 +30,23 @@ export async function loadConfig(repoRoot: string): Promise<MeshConfig> {
   const target = join(repoRoot, MESH_DIR, CONFIG_FILE);
   const fallback = defaultConfig(repoRoot);
 
+  let content: string;
+  try {
+    content = await readFile(target, 'utf8');
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException;
+    if (error.code === 'ENOENT') {
+      await saveConfig(repoRoot, fallback);
+      return fallback;
+    }
+    throw new Error(`Failed to read config at ${target}: ${error.message}`, { cause: err });
+  }
+
   let stored: Partial<MeshConfig>;
   try {
-    stored = JSON.parse(await readFile(target, 'utf8')) as Partial<MeshConfig>;
-  } catch {
-    await saveConfig(repoRoot, fallback);
-    return fallback;
+    stored = JSON.parse(content) as Partial<MeshConfig>;
+  } catch (err) {
+    throw new Error(`Failed to parse config at ${target}: ${(err as Error).message}`, { cause: err });
   }
 
   return {
