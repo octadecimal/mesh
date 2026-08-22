@@ -53,12 +53,12 @@
 - Consumes: nothing.
 - Produces: `MeshConfig`, `loadConfig(repoRoot: string): Promise<MeshConfig>`, `saveConfig(repoRoot: string, config: MeshConfig): Promise<void>`, `defaultConfig(repoRoot: string): MeshConfig`.
 
-- [ ] **Step 1: Verify Node runs TypeScript directly**
+- [x] **Step 1: Verify Node runs TypeScript directly**
 
 Run: `node --version && echo 'const x: number = 1; console.log(x)' > /tmp/t.ts && node /tmp/t.ts`
 Expected: prints a version of `v24.x` or later, then `1`. If it errors, stop and report — every later step assumes type stripping works.
 
-- [ ] **Step 2: Create `package.json`**
+- [x] **Step 2: Create `package.json`**
 
 ```json
 {
@@ -88,7 +88,7 @@ Expected: prints a version of `v24.x` or later, then `1`. If it errors, stop and
 }
 ```
 
-- [ ] **Step 3: Create `tsconfig.json`**
+- [x] **Step 3: Create `tsconfig.json`**
 
 This is for the editor and for Vite. The server never compiles.
 
@@ -113,7 +113,7 @@ This is for the editor and for Vite. The server never compiles.
 
 `erasableSyntaxOnly` matters: it stops anyone writing enums or parameter properties, which Node's type stripping cannot erase.
 
-- [ ] **Step 4: Create `.gitignore`**
+- [x] **Step 4: Create `.gitignore`**
 
 ```gitignore
 node_modules/
@@ -122,7 +122,7 @@ dist/
 *.log
 ```
 
-- [ ] **Step 5: Create `src/types.ts`**
+- [x] **Step 5: Create `src/types.ts`**
 
 ```typescript
 /** An agent's identity within one Claude Code process. */
@@ -183,7 +183,7 @@ export interface MeshConfig {
 }
 ```
 
-- [ ] **Step 6: Write the failing test for config**
+- [x] **Step 6: Write the failing test for config**
 
 ```typescript
 // tests/config.test.ts
@@ -227,12 +227,12 @@ test('loadConfig fills in keys missing from an older config file', async () => {
 });
 ```
 
-- [ ] **Step 7: Run the test to verify it fails**
+- [x] **Step 7: Run the test to verify it fails**
 
 Run: `node --test tests/config.test.ts`
 Expected: FAIL, cannot find module `../src/config.ts`.
 
-- [ ] **Step 8: Implement `src/config.ts`**
+- [x] **Step 8: Implement `src/config.ts`**
 
 ```typescript
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
@@ -286,7 +286,7 @@ export async function loadConfig(repoRoot: string): Promise<MeshConfig> {
 }
 ```
 
-- [ ] **Step 9: Run the test to verify it passes**
+- [x] **Step 9: Run the test to verify it passes**
 
 Run: `node --test tests/config.test.ts`
 Expected: PASS, 3 tests.
@@ -298,7 +298,7 @@ Expected: PASS, 3 tests.
 > propagates every other error, and a fourth test asserts a corrupt config survives on
 > disk. Step 8's code block above is the original, superseded text.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add package.json tsconfig.json .gitignore src/types.ts src/config.ts tests/config.test.ts
@@ -319,7 +319,7 @@ git commit -m "feat: add project scaffold and mesh configuration"
 
 A single stdout chunk can end mid-line, and one chunk can hold several lines. The splitter holds the remainder between calls.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 // tests/stream-lines.test.ts
@@ -354,12 +354,12 @@ test('parseLine returns null for JSON without a type field', () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `node --test tests/stream-lines.test.ts`
 Expected: FAIL, cannot find module `../src/stream.ts`.
 
-- [ ] **Step 3: Implement the splitter and parser**
+- [x] **Step 3: Implement the splitter and parser**
 
 ```typescript
 // src/stream.ts
@@ -394,12 +394,12 @@ export function parseLine(line: string): RawEvent | null {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `node --test tests/stream-lines.test.ts`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/stream.ts tests/stream-lines.test.ts
@@ -422,7 +422,7 @@ git commit -m "feat: add ndjson line splitting and parsing"
 
 Every subagent event carries `parent_tool_use_id`; the project manager's own events carry `null`. That single field is the whole demultiplexer.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 // tests/stream-classify.test.ts
@@ -516,12 +516,12 @@ test('roster events report the live background task list', async () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `node --test tests/stream-classify.test.ts`
 Expected: FAIL, `classify` is not exported from `src/stream.ts`.
 
-- [ ] **Step 3: Implement `agentOf` and `classify`**
+- [x] **Step 3: Implement `agentOf` and `classify`**
 
 First replace the existing import line at the top of `src/stream.ts` with:
 
@@ -697,14 +697,14 @@ export function classify(raw: RawEvent): MeshEvent[] {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `node --test tests/stream-classify.test.ts`
 Expected: PASS, 8 tests.
 
 If the count assertion in the third test fails, print the actual events with `console.dir(events, { depth: null })` and correct the expected number to match the fixture — the fixture is the source of truth, not the plan.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/stream.ts tests/stream-classify.test.ts
@@ -726,7 +726,7 @@ git commit -m "feat: classify stream events and demultiplex by parent tool use"
 
 The stub replays a fixture so tests never spawn a real `claude` and never cost quota. It also records the arguments it was called with, which is how `--resume` is tested.
 
-- [ ] **Step 1: Write the stub binary**
+- [x] **Step 1: Write the stub binary**
 
 ```javascript
 // tests/stubs/fake-claude.mjs
@@ -752,7 +752,7 @@ process.stdin.on('data', (chunk) => {
 process.stdin.on('end', () => process.exit(0));
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [x] **Step 2: Write the failing test**
 
 ```typescript
 // tests/supervisor.test.ts
@@ -854,12 +854,12 @@ test('send writes a stream-json user message to child stdin', async () => {
 });
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [x] **Step 3: Run the test to verify it fails**
 
 Run: `node --test tests/supervisor.test.ts`
 Expected: FAIL, cannot find module `../src/supervisor.ts`.
 
-- [ ] **Step 4: Implement `src/supervisor.ts`**
+- [x] **Step 4: Implement `src/supervisor.ts`**
 
 ```typescript
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -999,12 +999,12 @@ export class Supervisor {
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [x] **Step 5: Run the test to verify it passes**
 
 Run: `node --test tests/supervisor.test.ts`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/supervisor.ts tests/supervisor.test.ts tests/stubs/fake-claude.mjs
@@ -1025,7 +1025,7 @@ git commit -m "feat: add process supervisor with fixture-replaying test stub"
 
 A browser that reconnects must not lose the transcript, so the bus keeps a bounded buffer and replays from a sequence number.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 // tests/bus.test.ts
@@ -1086,12 +1086,12 @@ test('a throwing subscriber does not stop the others', () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `node --test tests/bus.test.ts`
 Expected: FAIL, cannot find module `../src/bus.ts`.
 
-- [ ] **Step 3: Implement `src/bus.ts`**
+- [x] **Step 3: Implement `src/bus.ts`**
 
 ```typescript
 import type { MeshEvent, StampedEvent } from './types.ts';
@@ -1138,12 +1138,12 @@ export class EventBus {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `node --test tests/bus.test.ts`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/bus.ts tests/bus.test.ts
@@ -1170,7 +1170,7 @@ Routes:
 | `GET` | `/api/events` | SSE. Replays history, then streams. Honours `Last-Event-ID`. |
 | `POST` | `/api/message` | Body `{"text":"..."}`. Calls `onMessage`. Returns 202. |
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 // tests/api.test.ts
@@ -1278,12 +1278,12 @@ test('Last-Event-ID skips events the client already has', async () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `node --test tests/api.test.ts`
 Expected: FAIL, cannot find module `../src/api.ts`.
 
-- [ ] **Step 3: Implement `src/api.ts`**
+- [x] **Step 3: Implement `src/api.ts`**
 
 ```typescript
 import http from 'node:http';
@@ -1380,12 +1380,12 @@ export function createServer(options: ApiOptions): http.Server {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `node --test tests/api.test.ts`
 Expected: PASS, 5 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/api.ts tests/api.test.ts
@@ -1406,7 +1406,7 @@ git commit -m "feat: add sse event stream and message endpoint"
 
 This file is deliberately free of JSX so `node --test` runs it directly. The React component in Task 8 renders whatever this returns.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```typescript
 // web/src/lib/panes.test.ts
@@ -1475,12 +1475,12 @@ test('latestQuota returns null when nothing has arrived', () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `node --test web/src/lib/panes.test.ts`
 Expected: FAIL, cannot find module `./panes.ts`.
 
-- [ ] **Step 3: Implement `web/src/lib/panes.ts`**
+- [x] **Step 3: Implement `web/src/lib/panes.ts`**
 
 ```typescript
 import { PM } from '../../../src/types.ts';
@@ -1538,12 +1538,12 @@ export function latestQuota(events: StampedEvent[]): QuotaState | null {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `node --test web/src/lib/panes.test.ts`
 Expected: PASS, 6 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add web/src/lib/panes.ts web/src/lib/panes.test.ts
@@ -1566,12 +1566,12 @@ git commit -m "feat: add pane grouping for the viewer"
 - Consumes: `groupIntoPanes`, `latestQuota`, `Pane`, `QuotaState`, `StampedEvent`.
 - Produces: the browser application. Nothing later depends on it.
 
-- [ ] **Step 1: Install dependencies**
+- [x] **Step 1: Install dependencies**
 
 Run: `npm install`
 Expected: completes without error, `node_modules/` exists.
 
-- [ ] **Step 2: Create `vite.config.ts`**
+- [x] **Step 2: Create `vite.config.ts`**
 
 ```typescript
 import { defineConfig } from 'vite';
@@ -1589,7 +1589,7 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 3: Create `web/index.html`**
+- [x] **Step 3: Create `web/index.html`**
 
 ```html
 <!doctype html>
@@ -1606,7 +1606,7 @@ export default defineConfig({
 </html>
 ```
 
-- [ ] **Step 4: Create `web/src/main.tsx`**
+- [x] **Step 4: Create `web/src/main.tsx`**
 
 ```tsx
 import { StrictMode } from 'react';
@@ -1621,7 +1621,7 @@ createRoot(document.getElementById('root')!).render(
 );
 ```
 
-- [ ] **Step 5: Create `web/src/useMeshEvents.ts`**
+- [x] **Step 5: Create `web/src/useMeshEvents.ts`**
 
 ```typescript
 import { useEffect, useState } from 'react';
@@ -1656,7 +1656,7 @@ export function useMeshEvents(): { events: StampedEvent[]; connection: Connectio
 }
 ```
 
-- [ ] **Step 6: Create `web/src/App.tsx`**
+- [x] **Step 6: Create `web/src/App.tsx`**
 
 ```tsx
 import { useMemo, useState } from 'react';
@@ -1759,7 +1759,7 @@ export function App() {
 }
 ```
 
-- [ ] **Step 7: Create `web/src/app.css`**
+- [x] **Step 7: Create `web/src/app.css`**
 
 ```css
 * { box-sizing: border-box; }
@@ -1785,12 +1785,12 @@ button { padding: 0 18px; background: #2f5bd0; color: #fff; border: 0; border-ra
 button:disabled { opacity: 0.5; cursor: default; }
 ```
 
-- [ ] **Step 8: Verify the frontend builds**
+- [x] **Step 8: Verify the frontend builds**
 
 Run: `npm run build:web`
 Expected: succeeds, `dist/web/index.html` exists. A TypeScript or CSS error here is a real bug — fix it before committing.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add vite.config.ts web/index.html web/src/main.tsx web/src/useMeshEvents.ts web/src/App.tsx web/src/app.css
@@ -1810,7 +1810,7 @@ git commit -m "feat: add react viewer frontend"
 - Consumes: `loadConfig`, `saveConfig`, `Supervisor`, `EventBus`, `createServer`.
 - Produces: the runnable application.
 
-- [ ] **Step 1: Implement `src/index.ts`**
+- [x] **Step 1: Implement `src/index.ts`**
 
 ```typescript
 import { resolve } from 'node:path';
@@ -1852,7 +1852,7 @@ process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
 ```
 
-- [ ] **Step 2: Add the `dev` script to `package.json`**
+- [x] **Step 2: Add the `dev` script to `package.json`**
 
 Add to `scripts`:
 
@@ -1860,7 +1860,7 @@ Add to `scripts`:
 "dev": "node src/index.ts"
 ```
 
-- [ ] **Step 3: Run the whole test suite**
+- [x] **Step 3: Run the whole test suite**
 
 Run: `npm test`
 Expected: PASS. 37 tests across seven files, no real `claude` process spawned.
@@ -1882,7 +1882,7 @@ Open `http://127.0.0.1:5173`. Confirm each of the following, and stop and report
 6. `.mesh/config.json` now contains a non-null `pm.sessionId`.
 7. Stopping the server with Ctrl+C and running `npm run dev` again resumes: the pane still answers questions about the earlier messages.
 
-- [ ] **Step 5: Write `README.md`**
+- [x] **Step 5: Write `README.md`**
 
 ````markdown
 # Mesh
@@ -1927,7 +1927,7 @@ gitignored. The project manager's session id is written there so restarts
 resume the same conversation.
 ````
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/index.ts README.md package.json
