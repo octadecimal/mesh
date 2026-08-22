@@ -10,9 +10,12 @@
     "test": "node --test \"tests/**/*.test.ts\" \"web/src/lib/**/*.test.ts\"",
     "dev": "node src/index.ts",
     "dev:web": "vite",
-    "build:web": "vite build"
+    "build:web": "vite build",
+    "test:e2e": "playwright test",
+    "test:e2e:real": "MESH_E2E_REAL=1 playwright test real-cli"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
