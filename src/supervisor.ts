@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createLineSplitter, parseLine, classify } from './stream.ts';
+import { PM } from './types.ts';
 import type { MeshConfig, MeshEvent } from './types.ts';
 
 /** Environment variables that must never reach the child process. */
@@ -71,7 +72,9 @@ export class Supervisor {
   }
 
   #emit(event: MeshEvent): void {
-    if (event.kind === 'init' && event.sessionId) this.sessionId = event.sessionId;
+    if (event.kind === 'init' && event.agent === PM && event.sessionId) {
+      this.sessionId = event.sessionId;
+    }
     for (const listener of this.#listeners) listener(event);
   }
 
@@ -94,15 +97,28 @@ export class Supervisor {
       }
     });
 
+    let stderrBuf = '';
     child.stderr.setEncoding('utf8');
-    child.stderr.on('data', (chunk: string) => process.stderr.write(`[claude] ${chunk}`));
+    child.stderr.on('data', (chunk: string) => {
+      stderrBuf += chunk;
+      process.stderr.write(`[claude] ${chunk}`);
+    });
 
-    // Resolve once the child has produced its first output or exited, so the
-    // caller knows the process is genuinely running.
+    // Resolve once the child has produced its first output, so the caller
+    // knows the process is genuinely running. If the child terminates first
+    // — auth failure, bad --model, broken MCP config — reject instead of
+    // reporting a false success. 'close' (not 'exit') so stdio has fully
+    // drained by the time we decide which branch this was.
     await new Promise<void>((resolve, reject) => {
-      const done = () => resolve();
-      child.stdout.once('data', done);
-      child.once('exit', done);
+      child.stdout.once('data', () => resolve());
+      child.once('close', (code) => {
+        const detail = stderrBuf.trim();
+        reject(
+          new Error(
+            `claude exited with code ${code} before producing output${detail ? `: ${detail}` : ''}`,
+          ),
+        );
+      });
       child.once('error', reject);
     });
   }
@@ -126,7 +142,7 @@ export class Supervisor {
         child.kill('SIGTERM');
         resolve();
       }, 2000);
-      child.once('exit', () => {
+      child.once('close', () => {
         clearTimeout(timer);
         resolve();
       });

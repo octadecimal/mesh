@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,16 +49,18 @@ test('supervisor never passes an API key and strips inherited session vars', asy
   process.env.ANTHROPIC_API_KEY = 'must-not-be-forwarded';
   process.env.CLAUDECODE = '1';
 
-  const supervisor = makeSupervisor(dir, argsOut);
-  await supervisor.start();
-  const childEnv = supervisor.spawnEnvForTest();
-  await supervisor.stop();
+  try {
+    const supervisor = makeSupervisor(dir, argsOut);
+    await supervisor.start();
+    const childEnv = supervisor.spawnEnvForTest();
+    await supervisor.stop();
 
-  delete process.env.ANTHROPIC_API_KEY;
-  delete process.env.CLAUDECODE;
-
-  assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
-  assert.equal(childEnv.CLAUDECODE, undefined);
+    assert.equal(childEnv.ANTHROPIC_API_KEY, undefined);
+    assert.equal(childEnv.CLAUDECODE, undefined);
+  } finally {
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDECODE;
+  }
 });
 
 test('supervisor passes --resume when a session id is known', async () => {
@@ -93,4 +95,57 @@ test('send writes a stream-json user message to child stdin', async () => {
   assert.equal(message.type, 'user');
   assert.equal(message.message.role, 'user');
   assert.equal(message.message.content[0].text, 'hello there');
+});
+
+test('a subagent init event does not clobber the PM session id', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mesh-'));
+  const argsOut = join(dir, 'args.json');
+  // Hand-built, not one of the tracked fixtures: the recorded fixtures
+  // happen not to contain a subagent init event, which is exactly the case
+  // this guards against. Subagent init events stream through the same
+  // stdout pipe tagged with their own parent_tool_use_id.
+  const customFixture = join(dir, 'subagent-init.ndjson');
+  const lines = [
+    JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      session_id: 'pm-session-id',
+      model: 'claude-sonnet-5',
+      tools: [],
+    }),
+    JSON.stringify({
+      type: 'system',
+      subtype: 'init',
+      session_id: 'subagent-session-id',
+      model: 'claude-sonnet-5',
+      tools: [],
+      parent_tool_use_id: 'toolu_01ABCDEF',
+    }),
+  ];
+  await writeFile(customFixture, `${lines.join('\n')}\n`, 'utf8');
+
+  const supervisor = new Supervisor({
+    config: { targetRepo: dir, port: 0, pm: { model: 'claude-sonnet-5', sessionId: null } },
+    command: process.execPath,
+    baseArgs: [stub],
+    env: { FAKE_CLAUDE_FIXTURE: customFixture, FAKE_CLAUDE_ARGS_OUT: argsOut },
+  });
+
+  await supervisor.start();
+  await supervisor.stop();
+
+  assert.equal(supervisor.sessionId, 'pm-session-id');
+});
+
+test('start rejects when the child exits before producing any stdout', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mesh-'));
+  const argsOut = join(dir, 'args.json');
+  const supervisor = new Supervisor({
+    config: { targetRepo: dir, port: 0, pm: { model: 'claude-sonnet-5', sessionId: null } },
+    command: process.execPath,
+    baseArgs: [stub],
+    env: { FAKE_CLAUDE_FIXTURE: fixture, FAKE_CLAUDE_ARGS_OUT: argsOut, FAKE_CLAUDE_EXIT_CODE: '17' },
+  });
+
+  await assert.rejects(supervisor.start(), /exited with code 17/);
 });
