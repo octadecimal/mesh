@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { parseLine, classify, agentOf } from '../src/stream.ts';
 import { PM } from '../src/types.ts';
-import type { MeshEvent } from '../src/types.ts';
+import type { MeshEvent, RawEvent } from '../src/types.ts';
 
 async function loadFixture(name: string): Promise<MeshEvent[]> {
   const text = await readFile(new URL(`./fixtures/streams/${name}`, import.meta.url), 'utf8');
@@ -85,4 +85,37 @@ test('roster events report the live background task list', async () => {
   const rosters = events.filter((e) => e.kind === 'roster');
   const sizes = rosters.map((e) => (e.kind === 'roster' ? e.taskIds.length : -1));
   assert.ok(sizes.includes(5), `expected a roster of five, saw ${sizes.join(',')}`);
+});
+
+test('a message carrying both a thinking block and a tool use classifies to two events, in order', () => {
+  const raw: RawEvent = {
+    type: 'assistant',
+    parent_tool_use_id: null,
+    message: {
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'weighing the options' },
+        { type: 'tool_use', id: 'toolu_multi_1', name: 'Read', input: { file: 'a.txt' } },
+      ],
+    },
+  };
+
+  const events = classify(raw);
+
+  assert.equal(events.length, 2);
+
+  const [first, second] = events;
+  assert.ok(first && second);
+
+  assert.equal(first.kind, 'thinking');
+  assert.equal(first.agent, PM);
+  assert.ok(first.kind === 'thinking');
+  assert.equal(first.text, 'weighing the options');
+
+  assert.equal(second.kind, 'tool_use');
+  assert.equal(second.agent, PM);
+  assert.ok(second.kind === 'tool_use');
+  assert.equal(second.name, 'Read');
+  assert.equal(second.toolUseId, 'toolu_multi_1');
+  assert.deepEqual(second.input, { file: 'a.txt' });
 });

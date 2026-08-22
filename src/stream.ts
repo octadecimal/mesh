@@ -155,7 +155,7 @@ export function classify(raw: RawEvent): MeshEvent[] {
   }
 
   if (raw.type === 'assistant' || raw.type === 'user') {
-    const role = raw.type === 'assistant' ? 'assistant' : 'user';
+    const role: 'assistant' | 'user' = raw.type === 'assistant' ? 'assistant' : 'user';
     return blocksOf(raw).flatMap((block): MeshEvent[] => {
       if (block.type === 'text' && block.text) {
         return [{ kind: 'text', agent, role, text: block.text }];
