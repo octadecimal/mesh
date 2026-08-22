@@ -33,6 +33,40 @@ npm test
 Tests replay recorded streams from `tests/fixtures/streams/` and never spawn a
 real `claude` process, so the suite costs no quota.
 
+### End-to-end
+
+Browser tests drive the viewer in headless Chromium against those same recorded
+streams:
+
+```bash
+npm run test:e2e
+```
+
+The first run needs the browser and its system libraries. Playwright's
+`install --with-deps` shortcut shells out to `sudo` and needs an interactive
+terminal, which fails under WSL2 tooling — so install the two halves
+separately, the second from your own terminal:
+
+```bash
+npx playwright install chromium
+sudo apt-get install -y libnss3 libnspr4 libasound2t64
+```
+
+Those package names are Ubuntu 24.04 (noble). On 22.04 the last one is
+`libasound2`. If Chromium still refuses to start, list what is missing with:
+
+```bash
+ldd ~/.cache/ms-playwright/chromium-*/chrome-linux64/chrome | grep 'not found'
+```
+
+To drive the real `claude` binary through the browser instead of the stub:
+
+```bash
+npm run test:e2e:real
+```
+
+That one spends subscription quota, so it is skipped unless `MESH_E2E_REAL=1`.
+
 ## Configuration
 
 `.mesh/config.json` in the target repository. Created on first run and

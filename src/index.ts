@@ -8,7 +8,17 @@ const repoRoot = resolve(process.argv[2] ?? process.cwd());
 const config = await loadConfig(repoRoot);
 
 const bus = new EventBus();
-const supervisor = new Supervisor({ config });
+
+// End-to-end tests point the child at the fixture-replaying stub so a browser
+// run costs no quota. Both are unset in normal use, giving the real CLI.
+const claudeBin = process.env.MESH_CLAUDE_BIN;
+const claudeArgs = process.env.MESH_CLAUDE_ARGS;
+
+const supervisor = new Supervisor({
+  config,
+  ...(claudeBin ? { command: claudeBin } : {}),
+  ...(claudeArgs ? { baseArgs: JSON.parse(claudeArgs) as string[] } : {}),
+});
 
 supervisor.onEvent((event) => {
   bus.publish(event);

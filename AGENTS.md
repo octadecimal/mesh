@@ -27,6 +27,22 @@ This server runs the **front door** surface: three tools reach every jCodeMunch 
 
 **Announce your model once per session** so the server can size its answers: `announce_model { "model": "<your-model-id>" }`.
 
+## Testing Policy
+
+`npm test` and `npm run test:e2e` replay recorded streams from
+`tests/fixtures/streams/` and never spawn a real `claude` process. Both are
+free to run at any time.
+
+Two commands launch a real `claude` child and spend the user's subscription
+quota. Never run either without explicit permission:
+
+- `npm run dev` — the server owns a live project manager process
+- `npm run test:e2e:real` — the opt-in browser test against the real CLI
+
+`src/index.ts` honours `MESH_CLAUDE_BIN` and `MESH_CLAUDE_ARGS`, which point the
+supervisor at a stub binary. That is how the end-to-end suite exercises the real
+entry point for free; leave both unset in normal use.
+
 ## Commit Policy
 
 Every commit in this repository uses the Conventional Commits format:
