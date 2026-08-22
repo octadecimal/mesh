@@ -21,6 +21,6 @@ for (const line of readFileSync(fixture, 'utf8').split('\n')) {
 // Stay alive so the supervisor can write to stdin, and exit when it closes.
 process.stdin.resume();
 process.stdin.on('data', (chunk) => {
-  writeFileSync(`${argsOut}.stdin`, chunk, { flag: 'a' });
+  if (argsOut) writeFileSync(`${argsOut}.stdin`, chunk, { flag: 'a' });
 });
 process.stdin.on('end', () => process.exit(0));
