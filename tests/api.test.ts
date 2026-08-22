@@ -93,8 +93,16 @@ test('Last-Event-ID skips events the client already has', async () => {
   await withServer(bus, () => {}, async (base) => {
     const response = await fetch(`${base}/api/events`, { headers: { 'last-event-id': '1' } });
     const reader = response.body!.getReader();
-    const { value } = await reader.read();
-    const text = new TextDecoder().decode(value);
+    const decoder = new TextDecoder();
+    let text = '';
+
+    // The stream contract does not guarantee "seq":2 arrives in the first
+    // chunk read; accumulate until it shows up rather than assuming so.
+    while (!text.includes('"seq":2')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
 
     assert.ok(!text.includes('id: 1\n'), 'should not replay the acknowledged event');
     assert.match(text, /^id: 2$/m);

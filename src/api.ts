@@ -37,14 +37,28 @@ function handleEvents(request: http.IncomingMessage, response: http.ServerRespon
     'x-accel-buffering': 'no',
   });
 
+  // A client that vanishes without a clean TCP FIN (dropped mobile network,
+  // backgrounded tab, NAT timeout) never fires 'close' — the dead socket is
+  // only discovered by the next write, which emits 'error'. Without a
+  // listener that error is thrown and takes down the whole process.
+  response.on('error', () => {});
+
+  const write = (chunk: string) => {
+    try {
+      response.write(chunk);
+    } catch {
+      // The socket is already gone; 'close' will run cleanup.
+    }
+  };
+
   for (const event of bus.history(Number.isNaN(since) ? 0 : since)) {
-    response.write(frame(event));
+    write(frame(event));
   }
 
-  const unsubscribe = bus.subscribe((event) => response.write(frame(event)));
+  const unsubscribe = bus.subscribe((event) => write(frame(event)));
 
   // Comment frames keep intermediaries from closing an idle stream.
-  const heartbeat = setInterval(() => response.write(': ping\n\n'), 15000);
+  const heartbeat = setInterval(() => write(': ping\n\n'), 15000);
 
   const cleanup = () => {
     clearInterval(heartbeat);
@@ -69,21 +83,28 @@ export function createServer(options: ApiOptions): http.Server {
     }
 
     if (request.method === 'POST' && url.pathname === '/api/message') {
-      void readBody(request).then((body) => {
-        let text: unknown;
-        try {
-          text = (JSON.parse(body) as { text?: unknown }).text;
-        } catch {
-          sendJson(response, 400, { error: 'invalid json' });
-          return;
-        }
-        if (typeof text !== 'string' || text.trim().length === 0) {
-          sendJson(response, 400, { error: 'text is required' });
-          return;
-        }
-        options.onMessage(text);
-        sendJson(response, 202, { accepted: true });
-      });
+      void readBody(request)
+        .then((body) => {
+          let text: unknown;
+          try {
+            text = (JSON.parse(body) as { text?: unknown }).text;
+          } catch {
+            sendJson(response, 400, { error: 'invalid json' });
+            return;
+          }
+          if (typeof text !== 'string' || text.trim().length === 0) {
+            sendJson(response, 400, { error: 'text is required' });
+            return;
+          }
+          options.onMessage(text);
+          sendJson(response, 202, { accepted: true });
+        })
+        .catch(() => {
+          // The request aborted mid-body (e.g. client disconnected while
+          // uploading). Respond if we still can; otherwise there is nothing
+          // left to do — the socket is already gone.
+          if (!response.headersSent) sendJson(response, 400, { error: 'request aborted' });
+        });
       return;
     }
 
