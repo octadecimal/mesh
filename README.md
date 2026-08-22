@@ -24,6 +24,22 @@ npm run dev:web    # browser on 127.0.0.1:5173
 
 Pass a path to watch a different repository: `npm run dev -- /path/to/repo`.
 
+### Viewing from Windows under WSL2
+
+The dev server binds every interface, so the viewer opens in a native Windows
+browser at either:
+
+```
+http://localhost:5173      # via WSL localhost forwarding
+http://<wsl-ip>:5173       # direct; find it with `hostname -I`
+```
+
+Use the second if the first does not answer — localhost forwarding is the part
+that breaks. Only the frontend is exposed this way; the API stays bound to
+`127.0.0.1` and is reached through the Vite proxy inside WSL. Windows does not
+forward the WSL network onward, so the page is reachable from the host, not
+from the wider LAN.
+
 ## Testing
 
 ```bash
