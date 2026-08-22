@@ -87,18 +87,41 @@ already set from the PR title, supply one in Conventional Commits form.
 
 ## 4. Clean up locally
 
-Mesh uses a single checkout — there are no worktrees to remove.
+`gh pr merge --delete-branch` in step 3 deleted **both** the local and the
+remote branch, and switched this checkout off the branch it deleted. So this
+step mostly confirms that rather than repeating it. Mesh uses a single checkout
+— there are no worktrees to remove.
+
+Sync master and drop the stale remote ref:
 
 ```
-git checkout master
+git checkout master   # usually already here; gh switched for you
 git pull
-git branch -d <branch>
+git fetch --prune
 ```
 
-`git branch -d` refuses if the branch is not merged. Because the merge was a
-squash, git may not recognise the branch as merged; verify the PR shows as
-merged, then use `git branch -D <branch>`. Never reach for `-D` without that
-confirmation.
+Then check whether the local branch actually went:
+
+```
+git branch --list <branch>
+```
+
+- **No output?** Cleanup is done — say so and move on. Do NOT run
+  `git branch -d`; it fails with `branch '<branch>' not found`, and that error
+  is noise, not a problem to report as a failure.
+- **Still listed?** gh could not delete it — typically the working tree was
+  dirty, or the merge was run from a different checkout. Delete it now:
+  ```
+  git branch -d <branch>
+  ```
+  `-d` refuses a branch git does not consider merged, which is the normal case
+  after a **squash** merge, because the commit on master is a new object.
+  Confirm the PR is merged first:
+  ```
+  gh pr view <number> --json state --jq .state
+  ```
+  Only once that prints `MERGED`, use `git branch -D <branch>`. Never reach for
+  `-D` without that confirmation.
 
 If `git checkout master` fails because the working tree is dirty, STOP and
 report — do not stash the user's changes.
