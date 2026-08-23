@@ -60,6 +60,10 @@ Rules:
 - Breaking changes append `!` after the type or scope, and explain the break in
   the commit body.
 - Keep the subject line at 72 characters or fewer; put detail in the body.
+- Never sign a commit as an agent. Do not add `Co-Authored-By` trailers naming
+  Claude, Claude Code, Codex, Copilot, or any other assistant, and do not add
+  "Generated with ..." footers. The commit author is the human running the tool,
+  and the message body carries no tool attribution.
 
 If history is created that does not follow this format, rewrite it before
 pushing.

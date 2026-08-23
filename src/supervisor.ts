@@ -130,6 +130,11 @@ export class Supervisor {
       message: { role: 'user', content: [{ type: 'text', text }] },
     };
     this.#child.stdin.write(`${JSON.stringify(message)}\n`);
+    // The child never echoes stdin back on stdout, so the human's own words
+    // would otherwise be missing from every transcript. Emitting here puts
+    // them on the bus like any other event: in history, replayed on
+    // reconnect, and visible in every open tab rather than only the sender's.
+    this.#emit({ kind: 'text', agent: PM, role: 'user', text });
   }
 
   async stop(): Promise<void> {
