@@ -21,7 +21,11 @@ const supervisor = new Supervisor({
 });
 
 supervisor.onEvent((event) => {
-  bus.publish(event);
+  // A delta is superseded by the finished message that follows it, so it goes
+  // out live-only: keeping hundreds of them per turn in the replay buffer would
+  // evict the real transcript a reconnecting viewer needs.
+  if (event.kind === 'delta') bus.publishEphemeral(event);
+  else bus.publish(event);
   // Persist the session id the first time we learn it, so a restart resumes.
   if (event.kind === 'init' && config.pm.sessionId !== event.sessionId) {
     config.pm.sessionId = event.sessionId;
