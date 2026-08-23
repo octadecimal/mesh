@@ -1,6 +1,6 @@
 ---
 name: complete-work
-description: Use when a development branch is finished — opens or verifies its PR, gates on CI, squash-merges, cleans up the branch, returns to master, optionally brings up the live stack, and writes a change-specific manual test walkthrough. Invoke as /complete-work.
+description: Use when a development branch is finished — opens or verifies its PR, gates on CI, brings up the live stack and writes a change-specific walkthrough so a human can try the change in a browser, waits for their sign-off, then squash-merges and cleans up the branch. Invoke as /complete-work.
 ---
 
 # /complete-work
@@ -39,7 +39,7 @@ gh pr view --json number,state,headRefName,mergeStateStatus,statusCheckRollup
   gh pr create --base master --title "<conventional commit subject>" --body "<what and why>"
   ```
 
-  The title becomes the squash commit subject in step 3, so it must be a valid
+  The title becomes the squash commit subject in step 6, so it must be a valid
   Conventional Commits subject, 72 characters or fewer.
 
 ## 2. Pre-merge gate
@@ -76,7 +76,84 @@ Evaluate in order:
 Do not re-run the test suite here. This gate trusts that the work was validated
 before the PR was opened; it confirms the PR's own CI is green.
 
-## 3. Merge
+## 3. Live stack — ASK FIRST
+
+**Do not start the stack without asking.** `npm run dev` spawns a real `claude`
+child process against the user's subscription, so it costs quota. Ask:
+
+> CI is green and the PR is ready to merge. Want me to bring up the live stack so
+> you can try the change in a browser first? This spawns a real `claude` process
+> and spends subscription quota.
+
+If they decline, print the commands and move to step 4.
+
+If they accept, check `claude` is on `PATH`, then run each in the background so
+they survive the turn:
+
+```
+npm run dev        # server on 127.0.0.1:4317
+npm run dev:web    # frontend on 127.0.0.1:5173
+```
+
+Poll until the API answers:
+
+```
+curl -s http://127.0.0.1:4317/api/health
+```
+
+Expect `{"ok":true}`. If it does not answer, report the failure with the
+server's output rather than claiming the stack is up.
+
+**Say plainly that these background processes terminate when the Claude session
+ends**, so the user is not surprised later.
+
+## 4. Change-specific walkthrough
+
+Read what is about to be merged:
+
+```
+gh pr view <number> --json title,body,files
+gh pr diff <number>
+```
+
+Write a walkthrough tailored to **this** change, not a generic tour. The
+user runs it by hand — it is the evidence for the sign-off in step 5, so
+every claim in it must be something they can see for themselves:
+
+- **URLs:** `http://127.0.0.1:5173`, plus the LAN URL `http://<this-machine-ip>:5173`
+  — the user often browses from another machine, so never assume localhost on
+  their end. Find the IP with `hostname -I`.
+- **Where to look:** the pane or element this change affects.
+- **What to do:** the concrete inputs or clicks that exercise it.
+- **What "correct" looks like:** the observable behavior that confirms it works.
+- **Caveats:** anything the change depends on that is not currently running.
+
+If the user declined the live stack in step 3, still write the walkthrough —
+prefixed with the commands they need to start it themselves.
+
+## 5. Human sign-off — STOP AND WAIT
+
+**Nothing merges until a human has tried it.** Post the walkthrough, then stop
+the turn and wait for their verdict. Do not merge in the same turn that you
+wrote the walkthrough, and do not treat silence, a thumbs-up on some earlier
+step, or your own passing tests as sign-off. CI proves the code runs; this step
+proves it does the thing the user actually wanted.
+
+Ask plainly:
+
+> Try it in the browser and tell me how it looks. I will merge once you confirm.
+
+Then act on what comes back:
+
+- **They confirm it works** — proceed to step 6.
+- **They report a problem** — STOP the merge. Treat it as the real bug it is:
+  diagnose, fix on this same branch, push, then re-run from step 2. The PR stays
+  open throughout.
+- **They decline to test** (declined the stack in step 3, or explicitly say to
+  merge without trying it) — that is a valid answer and it is theirs to give.
+  Say plainly that the change is going in unverified by a human, and proceed.
+
+## 6. Merge
 
 ```
 gh pr merge --squash --delete-branch
@@ -85,9 +162,9 @@ gh pr merge --squash --delete-branch
 Squash-merges and deletes the remote branch. If the squash subject was not
 already set from the PR title, supply one in Conventional Commits form.
 
-## 4. Clean up locally
+## 7. Clean up locally
 
-`gh pr merge --delete-branch` in step 3 deleted **both** the local and the
+`gh pr merge --delete-branch` in step 6 deleted **both** the local and the
 remote branch, and switched this checkout off the branch it deleted. So this
 step mostly confirms that rather than repeating it. Mesh uses a single checkout
 — there are no worktrees to remove.
@@ -126,59 +203,11 @@ git branch --list <branch>
 If `git checkout master` fails because the working tree is dirty, STOP and
 report — do not stash the user's changes.
 
-## 5. Live stack — ASK FIRST
-
-**Do not start the stack without asking.** `npm run dev` spawns a real `claude`
-child process against the user's subscription, so it costs quota. Ask:
-
-> Merged and cleaned up. Want me to bring up the live stack so you can try it?
-> This spawns a real `claude` process and spends subscription quota.
-
-If they decline, print the commands and move to step 6.
-
-If they accept, check `claude` is on `PATH`, then run each in the background so
-they survive the turn:
-
-```
-npm run dev        # server on 127.0.0.1:4317
-npm run dev:web    # frontend on 127.0.0.1:5173
-```
-
-Poll until the API answers:
-
-```
-curl -s http://127.0.0.1:4317/api/health
-```
-
-Expect `{"ok":true}`. If it does not answer, report the failure with the
-server's output rather than claiming the stack is up.
-
-**Say plainly that these background processes terminate when the Claude session
-ends**, so the user is not surprised later.
-
-## 6. Change-specific walkthrough
-
-Read what was just merged:
-
-```
-gh pr view <number> --json title,body,files
-gh pr diff <number>
-```
-
-Write a walkthrough tailored to **this** change, not a generic tour:
-
-- **URLs:** `http://127.0.0.1:5173`, plus the LAN URL `http://<this-machine-ip>:5173`
-  — the user often browses from another machine, so never assume localhost on
-  their end. Find the IP with `hostname -I`.
-- **Where to look:** the pane or element this change affects.
-- **What to do:** the concrete inputs or clicks that exercise it.
-- **What "correct" looks like:** the observable behavior that confirms it works.
-- **Caveats:** anything the change depends on that is not currently running.
-
-If the user declined the live stack in step 5, still write the walkthrough —
-prefixed with the commands they need to start it themselves.
+If the live stack from step 3 is still running, leave it running — the squash
+commit carries the same code the user just verified, so nothing needs a restart.
 
 ## Done
 
-Report a short summary: PR number merged, branch cleaned up, live stack status
-and URLs (or that it was not started), and the walkthrough.
+Report a short summary: PR number merged, who verified it in the browser (or
+that it went in unverified at the user's direction), branch cleanup status, and
+whether the live stack is still up and on which URLs.
