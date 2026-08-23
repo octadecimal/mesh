@@ -55,6 +55,9 @@ export class Supervisor {
       '--output-format',
       'stream-json',
       '--verbose',
+      // Without this the CLI only reports finished messages, so the viewer sits
+      // silent for the whole turn instead of showing text as it is written.
+      '--include-partial-messages',
       '--model',
       this.#options.config.pm.model,
       '--strict-mcp-config',
