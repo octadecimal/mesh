@@ -51,6 +51,12 @@ function handleEvents(request: http.IncomingMessage, response: http.ServerRespon
     }
   };
 
+  // Node holds the headers back until something is written, so an empty replay
+  // buffer would leave the client with no response at all until the first
+  // heartbeat — 15 seconds of a browser showing no connection. Open the stream
+  // straight away.
+  write(': open\n\n');
+
   for (const event of bus.history(Number.isNaN(since) ? 0 : since)) {
     write(frame(event));
   }

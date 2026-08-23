@@ -109,3 +109,31 @@ test('Last-Event-ID skips events the client already has', async () => {
     await reader.cancel();
   });
 });
+
+test('an empty stream still flushes headers and an opening frame immediately', async () => {
+  // With nothing in the replay buffer — the state right after a resume, since
+  // the child stays silent until it is messaged — nothing used to be written
+  // until the 15s heartbeat. Node holds headers back until the first write, so
+  // the browser saw no response at all and EventSource.onopen never fired.
+  await withServer(new EventBus(), () => {}, async (base) => {
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 3000);
+    const started = Date.now();
+    try {
+      const response = await fetch(`${base}/api/events`, { signal: controller.signal });
+      const reader = response.body!.getReader();
+      const { value } = await reader.read();
+      const elapsed = Date.now() - started;
+
+      assert.equal(response.status, 200);
+      assert.ok(
+        elapsed < 1000,
+        `first byte took ${elapsed}ms; expected the stream to open immediately`,
+      );
+      assert.match(new TextDecoder().decode(value), /^:/, 'expected an opening comment frame');
+    } finally {
+      clearTimeout(deadline);
+      controller.abort();
+    }
+  });
+});
