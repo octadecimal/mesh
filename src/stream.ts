@@ -124,10 +124,32 @@ function classifySystem(raw: RawEvent, agent: AgentId): MeshEvent[] {
   }
 }
 
+/**
+ * `--include-partial-messages` wraps the Anthropic streaming events in a
+ * `stream_event` envelope. Only the two deltas the viewer renders are taken;
+ * block starts and stops carry no text, and the completed message that
+ * follows is what gets recorded.
+ */
+function classifyDelta(raw: RawEvent, agent: AgentId): MeshEvent[] {
+  const event = raw.event as { type?: unknown; delta?: unknown } | undefined;
+  if (event?.type !== 'content_block_delta') return [];
+
+  const delta = event.delta as { type?: unknown; text?: unknown; thinking?: unknown } | undefined;
+  if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+    return [{ kind: 'delta', agent, channel: 'text', text: delta.text }];
+  }
+  if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+    return [{ kind: 'delta', agent, channel: 'thinking', text: delta.thinking }];
+  }
+  return [];
+}
+
 export function classify(raw: RawEvent): MeshEvent[] {
   const agent = agentOf(raw);
 
   if (raw.type === 'system') return classifySystem(raw, agent);
+
+  if (raw.type === 'stream_event') return classifyDelta(raw, agent);
 
   if (raw.type === 'rate_limit_event') {
     const info = raw.rate_limit_info as Record<string, unknown> | undefined;

@@ -24,6 +24,12 @@ export type MeshEvent =
   | { kind: 'init'; agent: AgentId; sessionId: string; model: string; tools: string[] }
   | { kind: 'text'; agent: AgentId; role: 'assistant' | 'user'; text: string }
   | { kind: 'thinking'; agent: AgentId; text: string }
+  /**
+   * A fragment of a message still being generated. Deltas are live-only: they
+   * never enter the bus history, because the completed `text` or `thinking`
+   * event that follows says the same thing durably.
+   */
+  | { kind: 'delta'; agent: AgentId; channel: 'text' | 'thinking'; text: string }
   | { kind: 'tool_use'; agent: AgentId; name: string; toolUseId: string; input: unknown }
   | { kind: 'tool_result'; agent: AgentId; toolUseId: string; isError: boolean }
   | {

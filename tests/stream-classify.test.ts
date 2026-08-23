@@ -119,3 +119,50 @@ test('a message carrying both a thinking block and a tool use classifies to two 
   assert.equal(second.toolUseId, 'toolu_multi_1');
   assert.deepEqual(second.input, { file: 'a.txt' });
 });
+
+test('a text delta becomes a streaming delta event', () => {
+  const events = classify({
+    type: 'stream_event',
+    event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hel' } },
+  });
+
+  assert.deepEqual(events, [{ kind: 'delta', agent: PM, channel: 'text', text: 'Hel' }]);
+});
+
+test('a thinking delta streams on its own channel', () => {
+  const events = classify({
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'thinking_delta', thinking: 'weighing' },
+    },
+  });
+
+  assert.deepEqual(events, [{ kind: 'delta', agent: PM, channel: 'thinking', text: 'weighing' }]);
+});
+
+test('a subagent delta is attributed to the subagent', () => {
+  const events = classify({
+    type: 'stream_event',
+    parent_tool_use_id: 'toolu_7',
+    event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+  });
+
+  assert.equal(events[0]?.agent, 'toolu_7');
+});
+
+test('stream events other than text and thinking deltas are ignored', () => {
+  const envelopes: RawEvent[] = [
+    { type: 'stream_event', event: { type: 'message_start', message: {} } },
+    { type: 'stream_event', event: { type: 'content_block_start', index: 0 } },
+    { type: 'stream_event', event: { type: 'content_block_stop', index: 0 } },
+    {
+      type: 'stream_event',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"a"' } },
+    },
+    { type: 'stream_event' },
+  ];
+
+  for (const envelope of envelopes) assert.deepEqual(classify(envelope), []);
+});
