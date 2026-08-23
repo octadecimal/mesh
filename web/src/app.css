@@ -19,3 +19,6 @@ footer { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid #262
 textarea { flex: 1; height: 56px; resize: none; background: #1b1e24; color: inherit; border: 1px solid #2f343c; border-radius: 4px; padding: 8px; font: inherit; }
 button { padding: 0 18px; background: #2f5bd0; color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
 button:disabled { opacity: 0.5; cursor: default; }
+/* A message still being streamed: same styling as the finished line it will
+   become, dimmed so the transcript above it reads as settled. */
+.line.partial { opacity: 0.65; }
