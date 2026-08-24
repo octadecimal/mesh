@@ -51,7 +51,7 @@ export const buildSnapshot = (dependencies: SnapshotDependencies) => {
     dependencies.workspaces.listByProject(project.id),
   );
   const sessions = projects.flatMap((project) =>
-    dependencies.sessions.listByProject(project.id),
+    dependencies.sessions.listByProject(project.id, { includeArchived: true }),
   );
   const events = sessions.flatMap((session) =>
     dependencies.events.after(session.id, 0),

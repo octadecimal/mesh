@@ -164,6 +164,58 @@ describe('HTTP command routes', () => {
     expect(response.json().sessions).toHaveLength(1);
   });
 
+  it('keeps archived sessions in snapshots while excluding explicitly deleted sessions', async () => {
+    const fixture = setup();
+    cleanups.push(async () => {
+      await fixture.app.close();
+      fixture.repositories.dispose();
+    });
+    fixture.repositories.sessions.create({
+      id: id('s2'),
+      projectId: id('p1'),
+      workspaceId: id('w1'),
+      title: 'Delete me',
+      permissionMode: 'interactive',
+      lifecycleState: 'idle',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const archived = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'archive-snapshot',
+        command: {
+          type: 'session.archive',
+          payload: { sessionId: 's1' },
+        },
+      },
+    });
+    const deleted = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'delete-snapshot',
+        command: {
+          type: 'session.delete',
+          payload: { sessionId: 's2', confirmed: true },
+        },
+      },
+    });
+
+    const snapshot = (
+      await fixture.app.inject({ method: 'GET', url: '/api/snapshot' })
+    ).json();
+
+    expect(archived.statusCode).toBe(200);
+    expect(deleted.statusCode).toBe(200);
+    expect(snapshot.sessions).toEqual([
+      expect.objectContaining({ id: 's1', lifecycleState: 'archived' }),
+    ]);
+  });
+
   it('returns reconstruction projections without raw diagnostics', async () => {
     const fixture = setup();
     cleanups.push(async () => {
