@@ -26,8 +26,9 @@ in a sidebar and persist on disk.
 
 ## Probe findings
 
-All of the following were measured against Claude Code 2.1.239 on 2026-08-21.
-Probe code was throwaway and is not retained.
+All of the following were measured against Claude Code 2.1.239 on 2026-08-21,
+except the HTTP MCP finding, measured against 2.1.241 on 2026-08-23. Probe code
+was throwaway and is not retained.
 
 ### Subscription authentication works headless
 
@@ -110,6 +111,52 @@ by prompt discipline.
 `--input-format stream-json` accepts newline-delimited user messages on stdin.
 Context is retained across them and one `result` event is emitted per turn,
 giving a clean turn boundary for the UI.
+
+### HTTP MCP over `--mcp-config` works
+
+Answers open question 1. A throwaway MCP server exposing one tool over
+streamable HTTP was reached by a headless `-p` run on subscription auth, and the
+tool's return value round-tripped through the model:
+
+```
+methods received: server/discover, initialize,
+                  notifications/initialized, tools/list, tools/call
+init.mcp_servers: [{"name":"mesh","status":"connected"}]
+init.tools:       ["mcp__mesh__mesh_ping"]
+tool_result:      marker returned intact, is_error false
+```
+
+Four consequences for the board tools:
+
+- **`--mcp-config` is the only viable path.** The project-scoped `.mcp.json`
+  alternative reports `Pending approval (run claude to approve)` and needs an
+  interactive session, so it cannot be used headless. Passing the config
+  explicitly bypasses that gate.
+- **`--strict-mcp-config` is required, not optional.** Without it the project
+  manager inherits whatever MCP servers the operator has configured globally.
+  With it, Mesh's board tools are the only MCP surface the agent sees.
+- **`init.mcp_servers[].status` is a readiness signal.** It reported `failed`
+  accurately while the probe server was broken, so Mesh can gate dispatch on
+  `connected` rather than assuming the tools arrived.
+- **Tools are named `mcp__<server>__<tool>`.** That is the string the
+  session-level `--allowedTools` ceiling and the per-agent `tools` lists must
+  use.
+
+Two implementation notes for `mcp.ts`. A stateless streamable HTTP server needs
+a fresh server and transport instance per request; reusing one instance returns
+500 on the second `initialize`, and the symptom at the CLI is an unexplained
+`status: "failed"` with no tools and no error text. And the CLI opens with a
+`server/discover` call at protocol `2026-07-28` that the MCP SDK 1.30 does not
+implement — it returns 400 and the CLI proceeds to `initialize` regardless.
+
+### `--allowedTools` gates execution, not attempts
+
+A run restricted to a single MCP tool still emitted a `Bash` tool call, which
+the permission classifier blocked and reported in `result.permission_denials`.
+The allowlist is therefore enforced after the model has already decided to act,
+not before. This does not change the capability model — the tool still cannot
+run — but it means denials are an expected part of normal operation rather than
+a sign of a misbehaving agent, which is what the card rendering assumes.
 
 ### Two dead ends
 
@@ -368,8 +415,8 @@ M1 and M2 carry the risk. M3 onwards is mostly bookkeeping.
 
 These are cheap to answer now and expensive to discover late.
 
-1. Does the CLI accept an HTTP MCP transport via `--mcp-config`? Blocks the board
-   tools. Verify in M1.
+1. ~~Does the CLI accept an HTTP MCP transport via `--mcp-config`?~~ Answered
+   2026-08-23: yes. See "HTTP MCP over `--mcp-config` works" above.
 2. Does `PostCompact` fire in headless mode? Decides whether re-priming after
    compaction is automatic or manual. Verify in M1.
 3. Does the stream emit a live, answerable permission request, or only
