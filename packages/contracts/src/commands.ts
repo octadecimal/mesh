@@ -16,15 +16,40 @@ export const discoveryCommandSchema = z.discriminatedUnion('type', [
   }),
 ]);
 
+const sessionCreatePayloadSchema = z.union([
+  z.object({
+    projectId: idSchema,
+    workspaceId: idSchema,
+    title: z.string().min(1),
+    permissionMode: permissionModeSchema,
+  }),
+  z.object({
+    projectId: idSchema,
+    title: z.string().min(1),
+    permissionMode: permissionModeSchema,
+    workspace: z.object({
+      type: z.literal('shared'),
+      path: z.string().trim().min(1),
+    }),
+  }),
+  z.object({
+    projectId: idSchema,
+    title: z.string().min(1),
+    permissionMode: permissionModeSchema,
+    workspace: z.object({
+      type: z.literal('worktree'),
+      repositoryPath: z.string().trim().min(1),
+      path: z.string().trim().min(1),
+      branch: z.string().trim().min(1),
+      startPoint: z.string().trim().min(1),
+    }),
+  }),
+]);
+
 const mutatingCommandSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('session.create'),
-    payload: z.object({
-      projectId: idSchema,
-      workspaceId: idSchema,
-      title: z.string().min(1),
-      permissionMode: permissionModeSchema,
-    }),
+    payload: sessionCreatePayloadSchema,
   }),
   z.object({
     type: z.literal('session.resume'),

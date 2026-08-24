@@ -33,6 +33,7 @@ export class SessionRepository {
   private readonly selectActiveByProject;
   private readonly selectAllByProject;
   private readonly archiveById;
+  private readonly deleteById;
 
   constructor(private readonly database: Database) {
     this.insert = database.prepare(`
@@ -54,6 +55,7 @@ export class SessionRepository {
     this.archiveById = database.prepare(
       "UPDATE sessions SET lifecycle_state = 'archived', updated_at = ? WHERE id = ?",
     );
+    this.deleteById = database.prepare('DELETE FROM sessions WHERE id = ?');
   }
 
   create(session: Session): Session {
@@ -67,7 +69,10 @@ export class SessionRepository {
     return row ? toSession(row) : undefined;
   }
 
-  listByProject(projectId: string, options?: { includeArchived?: boolean }): Session[] {
+  listByProject(
+    projectId: string,
+    options?: { includeArchived?: boolean },
+  ): Session[] {
     const statement = options?.includeArchived
       ? this.selectAllByProject
       : this.selectActiveByProject;
@@ -77,5 +82,9 @@ export class SessionRepository {
   archive(id: string): Session | undefined {
     this.archiveById.run(new Date().toISOString(), id);
     return this.get(id);
+  }
+
+  remove(id: string): boolean {
+    return this.deleteById.run(id).changes === 1;
   }
 }

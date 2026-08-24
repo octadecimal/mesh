@@ -9,23 +9,36 @@ type CommandRow = {
   response_json: string | null;
 };
 
-const assertJsonSafe = (value: unknown, ancestors = new Set<object>()): void => {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+const assertJsonSafe = (
+  value: unknown,
+  ancestors = new Set<object>(),
+): void => {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean')
+    return;
   if (typeof value === 'number') {
     if (Number.isFinite(value)) return;
     throw new TypeError('Command response must be JSON-safe');
   }
-  if (typeof value !== 'object') throw new TypeError('Command response must be JSON-safe');
-  if (ancestors.has(value)) throw new TypeError('Command response must be JSON-safe');
+  if (typeof value !== 'object')
+    throw new TypeError('Command response must be JSON-safe');
+  if (ancestors.has(value))
+    throw new TypeError('Command response must be JSON-safe');
   if (Array.isArray(value)) {
-    if (Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError('Command response must be JSON-safe');
+    if (Object.getPrototypeOf(value) !== Array.prototype)
+      throw new TypeError('Command response must be JSON-safe');
     const names = Object.getOwnPropertyNames(value);
-    if (names.length !== value.length + 1 || names.some((name) => name !== 'length' && !/^(0|[1-9]\d*)$/.test(name))) throw new TypeError('Command response must be JSON-safe');
+    if (
+      names.length !== value.length + 1 ||
+      names.some((name) => name !== 'length' && !/^(0|[1-9]\d*)$/.test(name))
+    )
+      throw new TypeError('Command response must be JSON-safe');
     for (let index = 0; index < value.length; index += 1) {
       const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) throw new TypeError('Command response must be JSON-safe');
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor))
+        throw new TypeError('Command response must be JSON-safe');
     }
-    if (Object.getOwnPropertySymbols(value).length > 0) throw new TypeError('Command response must be JSON-safe');
+    if (Object.getOwnPropertySymbols(value).length > 0)
+      throw new TypeError('Command response must be JSON-safe');
     ancestors.add(value);
     for (const item of value) assertJsonSafe(item, ancestors);
     ancestors.delete(value);
@@ -39,10 +52,12 @@ const assertJsonSafe = (value: unknown, ancestors = new Set<object>()): void => 
   }
   const descriptors = Object.getOwnPropertyDescriptors(value);
   for (const descriptor of Object.values(descriptors)) {
-    if (!descriptor.enumerable || !('value' in descriptor)) throw new TypeError('Command response must be JSON-safe');
+    if (!descriptor.enumerable || !('value' in descriptor))
+      throw new TypeError('Command response must be JSON-safe');
   }
   ancestors.add(value);
-  for (const descriptor of Object.values(descriptors)) assertJsonSafe(descriptor.value, ancestors);
+  for (const descriptor of Object.values(descriptors))
+    assertJsonSafe(descriptor.value, ancestors);
   ancestors.delete(value);
 };
 
@@ -53,7 +68,9 @@ export class CommandReconciliationRequiredError extends Error {
     readonly idempotencyKey: string,
     readonly state: Exclude<CommandState, 'completed'>,
   ) {
-    super(`Command '${idempotencyKey}' is ${state} and requires reconciliation`);
+    super(
+      `Command '${idempotencyKey}' is ${state} and requires reconciliation`,
+    );
     this.name = 'CommandReconciliationRequiredError';
   }
 }
@@ -84,13 +101,24 @@ export class CommandRepository {
     `);
   }
 
-  executeOnce<Response>(idempotencyKey: string, execute: () => Response): Response {
+  executeOnce<Response>(
+    idempotencyKey: string,
+    execute: () => Promise<Response>,
+  ): Promise<Response>;
+  executeOnce<Response>(
+    idempotencyKey: string,
+    execute: () => Response,
+  ): Response;
+  executeOnce<Response>(
+    idempotencyKey: string,
+    execute: () => Response | Promise<Response>,
+  ): Response | Promise<Response> {
     const existing = this.reserveOrRead(idempotencyKey);
     if (existing) {
       return this.resolveExisting<Response>(idempotencyKey, existing);
     }
 
-    let response: Response;
+    let response: Response | Promise<Response>;
     try {
       response = execute();
     } catch (error) {
@@ -98,6 +126,23 @@ export class CommandRepository {
       throw error;
     }
 
+    if (response instanceof Promise) {
+      return response.then(
+        (value) => this.completeResponse(idempotencyKey, value),
+        (error) => {
+          this.markNonRetryable(idempotencyKey, 'failed', error);
+          throw error;
+        },
+      );
+    }
+
+    return this.completeResponse(idempotencyKey, response);
+  }
+
+  private completeResponse<Response>(
+    idempotencyKey: string,
+    response: Response,
+  ): Response {
     let serialized: string;
     try {
       assertJsonSafe(response);
@@ -113,13 +158,21 @@ export class CommandRepository {
     this.database.exec('BEGIN IMMEDIATE');
     let committed = false;
     try {
-      const result = this.complete.run(serialized, new Date().toISOString(), idempotencyKey);
+      const result = this.complete.run(
+        serialized,
+        new Date().toISOString(),
+        idempotencyKey,
+      );
       if (result.changes !== 1) {
-        const row = this.selectByKey.get(idempotencyKey) as CommandRow | undefined;
+        const row = this.selectByKey.get(idempotencyKey) as
+          | CommandRow
+          | undefined;
         this.database.exec('COMMIT');
         committed = true;
         if (!row) {
-          throw new Error(`Command reservation disappeared for '${idempotencyKey}'`);
+          throw new Error(
+            `Command reservation disappeared for '${idempotencyKey}'`,
+          );
         }
         return this.resolveExisting<Response>(idempotencyKey, row);
       }
@@ -137,7 +190,9 @@ export class CommandRepository {
   private reserveOrRead(idempotencyKey: string): CommandRow | undefined {
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const existing = this.selectByKey.get(idempotencyKey) as CommandRow | undefined;
+      const existing = this.selectByKey.get(idempotencyKey) as
+        | CommandRow
+        | undefined;
       if (existing) {
         this.database.exec('COMMIT');
         return existing;
@@ -153,10 +208,15 @@ export class CommandRepository {
     }
   }
 
-  private resolveExisting<Response>(idempotencyKey: string, row: CommandRow): Response {
+  private resolveExisting<Response>(
+    idempotencyKey: string,
+    row: CommandRow,
+  ): Response {
     if (row.state === 'completed') {
       if (row.response_json === null) {
-        throw new Error(`Completed command '${idempotencyKey}' has no stored response`);
+        throw new Error(
+          `Completed command '${idempotencyKey}' has no stored response`,
+        );
       }
       return JSON.parse(row.response_json) as Response;
     }
@@ -168,10 +228,18 @@ export class CommandRepository {
     state: Extract<CommandState, 'failed' | 'indeterminate'>,
     error: unknown,
   ): void {
-    const failure = error instanceof Error ? { message: error.message } : { message: String(error) };
+    const failure =
+      error instanceof Error
+        ? { message: error.message }
+        : { message: String(error) };
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      this.fail.run(state, JSON.stringify(failure), new Date().toISOString(), idempotencyKey);
+      this.fail.run(
+        state,
+        JSON.stringify(failure),
+        new Date().toISOString(),
+        idempotencyKey,
+      );
       this.database.exec('COMMIT');
     } catch (markError) {
       this.database.exec('ROLLBACK');

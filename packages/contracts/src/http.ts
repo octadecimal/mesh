@@ -4,6 +4,7 @@ import {
   idSchema,
   projectSchema,
   rawDiagnosticSchema,
+  savedLayoutSchema,
   sessionSchema,
   workspaceSchema,
 } from './domain.js';
@@ -16,6 +17,11 @@ export const sessionSnapshotSchema = z.object({
   workspaces: z.array(workspaceSchema),
   sessions: z.array(sessionSchema),
   events: z.array(sessionEventSchema),
+  pendingApprovals: z.array(sessionEventSchema).default([]),
+  lastSequenceBySession: z
+    .record(z.string(), z.number().int().nonnegative())
+    .default({}),
+  layouts: z.array(savedLayoutSchema).default([]),
 });
 
 export const sessionHistorySchema = z.object({

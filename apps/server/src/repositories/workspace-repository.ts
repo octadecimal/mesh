@@ -1,4 +1,7 @@
-import { workspaceSchema, type Workspace } from '@mesh-session-platform/contracts';
+import {
+  workspaceSchema,
+  type Workspace,
+} from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
 
@@ -29,6 +32,7 @@ export class WorkspaceRepository {
   private readonly insert;
   private readonly selectByProject;
   private readonly selectById;
+  private readonly markCleanedById;
 
   constructor(private readonly database: Database) {
     this.insert = database.prepare(`
@@ -42,6 +46,9 @@ export class WorkspaceRepository {
       'SELECT * FROM workspaces WHERE project_id = ? ORDER BY id',
     );
     this.selectById = database.prepare('SELECT * FROM workspaces WHERE id = ?');
+    this.markCleanedById = database.prepare(
+      "UPDATE workspaces SET cleanup_state = 'cleaned' WHERE id = ?",
+    );
   }
 
   create(workspace: Workspace): Workspace {
@@ -61,6 +68,13 @@ export class WorkspaceRepository {
   }
 
   listByProject(projectId: string): Workspace[] {
-    return (this.selectByProject.all(projectId) as WorkspaceRow[]).map(toWorkspace);
+    return (this.selectByProject.all(projectId) as WorkspaceRow[]).map(
+      toWorkspace,
+    );
+  }
+
+  markCleaned(id: string): Workspace | undefined {
+    this.markCleanedById.run(id);
+    return this.get(id);
   }
 }

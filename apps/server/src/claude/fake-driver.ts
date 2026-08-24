@@ -18,7 +18,10 @@ export class FakeSubscriptionLimitError extends Error {
 
 export class FakeDriverSession implements DriverSession {
   readonly prompts: string[] = [];
-  readonly permissionDecisions: Array<{ requestId: string; decision: 'approve' | 'deny' }> = [];
+  readonly permissionDecisions: Array<{
+    requestId: string;
+    decision: 'approve' | 'deny';
+  }> = [];
   interrupted = false;
   private readonly queuedEvents: DriverEvent[] = [];
   private paused = false;
@@ -65,7 +68,10 @@ export class FakeDriverSession implements DriverSession {
     this.prompts.push(prompt);
   }
 
-  async resolvePermission(requestId: string, decision: 'approve' | 'deny'): Promise<void> {
+  async resolvePermission(
+    requestId: string,
+    decision: 'approve' | 'deny',
+  ): Promise<void> {
     this.permissionDecisions.push({ requestId, decision });
   }
 
@@ -88,6 +94,7 @@ export class FakeDriverSession implements DriverSession {
 
 export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
   readonly createdRequests: StartClaudeSessionRequest[] = [];
+  readonly createdSessions: FakeDriverSession[] = [];
   readonly resumedRequests: ResumeClaudeSessionRequest[] = [];
   private createdCount = 0;
 
@@ -98,20 +105,29 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
     } = {},
   ) {}
 
-  async discover(_request: DiscoverClaudeSessionsRequest): Promise<DiscoveredClaudeSession[]> {
+  async discover(
+    _request: DiscoverClaudeSessionsRequest,
+  ): Promise<DiscoveredClaudeSession[]> {
     return this.options.discovered?.map((session) => ({ ...session })) ?? [];
   }
 
   async create(request: StartClaudeSessionRequest): Promise<FakeDriverSession> {
-    if (this.options.subscriptionLimit !== undefined && this.createdCount >= this.options.subscriptionLimit) {
+    if (
+      this.options.subscriptionLimit !== undefined &&
+      this.createdCount >= this.options.subscriptionLimit
+    ) {
       throw new FakeSubscriptionLimitError();
     }
     this.createdCount += 1;
     this.createdRequests.push({ ...request });
-    return new FakeDriverSession(`fake-resume-${this.createdCount}`);
+    const session = new FakeDriverSession(`fake-resume-${this.createdCount}`);
+    this.createdSessions.push(session);
+    return session;
   }
 
-  async resume(request: ResumeClaudeSessionRequest): Promise<FakeDriverSession> {
+  async resume(
+    request: ResumeClaudeSessionRequest,
+  ): Promise<FakeDriverSession> {
     this.resumedRequests.push({ ...request });
     return new FakeDriverSession(request.claudeResumeId);
   }

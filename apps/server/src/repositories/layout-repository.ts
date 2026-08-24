@@ -1,4 +1,7 @@
-import { savedLayoutSchema, type SavedLayout } from '@mesh-session-platform/contracts';
+import {
+  savedLayoutSchema,
+  type SavedLayout,
+} from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
 
@@ -28,6 +31,7 @@ const toLayout = (row: LayoutRow): SavedLayout =>
 export class LayoutRepository {
   private readonly upsert;
   private readonly selectById;
+  private readonly selectAll;
 
   constructor(private readonly database: Database) {
     this.upsert = database.prepare(`
@@ -46,7 +50,12 @@ export class LayoutRepository {
         visible_panels_json = excluded.visible_panels_json,
         updated_at = excluded.updated_at
     `);
-    this.selectById = database.prepare('SELECT * FROM saved_layouts WHERE id = ?');
+    this.selectById = database.prepare(
+      'SELECT * FROM saved_layouts WHERE id = ?',
+    );
+    this.selectAll = database.prepare(
+      'SELECT * FROM saved_layouts ORDER BY updated_at, id',
+    );
   }
 
   save(layout: SavedLayout): SavedLayout {
@@ -57,7 +66,8 @@ export class LayoutRepository {
       sessionId: value.sessionId ?? null,
       workspaceId: value.workspaceId ?? null,
       dockviewJson: JSON.stringify(value.dockview),
-      sidebarJson: value.sidebar === undefined ? null : JSON.stringify(value.sidebar),
+      sidebarJson:
+        value.sidebar === undefined ? null : JSON.stringify(value.sidebar),
       visiblePanelsJson: JSON.stringify(value.visiblePanels),
     });
     return value;
@@ -66,5 +76,9 @@ export class LayoutRepository {
   get(id: string): SavedLayout | undefined {
     const row = this.selectById.get(id) as LayoutRow | undefined;
     return row ? toLayout(row) : undefined;
+  }
+
+  list(): SavedLayout[] {
+    return (this.selectAll.all() as LayoutRow[]).map(toLayout);
   }
 }

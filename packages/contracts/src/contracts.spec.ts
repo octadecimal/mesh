@@ -105,6 +105,101 @@ describe('session platform contracts', () => {
     }
   });
 
+  it('preserves the existing session.create envelope', () => {
+    expect(
+      commandEnvelopeSchema.parse({
+        protocolVersion: 1,
+        idempotencyKey: 'legacy-create',
+        command: {
+          type: 'session.create',
+          payload: {
+            projectId: 'p1',
+            workspaceId: 'w1',
+            title: 'Legacy',
+            permissionMode: 'interactive',
+          },
+        },
+      }).command.payload,
+    ).toMatchObject({ workspaceId: 'w1' });
+  });
+
+  it('accepts shared and worktree session.create variants', () => {
+    const shared = {
+      type: 'session.create' as const,
+      payload: {
+        projectId: 'p1',
+        title: 'Shared',
+        permissionMode: 'interactive' as const,
+        workspace: { type: 'shared' as const, path: 'C:/code/mesh' },
+      },
+    };
+    const worktree = {
+      type: 'session.create' as const,
+      payload: {
+        projectId: 'p1',
+        title: 'Worktree',
+        permissionMode: 'safe_auto' as const,
+        workspace: {
+          type: 'worktree' as const,
+          repositoryPath: 'C:/code/mesh',
+          path: 'C:/code/mesh-worktree',
+          branch: 'feature/http',
+          startPoint: 'main',
+        },
+      },
+    };
+
+    for (const command of [shared, worktree]) {
+      expect(
+        commandEnvelopeSchema.parse({
+          protocolVersion: 1,
+          idempotencyKey: `${command.payload.workspace.type}-create`,
+          command,
+        }).command,
+      ).toEqual(command);
+      expect(() =>
+        commandSchema.parse({ protocolVersion: 1, ...command }),
+      ).toThrow();
+    }
+  });
+
+  it('rejects malformed expanded session.create variants', () => {
+    const envelope = (workspace: unknown) => ({
+      protocolVersion: 1,
+      idempotencyKey: 'malformed-create',
+      command: {
+        type: 'session.create',
+        payload: {
+          projectId: 'p1',
+          title: 'Malformed',
+          permissionMode: 'interactive',
+          workspace,
+        },
+      },
+    });
+
+    expect(() =>
+      commandEnvelopeSchema.parse(envelope({ type: 'shared', path: '' })),
+    ).toThrow();
+    expect(() =>
+      commandEnvelopeSchema.parse(
+        envelope({
+          type: 'worktree',
+          repositoryPath: 'C:/code/mesh',
+          path: 'C:/code/worktree',
+          branch: '',
+          startPoint: 'main',
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      commandEnvelopeSchema.parse({
+        ...envelope({ type: 'shared', path: 'C:/code/mesh' }),
+        protocolVersion: 2,
+      }),
+    ).toThrow();
+  });
+
   it('rejects missing and unsupported protocol versions at every wire boundary', () => {
     const event = {
       protocolVersion: 1,
