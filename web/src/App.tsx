@@ -1,6 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useMeshEvents } from './useMeshEvents.ts';
 import { groupIntoPanes, latestQuota } from './lib/panes.ts';
+import { isAtBottom } from './lib/scroll.ts';
+import type { Pane } from './lib/panes.ts';
 import type { PartialText } from './lib/partials.ts';
 import type { StampedEvent } from '../../src/types.ts';
 
@@ -34,6 +36,66 @@ function PendingLines({ pending }: { pending: PartialText }) {
     <>
       {pending.thinking ? <p className="line thinking partial">{pending.thinking}</p> : null}
       {pending.text ? <p className="line text assistant partial">{pending.text}</p> : null}
+    </>
+  );
+}
+
+/**
+ * One agent's scrolling transcript. A transcript parked at its bottom edge
+ * follows whatever arrives next; one the reader has scrolled up holds its
+ * position and offers a button back to the end instead, so an agent writing
+ * cannot yank the passage being read out from under them.
+ */
+function Transcript({ pane, pending }: { pane: Pane; pending: PartialText }) {
+  const box = useRef<HTMLDivElement>(null);
+  const pinned = useRef(true);
+  const [hasNew, setHasNew] = useState(false);
+
+  // Growth is what should move the transcript, so the effect below is keyed on
+  // what has arrived rather than firing on every render. Streamed partials
+  // count: an agent mid-sentence is new content like any other.
+  const arrived = `${pane.events.at(-1)?.seq ?? 0}:${pending.text.length}:${pending.thinking.length}`;
+
+  // Layout, not effect: the scroll has to land in the same frame as the new
+  // line, or the transcript visibly lurches.
+  useLayoutEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    if (pinned.current) el.scrollTop = el.scrollHeight;
+    else setHasNew(true);
+  }, [arrived]);
+
+  // Whether the reader is parked at the bottom is only ever read inside the
+  // handlers, so it lives in a ref: re-rendering the pane on every scroll tick
+  // would buy nothing.
+  function trackPosition() {
+    const el = box.current;
+    if (!el) return;
+    pinned.current = isAtBottom(el);
+    if (pinned.current) setHasNew(false);
+  }
+
+  function jumpToEnd() {
+    const el = box.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    pinned.current = true;
+    setHasNew(false);
+  }
+
+  return (
+    <>
+      <div className="transcript" ref={box} onScroll={trackPosition}>
+        {pane.events.map((event) => (
+          <EventLine key={event.seq} event={event} />
+        ))}
+        <PendingLines pending={pending} />
+      </div>
+      {hasNew ? (
+        <button type="button" className="jump-to-end" onClick={jumpToEnd}>
+          ↓ New messages
+        </button>
+      ) : null}
     </>
   );
 }
@@ -79,12 +141,7 @@ export function App() {
         {panes.map((pane) => (
           <section key={pane.agent} className="pane">
             <h2>{pane.title}</h2>
-            <div className="transcript">
-              {pane.events.map((event) => (
-                <EventLine key={event.seq} event={event} />
-              ))}
-              <PendingLines pending={partials[pane.agent] ?? { text: '', thinking: '' }} />
-            </div>
+            <Transcript pane={pane} pending={partials[pane.agent] ?? { text: '', thinking: '' }} />
           </section>
         ))}
       </main>
