@@ -176,6 +176,9 @@ describe('migrate', () => {
       join(outputPath, 'db', 'migrations', '001-initial.sql'),
       'utf8',
     );
+    expect(readFileSync(join(outputPath, 'db', 'migrations', '002-command-state.sql'), 'utf8')).toContain(
+      'processed_commands_next',
+    );
     const database = openDatabase(join(directory, 'output.sqlite'));
     databases.push(database);
     database.exec(migrationSql);

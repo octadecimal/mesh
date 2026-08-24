@@ -18,19 +18,31 @@ const assertJsonSafe = (value: unknown, ancestors = new Set<object>()): void => 
   if (typeof value !== 'object') throw new TypeError('Command response must be JSON-safe');
   if (ancestors.has(value)) throw new TypeError('Command response must be JSON-safe');
   if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError('Command response must be JSON-safe');
+    const names = Object.getOwnPropertyNames(value);
+    if (names.length !== value.length + 1 || names.some((name) => name !== 'length' && !/^(0|[1-9]\d*)$/.test(name))) throw new TypeError('Command response must be JSON-safe');
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) throw new TypeError('Command response must be JSON-safe');
+    }
+    if (Object.getOwnPropertySymbols(value).length > 0) throw new TypeError('Command response must be JSON-safe');
     ancestors.add(value);
     for (const item of value) assertJsonSafe(item, ancestors);
     ancestors.delete(value);
     return;
   }
-  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+  if (Object.getPrototypeOf(value) !== Object.prototype) {
     throw new TypeError('Command response must be JSON-safe');
   }
   if (Object.getOwnPropertySymbols(value).length > 0) {
     throw new TypeError('Command response must be JSON-safe');
   }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  for (const descriptor of Object.values(descriptors)) {
+    if (!descriptor.enumerable || !('value' in descriptor)) throw new TypeError('Command response must be JSON-safe');
+  }
   ancestors.add(value);
-  for (const property of Object.values(value)) assertJsonSafe(property, ancestors);
+  for (const descriptor of Object.values(descriptors)) assertJsonSafe(descriptor.value, ancestors);
   ancestors.delete(value);
 };
 
@@ -113,7 +125,7 @@ export class CommandRepository {
       }
       this.database.exec('COMMIT');
       committed = true;
-      return response;
+      return JSON.parse(serialized) as Response;
     } catch (error) {
       if (!committed) {
         this.database.exec('ROLLBACK');
