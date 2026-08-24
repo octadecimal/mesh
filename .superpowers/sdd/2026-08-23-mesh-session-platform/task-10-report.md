@@ -40,3 +40,17 @@ The environment still emits the existing Vite native-config and Nx Vite-plugin d
 ## Concerns
 
 No blocking concerns. Deprecation warnings are pre-existing and outside the explicit Task 10 MVP scope.
+
+## Fix round: saved-layout scope safety
+
+- Reproduced the cross-project defect with project A owning the only saved layout, then selecting project B: A's tab remained visible and B reused A's saved layout ID/project scope.
+- Changed saved-layout selection so a valid selected session only accepts layouts whose populated `projectId`, `workspaceId`, and `sessionId` scopes all match that session. Matching layouts are chosen by specificity; an explicitly unscoped global layout remains eligible. The first-layout fallback now applies only when no valid session is selected.
+- Revalidated the chosen layout at the save boundary. A stale layout can no longer contribute its ID or scope; a new selected project receives a new project-scoped layout ID.
+- Cleared the current Dockview layout when changing to a selected scope with no saved layout, so panels restored for another project do not remain as tabs.
+- Added a red/green two-project regression proving A restores before selection, B starts clean after selection, B saves under `layout-p2`/`p2`, and no B state overwrites A's layout.
+
+Fix-round verification:
+
+- Focused Task 10 suite: 4 files passed, 10 tests passed.
+- `web:typecheck`: passed.
+- `git diff --check`: passed.

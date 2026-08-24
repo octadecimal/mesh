@@ -91,6 +91,8 @@ export function restoreSavedLayout(
     } catch {
       api.clear();
     }
+  } else {
+    api.clear();
   }
 
   const sessionsById = new Map(sessions.map((session) => [session.id, session]));

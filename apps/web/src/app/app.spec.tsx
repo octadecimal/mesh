@@ -57,6 +57,48 @@ describe('App', () => {
     expect(store.state.selectedSessionId.get()).toBe('s1');
     expect(store.state.unreadSessionIds.s1.get()).toBe(false);
   });
+
+  it("keeps project A's restored layout isolated when project B becomes selected", async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(crossProjectSnapshot);
+    const api = createApi();
+    render(<App store={store} api={api} />);
+
+    expect(await screen.findByRole('tab', { name: 'Session A' })).toBeDefined();
+    await user.click(screen.getByRole('button', { name: /Session B/ }));
+
+    expect(await screen.findByRole('tab', { name: 'Session B' })).toBeDefined();
+    await waitFor(() =>
+      expect(screen.queryByRole('tab', { name: 'Session A' })).toBeNull(),
+    );
+    await waitFor(() =>
+      expect(
+        api.command.mock.calls
+          .map(([command]) => command)
+          .find((command) => command.payload.projectId === 'p2'),
+      ).toEqual(
+        expect.objectContaining({
+          type: 'layout.save',
+          payload: expect.objectContaining({
+            id: 'layout-p2',
+            projectId: 'p2',
+            visiblePanels: ['s2'],
+          }),
+        }),
+      ),
+    );
+    expect(
+      api.command.mock.calls
+        .map(([command]) => command)
+        .filter((command) => command.payload.id === 'layout-a')
+        .every(
+          (command) =>
+            command.payload.projectId === 'p1' &&
+            command.payload.visiblePanels.length === 1 &&
+            command.payload.visiblePanels[0] === 's1',
+        ),
+    ).toBe(true);
+  });
 });
 
 const project = {
@@ -93,6 +135,69 @@ const snapshot: SessionSnapshot = {
       dockview: {},
       sidebar: { filter: '' },
       visiblePanels: [],
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    },
+  ],
+};
+
+const projectB = {
+  ...project,
+  id: 'p2',
+  displayName: 'Other',
+  repositoryPath: '/other',
+};
+const workspaceB = {
+  ...workspace,
+  id: 'w2',
+  projectId: 'p2',
+  path: '/other',
+};
+const sessionB = {
+  ...session,
+  id: 's2',
+  projectId: 'p2',
+  workspaceId: 'w2',
+  title: 'Session B',
+};
+
+const crossProjectSnapshot: SessionSnapshot = {
+  ...snapshot,
+  projects: [project, projectB],
+  workspaces: [workspace, workspaceB],
+  sessions: [session, sessionB],
+  layouts: [
+    {
+      id: 'layout-a',
+      projectId: 'p1',
+      dockview: {
+        grid: {
+          root: {
+            type: 'branch',
+            size: 100,
+            data: [
+              {
+                type: 'leaf',
+                size: 100,
+                data: { id: 'group-a', views: ['s1'], activeView: 's1' },
+              },
+            ],
+          },
+          height: 100,
+          width: 100,
+          orientation: 'HORIZONTAL',
+        },
+        panels: {
+          s1: {
+            id: 's1',
+            contentComponent: 'session',
+            title: 'Session A',
+            params: { sessionId: 's1' },
+          },
+        },
+        activeGroup: 'group-a',
+      },
+      sidebar: { filter: '' },
+      visiblePanels: ['s1'],
       updatedAt: '2026-08-24T00:00:00.000Z',
     },
   ],

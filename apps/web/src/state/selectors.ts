@@ -1,4 +1,4 @@
-import type { SavedLayout } from '@mesh-session-platform/contracts';
+import type { SavedLayout, Session } from '@mesh-session-platform/contracts';
 
 import type { MeshProjection, PendingApproval } from './reducer';
 
@@ -8,14 +8,34 @@ export const selectSessions = (state: MeshProjection) => state.sessions;
 export const selectSelectedSessionId = (state: MeshProjection) =>
   state.selectedSessionId;
 
+const layoutSpecificity = ({
+  projectId,
+  workspaceId,
+  sessionId,
+}: SavedLayout) =>
+  (projectId ? 1 : 0) + (workspaceId ? 2 : 0) + (sessionId ? 4 : 0);
+
+export const savedLayoutMatchesSession = (
+  layout: SavedLayout,
+  session: Session,
+) =>
+  (!layout.projectId || layout.projectId === session.projectId) &&
+  (!layout.workspaceId || layout.workspaceId === session.workspaceId) &&
+  (!layout.sessionId || layout.sessionId === session.id);
+
 export const selectSavedLayout = (state: MeshProjection): SavedLayout | undefined => {
   const selected = state.sessions.find(({ id }) => id === state.selectedSessionId);
-  return (
-    state.layouts.find(({ projectId }) => projectId === selected?.projectId) ??
-    state.layouts.find(({ projectId, sessionId, workspaceId }) =>
-      !projectId && !sessionId && !workspaceId) ??
-    state.layouts[0]
-  );
+  if (!selected) return state.layouts[0];
+
+  return state.layouts
+    .filter((layout) => savedLayoutMatchesSession(layout, selected))
+    .reduce<SavedLayout | undefined>(
+      (best, layout) =>
+        !best || layoutSpecificity(layout) > layoutSpecificity(best)
+          ? layout
+          : best,
+      undefined,
+    );
 };
 
 export const selectSessionFilter = (

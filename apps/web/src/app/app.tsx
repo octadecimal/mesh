@@ -14,6 +14,7 @@ import type { MeshApi } from '../api/client';
 import type { MeshProjection } from '../state/reducer';
 import {
   selectProjects,
+  savedLayoutMatchesSession,
   selectSavedLayout,
   selectSelectedSessionId,
   selectSessionFilter,
@@ -53,14 +54,20 @@ function saveLayout(
   api: AppProps['api'],
   onCommand: AppProps['onCommand'],
   saved: SavedLayout | undefined,
-  projectId: string | undefined,
+  selected: Session | undefined,
   layout: DockviewLayoutSnapshot,
 ) {
+  const compatibleSaved =
+    saved && selected && !savedLayoutMatchesSession(saved, selected)
+      ? undefined
+      : saved;
   const payload = savedLayoutSchema.parse({
-    id: saved?.id ?? `layout-${projectId ?? 'workspace'}`,
-    projectId: saved?.projectId ?? projectId,
-    sessionId: saved?.sessionId,
-    workspaceId: saved?.workspaceId,
+    id: compatibleSaved?.id ?? `layout-${selected?.projectId ?? 'workspace'}`,
+    projectId: compatibleSaved
+      ? compatibleSaved.projectId
+      : selected?.projectId,
+    sessionId: compatibleSaved?.sessionId,
+    workspaceId: compatibleSaved?.workspaceId,
     dockview: layout.dockview,
     sidebar: layout.sidebar,
     visiblePanels: layout.visiblePanels,
@@ -112,7 +119,7 @@ function ConnectedApp({
         selectedSessionId={selectedSessionId}
         sidebar={{ filter }}
         onSaveLayout={(layout) =>
-          saveLayout(api, onCommand, savedLayout, selected?.projectId, layout)
+          saveLayout(api, onCommand, savedLayout, selected, layout)
         }
       />
       <p className="sr-only">Session platform</p>
