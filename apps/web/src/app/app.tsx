@@ -36,7 +36,7 @@ type AppProps = {
   sessions?: Session[];
   onCommand?: (command: AppCommand) => void;
   store?: MeshStore;
-  api?: Pick<MeshApi, 'command'>;
+  api?: Pick<MeshApi, 'command' | 'diagnostics'>;
 };
 
 const snapshotFor = ({ projects = [], workspaces = [], sessions = [] }: AppProps): SessionSnapshot => ({
@@ -115,6 +115,10 @@ function ConnectedApp({
       />
       <SessionWorkspace
         sessions={sessions}
+        events={projection.events}
+        workspaces={workspaces}
+        api={api}
+        auditAvailable={projection.connectionHealth === 'connected'}
         savedLayout={savedLayout}
         selectedSessionId={selectedSessionId}
         sidebar={{ filter }}

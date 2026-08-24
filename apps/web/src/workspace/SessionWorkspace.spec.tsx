@@ -10,7 +10,7 @@ describe('SessionWorkspace', () => {
     );
 
     expect(container.querySelector('.dv-dockview')).not.toBeNull();
-    expect(screen.getByText('Session s1')).toBeDefined();
+    expect(screen.getByRole('heading', { name: 'Session A' })).toBeDefined();
   });
 
   it('serializes the real Dockview layout after a panel is opened', async () => {

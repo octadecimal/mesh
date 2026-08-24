@@ -5,6 +5,10 @@ import {
   type IDockviewPanelProps,
 } from 'dockview-react';
 import type { SavedLayout } from '@mesh-session-platform/contracts';
+import type { Session, SessionEvent, Workspace } from '@mesh-session-platform/contracts';
+
+import type { SessionPanelApi } from '../sessions/SessionPanel';
+import { SessionPanel } from '../sessions/SessionPanel';
 
 import {
   installTwoGroupPolicy,
@@ -19,7 +23,13 @@ import {
 
 export { SESSION_COMPONENT, type SessionPanelParams } from './layout-controller';
 
-function SessionPanel({ api, params }: IDockviewPanelProps<SessionPanelParams>) {
+function DockviewSessionPanel({ api, params, session, workspace, events, panelApi, auditAvailable }: IDockviewPanelProps<SessionPanelParams> & {
+  session: Session;
+  workspace?: Workspace;
+  events: SessionEvent[];
+  panelApi?: SessionPanelApi;
+  auditAvailable: boolean;
+}) {
   return (
     <section className="session-panel" aria-label={`Session ${params.sessionId} panel`}>
       <button
@@ -28,12 +38,22 @@ function SessionPanel({ api, params }: IDockviewPanelProps<SessionPanelParams>) 
       >
         Close
       </button>
-      <p>Session {params.sessionId}</p>
+      <SessionPanel session={session} workspace={workspace} events={events} api={panelApi} auditAvailable={auditAvailable} />
     </section>
   );
 }
 
-const components = { [SESSION_COMPONENT]: SessionPanel };
+const sessionForPanel = (session: WorkspaceSession): Session => ({
+  id: session.id,
+  projectId: 'unknown-project',
+  workspaceId: 'unknown-workspace',
+  title: session.title,
+  permissionMode: 'interactive',
+  lifecycleState: 'idle',
+  createdAt: new Date(0).toISOString(),
+  updatedAt: new Date(0).toISOString(),
+  ...(session as Partial<Session>),
+} as Session);
 
 export function SessionWorkspace({
   sessions,
@@ -42,6 +62,10 @@ export function SessionWorkspace({
   sidebar = { filter: '' },
   onSaveLayout,
   onCloseSession,
+  events = [],
+  workspaces = [],
+  api: panelApi,
+  auditAvailable = true,
 }: {
   sessions: WorkspaceSession[];
   savedLayout?: SavedLayout;
@@ -49,6 +73,10 @@ export function SessionWorkspace({
   sidebar?: unknown;
   onSaveLayout?: (layout: DockviewLayoutSnapshot) => void;
   onCloseSession?: (sessionId: string) => void;
+  events?: SessionEvent[];
+  workspaces?: Workspace[];
+  api?: SessionPanelApi;
+  auditAvailable?: boolean;
 }) {
   const apiRef = useRef<DockviewApi | null>(null);
   const restoringRef = useRef(false);
@@ -61,6 +89,20 @@ export function SessionWorkspace({
     () => sessions.map(({ id, title }) => `${id}:${title}`).join('|'),
     [sessions],
   );
+  const components = useMemo(() => ({
+    [SESSION_COMPONENT]: (props: IDockviewPanelProps<SessionPanelParams>) => {
+      const session = sessions.find(({ id }) => id === props.params.sessionId);
+      const panelSession = sessionForPanel(session ?? { id: props.params.sessionId, title: props.api.title ?? props.params.sessionId });
+      return <DockviewSessionPanel
+        {...props}
+        session={panelSession}
+        workspace={workspaces.find((workspace) => workspace.id === panelSession.workspaceId)}
+        events={events.filter((event) => event.sessionId === props.params.sessionId)}
+        panelApi={panelApi}
+        auditAvailable={auditAvailable}
+      />;
+    },
+  }), [sessions, workspaces, events, panelApi, auditAvailable]);
 
   onSaveRef.current = onSaveLayout;
   onCloseRef.current = onCloseSession;
