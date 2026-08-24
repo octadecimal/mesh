@@ -2,6 +2,7 @@ import {
   rawDiagnosticSchema,
   sessionEventSchema,
   type RawDiagnostic,
+  type LifecycleState,
   type SessionEvent,
 } from '@mesh-session-platform/contracts';
 
@@ -53,7 +54,11 @@ export class EventRepository {
       VALUES (@id, @sessionId, @sequence, @occurredAt, @type, @payloadJson)
     `);
     this.updateSessionTimestamp = database.prepare(
-      'UPDATE sessions SET updated_at = ? WHERE id = ?',
+      `UPDATE sessions SET
+        lifecycle_state = COALESCE(@lifecycleState, lifecycle_state),
+        claude_resume_id = COALESCE(@claudeResumeId, claude_resume_id),
+        updated_at = @updatedAt
+      WHERE id = @sessionId`,
     );
     this.selectAfter = database.prepare(
       'SELECT * FROM session_events WHERE session_id = ? AND sequence > ? ORDER BY sequence',
@@ -64,6 +69,7 @@ export class EventRepository {
     sessionId: string,
     draft: SessionEventDraft,
     rawDiagnostic: RawDiagnostic,
+    sessionUpdate?: { lifecycleState?: LifecycleState; claudeResumeId?: string },
   ): SessionEvent {
     const diagnostic = rawDiagnosticSchema.parse(rawDiagnostic);
     if (diagnostic.sessionId !== sessionId) {
@@ -92,7 +98,12 @@ export class EventRepository {
         payloadJson: JSON.stringify(event.payload),
       });
       this.diagnostics.linkToEvent(diagnostic.id, event.id);
-      this.updateSessionTimestamp.run(new Date().toISOString(), sessionId);
+      this.updateSessionTimestamp.run({
+        sessionId,
+        lifecycleState: sessionUpdate?.lifecycleState ?? null,
+        claudeResumeId: sessionUpdate?.claudeResumeId ?? null,
+        updatedAt: new Date().toISOString(),
+      });
       this.database.exec('COMMIT');
       return event;
     } catch (error) {
