@@ -97,6 +97,13 @@
       "options": {
         "command": "tsc --noEmit -p apps/server/tsconfig.app.json"
       }
+    },
+    "external-smoke": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "command": "vitest run apps/server/src/claude/sdk-driver.smoke.spec.ts --config apps/server/vitest.config.ts"
+      }
     }
   },
   "tags": ["type:app"]

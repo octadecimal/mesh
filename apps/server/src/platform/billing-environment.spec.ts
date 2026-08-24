@@ -1,6 +1,8 @@
+import { join } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
-import { detectBillingOverrides } from '../config.js';
+import { detectBillingOverrides, loadServerConfig } from '../config.js';
 
 describe('detectBillingOverrides', () => {
   it('reports API billing overrides without returning secret values', () => {
@@ -14,5 +16,22 @@ describe('detectBillingOverrides', () => {
 
   it('ignores an empty API key override', () => {
     expect(detectBillingOverrides({ ANTHROPIC_API_KEY: '' })).toEqual([]);
+  });
+});
+
+describe('loadServerConfig', () => {
+  it('keeps the server on loopback and resolves persistence from the configured base directory', () => {
+    const baseDirectory = process.cwd();
+    expect(
+      loadServerConfig(
+        { MESH_PORT: '4567', MESH_DATABASE_PATH: 'state/mesh.sqlite' },
+        baseDirectory,
+      ),
+    ).toEqual({
+      host: '127.0.0.1',
+      port: 4567,
+      baseDirectory,
+      databasePath: join(baseDirectory, 'state', 'mesh.sqlite'),
+    });
   });
 });
