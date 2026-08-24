@@ -2,8 +2,13 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { detectBillingOverrides } from './config.js';
 import { registerRoutes, type HttpDependencies } from './http/routes.js';
+import { registerSocketHub } from './realtime/socket-hub.js';
 
-export const buildApp = (dependencies: HttpDependencies): FastifyInstance => {
+type AppDependencies = HttpDependencies & {
+  servedOrigin?: string;
+};
+
+export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
   const app = Fastify({ logger: false });
   registerRoutes(
     app,
@@ -14,5 +19,10 @@ export const buildApp = (dependencies: HttpDependencies): FastifyInstance => {
         }
       : dependencies,
   );
+  registerSocketHub(app, {
+    events: dependencies.events,
+    publisher: dependencies.registry.publisher,
+    servedOrigin: dependencies.servedOrigin ?? 'http://127.0.0.1:3000',
+  });
   return app;
 };
