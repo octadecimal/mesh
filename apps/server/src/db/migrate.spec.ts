@@ -182,13 +182,12 @@ describe('migrate', () => {
       workers.push(start());
       workers.push(start());
       await Promise.all(workers.map((worker) => waitForWorkerMessage(worker)));
+      const results = Promise.all(
+        workers.map((worker) => waitForWorkerMessage(worker)),
+      );
       Atomics.store(new Int32Array(barrier), 0, 1);
       Atomics.notify(new Int32Array(barrier), 0, 2);
-      expect(
-        await Promise.all(
-          workers.map((worker) => waitForWorkerMessage(worker)),
-        ),
-      ).toEqual(['done', 'done']);
+      expect(await results).toEqual(['done', 'done']);
 
       const database = openDatabase(databasePath);
       databases.push(database);

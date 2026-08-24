@@ -444,9 +444,7 @@ describe('repositories', () => {
       workers.push(start(userMessage('one'), diagnostic('d1', 'user')));
       workers.push(start(userMessage('two'), diagnostic('d2', 'user')));
       await Promise.all(workers.map((worker) => waitForWorkerMessage(worker)));
-      Atomics.store(new Int32Array(barrier), 0, 1);
-      Atomics.notify(new Int32Array(barrier), 0, 2);
-      const results = await Promise.all(
+      const resultsPromise = Promise.all(
         workers.map((worker) =>
           waitForWorkerMessage<{
             type: string;
@@ -455,6 +453,9 @@ describe('repositories', () => {
           }>(worker),
         ),
       );
+      Atomics.store(new Int32Array(barrier), 0, 1);
+      Atomics.notify(new Int32Array(barrier), 0, 2);
+      const results = await resultsPromise;
 
       expect(results).toEqual([
         expect.objectContaining({ type: 'result' }),
