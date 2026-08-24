@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventBus } from '../src/bus.ts';
 import { PM } from '../src/types.ts';
+import type { MeshEvent } from '../src/types.ts';
 
 const sample = { kind: 'text', agent: PM, role: 'assistant', text: 'hi' } as const;
 
@@ -52,4 +53,54 @@ test('a throwing subscriber does not stop the others', () => {
 
   bus.publish(sample);
   assert.deepEqual(seen, [1]);
+});
+
+const delta = { kind: 'delta', agent: PM, channel: 'text', text: 'hi' } as const;
+
+test('an ephemeral event reaches live subscribers', () => {
+  const bus = new EventBus();
+  const seen: MeshEvent[] = [];
+  bus.subscribeEphemeral((event) => seen.push(event));
+
+  bus.publishEphemeral(delta);
+
+  assert.deepEqual(seen, [delta]);
+});
+
+test('an ephemeral event never enters the replay history', () => {
+  const bus = new EventBus();
+  bus.publishEphemeral(delta);
+  bus.publishEphemeral(delta);
+
+  assert.deepEqual(bus.history(), []);
+});
+
+test('ephemeral events do not consume sequence numbers', () => {
+  const bus = new EventBus();
+  bus.publish(sample);
+  bus.publishEphemeral(delta);
+
+  assert.equal(bus.publish(sample).seq, 2);
+});
+
+test('ephemeral events are not delivered to durable subscribers', () => {
+  const bus = new EventBus();
+  const seen: string[] = [];
+  bus.subscribe((event) => seen.push(event.kind));
+
+  bus.publishEphemeral(delta);
+  bus.publish(sample);
+
+  assert.deepEqual(seen, ['text']);
+});
+
+test('unsubscribing stops ephemeral delivery', () => {
+  const bus = new EventBus();
+  const seen: MeshEvent[] = [];
+  const unsubscribe = bus.subscribeEphemeral((event) => seen.push(event));
+
+  unsubscribe();
+  bus.publishEphemeral(delta);
+
+  assert.equal(seen.length, 0);
 });

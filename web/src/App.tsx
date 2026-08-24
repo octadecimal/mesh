@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { useMeshEvents } from './useMeshEvents.ts';
 import { groupIntoPanes, latestQuota } from './lib/panes.ts';
+import type { PartialText } from './lib/partials.ts';
 import type { StampedEvent } from '../../src/types.ts';
 
 function EventLine({ event }: { event: StampedEvent }) {
@@ -27,8 +28,18 @@ function EventLine({ event }: { event: StampedEvent }) {
   }
 }
 
+/** The message an agent is still writing, rendered under its finished lines. */
+function PendingLines({ pending }: { pending: PartialText }) {
+  return (
+    <>
+      {pending.thinking ? <p className="line thinking partial">{pending.thinking}</p> : null}
+      {pending.text ? <p className="line text assistant partial">{pending.text}</p> : null}
+    </>
+  );
+}
+
 export function App() {
-  const { events, connection } = useMeshEvents();
+  const { events, partials, connection } = useMeshEvents();
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
 
@@ -72,6 +83,7 @@ export function App() {
               {pane.events.map((event) => (
                 <EventLine key={event.seq} event={event} />
               ))}
+              <PendingLines pending={partials[pane.agent] ?? { text: '', thinking: '' }} />
             </div>
           </section>
         ))}

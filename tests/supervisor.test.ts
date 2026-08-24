@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Supervisor } from '../src/supervisor.ts';
+import { PM } from '../src/types.ts';
 import type { MeshEvent } from '../src/types.ts';
 
 const stub = fileURLToPath(new URL('./stubs/fake-claude.mjs', import.meta.url));
@@ -148,4 +149,32 @@ test('start rejects when the child exits before producing any stdout', async () 
   });
 
   await assert.rejects(supervisor.start(), /exited with code 17/);
+});
+
+test('send emits the human message so the viewer shows it', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mesh-'));
+  const supervisor = makeSupervisor(dir, join(dir, 'args.json'));
+  const seen: MeshEvent[] = [];
+  supervisor.onEvent((event) => seen.push(event));
+
+  await supervisor.start();
+  supervisor.send('ship the gauge');
+  await supervisor.stop();
+
+  const echoed = seen.find((e) => e.kind === 'text' && e.role === 'user');
+  assert.ok(echoed, 'expected a user text event for the typed message');
+  assert.equal(echoed.kind === 'text' ? echoed.text : '', 'ship the gauge');
+  assert.equal(echoed.agent, PM);
+});
+
+test('supervisor asks the CLI for partial messages so deltas arrive', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'mesh-'));
+  const argsOut = join(dir, 'args.json');
+  const supervisor = makeSupervisor(dir, argsOut);
+
+  await supervisor.start();
+  await supervisor.stop();
+
+  const argv: string[] = JSON.parse(await readFile(argsOut, 'utf8'));
+  assert.ok(argv.includes('--include-partial-messages'));
 });

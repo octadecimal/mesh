@@ -1,6 +1,6 @@
 import http from 'node:http';
 import type { EventBus } from './bus.ts';
-import type { StampedEvent } from './types.ts';
+import type { MeshEvent, StampedEvent } from './types.ts';
 
 export interface ApiOptions {
   bus: EventBus;
@@ -24,6 +24,16 @@ async function readBody(request: http.IncomingMessage): Promise<string> {
 
 function frame(event: StampedEvent): string {
   return `id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+/**
+ * Live-only events are framed without an `id:` line. EventSource remembers
+ * the last id it saw and sends it back on reconnect, so giving a delta an id
+ * would make the browser ask to resume from an event the history has never
+ * heard of.
+ */
+function ephemeralFrame(event: MeshEvent): string {
+  return `data: ${JSON.stringify(event)}\n\n`;
 }
 
 function handleEvents(request: http.IncomingMessage, response: http.ServerResponse, bus: EventBus): void {
@@ -62,6 +72,7 @@ function handleEvents(request: http.IncomingMessage, response: http.ServerRespon
   }
 
   const unsubscribe = bus.subscribe((event) => write(frame(event)));
+  const unsubscribeEphemeral = bus.subscribeEphemeral((event) => write(ephemeralFrame(event)));
 
   // Comment frames keep intermediaries from closing an idle stream.
   const heartbeat = setInterval(() => write(': ping\n\n'), 15000);
@@ -69,6 +80,7 @@ function handleEvents(request: http.IncomingMessage, response: http.ServerRespon
   const cleanup = () => {
     clearInterval(heartbeat);
     unsubscribe();
+    unsubscribeEphemeral();
   };
   request.on('close', cleanup);
   response.on('close', cleanup);

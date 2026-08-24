@@ -137,3 +137,39 @@ test('an empty stream still flushes headers and an opening frame immediately', a
     }
   });
 });
+
+test('deltas stream without an id so Last-Event-ID keeps tracking real events', async () => {
+  const bus = new EventBus();
+
+  await withServer(bus, () => {}, async (base) => {
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), 3000);
+    try {
+      const response = await fetch(`${base}/api/events`, { signal: controller.signal });
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let text = '';
+
+      const readUntil = async (needle: string) => {
+        while (!text.includes(needle)) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+        }
+      };
+
+      bus.publish(sample);
+      await readUntil('"seq":1');
+      bus.publishEphemeral({ kind: 'delta', agent: PM, channel: 'text', text: 'par' });
+      await readUntil('"kind":"delta"');
+
+      const deltaFrame = text.slice(text.indexOf('data: {"kind":"delta"'));
+      assert.ok(!deltaFrame.includes('id:'), 'a delta frame must not carry an event id');
+      assert.match(text, /^id: 1$/m);
+      await reader.cancel();
+    } finally {
+      clearTimeout(deadline);
+      controller.abort();
+    }
+  });
+});
