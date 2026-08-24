@@ -27,3 +27,12 @@ Implemented the durable runtime core with exhaustive lifecycle transitions, one 
 ## Commit
 
 `feat(runtime): add durable session runtime`
+
+## Fix round
+
+- RED: a throwing subscriber blocked a peer listener and tripped the audit barrier after the event was already committed.
+- RED: a never-resolving driver `close()` kept shutdown pending after the configured timeout.
+- GREEN: listener failures are contained per subscriber after persistence/state update, leaving audit status available and the session usable.
+- GREEN: one absolute shutdown deadline now bounds both interruption and close; terminal state is persisted before a potentially hanging close, and database ownership proceeds after the deadline.
+- Verification: focused runtime suite passed 17/17, server typecheck exited 0, and `git diff --check` exited 0.
+- Deferred exactly as directed: concurrent create/resume race, fingerprint dedupe semantics, and driver-call rejection after persisted prompt/permission.

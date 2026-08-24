@@ -115,8 +115,8 @@ export class SessionRuntime {
   }
 
   async forceClose(): Promise<void> {
-    await this.dependencies.driverSession.close().catch(() => undefined);
     if (this.state === 'interrupting') this.persistTransition({ type: 'driver_stopped' });
+    await this.dependencies.driverSession.close().catch(() => undefined);
     this.dependencies.onStopped();
   }
 
@@ -215,20 +215,21 @@ export class SessionRuntime {
     stableId?: string,
   ): SessionEvent {
     const id = stableId ?? randomUUID();
+    let event: SessionEvent;
     try {
-      const event = this.dependencies.events.append(
+      event = this.dependencies.events.append(
         this.dependencies.session.id,
         { id: `event-${id}`, occurredAt: now(), ...draft },
         this.diagnostic(`diagnostic-${id}`, raw),
         { lifecycleState: next, claudeResumeId },
       );
       if (next) this.state = next;
-      this.dependencies.publisher.publish(event);
-      return event;
     } catch (error) {
       this.dependencies.onAuditFailure(error);
       throw error;
     }
+    this.dependencies.publisher.publish(event);
+    return event;
   }
 
   private insertDiagnostic(id: string, raw: unknown): void {

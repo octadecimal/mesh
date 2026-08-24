@@ -74,6 +74,7 @@ describe('session runtime', () => {
   const disposers: Array<() => void> = [];
 
   afterEach(() => {
+    vi.useRealTimers();
     for (const dispose of disposers.splice(0)) dispose();
   });
 
@@ -106,6 +107,32 @@ describe('session runtime', () => {
 
     await expect(registry.create('s1')).rejects.toMatchObject({ code: 'invalid_session_state' });
     expect(create).toHaveBeenCalledOnce();
+  });
+
+  it('isolates a throwing subscriber while other subscribers receive persisted events', async () => {
+    const { repos, driverSession, publisher, registry } = setup();
+    disposers.push(repos.dispose);
+    await registry.create('s1');
+    const received: Array<{ text: string; persisted: boolean }> = [];
+    publisher.subscribe('s1', () => { throw new Error('disconnected listener'); });
+    publisher.subscribe('s1', (event) => {
+      if (event.type === 'message.assistant') {
+        received.push({
+          text: event.payload.text,
+          persisted: repos.events.after('s1', 0).some(({ id }) => id === event.id),
+        });
+      }
+    });
+
+    driverSession.enqueue({ kind: 'text_completed', text: 'still delivered' });
+
+    await vi.waitFor(() => expect(received).toEqual([
+      { text: 'still delivered', persisted: true },
+    ]));
+    expect(registry.auditStatus).toBe('available');
+    expect(driverSession.interrupted).toBe(false);
+    await registry.sendPrompt('s1', 'continue');
+    expect(driverSession.prompts).toEqual(['continue']);
   });
 
   it('quarantines malformed events without a sequence gap and suppresses duplicate application', async () => {
@@ -229,5 +256,27 @@ describe('session runtime', () => {
 
     expect(closed).toBe(true);
     expect(repos.sessions.get('s1')?.lifecycleState).toBe('interrupted');
+  });
+
+  it('uses the shutdown deadline when driver close never resolves', async () => {
+    vi.useFakeTimers();
+    let closed = false;
+    const { repos, driverSession, registry } = setup({
+      shutdownTimeoutMs: 10,
+      closeDatabase: () => { closed = true; },
+    });
+    disposers.push(repos.dispose);
+    await registry.create('s1');
+    driverSession.close = () => new Promise<void>(() => undefined);
+
+    let resolved = false;
+    const shutdown = registry.shutdown().then(() => { resolved = true; });
+    await vi.advanceTimersByTimeAsync(10);
+    await Promise.resolve();
+
+    expect(resolved).toBe(true);
+    expect(closed).toBe(true);
+    expect(repos.sessions.get('s1')?.lifecycleState).toBe('interrupted');
+    await shutdown;
   });
 });

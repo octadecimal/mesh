@@ -16,6 +16,12 @@ export class EventPublisher {
   }
 
   publish(event: SessionEvent): void {
-    for (const listener of this.listeners.get(event.sessionId) ?? []) listener(event);
+    for (const listener of this.listeners.get(event.sessionId) ?? []) {
+      try {
+        listener(event);
+      } catch {
+        // A stale consumer cannot invalidate a committed audit event or block peers.
+      }
+    }
   }
 }

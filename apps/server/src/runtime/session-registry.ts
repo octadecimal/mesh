@@ -65,16 +65,24 @@ export class SessionRegistry {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
     const runtimes = [...this.runtimes.values()];
+    const timeoutMs = this.dependencies.shutdownTimeoutMs ?? 5_000;
+    const deadline = Date.now() + timeoutMs;
+    const waitWithinDeadline = async (pending: Promise<unknown>): Promise<void> => {
+      const remaining = Math.max(0, deadline - Date.now());
+      if (remaining === 0) return;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        pending,
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, remaining);
+        }),
+      ]);
+      if (timeout) clearTimeout(timeout);
+    };
     const interruptions = runtimes.map((runtime) => runtime.interrupt().catch(() => undefined));
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      Promise.allSettled(interruptions),
-      new Promise<void>((resolve) => {
-        timeout = setTimeout(resolve, this.dependencies.shutdownTimeoutMs ?? 5_000);
-      }),
-    ]);
-    if (timeout) clearTimeout(timeout);
-    await Promise.allSettled(runtimes.map((runtime) => runtime.forceClose()));
+    await waitWithinDeadline(Promise.allSettled(interruptions));
+    const closures = runtimes.map((runtime) => runtime.forceClose().catch(() => undefined));
+    await waitWithinDeadline(Promise.allSettled(closures));
     (this.dependencies.closeDatabase ?? (() => this.dependencies.database.close()))();
   }
 
