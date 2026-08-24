@@ -276,6 +276,31 @@ describe('repositories', () => {
     expect(executions).toBe(0);
   });
 
+  it('returns an exact nested JSON response from a completed duplicate', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    const response = { nested: { values: [1, true, null, 'x'] } };
+
+    expect(repos.commands.executeOnce('nested-json', () => response)).toEqual(response);
+    expect(repos.commands.executeOnce('nested-json', () => ({ changed: true }))).toEqual(response);
+  });
+
+  it('marks transformed JSON values indeterminate without retrying the callback', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    let executions = 0;
+
+    expect(() => repos.commands.executeOnce('unsafe-date', () => {
+      executions += 1;
+      return { when: new Date('2026-08-24T00:00:00.000Z') };
+    })).toThrow('JSON-safe');
+    expect(() => repos.commands.executeOnce('unsafe-date', () => {
+      executions += 1;
+      return { retry: true };
+    })).toThrow(CommandReconciliationRequiredError);
+    expect(executions).toBe(1);
+  });
+
   it('allocates unique consecutive sequences for concurrent connections', async () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
@@ -325,16 +350,25 @@ describe('repositories', () => {
         worker.once('error', reject);
       });
 
-    await Promise.all([waitFor(first), waitFor(second)]);
-    Atomics.store(new Int32Array(barrier), 0, 1);
-    Atomics.notify(new Int32Array(barrier), 0, 2);
-    const results = await Promise.all([waitFor(first), waitFor(second)]);
+    try {
+      await Promise.all([waitFor(first), waitFor(second)]);
+      Atomics.store(new Int32Array(barrier), 0, 1);
+      Atomics.notify(new Int32Array(barrier), 0, 2);
+      const results = await Promise.all([waitFor(first), waitFor(second)]);
 
-    expect(results).toEqual([
-      expect.objectContaining({ type: 'result' }),
-      expect.objectContaining({ type: 'result' }),
-    ]);
-    expect(results.map((result) => result.event?.sequence).sort()).toEqual([1, 2]);
-    expect(repos.diagnostics.list('s1')).toHaveLength(2);
+      expect(results).toEqual([
+        expect.objectContaining({ type: 'result' }),
+        expect.objectContaining({ type: 'result' }),
+      ]);
+      expect(results.map((result) => result.event?.sequence).sort()).toEqual([1, 2]);
+      expect(repos.diagnostics.list('s1')).toMatchObject([
+        { id: 'd1', normalizedEventId: 'event-one' },
+        { id: 'd2', normalizedEventId: 'event-two' },
+      ]);
+    } finally {
+      Atomics.store(new Int32Array(barrier), 0, 1);
+      Atomics.notify(new Int32Array(barrier), 0, 2);
+      await Promise.all([first.terminate(), second.terminate()]);
+    }
   }, 15_000);
 });

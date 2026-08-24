@@ -9,6 +9,31 @@ type CommandRow = {
   response_json: string | null;
 };
 
+const assertJsonSafe = (value: unknown, ancestors = new Set<object>()): void => {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
+  if (typeof value === 'number') {
+    if (Number.isFinite(value)) return;
+    throw new TypeError('Command response must be JSON-safe');
+  }
+  if (typeof value !== 'object') throw new TypeError('Command response must be JSON-safe');
+  if (ancestors.has(value)) throw new TypeError('Command response must be JSON-safe');
+  if (Array.isArray(value)) {
+    ancestors.add(value);
+    for (const item of value) assertJsonSafe(item, ancestors);
+    ancestors.delete(value);
+    return;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+    throw new TypeError('Command response must be JSON-safe');
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new TypeError('Command response must be JSON-safe');
+  }
+  ancestors.add(value);
+  for (const property of Object.values(value)) assertJsonSafe(property, ancestors);
+  ancestors.delete(value);
+};
+
 export class CommandReconciliationRequiredError extends Error {
   readonly code = 'command_reconciliation_required';
 
@@ -63,6 +88,7 @@ export class CommandRepository {
 
     let serialized: string;
     try {
+      assertJsonSafe(response);
       serialized = JSON.stringify(response);
       if (serialized === undefined) {
         throw new TypeError('Command response must be JSON-serializable');

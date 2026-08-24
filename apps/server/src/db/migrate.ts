@@ -7,8 +7,12 @@ const initialMigration = {
   id: '001-initial',
   sql: readFileSync(join(__dirname, 'migrations', '001-initial.sql'), 'utf8'),
 };
+const commandStateMigration = {
+  id: '002-command-state',
+  sql: readFileSync(join(__dirname, 'migrations', '002-command-state.sql'), 'utf8'),
+};
 
-const migrations = [initialMigration];
+const migrations = [initialMigration, commandStateMigration];
 
 export const migrate = (database: Database): void => {
   database.exec('BEGIN IMMEDIATE');
