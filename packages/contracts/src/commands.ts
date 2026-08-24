@@ -1,16 +1,22 @@
 import { z } from 'zod';
 
 import { idSchema, permissionModeSchema, savedLayoutSchema } from './domain.js';
+import { protocolVersionSchema } from './protocol.js';
 
 export const discoveryCommandSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('projects.discover'), payload: z.object({}) }),
   z.object({
+    protocolVersion: protocolVersionSchema,
+    type: z.literal('projects.discover'),
+    payload: z.object({}),
+  }),
+  z.object({
+    protocolVersion: protocolVersionSchema,
     type: z.literal('sessions.discover'),
     payload: z.object({ projectId: idSchema.optional() }),
   }),
 ]);
 
-export const mutatingCommandSchema = z.discriminatedUnion('type', [
+const mutatingCommandSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('session.create'),
     payload: z.object({
@@ -52,6 +58,7 @@ export const mutatingCommandSchema = z.discriminatedUnion('type', [
 
 export const readCommandSchema = z.discriminatedUnion('type', [
   z.object({
+    protocolVersion: protocolVersionSchema,
     type: z.literal('session.history'),
     payload: z.object({
       sessionId: idSchema,
@@ -59,20 +66,22 @@ export const readCommandSchema = z.discriminatedUnion('type', [
     }),
   }),
   z.object({
+    protocolVersion: protocolVersionSchema,
     type: z.literal('session.diagnostics'),
     payload: z.object({ sessionId: idSchema }),
   }),
 ]);
 
-export const commandSchema = z.union([
-  discoveryCommandSchema,
-  mutatingCommandSchema,
-  readCommandSchema,
-]);
 export const commandEnvelopeSchema = z.object({
+  protocolVersion: protocolVersionSchema,
   idempotencyKey: idSchema,
   command: mutatingCommandSchema,
 });
+export const commandSchema = z.union([
+  discoveryCommandSchema,
+  readCommandSchema,
+  commandEnvelopeSchema,
+]);
 
 export type DiscoveryCommand = z.infer<typeof discoveryCommandSchema>;
 export type MutatingCommand = z.infer<typeof mutatingCommandSchema>;

@@ -5,6 +5,7 @@ import {
   isoTimestampSchema,
   lifecycleStateSchema,
 } from './domain.js';
+import { protocolVersionSchema } from './protocol.js';
 
 export const capabilityErrorSchema = z.object({
   code: z.string().trim().min(1),
@@ -31,6 +32,7 @@ const event = <Type extends string, Payload extends z.ZodType>(
   payload: Payload,
 ) =>
   z.object({
+    protocolVersion: protocolVersionSchema,
     id: idSchema,
     sessionId: idSchema,
     sequence: z.number().int().positive(),
