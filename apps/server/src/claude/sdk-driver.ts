@@ -29,13 +29,13 @@ export interface SdkPermissionRequest {
   input: unknown;
 }
 
-export type SdkPermissionDecision = 'approve' | 'deny' | null;
+export type SdkPermissionDecision = 'approve' | 'deny';
 
 export interface SdkQueryOptions {
   cwd?: string;
   title?: string;
   resume?: string;
-  onPermission(request: SdkPermissionRequest): Promise<SdkPermissionDecision>;
+  onPermission?(request: SdkPermissionRequest): Promise<SdkPermissionDecision>;
 }
 
 export interface SdkQuery {
@@ -146,7 +146,9 @@ class SdkDriverSession implements DriverSession {
       input: request.input,
     });
     if (decision.action === 'approve') return 'approve';
-    if (decision.action === 'delegate') return null;
+    if (decision.action === 'delegate') {
+      throw new Error('Inherited permissions must not install an SDK permission callback');
+    }
     if (this.pendingPermissions.has(request.requestId)) {
       throw new Error(`Permission request '${request.requestId}' is already pending`);
     }
@@ -247,17 +249,21 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
     request: StartClaudeSessionRequest | ResumeClaudeSessionRequest,
     resume?: string,
   ): Promise<SdkDriverSession> {
+    const mode = request.permissionMode ?? 'interactive';
     let session: SdkDriverSession | undefined;
-    const query = this.sdk.startQuery({
+    const options: SdkQueryOptions = {
       cwd: request.workspacePath,
       title: 'title' in request ? request.title : undefined,
       resume,
-      onPermission: (permission) => {
+    };
+    if (mode !== 'inherit') {
+      options.onPermission = (permission) => {
         if (!session) throw new Error('Claude SDK requested permission before session initialization');
         return session.handlePermission(permission);
-      },
-    });
-    session = new SdkDriverSession(query, request.permissionMode ?? 'interactive');
+      };
+    }
+    const query = this.sdk.startQuery(options);
+    session = new SdkDriverSession(query, mode);
     await session.initialize();
     return session;
   }

@@ -59,7 +59,7 @@ class ScriptedFacade implements SdkFacade {
   }
 
   requestPermission(request: SdkPermissionRequest) {
-    return this.queryCalls[0]?.onPermission(request);
+    return this.queryCalls[0]?.onPermission?.(request);
   }
 }
 
@@ -141,6 +141,42 @@ describe('SdkClaudeSessionDriver contract', () => {
     });
     await session.resolvePermission('request-1', 'approve');
     await expect(permission).resolves.toBe('approve');
+  });
+
+  it('omits the permission callback for inherit mode and lets the SDK stream complete', async () => {
+    const sdk = new ScriptedFacade([
+      { kind: 'started', sessionId: 'resume-inherit', apiKeySource: 'none' },
+      { kind: 'completed' },
+    ]);
+    const session = await new SdkClaudeSessionDriver(sdk).create({
+      title: 'Session',
+      permissionMode: 'inherit',
+    });
+
+    expect(sdk.queryCalls[0]).not.toHaveProperty('onPermission');
+    await expect(collect(session.events())).resolves.toEqual([]);
+  });
+
+  it('keeps safe-auto permission decisions on the injected callback', async () => {
+    const sdk = new ScriptedFacade([
+      { kind: 'started', sessionId: 'resume-safe-auto', apiKeySource: 'none' },
+      { kind: 'completed' },
+    ]);
+    const session = await new SdkClaudeSessionDriver(sdk).create({
+      title: 'Session',
+      permissionMode: 'safe_auto',
+    });
+
+    expect(sdk.queryCalls[0]?.onPermission).toBeTypeOf('function');
+    await expect(
+      sdk.requestPermission({
+        requestId: 'request-safe',
+        toolUseId: 'tool-safe',
+        toolName: 'Read',
+        input: { path: 'safe.ts' },
+      }),
+    ).resolves.toBe('approve');
+    await expect(collect(session.events())).resolves.toEqual([]);
   });
 
   it('maps subscription limits and execution failures without throwing SDK values', async () => {

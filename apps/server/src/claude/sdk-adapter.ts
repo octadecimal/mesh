@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   listSessions,
   query,
+  type CanUseTool,
   type PermissionResult,
   type Query,
   type SDKMessage,
@@ -56,8 +57,7 @@ class AsyncPromptQueue implements AsyncIterable<SDKUserMessage> {
 const permissionResult = (
   decision: SdkPermissionDecision,
   input: Record<string, unknown>,
-): PermissionResult | null => {
-  if (decision === null) return null;
+): PermissionResult => {
   if (decision === 'approve') return { behavior: 'allow', updatedInput: input };
   return { behavior: 'deny', message: 'Denied by Mesh session permission policy' };
 };
@@ -192,6 +192,19 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
   startQuery: (options: SdkQueryOptions) => {
     const prompts = new AsyncPromptQueue();
     const sessionId = options.resume ?? randomUUID();
+    const onPermission = options.onPermission;
+    const canUseTool: CanUseTool | undefined = onPermission
+      ? async (toolName, input, permissionOptions) =>
+          permissionResult(
+            await onPermission({
+              requestId: permissionOptions.requestId,
+              toolUseId: permissionOptions.toolUseID,
+              toolName,
+              input,
+            }),
+            input,
+          )
+      : undefined;
     const sdkQuery = query({
       prompt: prompts,
       options: {
@@ -201,16 +214,7 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
         sessionId: options.resume ? undefined : sessionId,
         includePartialMessages: false,
         permissionMode: 'default',
-        canUseTool: async (toolName, input, permissionOptions) =>
-          permissionResult(
-            await options.onPermission({
-              requestId: permissionOptions.requestId,
-              toolUseId: permissionOptions.toolUseID,
-              toolName,
-              input,
-            }),
-            input,
-          ),
+        ...(canUseTool ? { canUseTool } : {}),
       },
     });
     if (typeof sdkQuery.interrupt !== 'function' || typeof sdkQuery.close !== 'function') {
