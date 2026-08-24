@@ -1,3 +1,37 @@
+## Worktree Policy
+
+Every unit of work that becomes a pull request is done in its own git worktree.
+No exceptions — docs-only and chore changes included. The main checkout at the
+repository root stays on `master` and is never used for feature work.
+
+Create the worktree from an up-to-date `master`:
+
+```
+git fetch origin master
+git worktree add .claude/worktrees/<slug> -b <branch> origin/master
+cd .claude/worktrees/<slug>
+npm ci
+```
+
+`<slug>` is the branch name with `/` replaced by `-`, so `feat/pane-resize`
+lives in `.claude/worktrees/feat-pane-resize`.
+
+Agents running in Claude Code use the `EnterWorktree` tool instead. It creates
+the same layout under `.claude/worktrees/` and switches the session into it.
+
+Constraints that follow from this layout:
+
+- `.claude/worktrees/` is gitignored. Never commit a worktree.
+- `node_modules/` is not shared between worktrees. Run `npm ci` in a fresh one
+  before `npm test`, `npx tsc --noEmit`, or `npm run build:web`.
+- The dev server binds fixed ports — 4317 for the API, 5173 for the frontend —
+  so only one worktree can run the live stack at a time. Stop one before
+  starting another.
+- Remove the worktree once its pull request is merged. `git worktree remove`
+  runs from the main checkout, and it must happen before the local branch can
+  be deleted, because git refuses to delete a branch that is checked out
+  anywhere. `.claude/skills/complete-work/SKILL.md` covers the full sequence.
+
 ## Code Exploration Policy
 
 Always use jCodeMunch-MCP for code navigation. Never fall back to Read, Grep, Glob, or Bash for code exploration.

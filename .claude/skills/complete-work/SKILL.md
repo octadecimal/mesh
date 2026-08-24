@@ -23,7 +23,11 @@ git branch --show-current
 gh pr view --json number,state,headRefName,mergeStateStatus,statusCheckRollup
 ```
 
-- **On `master`?** STOP — there is nothing to complete. Work happens on branches.
+- **On `master`?** STOP — there is nothing to complete. Work happens on a
+  branch in its own worktree under `.claude/worktrees/`, per `AGENTS.md`.
+- **In the main checkout on a branch?** The work still merges fine, but say so
+  in the final report — it means the worktree policy was skipped, and step 7's
+  cleanup differs.
 - **PR exists?** Go to step 2.
 - **No PR?** Open one, but check these first:
   - `git status --short` is clean. If not, STOP and report the dirty files —
@@ -95,6 +99,10 @@ npm run dev        # server on 127.0.0.1:4317
 npm run dev:web    # frontend on 127.0.0.1:5173
 ```
 
+Run both from **this worktree**. Those ports are machine-wide, so if another
+worktree already has a stack up, stop it first — otherwise the second `npm run
+dev` fails to bind and the browser shows the other branch's code.
+
 Poll until the API answers:
 
 ```
@@ -164,10 +172,29 @@ already set from the PR title, supply one in Conventional Commits form.
 
 ## 7. Clean up locally
 
-`gh pr merge --delete-branch` in step 6 deleted **both** the local and the
-remote branch, and switched this checkout off the branch it deleted. So this
-step mostly confirms that rather than repeating it. Mesh uses a single checkout
-— there are no worktrees to remove.
+Cleanup is worktree first, branch second — git refuses to delete a branch that
+is checked out anywhere, a worktree included.
+
+`gh pr merge --delete-branch` in step 6 deleted the **remote** branch. It could
+not delete the local one while this worktree still had it checked out. That is
+expected; do not report it as a failure.
+
+**Stop the live stack from step 3 before going further.** Vite and the API
+server serve files out of this worktree directory, and removing it underneath
+them leaves a process serving a directory that no longer exists.
+
+Then remove the worktree, from the main checkout:
+
+```
+cd <repository root>       # the main checkout, not .claude/worktrees/...
+git worktree remove .claude/worktrees/<slug>
+```
+
+`git worktree remove` refuses a worktree with uncommitted changes. If it does,
+STOP and report what is dirty — never reach for `--force`.
+
+If the work was done in the main checkout rather than a worktree, skip the two
+steps above; there is nothing to remove.
 
 Sync master and drop the stale remote ref:
 
@@ -203,11 +230,12 @@ git branch --list <branch>
 If `git checkout master` fails because the working tree is dirty, STOP and
 report — do not stash the user's changes.
 
-If the live stack from step 3 is still running, leave it running — the squash
-commit carries the same code the user just verified, so nothing needs a restart.
+The live stack from step 3 is down — you stopped it before removing the
+worktree. If the user wants it back, start it again from the main checkout on
+`master`; the squash commit carries the same code they just verified.
 
 ## Done
 
 Report a short summary: PR number merged, who verified it in the browser (or
-that it went in unverified at the user's direction), branch cleanup status, and
-whether the live stack is still up and on which URLs.
+that it went in unverified at the user's direction), worktree and branch cleanup
+status, and whether the live stack is up and on which URLs.
