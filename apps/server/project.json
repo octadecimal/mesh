@@ -14,10 +14,20 @@
         "format": ["cjs"],
         "bundle": false,
         "main": "apps/server/src/main.ts",
+        "additionalEntryPoints": ["apps/server/src/db/migrate.ts"],
         "tsConfig": "apps/server/tsconfig.app.json",
         "assets": [
           "apps/server/src/assets",
-          {"input":"apps/server/src/db/migrations","glob":"**/*.sql","output":"db/migrations"}
+          {
+            "input": "apps/server/src/db/migrations",
+            "glob": "**/*.sql",
+            "output": "db/migrations"
+          },
+          {
+            "input": "apps/server/src/db/migrations",
+            "glob": "**/*.sql",
+            "output": "apps/server/src/db/migrations"
+          }
         ],
         "generatePackageJson": true,
         "esbuildOptions": {
