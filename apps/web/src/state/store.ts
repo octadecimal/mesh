@@ -33,5 +33,19 @@ export const createMeshStore = (snapshot: SessionSnapshot) => {
       const current = currentProjection(state);
       state.notifications.set([...current.notifications, diagnosticNotification(message)]);
     },
+    selectSession(sessionId: string | undefined) {
+      const current = currentProjection(state);
+      state.set({
+        ...current,
+        selectedSessionId: sessionId,
+        unreadSessionIds: sessionId
+          ? { ...current.unreadSessionIds, [sessionId]: false }
+          : current.unreadSessionIds,
+      });
+    },
+    setFilter(scope: string, value: string) {
+      const current = currentProjection(state);
+      state.set({ ...current, filters: { ...current.filters, [scope]: value } });
+    },
   };
 };

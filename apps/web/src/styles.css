@@ -1,1 +1,20 @@
-/* You can add global styles to this file, and also import other style files */
+@import "tailwindcss";
+
+:root { --background: #101317; --panel: #181d23; --border: #303845; --focus: #79b8ff; --status: #53d18f; --dockview-group: #151a20; --dockview-tab: #252c35; color: #e8edf2; background: var(--background); font-family: Inter, system-ui, sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input { font: inherit; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.app-shell { display: grid; grid-template-columns: minmax(16rem, 22rem) 1fr; min-height: 100vh; }
+.session-sidebar { padding: 1rem; background: var(--panel); border-right: 1px solid var(--border); overflow: auto; }
+.session-sidebar header { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.session-sidebar h1, .session-sidebar h2 { margin: .5rem 0; }
+.session-sidebar label { display: grid; gap: .25rem; }
+.session-row { display: flex; width: 100%; gap: .45rem; text-align: left; margin: .25rem 0; }
+.status { color: var(--status); }
+.session-workspace { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; background: var(--border); }
+.session-workspace > div { min-width: 0; min-height: 0; }
+.session-group { min-width: 0; background: var(--dockview-group); padding: .5rem; }
+.session-panel { min-height: 18rem; padding: 1rem; background: var(--panel); }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+@media (max-width: 720px) { .app-shell { grid-template-columns: 1fr; } .session-sidebar { border-right: 0; border-bottom: 1px solid var(--border); } }
