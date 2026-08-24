@@ -16,7 +16,8 @@ export const createTestRepositories = (options?: {
   failDiagnosticInsert?: boolean;
 }) => {
   const directory = mkdtempSync(join(tmpdir(), 'mesh-session-platform-'));
-  const database = openDatabase(join(directory, 'test.sqlite'));
+  const path = join(directory, 'test.sqlite');
+  const database = openDatabase(path);
   migrate(database);
 
   if (options?.failDiagnosticInsert) {
@@ -30,6 +31,7 @@ export const createTestRepositories = (options?: {
   }
 
   return {
+    path,
     database,
     projects: new ProjectRepository(database),
     workspaces: new WorkspaceRepository(database),

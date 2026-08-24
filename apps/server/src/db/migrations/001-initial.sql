@@ -78,8 +78,11 @@ CREATE TABLE saved_layouts (
 CREATE TABLE processed_commands (
   id TEXT PRIMARY KEY,
   idempotency_key TEXT NOT NULL UNIQUE,
-  response_json TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  state TEXT NOT NULL CHECK (state IN ('pending', 'completed', 'failed', 'indeterminate')),
+  response_json TEXT,
+  failure_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE INDEX idx_workspaces_project_id ON workspaces(project_id);

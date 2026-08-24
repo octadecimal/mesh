@@ -1,3 +1,9 @@
+import { Worker } from 'node:worker_threads';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { buildSync } from 'esbuild';
+import { join } from 'node:path';
+
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -9,6 +15,7 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import { createTestRepositories } from '../test/create-test-database.js';
+import { CommandReconciliationRequiredError } from './command-repository.js';
 
 const project = () =>
   projectSchema.parse({
@@ -206,4 +213,128 @@ describe('repositories', () => {
     expect(second).toEqual({ accepted: true });
     expect(executions).toBe(1);
   });
+
+  it('marks a throwing command as failed and blocks automatic retry', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+
+    expect(() =>
+      repos.commands.executeOnce('command-fails', () => {
+        throw new Error('external effect failed');
+      }),
+    ).toThrow('external effect failed');
+    expect(
+      repos.database
+        .prepare('SELECT state FROM processed_commands WHERE idempotency_key = ?')
+        .get('command-fails'),
+    ).toEqual({ state: 'failed' });
+    expect(() => repos.commands.executeOnce('command-fails', () => ({ accepted: true }))).toThrow(
+      CommandReconciliationRequiredError,
+    );
+  });
+
+  it('marks an unserializable response indeterminate and blocks automatic retry', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    let executions = 0;
+
+    expect(() =>
+      repos.commands.executeOnce('command-unserializable', () => {
+        executions += 1;
+        return { value: BigInt(1) };
+      }),
+    ).toThrow();
+    expect(
+      repos.database
+        .prepare('SELECT state FROM processed_commands WHERE idempotency_key = ?')
+        .get('command-unserializable'),
+    ).toEqual({ state: 'indeterminate' });
+    expect(() =>
+      repos.commands.executeOnce('command-unserializable', () => {
+        executions += 1;
+        return { accepted: true };
+      }),
+    ).toThrow(CommandReconciliationRequiredError);
+    expect(executions).toBe(1);
+  });
+
+  it('does not execute a key left pending by a prior process', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.database.prepare(`
+      INSERT INTO processed_commands (id, idempotency_key, state, created_at, updated_at)
+      VALUES ('pending-command', 'command-pending', 'pending', ?, ?)
+    `).run('2026-08-24T00:00:00.000Z', '2026-08-24T00:00:00.000Z');
+    let executions = 0;
+
+    expect(() =>
+      repos.commands.executeOnce('command-pending', () => {
+        executions += 1;
+        return { accepted: true };
+      }),
+    ).toThrow(CommandReconciliationRequiredError);
+    expect(executions).toBe(0);
+  });
+
+  it('allocates unique consecutive sequences for concurrent connections', async () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    const bundleDirectory = mkdtempSync(join(tmpdir(), 'mesh-session-platform-event-worker-'));
+    disposers.push(() => rmSync(bundleDirectory, { force: true, recursive: true }));
+    const modulePath = join(bundleDirectory, 'event-repository.cjs');
+    buildSync({
+      bundle: true,
+      entryPoints: [join(__dirname, 'event-repository.ts')],
+      external: ['better-sqlite3'],
+      format: 'cjs',
+      outfile: modulePath,
+      platform: 'node',
+      tsconfig: join(__dirname, '..', '..', '..', '..', 'tsconfig.base.json'),
+    });
+    const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    const workerSource = `
+      const { parentPort, workerData } = require('node:worker_threads');
+      const Database = require('better-sqlite3');
+      const { EventRepository } = require(workerData.modulePath);
+      const database = new Database(workerData.path);
+      database.pragma('foreign_keys = ON');
+      database.pragma('busy_timeout = 5000');
+      const repository = new EventRepository(database);
+      parentPort.postMessage({ type: 'ready' });
+      Atomics.wait(new Int32Array(workerData.barrier), 0, 0);
+      try {
+        const event = repository.append('s1', workerData.draft, workerData.diagnostic);
+        parentPort.postMessage({ type: 'result', event });
+      } catch (error) {
+        parentPort.postMessage({ type: 'error', message: error.message });
+      } finally {
+        database.close();
+      }
+    `;
+    const start = (draft: ReturnType<typeof userMessage>, raw: ReturnType<typeof diagnostic>) =>
+      new Worker(workerSource, {
+        eval: true,
+        workerData: { barrier, diagnostic: raw, draft, modulePath, path: repos.path },
+      });
+    const first = start(userMessage('one'), diagnostic('d1', 'user'));
+    const second = start(userMessage('two'), diagnostic('d2', 'user'));
+    const waitFor = (worker: Worker) =>
+      new Promise<{ type: string; event?: { sequence: number }; message?: string }>((resolve, reject) => {
+        worker.once('message', resolve);
+        worker.once('error', reject);
+      });
+
+    await Promise.all([waitFor(first), waitFor(second)]);
+    Atomics.store(new Int32Array(barrier), 0, 1);
+    Atomics.notify(new Int32Array(barrier), 0, 2);
+    const results = await Promise.all([waitFor(first), waitFor(second)]);
+
+    expect(results).toEqual([
+      expect.objectContaining({ type: 'result' }),
+      expect.objectContaining({ type: 'result' }),
+    ]);
+    expect(results.map((result) => result.event?.sequence).sort()).toEqual([1, 2]);
+    expect(repos.diagnostics.list('s1')).toHaveLength(2);
+  }, 15_000);
 });

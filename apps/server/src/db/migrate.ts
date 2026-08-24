@@ -11,25 +11,28 @@ const initialMigration = {
 const migrations = [initialMigration];
 
 export const migrate = (database: Database): void => {
-  database.exec(
-    'CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
-  );
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    database.exec(
+      'CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)',
+    );
+    const hasMigration = database.prepare(
+      'SELECT 1 FROM schema_migrations WHERE id = ?',
+    );
+    const recordMigration = database.prepare(
+      'INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)',
+    );
 
-  const hasMigration = database.prepare(
-    'SELECT 1 FROM schema_migrations WHERE id = ?',
-  );
-  const recordMigration = database.prepare(
-    'INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)',
-  );
-
-  for (const migration of migrations) {
-    if (hasMigration.get(migration.id)) {
-      continue;
-    }
-
-    database.transaction(() => {
+    for (const migration of migrations) {
+      if (hasMigration.get(migration.id)) {
+        continue;
+      }
       database.exec(migration.sql);
       recordMigration.run(migration.id, new Date().toISOString());
-    })();
+    }
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
   }
 };
