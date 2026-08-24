@@ -23,12 +23,14 @@ import {
 
 export { SESSION_COMPONENT, type SessionPanelParams } from './layout-controller';
 
-function DockviewSessionPanel({ api, params, session, workspace, events, panelApi, auditAvailable }: IDockviewPanelProps<SessionPanelParams> & {
+function DockviewSessionPanel({ api, params, session, workspace, events, panelApi, auditAvailable, promptDraft, onPromptDraftChange }: IDockviewPanelProps<SessionPanelParams> & {
   session: Session;
   workspace?: Workspace;
   events: SessionEvent[];
   panelApi?: SessionPanelApi;
   auditAvailable: boolean;
+  promptDraft: string;
+  onPromptDraftChange: (value: string) => void;
 }) {
   return (
     <section className="session-panel" aria-label={`Session ${params.sessionId} panel`}>
@@ -38,7 +40,7 @@ function DockviewSessionPanel({ api, params, session, workspace, events, panelAp
       >
         Close
       </button>
-      <SessionPanel session={session} workspace={workspace} events={events} api={panelApi} auditAvailable={auditAvailable} />
+      <SessionPanel session={session} workspace={workspace} events={events} api={panelApi} auditAvailable={auditAvailable} promptDraft={promptDraft} onPromptDraftChange={onPromptDraftChange} />
     </section>
   );
 }
@@ -66,6 +68,8 @@ export function SessionWorkspace({
   workspaces = [],
   api: panelApi,
   auditAvailable = true,
+  promptDrafts = {},
+  onPromptDraftChange,
 }: {
   sessions: WorkspaceSession[];
   savedLayout?: SavedLayout;
@@ -77,6 +81,8 @@ export function SessionWorkspace({
   workspaces?: Workspace[];
   api?: SessionPanelApi;
   auditAvailable?: boolean;
+  promptDrafts?: Record<string, string>;
+  onPromptDraftChange?: (sessionId: string, value: string) => void;
 }) {
   const apiRef = useRef<DockviewApi | null>(null);
   const restoringRef = useRef(false);
@@ -100,9 +106,11 @@ export function SessionWorkspace({
         events={events.filter((event) => event.sessionId === props.params.sessionId)}
         panelApi={panelApi}
         auditAvailable={auditAvailable}
+        promptDraft={promptDrafts[props.params.sessionId] ?? ''}
+        onPromptDraftChange={(value) => onPromptDraftChange?.(props.params.sessionId, value)}
       />;
     },
-  }), [sessions, workspaces, events, panelApi, auditAvailable]);
+  }), [sessions, workspaces, events, panelApi, auditAvailable, promptDrafts, onPromptDraftChange]);
 
   onSaveRef.current = onSaveLayout;
   onCloseRef.current = onCloseSession;

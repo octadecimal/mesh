@@ -1,14 +1,15 @@
 import { useState } from 'react';
-import type { MutatingCommand, PermissionRequest, PermissionResolution } from '@mesh-session-platform/contracts';
+import type { MutatingCommand, PermissionMode, PermissionRequest, PermissionResolution } from '@mesh-session-platform/contracts';
 
 export type CommandSender = (command: MutatingCommand, idempotencyKey?: string) => Promise<unknown>;
 
 const idempotencyKey = () => globalThis.crypto?.randomUUID?.() ?? `permission-${Date.now()}-${Math.random()}`;
 
-export function PermissionCard({ request, resolution, occurredAt, send }: {
+export function PermissionCard({ request, resolution, occurredAt, permissionMode, send }: {
   request: PermissionRequest;
   resolution?: PermissionResolution;
   occurredAt: string;
+  permissionMode: PermissionMode;
   send: CommandSender;
 }) {
   const [submitting, setSubmitting] = useState(false);
@@ -24,6 +25,7 @@ export function PermissionCard({ request, resolution, occurredAt, send }: {
   return <article className="permission-card" aria-label={`Permission ${request.name}`}>
     <h3>{request.name}</h3>
     <p>Requested {new Date(occurredAt).toLocaleString()}</p>
+    <p>Policy mode: {permissionMode}</p>
     <pre aria-label="Permission arguments">{JSON.stringify(request.input, null, 2)}</pre>
     <p aria-live="polite">Status: {status}</p>
     {status === 'pending' ? <div>

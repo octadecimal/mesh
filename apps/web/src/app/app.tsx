@@ -119,6 +119,8 @@ function ConnectedApp({
         workspaces={workspaces}
         api={api}
         auditAvailable={projection.connectionHealth === 'connected'}
+        promptDrafts={projection.promptDrafts}
+        onPromptDraftChange={store.setPromptDraft}
         savedLayout={savedLayout}
         selectedSessionId={selectedSessionId}
         sidebar={{ filter }}

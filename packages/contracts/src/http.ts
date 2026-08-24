@@ -34,6 +34,7 @@ export const sessionDiagnosticsSchema = z.object({
   protocolVersion: protocolVersionSchema,
   sessionId: idSchema,
   diagnostics: z.array(rawDiagnosticSchema),
+  nextAfter: idSchema.optional(),
 });
 
 export type SessionSnapshot = z.infer<typeof sessionSnapshotSchema>;

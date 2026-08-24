@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import {
+  idSchema,
   sessionDiagnosticsSchema,
   sessionHistorySchema,
   sessionSnapshotSchema,
@@ -30,6 +31,11 @@ const paginationSchema = z.object({
     .positive()
     .default(100)
     .transform((value) => Math.min(value, 200)),
+});
+
+const diagnosticPaginationSchema = z.object({
+  after: idSchema.optional(),
+  limit: z.coerce.number().int().positive().default(100).transform((value) => Math.min(value, 200)),
 });
 
 const requireSession = (
@@ -103,12 +109,14 @@ export const readDiagnostics = (
   query: unknown,
 ) => {
   requireSession(dependencies, sessionId);
-  const { after, limit } = paginationSchema.parse(query);
+  const { after, limit } = diagnosticPaginationSchema.parse(query);
+  const all = dependencies.diagnostics.list(sessionId);
+  const start = after === undefined ? 0 : Math.max(0, all.findIndex((diagnostic) => diagnostic.id === after) + 1);
+  const diagnostics = all.slice(start, start + limit);
   return sessionDiagnosticsSchema.parse({
     protocolVersion: 1,
     sessionId,
-    diagnostics: dependencies.diagnostics
-      .list(sessionId)
-      .slice(after, after + limit),
+    diagnostics,
+    nextAfter: start + diagnostics.length < all.length ? diagnostics.at(-1)?.id : undefined,
   });
 };

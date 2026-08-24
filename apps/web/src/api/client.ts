@@ -23,6 +23,7 @@ export type MeshApiOptions = {
 };
 
 export type CommandResponse = z.infer<typeof commandResponseSchema>;
+export type DiagnosticsOptions = { after?: SessionDiagnostics['nextAfter']; limit?: number };
 
 export class MeshApi {
   private readonly fetcher: typeof globalThis.fetch;
@@ -44,9 +45,13 @@ export class MeshApi {
     );
   }
 
-  async diagnostics(sessionId: string): Promise<SessionDiagnostics> {
+  async diagnostics(sessionId: string, options: DiagnosticsOptions = {}): Promise<SessionDiagnostics> {
+    const parameters = new URLSearchParams();
+    if (options.after) parameters.set('after', options.after);
+    if (options.limit) parameters.set('limit', String(options.limit));
+    const query = parameters.size ? `?${parameters}` : '';
     return sessionDiagnosticsSchema.parse(
-      await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/diagnostics`),
+      await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/diagnostics${query}`),
     );
   }
 

@@ -47,5 +47,9 @@ export const createMeshStore = (snapshot: SessionSnapshot) => {
       const current = currentProjection(state);
       state.set({ ...current, filters: { ...current.filters, [scope]: value } });
     },
+    setPromptDraft(sessionId: string, value: string) {
+      const current = currentProjection(state);
+      state.set({ ...current, promptDrafts: { ...current.promptDrafts, [sessionId]: value } });
+    },
   };
 };
