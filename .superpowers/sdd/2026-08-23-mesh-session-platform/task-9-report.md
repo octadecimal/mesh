@@ -22,3 +22,10 @@ Completed the Task 9 MVP.
 
 - The provided `pnpm nx test web --testPathPattern=...` command is incompatible with this Vitest version (`--testPathPattern` is unsupported), so focused tests ran via Vitest paths.
 - Existing Vite/Nx deprecation/config-loader warnings remain outside this task’s scope.
+
+## Follow-up Fix Round
+
+- Added one `createResyncCoordinator` shared by reducer gap handling and `resync.required` socket handling.
+- The coordinator calls `MeshApi.snapshot()`, uses the existing parsed snapshot client path, and delegates to `replaceSnapshot()` through the Hookstate store.
+- A single in-flight promise prevents simultaneous gap/resync signals from issuing duplicate snapshot fetches.
+- Focused tests now cover the gap refresh, snapshot replacement, draft retention, and socket resync reuse path.

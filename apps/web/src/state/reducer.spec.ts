@@ -1,6 +1,8 @@
 import type { SessionEvent, SessionSnapshot } from '@mesh-session-platform/contracts';
 
 import { applyEvent, createProjection, replaceSnapshot } from './reducer';
+import { createResyncCoordinator } from './resync';
+import { createMeshStore } from './store';
 
 const timestamp = '2026-08-24T00:00:00.000Z';
 
@@ -77,5 +79,28 @@ describe('replaceSnapshot', () => {
     expect(next.promptDrafts).toEqual({ 'session-1': 'keep this draft' });
     expect(next.selectedSessionId).toBe('session-1');
     expect(next.unreadSessionIds).toEqual({ 'session-1': true });
+  });
+});
+
+describe('createResyncCoordinator', () => {
+  it('refreshes a gap from one snapshot fetch and retains the prompt draft', async () => {
+    const store = createMeshStore(snapshot());
+    store.state.promptDrafts.set({ 'session-1': 'keep this draft' });
+    let requests = 0;
+    const coordinator = createResyncCoordinator(
+      {
+        snapshot: async () => {
+          requests += 1;
+          return snapshot(7);
+        },
+      },
+      store,
+    );
+
+    await Promise.all([coordinator.applyEvent(event(5)), coordinator.applyEvent(event(6))]);
+
+    expect(requests).toBe(1);
+    expect(store.state.lastSequenceBySession['session-1'].get()).toBe(7);
+    expect(store.state.promptDrafts['session-1'].get()).toBe('keep this draft');
   });
 });

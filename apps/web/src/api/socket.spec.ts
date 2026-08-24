@@ -1,6 +1,8 @@
 import type { ServerMessage } from '@mesh-session-platform/contracts';
 
 import { MeshSocket } from './socket';
+import { createResyncCoordinator } from '../state/resync';
+import { createMeshStore } from '../state/store';
 
 class FakeSocket {
   static instances: FakeSocket[] = [];
@@ -68,18 +70,44 @@ describe('MeshSocket', () => {
     socket.close();
   });
 
-  it('requests snapshot replacement when the server requires resync', () => {
-    let resyncs = 0;
+  it('requests snapshot replacement when the server requires resync', async () => {
+    const store = createMeshStore({
+      protocolVersion: 1,
+      projects: [],
+      workspaces: [],
+      sessions: [],
+      events: [],
+      pendingApprovals: [],
+      lastSequenceBySession: {},
+      layouts: [],
+    });
+    store.state.promptDrafts.set({ 'session-1': 'draft survives resync' });
+    let requests = 0;
+    const coordinator = createResyncCoordinator(
+      {
+        snapshot: async () => {
+          requests += 1;
+          return {
+            protocolVersion: 1,
+            projects: [],
+            workspaces: [],
+            sessions: [],
+            events: [],
+            pendingApprovals: [],
+            lastSequenceBySession: { 'session-1': 8 },
+            layouts: [],
+          };
+        },
+      },
+      store,
+    );
     const socket = new MeshSocket({
       url: 'ws://mesh.test/api/realtime',
       webSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
       cursors: () => ({}),
       onMessage: () => undefined,
       onDiagnostic: () => undefined,
-      resync: () => {
-        resyncs += 1;
-        return Promise.resolve();
-      },
+      resync: coordinator.refresh,
     });
 
     socket.connect();
@@ -91,7 +119,12 @@ describe('MeshSocket', () => {
       payload: { sessionId: 'session-1', reason: 'retention expired' },
     });
 
-    expect(resyncs).toBe(1);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(requests).toBe(1);
+    expect(store.state.lastSequenceBySession['session-1'].get()).toBe(8);
+    expect(store.state.promptDrafts['session-1'].get()).toBe('draft survives resync');
     socket.close();
   });
 });
