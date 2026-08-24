@@ -29,7 +29,10 @@ export class ReplayService {
       const highWater = retained.at(-1)?.sequence ?? 0;
       highWaterBySession[sessionId] = highWater;
 
-      if (firstSequence !== undefined && cursor < firstSequence - 1) {
+      if (
+        cursor > highWater ||
+        (firstSequence !== undefined && cursor < firstSequence - 1)
+      ) {
         resyncSessionIds.push(sessionId);
         continue;
       }

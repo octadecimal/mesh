@@ -41,4 +41,26 @@ describe('ReplayService', () => {
       resyncSessionIds: ['s1'],
     });
   });
+
+  it('requires a snapshot when the cursor is ahead of retained high-water', () => {
+    const replay = new ReplayService({
+      after: () => [event('s1', 4), event('s1', 5)],
+    });
+
+    expect(replay.after({ s1: 10 })).toEqual({
+      batches: [],
+      highWaterBySession: { s1: 5 },
+      resyncSessionIds: ['s1'],
+    });
+  });
+
+  it('requires a snapshot for a positive cursor when history is empty', () => {
+    const replay = new ReplayService({ after: () => [] });
+
+    expect(replay.after({ s1: 1 })).toEqual({
+      batches: [],
+      highWaterBySession: { s1: 0 },
+      resyncSessionIds: ['s1'],
+    });
+  });
 });
