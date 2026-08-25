@@ -52,9 +52,9 @@ If no open PR exists:
    and whose base is `master`.
 
 The user's explicit complete-work request authorizes the normal commit, push, PR
-creation, squash merge, cleanup, and restart operations in this workflow. It
-does not authorize including unrelated changes, bypassing failed checks,
-force-pushing, or weakening branch protection.
+creation, squash merge, cleanup, and any restart required by Step 5. It does not
+authorize including unrelated changes, bypassing failed checks, force-pushing,
+or weakening branch protection.
 
 ## 2. Apply the pre-merge gate
 
@@ -106,7 +106,22 @@ expected self-rooted exception: continue, report both leftovers precisely, and
 give the later cleanup commands. It is not permission to force-remove any other
 path.
 
-## 5. Restart Mesh from main
+## 5. Restart Mesh from main when runtime behavior changed
+
+Inspect the merged PR's file list before touching processes. Restart Mesh only
+when at least one changed path can affect the built application, runtime
+configuration, dependencies, persisted data, or operator-visible behavior.
+
+Skip restart and health checks when every changed path is documentation or
+development metadata under this allowlist:
+
+- `.agents/**`, `.claude/**`, `.github/**`, `.superpowers/**`, `.vscode/**`
+- `docs/**`, root `*.md` files
+- `.editorconfig`, `.gitignore`, `.prettierignore`, `.prettierrc.json`
+
+If any changed path falls outside that allowlist, perform the restart. Report a
+skipped restart explicitly with the file-scope evidence; do not invent a UI URL
+or health result.
 
 All commands and processes in this step use `C:\code\mesh`, never the feature
 worktree. Mesh uses the locally authenticated Claude Max subscription only.
@@ -160,7 +175,9 @@ gh pr view <number> --json title,body,files,url
 gh pr diff <number>
 ```
 
-Give a concise walkthrough specific to that change:
+Give a concise walkthrough specific to that change. For a restart-skipped
+documentation or metadata change, give a file/review walkthrough instead of UI
+instructions. Otherwise include:
 
 - Exact UI URL and affected session flow.
 - Concrete clicks and inputs.
@@ -170,8 +187,9 @@ Give a concise walkthrough specific to that change:
 ## Completion report
 
 Report the merged PR, synced `main` commit, worktree/branch cleanup or exact
-self-rooted leftovers, stack process/health status, UI URL, and tailored test
-walkthrough.
+self-rooted leftovers, restart decision with file-scope evidence, and the
+tailored walkthrough. Include stack process/health status and UI URL only when
+Step 5 ran.
 
 ## Quick reference
 
@@ -182,6 +200,7 @@ walkthrough.
 | CI pending                   | Watch, then re-evaluate the full gate            |
 | CI failed                    | Ask: fix, explicit bypass, or abort              |
 | PR behind                    | Update branch and re-check CI                    |
+| Docs/metadata-only PR        | Skip restart; report file-scope evidence         |
 | Unknown port owner           | Stop; do not kill it                             |
 | API billing override present | Stop; subscription-only policy is not satisfied  |
 | Self-rooted worktree lock    | Continue with exact leftovers documented         |
