@@ -95,19 +95,19 @@ describe('App', () => {
     );
     await user.click(screen.getByRole('button', { name: /Session A/ }));
 
-    await waitFor(() => expect(api.command).toHaveBeenCalled());
-    const command = api.command.mock.calls.at(-1)?.[0];
-    expect(command).toEqual(
-      expect.objectContaining({
-        type: 'layout.save',
-        payload: expect.objectContaining({
-          id: 'layout-1',
-          projectId: 'p1',
-          dockview: expect.objectContaining({ grid: expect.any(Object) }),
-          sidebar: { filter: 'Session' },
-          visiblePanels: ['s1'],
+    await waitFor(() =>
+      expect(api.command).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'layout.save',
+          payload: expect.objectContaining({
+            id: 'layout-1',
+            projectId: 'p1',
+            dockview: expect.objectContaining({ grid: expect.any(Object) }),
+            sidebar: { filter: 'Session' },
+            visiblePanels: ['s1'],
+          }),
         }),
-      }),
+      ),
     );
     expect(store.state.selectedSessionId.get()).toBe('s1');
     expect(store.state.unreadSessionIds.s1.get()).toBe(false);
