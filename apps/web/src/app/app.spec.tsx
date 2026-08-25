@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { SessionSnapshot } from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
@@ -198,11 +198,17 @@ describe('App', () => {
     render(<App store={archivedStore} api={api} />);
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
-    expect(screen.getByRole('region', { name: 'Mesh board' })).toHaveAttribute(
-      'aria-readonly',
-      'true',
-    );
-    expect(screen.getByText(/read-only until restored/i)).toBeDefined();
+    const board = screen.getByRole('region', { name: 'Mesh board' });
+    const readOnlyDescription = screen.getByText(/read-only until restored/i);
+    expect(board).toHaveAttribute('aria-describedby', readOnlyDescription.id);
+    expect(
+      within(board).queryByText('Board tasks will appear here.'),
+    ).toBeNull();
+    expect(
+      within(board)
+        .getAllByRole('button')
+        .map((button) => button.textContent),
+    ).toEqual(['Restore project']);
 
     await user.click(screen.getByRole('button', { name: 'Restore project' }));
     await waitFor(() =>
@@ -228,7 +234,7 @@ describe('App', () => {
     await waitFor(() =>
       expect(
         screen.getByRole('region', { name: 'Mesh board' }),
-      ).not.toHaveAttribute('aria-readonly'),
+      ).not.toHaveAttribute('aria-describedby'),
     );
     expect(
       screen.queryByRole('button', { name: 'Restore project' }),
@@ -255,7 +261,102 @@ describe('App', () => {
     await waitFor(() => expect(api.projectSnapshot).toHaveBeenCalledWith('p2'));
     expect(screen.getByRole('region', { name: 'Other board' })).toBeDefined();
   });
+
+  it('keeps the current board visible until a switched project snapshot resolves', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(crossProjectSnapshot);
+    const api = createApi();
+    const nextProject = deferred<{
+      protocolVersion: 1;
+      project: typeof projectB;
+      tasks: [];
+      attempts: [];
+      transitions: [];
+      repairs: [];
+      cursor: number;
+    }>();
+    api.projectSnapshot
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        project,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 1,
+      })
+      .mockImplementationOnce(() => nextProject.promise);
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    expect(
+      await screen.findByRole('region', { name: 'Mesh board' }),
+    ).toBeDefined();
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Loading Other project…',
+    );
+    expect(screen.getByRole('region', { name: 'Mesh board' })).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'Other board' })).toBeNull();
+
+    nextProject.resolve({
+      protocolVersion: 1,
+      project: projectB,
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 2,
+    });
+    expect(
+      await screen.findByRole('region', { name: 'Other board' }),
+    ).toBeDefined();
+    expect(api.projectSnapshot).toHaveBeenLastCalledWith('p2');
+  });
+
+  it('shows a retryable board-local error when a project snapshot rejects', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(crossProjectSnapshot);
+    const api = createApi();
+    api.projectSnapshot
+      .mockRejectedValueOnce(new Error('Project snapshot is unavailable'))
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        project: projectB,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 2,
+      });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Project snapshot is unavailable',
+    );
+    expect(screen.queryByRole('region', { name: 'Other board' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Retry project' }));
+
+    expect(
+      await screen.findByRole('region', { name: 'Other board' }),
+    ).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(api.projectSnapshot).toHaveBeenCalledTimes(2);
+  });
 });
+
+const deferred = <Value,>() => {
+  let resolve = (_value: Value) => undefined;
+  let reject = (_reason?: unknown) => undefined;
+  const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
 
 const project = {
   id: 'p1',

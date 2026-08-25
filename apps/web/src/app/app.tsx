@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useHookstate } from '@hookstate/core';
 import {
   savedLayoutSchema,
@@ -40,6 +40,11 @@ import {
 
 type MeshStore = ReturnType<typeof createMeshStore>;
 type AppCommand = { type: string; payload?: unknown };
+type ProjectLoadError = {
+  projectId: string;
+  displayName: string;
+  message: string;
+};
 const operator = taskActorSchema.parse({
   type: 'human',
   id: 'operator',
@@ -127,7 +132,13 @@ function ConnectedApp({
   const [view, setView] = useState<'board' | 'sessions'>('sessions');
   const [projectImportOpen, setProjectImportOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<ProjectImportSuggestion[]>([]);
-  const [projectLoading, setProjectLoading] = useState(false);
+  const [projectLoadTargetId, setProjectLoadTargetId] = useState<
+    string | undefined
+  >();
+  const [projectLoadError, setProjectLoadError] = useState<
+    ProjectLoadError | undefined
+  >();
+  const projectLoadId = useRef(0);
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [resumeSessionOpen, setResumeSessionOpen] = useState(false);
   const [flowError, setFlowError] = useState<SessionFlowError>();
@@ -136,6 +147,9 @@ function ConnectedApp({
     workspaces.map((workspace) => [workspace.id, workspace]),
   );
   const activeProject = projects.find(({ id }) => id === activeProjectId);
+  const projectLoadTarget = projects.find(
+    ({ id }) => id === projectLoadTargetId,
+  );
   useEffect(() => {
     if (!activeProjectId && projects[0]) setActiveProjectId(projects[0].id);
     if (activeProjectId && !projects.some(({ id }) => id === activeProjectId))
@@ -164,21 +178,41 @@ function ConnectedApp({
       });
   };
   const selectProject = (projectId: string) => {
-    setActiveProjectId(projectId);
-    setView('board');
-    if (!api?.projectSnapshot) return;
-    setProjectLoading(true);
+    const target = projects.find(({ id }) => id === projectId);
+    const loadId = ++projectLoadId.current;
+    setProjectLoadTargetId(projectId);
+    setProjectLoadError(undefined);
+    if (!api?.projectSnapshot) {
+      setActiveProjectId(projectId);
+      setProjectLoadTargetId(undefined);
+      setView('board');
+      return;
+    }
     void api
       .projectSnapshot(projectId)
-      .then((snapshot) => store.replaceProjectSnapshot(snapshot))
+      .then((snapshot) => {
+        if (loadId !== projectLoadId.current) return;
+        store.replaceProjectSnapshot(snapshot);
+        setActiveProjectId(projectId);
+        setProjectLoadTargetId(undefined);
+        setView('board');
+      })
       .catch((caught: unknown) => {
+        if (loadId !== projectLoadId.current) return;
         const failure = caught as { code?: string; message?: string };
-        setFlowError({
-          code: failure.code ?? 'unknown',
+        setProjectLoadError({
+          projectId,
+          displayName: target?.displayName ?? 'project',
           message: failure.message ?? 'The project board could not be loaded.',
         });
-      })
-      .finally(() => setProjectLoading(false));
+        setView('board');
+      });
+  };
+  const returnToSessions = () => {
+    projectLoadId.current += 1;
+    setProjectLoadTargetId(undefined);
+    setProjectLoadError(undefined);
+    setView('sessions');
   };
   const discoverSuggestions = () => {
     if (!api?.discover) return;
@@ -240,10 +274,13 @@ function ConnectedApp({
         )}
         onFilterChange={(value) => store.setFilter('sessions', value)}
         onOpenSession={(sessionId) => {
+          projectLoadId.current += 1;
           store.selectSession(sessionId);
           setActiveProjectId(
             sessions.find(({ id }) => id === sessionId)?.projectId,
           );
+          setProjectLoadTargetId(undefined);
+          setProjectLoadError(undefined);
           setView('sessions');
         }}
         onNewSession={() => {
@@ -292,7 +329,7 @@ function ConnectedApp({
             Selected project
             <select
               aria-label="Selected project"
-              value={activeProjectId ?? ''}
+              value={projectLoadTargetId ?? activeProjectId ?? ''}
               onChange={(event) => selectProject(event.target.value)}
             >
               {projects.length === 0 ? (
@@ -306,6 +343,11 @@ function ConnectedApp({
             </select>
           </label>
         </div>
+        {projectLoadTarget && !projectLoadError ? (
+          <p className="project-load-status" role="status">
+            Loading {projectLoadTarget.displayName} project…
+          </p>
+        ) : null}
         <div
           className="project-navigation-actions"
           role="navigation"
@@ -322,7 +364,7 @@ function ConnectedApp({
           <button
             className="button button-ghost"
             aria-current={view === 'sessions' ? 'page' : undefined}
-            onClick={() => setView('sessions')}
+            onClick={returnToSessions}
           >
             Sessions
           </button>
@@ -338,7 +380,11 @@ function ConnectedApp({
         </button>
       </aside>
       <div className="project-view">
-        <div hidden={view === 'board' && Boolean(activeProject)}>
+        <div
+          hidden={
+            view === 'board' && Boolean(activeProject || projectLoadError)
+          }
+        >
           <SessionWorkspace
             sessions={sessions}
             events={projection.events}
@@ -367,21 +413,53 @@ function ConnectedApp({
             }
           />
         </div>
-        {view === 'board' && activeProject ? (
+        {projectLoadError ? (
           <section
             className="project-board-boundary"
+            aria-label="Project board unavailable"
+          >
+            <div>
+              <span className="eyebrow">Project board</span>
+              <h2>Could not load {projectLoadError.displayName}</h2>
+              <p className="notice notice-error" role="alert">
+                {projectLoadError.message}
+              </p>
+              <div className="project-board-actions">
+                <button
+                  className="button button-primary"
+                  onClick={() => selectProject(projectLoadError.projectId)}
+                >
+                  Retry project
+                </button>
+                <button
+                  className="button button-ghost"
+                  onClick={returnToSessions}
+                >
+                  Return to sessions
+                </button>
+              </div>
+            </div>
+          </section>
+        ) : view === 'board' && activeProject ? (
+          <section
+            className={`project-board-boundary${
+              activeProject.archivedAt ? ' project-board-read-only' : ''
+            }`}
             aria-label={`${activeProject.displayName} board`}
-            aria-readonly={activeProject.archivedAt ? 'true' : undefined}
+            aria-describedby={
+              activeProject.archivedAt
+                ? `project-${activeProject.id}-archived-description`
+                : undefined
+            }
           >
             <div>
               <span className="eyebrow">Project board</span>
               <h2>{activeProject.displayName}</h2>
-              {projectLoading ? (
-                <p role="status">Loading project board…</p>
-              ) : null}
               {activeProject.archivedAt ? (
                 <>
-                  <p>This project is read-only until restored.</p>
+                  <p id={`project-${activeProject.id}-archived-description`}>
+                    This project is read-only until restored.
+                  </p>
                   <button
                     className="button button-primary"
                     onClick={restoreProject}

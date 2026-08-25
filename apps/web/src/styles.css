@@ -112,6 +112,12 @@ textarea:focus-visible {
   display: grid;
   gap: 0.45rem;
 }
+.project-load-status {
+  margin: -0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
 .project-navigation-actions .button {
   justify-content: flex-start;
 }
@@ -147,8 +153,13 @@ textarea:focus-visible {
   color: var(--muted);
   line-height: 1.6;
 }
-.project-board-boundary[aria-readonly='true'] {
+.project-board-read-only {
   background: linear-gradient(145deg, #17120d, #111720 55%, #0a0e14);
+}
+.project-board-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
 }
 .sidebar-brand {
   margin-bottom: 1.15rem;
