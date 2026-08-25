@@ -1,6 +1,9 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { SessionSnapshot } from '@mesh-session-platform/contracts';
+import {
+  taskSchema,
+  type SessionSnapshot,
+} from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
 
 import { createMeshStore } from '../state/store';
@@ -169,6 +172,44 @@ describe('App', () => {
     ).toBeDefined();
   });
 
+  it('renders the loaded task board, sends task commands, and forwards selection', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    const api = createApi();
+    const onSelectTask = vi.fn();
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [boardTask],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} onSelectTask={onSelectTask} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(
+      await screen.findByRole('button', { name: 'Open Board task' }),
+    );
+    expect(onSelectTask).toHaveBeenCalledWith('board-task');
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Move Board task to' }),
+      'ready',
+    );
+    expect(api.command).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'task.transition',
+        payload: expect.objectContaining({
+          taskId: 'board-task',
+          expectedRevision: 1,
+          nextState: 'ready',
+        }),
+      }),
+    );
+  });
+
   it('keeps an archived project board read-only and restores it explicitly', async () => {
     const user = userEvent.setup();
     const archivedStore = createMeshStore({
@@ -189,7 +230,7 @@ describe('App', () => {
         archivedAt: '2026-08-25T00:00:00.000Z',
         revision: 2,
       },
-      tasks: [],
+      tasks: [boardTask],
       attempts: [],
       transitions: [],
       repairs: [],
@@ -205,10 +246,11 @@ describe('App', () => {
       within(board).queryByText('Board tasks will appear here.'),
     ).toBeNull();
     expect(
-      within(board)
-        .getAllByRole('button')
-        .map((button) => button.textContent),
-    ).toEqual(['Restore project']);
+      within(board).getByRole('combobox', { name: 'Move Board task to' }),
+    ).toBeDisabled();
+    expect(
+      within(board).getByRole('button', { name: 'Restore project' }),
+    ).toBeDefined();
 
     await user.click(screen.getByRole('button', { name: 'Restore project' }));
     await waitFor(() =>
@@ -349,8 +391,8 @@ describe('App', () => {
 });
 
 const deferred = <Value,>() => {
-  let resolve = (_value: Value) => undefined;
-  let reject = (_reason?: unknown) => undefined;
+  let resolve!: (value: Value | PromiseLike<Value>) => void;
+  let reject!: (reason?: unknown) => void;
   const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
     reject = rejectPromise;
@@ -381,6 +423,23 @@ const session = {
   createdAt: '2026-08-24T00:00:00.000Z',
   updatedAt: '2026-08-24T00:00:00.000Z',
 };
+
+const boardTask = taskSchema.parse({
+  id: 'board-task',
+  projectId: 'p1',
+  title: 'Board task',
+  description: 'Render the task board.',
+  acceptanceCriteria: ['The board is visible.'],
+  priority: 'high',
+  rank: 'a',
+  lifecycleState: 'backlog',
+  labels: ['web'],
+  notes: '',
+  blocked: null,
+  revision: 1,
+  createdAt: '2026-08-24T00:00:00.000Z',
+  updatedAt: '2026-08-24T00:00:00.000Z',
+});
 
 const snapshot: SessionSnapshot = {
   protocolVersion: 1,

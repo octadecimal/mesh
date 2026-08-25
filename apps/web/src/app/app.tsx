@@ -37,6 +37,7 @@ import {
   type ImportedProject,
   type ProjectImportSuggestion,
 } from '../projects/ProjectImportDialog';
+import { TaskBoard } from '../tasks/TaskBoard';
 
 type MeshStore = ReturnType<typeof createMeshStore>;
 type AppCommand = { type: string; payload?: unknown };
@@ -56,6 +57,7 @@ type AppProps = {
   workspaces?: Workspace[];
   sessions?: Session[];
   onCommand?: (command: AppCommand) => void;
+  onSelectTask?: (taskId: string) => void;
   store?: MeshStore;
   api?: Pick<
     MeshApi,
@@ -110,10 +112,12 @@ function ConnectedApp({
   store,
   api,
   onCommand,
+  onSelectTask,
 }: {
   store: MeshStore;
   api?: AppProps['api'];
   onCommand?: AppProps['onCommand'];
+  onSelectTask?: AppProps['onSelectTask'];
 }) {
   const projection = useHookstate(store.state).get({
     noproxy: true,
@@ -176,6 +180,10 @@ function ConnectedApp({
           message: failure.message,
         });
       });
+  };
+  const submitTaskCommand = (command: MutatingCommand) => {
+    onCommand?.({ type: command.type, payload: command.payload });
+    return api ? api.command(command) : Promise.resolve(undefined);
   };
   const selectProject = (projectId: string) => {
     const target = projects.find(({ id }) => id === projectId);
@@ -452,11 +460,13 @@ function ConnectedApp({
                 : undefined
             }
           >
-            <div>
-              <span className="eyebrow">Project board</span>
-              <h2>{activeProject.displayName}</h2>
+            <header className="project-board-header">
+              <div>
+                <span className="eyebrow">Project board</span>
+                <h2>{activeProject.displayName}</h2>
+              </div>
               {activeProject.archivedAt ? (
-                <>
+                <div className="project-board-archive-state">
                   <p id={`project-${activeProject.id}-archived-description`}>
                     This project is read-only until restored.
                   </p>
@@ -466,11 +476,15 @@ function ConnectedApp({
                   >
                     Restore project
                   </button>
-                </>
-              ) : (
-                <p>Board tasks will appear here.</p>
-              )}
-            </div>
+                </div>
+              ) : null}
+            </header>
+            <TaskBoard
+              project={activeProject}
+              projection={projection}
+              onCommand={submitTaskCommand}
+              onSelectTask={onSelectTask}
+            />
           </section>
         ) : null}
       </div>
@@ -493,6 +507,7 @@ export function App(props: AppProps = {}) {
       store={props.store ?? fallbackStore}
       api={props.api}
       onCommand={props.onCommand}
+      onSelectTask={props.onSelectTask}
     />
   );
 }
