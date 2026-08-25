@@ -64,6 +64,24 @@ class ScriptedFacade implements SdkFacade {
 }
 
 describe('SdkClaudeSessionDriver contract', () => {
+  it('keeps consuming events after a completed turn', async () => {
+    const sdk = new ScriptedFacade([
+      { kind: 'started', sessionId: 'resume-multi', apiKeySource: 'none' },
+      { kind: 'assistant_text', text: 'first turn' },
+      { kind: 'completed' },
+      { kind: 'assistant_text', text: 'second turn' },
+    ]);
+    const session = await new SdkClaudeSessionDriver(sdk).create({
+      title: 'Session',
+      permissionMode: 'interactive',
+    });
+
+    await expect(collect(session.events())).resolves.toEqual([
+      { kind: 'text_completed', text: 'first turn' },
+      { kind: 'text_completed', text: 'second turn' },
+    ]);
+  });
+
   it('maps SDK identity, assistant/tool streaming, and completion into driver-owned events', async () => {
     const sdk = new ScriptedFacade([
       { kind: 'started', sessionId: 'resume-1', apiKeySource: 'none' },

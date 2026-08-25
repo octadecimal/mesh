@@ -235,7 +235,7 @@ class SdkDriverSession implements DriverSession {
       case 'malformed':
         return { kind: 'malformed', raw: event.raw };
       case 'completed':
-        return null;
+        return undefined;
     }
   }
 
