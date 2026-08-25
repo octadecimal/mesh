@@ -77,20 +77,7 @@ export class TaskAttemptRepository {
 
   create(attempt: TaskAttempt): TaskAttempt {
     const value = taskAttemptSchema.parse(attempt);
-    this.database.exec('BEGIN IMMEDIATE');
-    try {
-      const ordinal = (this.nextOrdinal.get(value.taskId) as { ordinal: number })
-        .ordinal;
-      if (value.ordinal !== ordinal) {
-        throw new Error(`Task attempt ordinal must be ${ordinal}`);
-      }
-      this.insert.run(this.toParameters(value));
-      this.database.exec('COMMIT');
-      return value;
-    } catch (error) {
-      this.database.exec('ROLLBACK');
-      throw error;
-    }
+    return this.inImmediateTransaction(() => this.insertWithOrdinal(value));
   }
 
   createForTask(
@@ -100,19 +87,26 @@ export class TaskAttemptRepository {
     actor: TaskActor,
   ): TaskAttempt {
     const parsedTaskId = idSchema.parse(taskId);
-    const ordinal = (this.nextOrdinal.get(parsedTaskId) as { ordinal: number })
-      .ordinal;
-    return this.create({
-      id: idSchema.parse(randomUUID()),
-      taskId: parsedTaskId,
-      sessionId: idSchema.parse(sessionId),
-      ordinal,
-      source,
-      actor: taskActorSchema.parse(actor),
-      createdAt: new Date().toISOString(),
-      unlinkedAt: null,
-      unlinkedBy: null,
-      unlinkReason: null,
+    const parsedSessionId = idSchema.parse(sessionId);
+    const parsedActor = taskActorSchema.parse(actor);
+    return this.inImmediateTransaction(() => {
+      const ordinal = (
+        this.nextOrdinal.get(parsedTaskId) as { ordinal: number }
+      ).ordinal;
+      const attempt = taskAttemptSchema.parse({
+        id: idSchema.parse(randomUUID()),
+        taskId: parsedTaskId,
+        sessionId: parsedSessionId,
+        ordinal,
+        source,
+        actor: parsedActor,
+        createdAt: new Date().toISOString(),
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+      });
+      this.insert.run(this.toParameters(attempt));
+      return attempt;
     });
   }
 
@@ -153,6 +147,28 @@ export class TaskAttemptRepository {
   private get(id: string): TaskAttempt | undefined {
     const row = this.selectById.get(idSchema.parse(id)) as TaskAttemptRow | undefined;
     return row ? toTaskAttempt(row) : undefined;
+  }
+
+  private insertWithOrdinal(attempt: TaskAttempt): TaskAttempt {
+    const ordinal = (this.nextOrdinal.get(attempt.taskId) as { ordinal: number })
+      .ordinal;
+    if (attempt.ordinal !== ordinal) {
+      throw new Error(`Task attempt ordinal must be ${ordinal}`);
+    }
+    this.insert.run(this.toParameters(attempt));
+    return attempt;
+  }
+
+  private inImmediateTransaction<Result>(execute: () => Result): Result {
+    this.database.exec('BEGIN IMMEDIATE');
+    try {
+      const result = execute();
+      this.database.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.database.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   private toParameters(attempt: TaskAttempt) {

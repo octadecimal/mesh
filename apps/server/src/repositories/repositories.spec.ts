@@ -21,6 +21,7 @@ import {
 import { createTestRepositories } from '../test/create-test-database.js';
 import { waitForWorkerMessage } from '../test/wait-for-worker-message.js';
 import { CommandReconciliationRequiredError } from './command-repository.js';
+import { TaskAttemptRepository } from './task-attempt-repository.js';
 
 const project = () =>
   projectSchema.parse({
@@ -263,6 +264,57 @@ const transition = (overrides: Record<string, unknown> = {}) =>
     ).toThrow();
   });
 
+  it('allocates a generated attempt ordinal after beginning its write transaction', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    repos.tasks.create(task());
+    let inImmediateTransaction = false;
+    const database = new Proxy(repos.database, {
+      get(target, property, receiver) {
+        if (property === 'exec') {
+          return (sql: string) => {
+            if (sql === 'BEGIN IMMEDIATE') inImmediateTransaction = true;
+            try {
+              return target.exec(sql);
+            } finally {
+              if (sql === 'COMMIT' || sql === 'ROLLBACK') {
+                inImmediateTransaction = false;
+              }
+            }
+          };
+        }
+        if (property === 'prepare') {
+          return (sql: string) => {
+            const statement = target.prepare(sql);
+            if (!sql.includes('MAX(ordinal)')) return statement;
+            return new Proxy(statement, {
+              get(statementTarget, statementProperty, statementReceiver) {
+                const value = Reflect.get(
+                  statementTarget,
+                  statementProperty,
+                  statementReceiver,
+                );
+                if (statementProperty !== 'get') return value;
+                return (...args: unknown[]) => {
+                  expect(inImmediateTransaction).toBe(true);
+                  return Reflect.apply(value, statementTarget, args);
+                };
+              },
+            });
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const attempts = new TaskAttemptRepository(database);
+
+    expect(() =>
+      attempts.createForTask('task-1', 's1', 'linked', actor()),
+    ).not.toThrow();
+    expect(attempts.getCurrentBySession('s1')).toMatchObject({ ordinal: 1 });
+  });
+
   it('appends immutable task transitions and rejects duplicate commands', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
@@ -381,13 +433,14 @@ const transition = (overrides: Record<string, unknown> = {}) =>
     expect(repos.diagnostics.list('s1')).toEqual([]);
   });
 
-  it('cascades a deleted project through its session records', () => {
+  it('keeps cascade coverage in raw fixture SQL without exposing project removal', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
     seedSession(repos);
     repos.events.append('s1', userMessage('one'), diagnostic('d1', 'user'));
 
-    repos.projects.remove('p1');
+    expect('remove' in repos.projects).toBe(false);
+    repos.database.prepare('DELETE FROM projects WHERE id = ?').run('p1');
 
     expect(repos.sessions.get('s1')).toBeUndefined();
     expect(repos.events.after('s1', 0)).toEqual([]);

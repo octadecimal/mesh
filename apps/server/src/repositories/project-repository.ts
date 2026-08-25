@@ -40,7 +40,6 @@ export class ProjectRepository {
   private readonly selectByRepositoryIdentity;
   private readonly selectAll;
   private readonly updateByRevision;
-  private readonly deleteById;
 
   constructor(private readonly database: Database) {
     this.insert = database.prepare(`
@@ -72,7 +71,6 @@ export class ProjectRepository {
         archived_at = @archivedAt
       WHERE id = @id AND revision = @expectedRevision
     `);
-    this.deleteById = database.prepare('DELETE FROM projects WHERE id = ?');
   }
 
   create(project: Project): Project {
@@ -139,7 +137,4 @@ export class ProjectRepository {
     );
   }
 
-  remove(id: string): void {
-    this.deleteById.run(idSchema.parse(id));
-  }
 }
