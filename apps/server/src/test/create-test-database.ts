@@ -14,6 +14,8 @@ import { WorkspaceRepository } from '../repositories/workspace-repository.js';
 
 export const createTestRepositories = (options?: {
   failDiagnosticInsert?: boolean;
+  failProjectEventInsert?: boolean;
+  failTaskTransitionInsert?: boolean;
 }) => {
   const directory = mkdtempSync(join(tmpdir(), 'mesh-session-platform-'));
   const path = join(directory, 'test.sqlite');
@@ -26,6 +28,26 @@ export const createTestRepositories = (options?: {
       BEFORE INSERT ON raw_diagnostics
       BEGIN
         SELECT RAISE(FAIL, 'diagnostic insert failed');
+      END;
+    `);
+  }
+
+  if (options?.failProjectEventInsert) {
+    database.exec(`
+      CREATE TRIGGER fail_project_event_insert
+      BEFORE INSERT ON project_events
+      BEGIN
+        SELECT RAISE(FAIL, 'project event insert failed');
+      END;
+    `);
+  }
+
+  if (options?.failTaskTransitionInsert) {
+    database.exec(`
+      CREATE TRIGGER fail_task_transition_insert
+      BEFORE INSERT ON task_transitions
+      BEGIN
+        SELECT RAISE(FAIL, 'task transition insert failed');
       END;
     `);
   }

@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { idSchema } from '@mesh-session-platform/contracts';
+import { idSchema, projectSchema } from '@mesh-session-platform/contracts';
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { GitAdapter } from '../platform/git.js';
@@ -28,13 +28,15 @@ const setup = (options?: {
     ? dirname(repositories.path)
     : 'C:/code/mesh';
   if (options?.seedProject !== false) {
-    repositories.projects.create({
-      id: id('p1'),
-      displayName: 'Mesh',
-      repositoryPath: workspacePath,
-      discoveredAt: now,
-      discoveryMetadata: {},
-    });
+    repositories.projects.create(
+      projectSchema.parse({
+        id: id('p1'),
+        displayName: 'Mesh',
+        repositoryPath: workspacePath,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
     repositories.workspaces.create({
       id: id('w1'),
       projectId: id('p1'),

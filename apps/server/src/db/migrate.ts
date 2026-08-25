@@ -14,8 +14,19 @@ const commandStateMigration = {
     'utf8',
   ),
 };
+const taskBoardStorageMigration = {
+  id: '003-task-board-storage',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '003-task-board-storage.sql'),
+    'utf8',
+  ),
+};
 
-const migrations = [initialMigration, commandStateMigration];
+const migrations = [
+  initialMigration,
+  commandStateMigration,
+  taskBoardStorageMigration,
+];
 
 export const migrate = (database: Database): void => {
   database.exec('BEGIN IMMEDIATE');
