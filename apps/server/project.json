@@ -74,25 +74,28 @@
       "dependsOn": ["prune-lockfile", "copy-workspace-modules"],
       "executor": "nx:noop"
     },
+    "dev": {
+      "continuous": true,
+      "executor": "@nx/js:node",
+      "dependsOn": ["contracts:build", "build"],
+      "options": {
+        "buildTarget": "server:build:development",
+        "runBuildTargetDependencies": false
+      }
+    },
     "serve": {
       "continuous": true,
       "executor": "@nx/js:node",
-      "defaultConfiguration": "development",
-      "dependsOn": ["build"],
+      "defaultConfiguration": "production",
+      "dependsOn": ["web:build", "build"],
       "options": {
-        "buildTarget": "server:build",
+        "buildTarget": "server:build:production",
         "runBuildTargetDependencies": false
-      },
-      "configurations": {
-        "development": {
-          "buildTarget": "server:build:development"
-        },
-        "production": {
-          "buildTarget": "server:build:production"
-        }
       }
     },
     "typecheck": {
+      "cache": true,
+      "inputs": ["default", "^production"],
       "executor": "nx:run-commands",
       "options": {
         "command": "tsc --noEmit -p apps/server/tsconfig.app.json"

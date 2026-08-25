@@ -1,9 +1,10 @@
 import { mkdirSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 import { dirname } from 'node:path';
 
 import type { FastifyInstance } from 'fastify';
 
-import { buildApp } from './app.js';
+import { buildApp, createOriginPolicy } from './app.js';
 import { createClaudeSdkFacade } from './claude/sdk-adapter.js';
 import { SdkClaudeSessionDriver } from './claude/sdk-driver.js';
 import type {
@@ -14,6 +15,7 @@ import type {
 } from './claude/driver.js';
 import {
   detectBillingOverrides,
+  isLoopbackAddress,
   loadServerConfig,
   type BillingConflict,
 } from './config.js';
@@ -49,7 +51,8 @@ class BillingBlockedDriver implements ClaudeSessionDriver {
   private error() {
     return {
       code: 'billing_configuration_conflict' as const,
-      message: 'API billing environment variables must be removed before starting Claude',
+      message:
+        'API billing environment variables must be removed before starting Claude',
       details: this.conflicts,
     };
   }
@@ -63,8 +66,60 @@ export const selectClaudeDriver = (
 
 export interface RunningServer {
   app: FastifyInstance;
+  origin: string;
   close(): Promise<void>;
 }
+
+export const originFromAddress = (
+  address: AddressInfo | string | null,
+): string => {
+  if (!address || typeof address === 'string') {
+    throw new Error('Server did not expose an IP listening address');
+  }
+  if (!isLoopbackAddress(address.address)) {
+    throw new Error('Server listened on a non-loopback address');
+  }
+  const host =
+    address.family === 'IPv6' ? `[${address.address}]` : address.address;
+  return `http://${host}:${address.port}`;
+};
+
+type ProcessLifecycleDependencies = {
+  stopAccepting(): void;
+  shutdownRuntime(): Promise<void>;
+  closeSockets(): Promise<void>;
+  auditStatus(): 'available' | 'audit_unavailable';
+  signalFailure(code: number): void;
+};
+
+export const createProcessLifecycle = (
+  dependencies: ProcessLifecycleDependencies,
+): { shutdown(): Promise<void> } => {
+  let closing: Promise<void> | undefined;
+  return {
+    shutdown: () => {
+      closing ??= (async () => {
+        dependencies.stopAccepting();
+        let failure: unknown;
+        try {
+          await dependencies.shutdownRuntime();
+        } catch (error) {
+          failure = error;
+        }
+        try {
+          await dependencies.closeSockets();
+        } catch (error) {
+          failure ??= error;
+        }
+        if (failure || dependencies.auditStatus() === 'audit_unavailable') {
+          dependencies.signalFailure(1);
+        }
+        if (failure) throw failure;
+      })();
+      return closing;
+    },
+  };
+};
 
 export const startServer = async (): Promise<RunningServer> => {
   const config = loadServerConfig(process.env);
@@ -94,6 +149,7 @@ export const startServer = async (): Promise<RunningServer> => {
     driver,
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
+  const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
     projects,
     workspaces,
@@ -107,27 +163,35 @@ export const startServer = async (): Promise<RunningServer> => {
     git: new GitAdapter(new NodeProcessRunner(), pathOptions),
     pathOptions,
     billingConflicts,
+    originPolicy,
+    webRoot: config.webRoot,
   });
 
-  let closing: Promise<void> | undefined;
+  const lifecycle = createProcessLifecycle({
+    stopAccepting: () => originPolicy.stopAccepting(),
+    shutdownRuntime: () => registry.shutdown(),
+    closeSockets: () => app.close(),
+    auditStatus: () => registry.auditStatus,
+    signalFailure: (code) => {
+      process.exitCode = code;
+    },
+  });
   const onSignal = () => {
-    void close();
+    void lifecycle.shutdown().catch(() => undefined);
   };
   const close = (): Promise<void> => {
-    closing ??= (async () => {
-      process.off('SIGINT', onSignal);
-      process.off('SIGTERM', onSignal);
-      await app.close().catch(() => undefined);
-      await registry.shutdown();
-    })();
-    return closing;
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    return lifecycle.shutdown();
   };
 
   try {
     await app.listen({ host: config.host, port: config.port });
+    const origin = originFromAddress(app.server.address());
+    originPolicy.setServedOrigin(origin);
     process.once('SIGINT', onSignal);
     process.once('SIGTERM', onSignal);
-    return { app, close };
+    return { app, origin, close };
   } catch (error) {
     await close();
     throw error;

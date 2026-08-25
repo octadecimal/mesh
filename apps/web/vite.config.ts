@@ -8,9 +8,23 @@ import tailwindcss from '@tailwindcss/vite';
 export default defineConfig(() => ({
   root: import.meta.dirname,
   cacheDir: '../../node_modules/.vite/apps/web',
-  server: { port: 4200, host: 'localhost' },
-  preview: { port: 4200, host: 'localhost' },
-  plugins: [react(), tailwindcss(), nxViteTsPaths(), nxCopyAssetsPlugin(['*.md'])],
+  server: {
+    port: 4200,
+    host: '127.0.0.1',
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:3737',
+        ws: true,
+      },
+    },
+  },
+  preview: { port: 4200, host: '127.0.0.1' },
+  plugins: [
+    react(),
+    tailwindcss(),
+    nxViteTsPaths(),
+    nxCopyAssetsPlugin(['*.md']),
+  ],
   build: {
     outDir: '../../dist/apps/web',
     emptyOutDir: true,

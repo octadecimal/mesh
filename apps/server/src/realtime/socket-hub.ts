@@ -8,6 +8,7 @@ import {
 
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
+import type { OriginPolicy } from '../app.js';
 import { ReplayService } from './replay.js';
 
 const DEFAULT_MAX_SUBSCRIPTIONS = 100;
@@ -96,8 +97,12 @@ const isLoopback = (remoteAddress: string | undefined): boolean => {
 export const isAllowedSocketUpgrade = (
   remoteAddress: string | undefined,
   origin: string | undefined,
-  servedOrigin: string,
-): boolean => isLoopback(remoteAddress) && origin === servedOrigin;
+  policy: string | Pick<OriginPolicy, 'accepting' | 'allows'>,
+): boolean =>
+  isLoopback(remoteAddress) &&
+  (typeof policy === 'string'
+    ? origin === policy
+    : policy.accepting && policy.allows(origin));
 
 export class SocketHub {
   private readonly replay: ReplayService;
@@ -239,7 +244,14 @@ export class SocketHub {
 
 export const registerSocketHub = (
   app: FastifyInstance,
-  options: SocketHubOptions & { servedOrigin: string },
+  options: SocketHubOptions &
+    (
+      | { servedOrigin: string; originPolicy?: never }
+      | {
+          servedOrigin?: never;
+          originPolicy: Pick<OriginPolicy, 'accepting' | 'allows'>;
+        }
+    ),
 ): void => {
   const hub = new SocketHub(options);
   app.register(websocket);
@@ -252,10 +264,16 @@ export const registerSocketHub = (
           !isAllowedSocketUpgrade(
             request.raw.socket.remoteAddress,
             request.headers.origin,
-            options.servedOrigin,
+            options.originPolicy ?? options.servedOrigin,
           )
         ) {
-          void reply.code(403).send();
+          void reply
+            .code(
+              options.originPolicy && !options.originPolicy.accepting
+                ? 503
+                : 403,
+            )
+            .send();
           return;
         }
         done();

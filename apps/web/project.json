@@ -6,7 +6,20 @@
   "tags": ["type:app"],
   "// targets": "to see all targets run: nx show project web --web",
   "targets": {
+    "build": {
+      "cache": true,
+      "inputs": ["production", "^production"],
+      "outputs": ["{workspaceRoot}/dist/apps/web"]
+    },
+    "dev": {
+      "options": {
+        "host": "127.0.0.1",
+        "port": 4200
+      }
+    },
     "typecheck": {
+      "cache": true,
+      "inputs": ["default", "^production"],
       "executor": "nx:run-commands",
       "options": {
         "command": "tsc --noEmit -p apps/web/tsconfig.app.json"
