@@ -81,7 +81,7 @@ describe('TaskBoard', () => {
     expect(screen.queryByText('Finished task')).toBeNull();
   });
 
-  it('exposes card selection without owning the task drawer', async () => {
+  it('opens the selected task drawer and preserves the selection callback', async () => {
     const user = userEvent.setup();
     const onSelectTask = vi.fn();
     renderBoard({ onSelectTask });
@@ -89,6 +89,19 @@ describe('TaskBoard', () => {
     await user.click(screen.getByRole('button', { name: 'Open First task' }));
 
     expect(onSelectTask).toHaveBeenCalledWith('first');
+    expect(screen.getByRole('dialog', { name: 'First task' })).toBeDefined();
+    expect(
+      screen.getByRole('region', { name: 'Attempt timeline' }),
+    ).toBeDefined();
+  });
+
+  it('opens lightweight backlog creation from the board toolbar', async () => {
+    const user = userEvent.setup();
+    renderBoard();
+
+    await user.click(screen.getByRole('button', { name: 'Add task' }));
+
+    expect(screen.getByRole('dialog', { name: 'Create task' })).toBeDefined();
   });
 
   it('keeps archived project cards read-only', () => {

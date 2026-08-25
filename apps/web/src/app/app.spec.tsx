@@ -1,6 +1,8 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  taskActorSchema,
+  taskAttemptSchema,
   taskSchema,
   type SessionSnapshot,
 } from '@mesh-session-platform/contracts';
@@ -181,7 +183,7 @@ describe('App', () => {
       protocolVersion: 1,
       project,
       tasks: [boardTask],
-      attempts: [],
+      attempts: [boardAttempt],
       transitions: [],
       repairs: [],
       cursor: 1,
@@ -193,6 +195,7 @@ describe('App', () => {
       await screen.findByRole('button', { name: 'Open Board task' }),
     );
     expect(onSelectTask).toHaveBeenCalledWith('board-task');
+    await user.click(screen.getByRole('button', { name: 'Close' }));
 
     await user.selectOptions(
       screen.getByRole('combobox', { name: 'Move Board task to' }),
@@ -208,6 +211,12 @@ describe('App', () => {
         }),
       }),
     );
+
+    await user.click(screen.getByRole('button', { name: 'Open Board task' }));
+    await user.click(screen.getByRole('button', { name: 'Open Session A' }));
+    expect(
+      screen.getByRole('main', { name: 'Session workspace' }),
+    ).toBeDefined();
   });
 
   it('keeps an archived project board read-only and restores it explicitly', async () => {
@@ -439,6 +448,18 @@ const boardTask = taskSchema.parse({
   revision: 1,
   createdAt: '2026-08-24T00:00:00.000Z',
   updatedAt: '2026-08-24T00:00:00.000Z',
+});
+const boardAttempt = taskAttemptSchema.parse({
+  id: 'board-attempt',
+  taskId: boardTask.id,
+  sessionId: session.id,
+  ordinal: 1,
+  source: 'linked',
+  actor: taskActorSchema.parse({ type: 'human', id: 'operator' }),
+  createdAt: '2026-08-24T00:00:00.000Z',
+  unlinkedAt: null,
+  unlinkedBy: null,
+  unlinkReason: null,
 });
 
 const snapshot: SessionSnapshot = {

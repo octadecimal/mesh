@@ -10,16 +10,20 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import type { MeshProjection } from '../state/reducer';
 import {
   selectBoardTasks,
+  selectProjectRepairConditions,
   selectTaskAttempts,
+  selectTaskTransitions,
   type BoardColumn,
 } from '../state/selectors';
 import { TaskCard } from './TaskCard';
+import { TaskDrawer } from './TaskDrawer';
 
 type TaskBoardProps = {
   project: Project;
   projection: MeshProjection;
   onCommand: (command: MutatingCommand) => Promise<unknown> | void;
   onSelectTask?: (taskId: string) => void;
+  onOpenSession?: (sessionId: string) => void;
 };
 
 type BoardView = 'active' | 'done' | 'cancelled';
@@ -93,6 +97,7 @@ export function TaskBoard({
   projection,
   onCommand,
   onSelectTask,
+  onOpenSession,
 }: TaskBoardProps) {
   const [view, setView] = useState<BoardView>('active');
   const [draggedTaskId, setDraggedTaskId] = useState<string>();
@@ -100,10 +105,15 @@ export function TaskBoard({
     {},
   );
   const [moveErrors, setMoveErrors] = useState<Record<string, string>>({});
+  const [drawerTaskId, setDrawerTaskId] = useState<string>();
+  const [creatingTask, setCreatingTask] = useState(false);
   const moveSequence = useRef(0);
   const activeMoveIds = useRef<Record<string, number>>({});
   const columns = selectBoardTasks(projection, project.id);
   const readOnly = Boolean(project.archivedAt);
+  const drawerTask = drawerTaskId
+    ? projection.tasksById[drawerTaskId]
+    : undefined;
   const terminalTasks = useMemo(() => {
     const tasks = Object.values(projection.tasksById).filter(
       (task) => task.projectId === project.id,
@@ -145,8 +155,7 @@ export function TaskBoard({
       setMoveErrors((current) => {
         const next = { ...current };
         for (const taskId of conflicts) {
-          next[taskId] =
-            'Task changed before the requested move was applied.';
+          next[taskId] = 'Task changed before the requested move was applied.';
         }
         return next;
       });
@@ -250,6 +259,11 @@ export function TaskBoard({
           ? rankBefore(orderedTasks[0].rank)
           : undefined;
     const nextRank = orderedTasks[index + 1]?.rank;
+    const selectTask = (taskId: string) => {
+      setCreatingTask(false);
+      setDrawerTaskId(taskId);
+      onSelectTask?.(taskId);
+    };
     return (
       <TaskCard
         key={task.id}
@@ -260,7 +274,7 @@ export function TaskBoard({
         error={moveErrors[task.id]}
         canMoveUp={index > 0 && previousRank !== undefined}
         canMoveDown={Boolean(nextRank)}
-        onSelectTask={onSelectTask}
+        onSelectTask={selectTask}
         onMoveTo={(state) => moveTask(task, state)}
         onMoveUp={() =>
           previousRank !== undefined &&
@@ -292,99 +306,145 @@ export function TaskBoard({
   };
 
   return (
-    <div className="task-board" data-read-only={readOnly ? 'true' : undefined}>
-      <div className="task-board-toolbar">
-        <div className="task-board-tabs" role="group" aria-label="Task filters">
-          <button
-            type="button"
-            aria-label="Show active tasks"
-            aria-pressed={view === 'active'}
-            onClick={() => setView('active')}
+    <>
+      <div
+        className="task-board"
+        data-read-only={readOnly ? 'true' : undefined}
+      >
+        <div className="task-board-toolbar">
+          <div
+            className="task-board-tabs"
+            role="group"
+            aria-label="Task filters"
           >
-            Active
-          </button>
-          <button
-            type="button"
-            aria-label="Show completed tasks"
-            aria-pressed={view === 'done'}
-            onClick={() => setView('done')}
-          >
-            Completed {terminalTasks.done.length}
-          </button>
-          <button
-            type="button"
-            aria-label="Show cancelled tasks"
-            aria-pressed={view === 'cancelled'}
-            onClick={() => setView('cancelled')}
-          >
-            Cancelled {terminalTasks.cancelled.length}
-          </button>
-        </div>
-        {readOnly ? (
-          <p className="task-board-read-only-note">Read-only task board</p>
-        ) : (
-          <p className="task-board-drag-help">
-            Drag cards or use each card’s move controls.
-          </p>
-        )}
-      </div>
-      {view === 'active' ? (
-        <div className="task-board-columns">
-          {activeColumns.map(({ id, label }) => {
-            const tasks = columns[id];
-            return (
-              <section
-                key={id}
-                className="task-column"
-                aria-label={`${label} tasks`}
-                onDragOver={(event) => {
-                  if (!readOnly) event.preventDefault();
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  const source = draggedTask(event);
-                  setDraggedTaskId(undefined);
-                  if (!source || readOnly) return;
-                  moveTask(source, id);
-                }}
-              >
-                <header>
-                  <h3>{label}</h3>
-                  <span aria-label={`${tasks.length} tasks`}>
-                    {tasks.length}
-                  </span>
-                </header>
-                <div className="task-column-cards">
-                  {tasks.length > 0 ? (
-                    tasks.map((task) => renderCard(task, tasks))
-                  ) : (
-                    <p className="task-column-empty">No tasks</p>
-                  )}
-                </div>
-              </section>
-            );
-          })}
-        </div>
-      ) : (
-        <section
-          className="task-column task-column-terminal"
-          aria-label={view === 'done' ? 'Completed tasks' : 'Cancelled tasks'}
-        >
-          <header>
-            <h3>{view === 'done' ? 'Completed' : 'Cancelled'}</h3>
-            <span>{terminalTasks[view].length}</span>
-          </header>
-          <div className="task-column-cards">
-            {terminalTasks[view].length > 0 ? (
-              terminalTasks[view].map((task) =>
-                renderCard(task, terminalTasks[view]),
-              )
+            <button
+              type="button"
+              aria-label="Show active tasks"
+              aria-pressed={view === 'active'}
+              onClick={() => setView('active')}
+            >
+              Active
+            </button>
+            <button
+              type="button"
+              aria-label="Show completed tasks"
+              aria-pressed={view === 'done'}
+              onClick={() => setView('done')}
+            >
+              Completed {terminalTasks.done.length}
+            </button>
+            <button
+              type="button"
+              aria-label="Show cancelled tasks"
+              aria-pressed={view === 'cancelled'}
+              onClick={() => setView('cancelled')}
+            >
+              Cancelled {terminalTasks.cancelled.length}
+            </button>
+          </div>
+          <div className="task-board-toolbar-actions">
+            {readOnly ? (
+              <p className="task-board-read-only-note">Read-only task board</p>
             ) : (
-              <p className="task-column-empty">No tasks</p>
+              <>
+                <p className="task-board-drag-help">
+                  Drag cards or use each card’s move controls.
+                </p>
+                <button
+                  className="button button-primary task-board-add"
+                  type="button"
+                  onClick={() => {
+                    setDrawerTaskId(undefined);
+                    setCreatingTask(true);
+                  }}
+                >
+                  Add task
+                </button>
+              </>
             )}
           </div>
-        </section>
-      )}
-    </div>
+        </div>
+        {view === 'active' ? (
+          <div className="task-board-columns">
+            {activeColumns.map(({ id, label }) => {
+              const tasks = columns[id];
+              return (
+                <section
+                  key={id}
+                  className="task-column"
+                  aria-label={`${label} tasks`}
+                  onDragOver={(event) => {
+                    if (!readOnly) event.preventDefault();
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const source = draggedTask(event);
+                    setDraggedTaskId(undefined);
+                    if (!source || readOnly) return;
+                    moveTask(source, id);
+                  }}
+                >
+                  <header>
+                    <h3>{label}</h3>
+                    <span aria-label={`${tasks.length} tasks`}>
+                      {tasks.length}
+                    </span>
+                  </header>
+                  <div className="task-column-cards">
+                    {tasks.length > 0 ? (
+                      tasks.map((task) => renderCard(task, tasks))
+                    ) : (
+                      <p className="task-column-empty">No tasks</p>
+                    )}
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+        ) : (
+          <section
+            className="task-column task-column-terminal"
+            aria-label={view === 'done' ? 'Completed tasks' : 'Cancelled tasks'}
+          >
+            <header>
+              <h3>{view === 'done' ? 'Completed' : 'Cancelled'}</h3>
+              <span>{terminalTasks[view].length}</span>
+            </header>
+            <div className="task-column-cards">
+              {terminalTasks[view].length > 0 ? (
+                terminalTasks[view].map((task) =>
+                  renderCard(task, terminalTasks[view]),
+                )
+              ) : (
+                <p className="task-column-empty">No tasks</p>
+              )}
+            </div>
+          </section>
+        )}
+      </div>
+      {creatingTask || drawerTask ? (
+        <TaskDrawer
+          key={creatingTask ? 'create' : drawerTask?.id}
+          open
+          project={project}
+          task={drawerTask}
+          attempts={
+            drawerTask ? selectTaskAttempts(projection, drawerTask.id) : []
+          }
+          transitions={
+            drawerTask ? selectTaskTransitions(projection, drawerTask.id) : []
+          }
+          repairs={selectProjectRepairConditions(projection, project.id)}
+          sessions={projection.sessions}
+          onCommand={onCommand}
+          onOpenSession={onOpenSession}
+          onOpenChange={(open) => {
+            if (open) return;
+            setCreatingTask(false);
+            setDrawerTaskId(undefined);
+          }}
+        />
+      ) : null}
+    </>
   );
 }

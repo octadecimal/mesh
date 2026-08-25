@@ -222,6 +222,14 @@ function ConnectedApp({
     setProjectLoadError(undefined);
     setView('sessions');
   };
+  const openSession = (sessionId: string) => {
+    projectLoadId.current += 1;
+    store.selectSession(sessionId);
+    setActiveProjectId(sessions.find(({ id }) => id === sessionId)?.projectId);
+    setProjectLoadTargetId(undefined);
+    setProjectLoadError(undefined);
+    setView('sessions');
+  };
   const discoverSuggestions = () => {
     if (!api?.discover) return;
     void api
@@ -281,16 +289,7 @@ function ConnectedApp({
           sessions.map(({ id }) => [id, unread.has(id)]),
         )}
         onFilterChange={(value) => store.setFilter('sessions', value)}
-        onOpenSession={(sessionId) => {
-          projectLoadId.current += 1;
-          store.selectSession(sessionId);
-          setActiveProjectId(
-            sessions.find(({ id }) => id === sessionId)?.projectId,
-          );
-          setProjectLoadTargetId(undefined);
-          setProjectLoadError(undefined);
-          setView('sessions');
-        }}
+        onOpenSession={openSession}
         onNewSession={() => {
           setFlowError(undefined);
           setCollisionWarning(undefined);
@@ -484,6 +483,7 @@ function ConnectedApp({
               projection={projection}
               onCommand={submitTaskCommand}
               onSelectTask={onSelectTask}
+              onOpenSession={openSession}
             />
           </section>
         ) : null}
