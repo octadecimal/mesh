@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve, sep, win32 } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -20,6 +20,12 @@ import type { AbsolutePath, WorkspacePathFileSystem } from './paths.js';
 const directoryFs: WorkspacePathFileSystem = {
   realpath: async (value) => value.replace(/\//g, '\\'),
   stat: async () => ({ isDirectory: () => true }),
+};
+
+const windowsPathOptions = {
+  baseDirectory: 'C:\\repo',
+  fs: directoryFs,
+  path: win32,
 };
 
 const workspace = (overrides: Partial<Workspace> = {}): Workspace => ({
@@ -81,10 +87,7 @@ describe('GitAdapter', () => {
         return { exitCode: 0, stdout: '', stderr: '' };
       },
     };
-    const git = new GitAdapter(runner, {
-      baseDirectory: 'C:\\repo',
-      fs: directoryFs,
-    });
+    const git = new GitAdapter(runner, windowsPathOptions);
 
     await expect(
       git.createWorktree({
@@ -120,10 +123,7 @@ describe('GitAdapter', () => {
         return { exitCode: 0, stdout: ' M changes.txt\n', stderr: '' };
       },
     };
-    const git = new GitAdapter(runner, {
-      baseDirectory: 'C:\\repo',
-      fs: directoryFs,
-    });
+    const git = new GitAdapter(runner, windowsPathOptions);
 
     await expect(
       git.removeOwnedWorktree({
@@ -144,10 +144,7 @@ describe('GitAdapter', () => {
         throw new Error('Git must not run for a shared folder');
       },
     };
-    const git = new GitAdapter(runner, {
-      baseDirectory: 'C:\\repo',
-      fs: directoryFs,
-    });
+    const git = new GitAdapter(runner, windowsPathOptions);
 
     await expect(
       git.removeOwnedWorktree({
@@ -167,10 +164,7 @@ describe('GitAdapter', () => {
         return { exitCode: 0, stdout: '', stderr: '' };
       },
     };
-    const git = new GitAdapter(runner, {
-      baseDirectory: 'C:\\repo',
-      fs: directoryFs,
-    });
+    const git = new GitAdapter(runner, windowsPathOptions);
 
     await expect(
       git.removeOwnedWorktree({
@@ -194,10 +188,7 @@ describe('GitAdapter', () => {
         );
       },
     };
-    const git = new GitAdapter(runner, {
-      baseDirectory: 'C:\\repo',
-      fs: directoryFs,
-    });
+    const git = new GitAdapter(runner, windowsPathOptions);
 
     await expect(
       git.removeOwnedWorktree({
@@ -215,10 +206,7 @@ describe('GitAdapter', () => {
         throw new Error('Git must not run for ambiguous paths');
       },
     };
-    const git = new GitAdapter(runner, {
-      baseDirectory: 'C:\\repo',
-      fs: directoryFs,
-    });
+    const git = new GitAdapter(runner, windowsPathOptions);
 
     await expect(
       git.removeOwnedWorktree({
