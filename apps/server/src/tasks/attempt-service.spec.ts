@@ -127,6 +127,17 @@ describe('AttemptService', () => {
     actor,
   });
 
+  const worktreeLaunchInput = (directory: string) => ({
+    ...launchInput(directory),
+    workspace: {
+      type: 'worktree' as const,
+      repositoryPath: directory,
+      path: join(directory, 'attempt-worktree'),
+      branch: 'attempt-branch',
+      startPoint: 'HEAD',
+    },
+  });
+
   const seedSession = (
     repositories: ReturnType<typeof createTestRepositories>,
     options: { projectId?: string; sessionId?: string } = {},
@@ -271,6 +282,131 @@ describe('AttemptService', () => {
     expect(repositories.attempts.listByTask('task-1')).toEqual([]);
   });
 
+  it('retains durable worktree ownership when creation succeeds but attempt audit fails', async () => {
+    let verifyReservation = () => undefined;
+    const { directory, driver, repositories, service } = setup({
+      repositories: { failProjectEventInsert: true },
+      git: {
+        createWorktree: async () => {
+          verifyReservation();
+          return { created: true };
+        },
+      },
+    });
+    seedTask(repositories);
+    verifyReservation = () => {
+      const [workspace] = repositories.workspaces.listByProject('project-1');
+      expect(workspace).toMatchObject({
+        owner: 'mesh',
+        cleanupState: 'pending',
+      });
+      expect(repositories.sessions.listByProject('project-1')).toEqual([
+        expect.objectContaining({ workspaceId: workspace?.id }),
+      ]);
+    };
+
+    await expect(
+      service.launch(worktreeLaunchInput(directory)),
+    ).rejects.toMatchObject({ code: 'workspace_preserved' });
+
+    const [workspace] = repositories.workspaces.listByProject('project-1');
+    const [session] = repositories.sessions.listByProject('project-1');
+    expect(workspace).toMatchObject({
+      projectId: 'project-1',
+      path: join(directory, 'attempt-worktree'),
+      owner: 'mesh',
+      cleanupState: 'pending',
+    });
+    expect(session).toMatchObject({
+      projectId: 'project-1',
+      workspaceId: workspace?.id,
+    });
+    expect(repositories.attempts.listByTask('task-1')).toEqual([]);
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
+    expect(repositories.diagnostics.list(session?.id ?? '')).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          stage: 'attempt_audit',
+          outcome: 'workspace_preserved',
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    [
+      'revision change',
+      'task_revision_conflict',
+      (repositories: ReturnType<typeof createTestRepositories>) => {
+        repositories.database
+          .prepare('UPDATE tasks SET revision = revision + 1 WHERE id = ?')
+          .run('task-1');
+      },
+    ],
+    [
+      'blocked change',
+      'task_blocked',
+      (repositories: ReturnType<typeof createTestRepositories>) => {
+        repositories.database
+          .prepare('UPDATE tasks SET blocked_json = ? WHERE id = ?')
+          .run(
+            JSON.stringify({
+              reason: 'Concurrent block',
+              actor,
+              blockedAt: now,
+            }),
+            'task-1',
+          );
+      },
+    ],
+    [
+      'lifecycle change',
+      'task_transition_invalid',
+      (repositories: ReturnType<typeof createTestRepositories>) => {
+        repositories.database
+          .prepare("UPDATE tasks SET lifecycle_state = 'backlog' WHERE id = ?")
+          .run('task-1');
+      },
+    ],
+    [
+      'project archive',
+      'project_archived',
+      (repositories: ReturnType<typeof createTestRepositories>) => {
+        repositories.database
+          .prepare('UPDATE projects SET archived_at = ? WHERE id = ?')
+          .run(now, 'project-1');
+      },
+    ],
+  ])(
+    'preserves the stable conflict when async workspace preparation observes a %s',
+    async (_name, code, mutate) => {
+      let applyConcurrentChange = () => undefined;
+      const context = setup({
+        git: {
+          createWorktree: async () => {
+            applyConcurrentChange();
+            return { created: true };
+          },
+        },
+      });
+      seedTask(context.repositories);
+      applyConcurrentChange = () => mutate(context.repositories);
+
+      await expect(
+        context.service.launch(worktreeLaunchInput(context.directory)),
+      ).rejects.toMatchObject({ code });
+
+      expect(
+        (context.driver as FakeClaudeSessionDriver).createdRequests,
+      ).toEqual([]);
+      expect(
+        context.repositories.workspaces.listByProject('project-1'),
+      ).toEqual([
+        expect.objectContaining({ owner: 'mesh', cleanupState: 'pending' }),
+      ]);
+    },
+  );
+
   it('preserves a worktree when filesystem creation does not complete', async () => {
     const { directory, driver, repositories, service } = setup({
       git: {
@@ -295,7 +431,18 @@ describe('AttemptService', () => {
     ).rejects.toMatchObject({ code: 'workspace_preserved' });
 
     expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
-    expect(repositories.sessions.listByProject('project-1')).toEqual([]);
+    const [workspace] = repositories.workspaces.listByProject('project-1');
+    const [session] = repositories.sessions.listByProject('project-1');
+    expect(workspace).toMatchObject({ owner: 'mesh', cleanupState: 'pending' });
+    expect(session).toMatchObject({ workspaceId: workspace?.id });
+    expect(repositories.diagnostics.list(session?.id ?? '')).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          stage: 'workspace_creation',
+          outcome: 'workspace_preserved',
+        }),
+      }),
+    );
   });
 
   it('interrupts and diagnoses the runtime when the task transition audit fails', async () => {
@@ -347,6 +494,28 @@ describe('AttemptService', () => {
     );
   });
 
+  it('interrupts the runtime and requires reconciliation when transition diagnostics fail', async () => {
+    const { directory, driver, repositories, service } = setup({
+      repositories: {
+        failTaskTransitionInsert: true,
+        failDiagnosticInsert: true,
+      },
+    });
+    seedTask(repositories);
+
+    await expect(service.launch(launchInput(directory))).rejects.toMatchObject({
+      code: 'attempt_reconciliation_required',
+    });
+
+    expect(
+      (driver as FakeClaudeSessionDriver).createdSessions[0]?.interrupted,
+    ).toBe(true);
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe('ready');
+    expect(
+      repositories.diagnostics.list(requireOnlyAttempt(repositories).sessionId),
+    ).toEqual([]);
+  });
+
   it('links a same-repository session without changing task lifecycle', async () => {
     const { repositories, service } = setup();
     seedTask(repositories);
@@ -368,6 +537,26 @@ describe('AttemptService', () => {
       lifecycleState: 'ready',
       revision: 1,
     });
+  });
+
+  it('replays a completed manual link before checking changed task state', async () => {
+    const { repositories, service } = setup();
+    seedTask(repositories);
+    seedSession(repositories);
+    const input = {
+      commandId: 'attempt-link-replay',
+      taskId: 'task-1',
+      expectedRevision: 1,
+      sessionId: 'session-1',
+      actor,
+    };
+    const first = await service.link(input);
+    repositories.projects.archive('project-1', now);
+
+    const replay = await service.link(input);
+
+    expect(replay).toEqual(first);
+    expect(repositories.attempts.listByTask('task-1')).toHaveLength(1);
   });
 
   it('rejects cross-repository and already-linked sessions', async () => {

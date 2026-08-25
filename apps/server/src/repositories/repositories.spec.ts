@@ -106,6 +106,20 @@ describe('repositories', () => {
     ]);
   });
 
+  it('activates a durable pending workspace reservation without replacing it', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const reserved = repos.workspaces.create(
+      workspaceSchema.parse({ ...workspace(), cleanupState: 'pending' }),
+    );
+
+    const active = repos.workspaces.markActive(reserved.id);
+
+    expect(active).toEqual({ ...reserved, cleanupState: 'active' });
+    expect(repos.workspaces.listByProject('p1')).toEqual([active]);
+  });
+
 const actor = () => taskActorSchema.parse({ type: 'human', id: 'user-1' });
 
 const task = (overrides: Record<string, unknown> = {}) =>
@@ -512,6 +526,30 @@ const transition = (overrides: Record<string, unknown> = {}) =>
     expect(first).toEqual({ accepted: true });
     expect(second).toEqual({ accepted: true });
     expect(executions).toBe(1);
+  });
+
+  it('reads completed and failed command history before application preconditions', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    const response = repos.commands.executeOnce('command-complete', () => ({
+      accepted: true,
+    }));
+    expect(() =>
+      repos.commands.executeOnce('command-failed', () => {
+        throw new Error('failed once');
+      }),
+    ).toThrow('failed once');
+
+    expect(repos.commands.getExisting('command-missing')).toEqual({
+      found: false,
+    });
+    expect(repos.commands.getExisting('command-complete')).toEqual({
+      found: true,
+      response,
+    });
+    expect(() => repos.commands.getExisting('command-failed')).toThrow(
+      CommandReconciliationRequiredError,
+    );
   });
 
   it('marks a throwing command as failed and blocks automatic retry', () => {

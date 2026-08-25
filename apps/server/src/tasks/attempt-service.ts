@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   rawDiagnosticSchema,
   sessionSchema,
+  stableTaskErrorCodeSchema,
   taskActorSchema,
   workspaceSchema,
   type MutatingCommand,
@@ -166,9 +167,7 @@ class WorkspacePreservedError extends Error {
   readonly code = 'workspace_preserved';
 
   constructor(readonly cause: unknown) {
-    super(
-      'Git worktree creation did not complete; filesystem state was preserved',
-    );
+    super('The worktree requires reconciliation and was preserved');
   }
 }
 
@@ -184,6 +183,25 @@ const errorDetails = (error: unknown) =>
   error instanceof Error
     ? { name: error.name, message: error.message }
     : { message: String(error) };
+
+const stableLaunchConflictCodes = new Set([
+  'project_not_found',
+  'project_archived',
+  'task_not_found',
+  'task_revision_conflict',
+  'task_not_ready',
+  'task_blocked',
+  'task_transition_invalid',
+  'task_transition_unauthorized',
+]);
+
+const isStableLaunchConflict = (error: unknown): boolean => {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return false;
+  }
+  const parsed = stableTaskErrorCodeSchema.safeParse(error.code);
+  return parsed.success && stableLaunchConflictCodes.has(parsed.data);
+};
 
 export class AttemptService {
   private readonly now: () => string;
@@ -206,7 +224,7 @@ export class AttemptService {
       if (!input.workspace) {
         throw new AttemptInvalidCommandError('Attempt workspace is required');
       }
-      const workspace = await this.prepareWorkspace(
+      const workspace = await this.resolveWorkspace(
         task.projectId,
         input.workspace,
       );
@@ -222,6 +240,39 @@ export class AttemptService {
         updatedAt: occurredAt,
       });
 
+      const hasWorktreeReservation = workspace.type === 'worktree';
+      if (hasWorktreeReservation) {
+        if (input.workspace.type !== 'worktree') {
+          throw new AttemptInvalidCommandError('Worktree input was expected');
+        }
+        try {
+          this.persistWorkspaceReservation(
+            task,
+            input.expectedRevision,
+            actor,
+            workspace,
+            session,
+          );
+        } catch (error) {
+          if (isStableLaunchConflict(error)) throw error;
+          throw new AttemptAuditUnavailableError(error);
+        }
+        try {
+          await this.createReservedWorktree(input.workspace, workspace);
+        } catch (error) {
+          if (
+            !this.recordWorkspacePreservedDiagnostic(
+              session.id,
+              'workspace_creation',
+              error,
+            )
+          ) {
+            throw new AttemptReconciliationRequiredError(session.id, error);
+          }
+          throw new WorkspacePreservedError(error);
+        }
+      }
+
       let prepared: {
         session: Session;
         attempt: TaskAttempt;
@@ -235,8 +286,20 @@ export class AttemptService {
           workspace,
           session,
           occurredAt,
+          hasWorktreeReservation,
         );
       } catch (error) {
+        if (hasWorktreeReservation) {
+          this.recordWorkspacePreservedDiagnostic(
+            session.id,
+            'attempt_audit',
+            error,
+          );
+        }
+        if (isStableLaunchConflict(error)) throw error;
+        if (hasWorktreeReservation) {
+          throw new WorkspacePreservedError(error);
+        }
         throw new AttemptAuditUnavailableError(error);
       }
       this.dependencies.registry.publisher.publishProject(prepared.event);
@@ -300,6 +363,11 @@ export class AttemptService {
   }
 
   async link(input: AttemptLinkInput): Promise<AttemptMutationResult> {
+    const existing =
+      this.dependencies.commands.getExisting<AttemptMutationResult>(
+        input.commandId,
+      );
+    if (existing.found) return existing.response;
     const actor = taskActorSchema.parse(input.actor);
     const task = this.requireTask(input.taskId, input.expectedRevision);
     const session = this.requireSession(input.sessionId);
@@ -421,7 +489,7 @@ export class AttemptService {
     }
   }
 
-  private async prepareWorkspace(
+  private async resolveWorkspace(
     projectId: string,
     input: AttemptWorkspaceInput,
   ): Promise<Workspace> {
@@ -460,16 +528,6 @@ export class AttemptService {
         'Worktree repository does not match the selected project',
       );
     }
-    try {
-      await this.dependencies.git.createWorktree({
-        repositoryPath,
-        worktreePath,
-        branch: input.branch,
-        startPoint: input.startPoint,
-      });
-    } catch (error) {
-      throw new WorkspacePreservedError(error);
-    }
     return workspaceSchema.parse({
       id: workspaceId,
       projectId,
@@ -478,8 +536,59 @@ export class AttemptService {
       gitBranch: input.branch,
       gitWorktreePath: worktreePath,
       owner: 'mesh',
-      cleanupState: 'active',
+      cleanupState: 'pending',
     });
+  }
+
+  private async createReservedWorktree(
+    input: Extract<AttemptWorkspaceInput, { type: 'worktree' }>,
+    workspace: Workspace,
+  ): Promise<void> {
+    const git = this.dependencies.git;
+    const pathOptions = this.dependencies.pathOptions;
+    if (!git) {
+      throw new AttemptInvalidCommandError(
+        'Git worktree support is unavailable',
+      );
+    }
+    if (!pathOptions) {
+      throw new AttemptInvalidCommandError(
+        'Workspace path configuration is unavailable',
+      );
+    }
+    await git.createWorktree({
+      repositoryPath: await resolveWorkspacePath(
+        input.repositoryPath,
+        pathOptions,
+      ),
+      worktreePath: await resolveWorkspacePath(workspace.path, {
+        ...pathOptions,
+        allowMissingLeaf: true,
+      }),
+      branch: input.branch,
+      startPoint: input.startPoint,
+    });
+  }
+
+  private persistWorkspaceReservation(
+    task: Task,
+    expectedRevision: number,
+    actor: TaskActor,
+    workspace: Workspace,
+    session: Session,
+  ): void {
+    this.dependencies.database.exec('BEGIN IMMEDIATE');
+    try {
+      this.requireLaunchableTask(task.id, expectedRevision, actor);
+      this.dependencies.workspaces.create(workspace);
+      this.dependencies.sessions.create(session);
+      this.dependencies.database.exec('COMMIT');
+    } catch (error) {
+      if (this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
+      throw error;
+    }
   }
 
   private persistLaunchAudit(
@@ -489,6 +598,7 @@ export class AttemptService {
     workspace: Workspace,
     session: Session,
     occurredAt: string,
+    hasWorktreeReservation: boolean,
   ) {
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
@@ -497,8 +607,18 @@ export class AttemptService {
         expectedRevision,
         actor,
       );
-      this.dependencies.workspaces.create(workspace);
-      const persistedSession = this.dependencies.sessions.create(session);
+      let persistedSession: Session;
+      if (hasWorktreeReservation) {
+        if (!this.dependencies.workspaces.markActive(workspace.id)) {
+          throw new Error(
+            `Workspace reservation '${workspace.id}' was not found`,
+          );
+        }
+        persistedSession = this.requireSession(session.id);
+      } else {
+        this.dependencies.workspaces.create(workspace);
+        persistedSession = this.dependencies.sessions.create(session);
+      }
       const attempt = this.dependencies.attempts.createForTask(
         current.id,
         persistedSession.id,
@@ -557,6 +677,20 @@ export class AttemptService {
     } catch {
       return false;
     }
+  }
+
+  private recordWorkspacePreservedDiagnostic(
+    sessionId: string,
+    stage: 'workspace_creation' | 'attempt_audit',
+    error: unknown,
+  ): boolean {
+    return this.recordDiagnostic(sessionId, {
+      kind: 'task_attempt_launch',
+      stage,
+      outcome: 'workspace_preserved',
+      reconciliationRequired: true,
+      error: errorDetails(error),
+    });
   }
 
   private assertBillingSafe(): void {

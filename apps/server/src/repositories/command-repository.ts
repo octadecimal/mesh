@@ -205,6 +205,19 @@ export class CommandRepository {
     }
   }
 
+  getExisting<Response>(
+    idempotencyKey: string,
+  ): { found: false } | { found: true; response: Response } {
+    const existing = this.selectByKey.get(idempotencyKey) as
+      | CommandRow
+      | undefined;
+    if (!existing) return { found: false };
+    return {
+      found: true,
+      response: this.resolveExisting<Response>(idempotencyKey, existing),
+    };
+  }
+
   private rollbackMutationAndCommitFailure(
     idempotencyKey: string,
     state: Extract<CommandState, 'failed' | 'indeterminate'>,
