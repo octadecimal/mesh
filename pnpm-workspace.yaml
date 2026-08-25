@@ -1,0 +1,7 @@
+autoInstallPeers: true
+allowBuilds:
+  nx: true
+  unrs-resolver: true
+  esbuild: true
+  better-sqlite3: true
+strictDepBuilds: true

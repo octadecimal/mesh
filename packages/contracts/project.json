@@ -1,0 +1,16 @@
+{
+  "name": "contracts",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/contracts/src",
+  "projectType": "library",
+  "tags": ["type:contracts"],
+  "// targets": "to see all targets run: nx show project contracts --web",
+  "targets": {
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p packages/contracts/tsconfig.lib.json"
+      }
+    }
+  }
+}

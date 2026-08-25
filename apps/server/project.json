@@ -1,0 +1,113 @@
+{
+  "name": "server",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/server/src",
+  "projectType": "application",
+  "targets": {
+    "build": {
+      "executor": "@nx/esbuild:esbuild",
+      "outputs": ["{options.outputPath}"],
+      "defaultConfiguration": "production",
+      "options": {
+        "platform": "node",
+        "outputPath": "dist/apps/server",
+        "format": ["cjs"],
+        "bundle": false,
+        "main": "apps/server/src/main.ts",
+        "additionalEntryPoints": ["apps/server/src/db/migrate.ts"],
+        "tsConfig": "apps/server/tsconfig.app.json",
+        "assets": [
+          "apps/server/src/assets",
+          {
+            "input": "apps/server/src/db/migrations",
+            "glob": "**/*.sql",
+            "output": "db/migrations"
+          },
+          {
+            "input": "apps/server/src/db/migrations",
+            "glob": "**/*.sql",
+            "output": "apps/server/src/db/migrations"
+          }
+        ],
+        "generatePackageJson": true,
+        "esbuildOptions": {
+          "sourcemap": true,
+          "outExtension": {
+            ".js": ".js"
+          }
+        }
+      },
+      "configurations": {
+        "development": {},
+        "production": {
+          "esbuildOptions": {
+            "sourcemap": false,
+            "outExtension": {
+              ".js": ".js"
+            }
+          }
+        }
+      }
+    },
+    "prune-lockfile": {
+      "dependsOn": ["build"],
+      "cache": true,
+      "executor": "@nx/js:prune-lockfile",
+      "outputs": [
+        "{workspaceRoot}/dist/apps/server/package.json",
+        "{workspaceRoot}/dist/apps/server/pnpm-lock.yaml"
+      ],
+      "options": {
+        "buildTarget": "build"
+      }
+    },
+    "copy-workspace-modules": {
+      "dependsOn": ["build"],
+      "cache": true,
+      "outputs": ["{workspaceRoot}/dist/apps/server/workspace_modules"],
+      "executor": "@nx/js:copy-workspace-modules",
+      "options": {
+        "buildTarget": "build"
+      }
+    },
+    "prune": {
+      "dependsOn": ["prune-lockfile", "copy-workspace-modules"],
+      "executor": "nx:noop"
+    },
+    "dev": {
+      "continuous": true,
+      "executor": "@nx/js:node",
+      "dependsOn": ["contracts:build", "build"],
+      "options": {
+        "buildTarget": "server:build:development",
+        "runBuildTargetDependencies": false
+      }
+    },
+    "serve": {
+      "continuous": true,
+      "executor": "@nx/js:node",
+      "defaultConfiguration": "production",
+      "dependsOn": ["web:build", "build"],
+      "options": {
+        "buildTarget": "server:build:production",
+        "runBuildTargetDependencies": false
+      }
+    },
+    "typecheck": {
+      "cache": true,
+      "inputs": ["default", "^production"],
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p apps/server/tsconfig.app.json"
+      }
+    },
+    "external-smoke": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "command": "vitest run apps/server/src/claude/sdk-driver.smoke.spec.ts --config apps/server/vitest.config.ts"
+      }
+    }
+  },
+  "tags": ["type:app"]
+}

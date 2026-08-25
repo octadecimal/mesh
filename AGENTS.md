@@ -8,41 +8,42 @@ Create the worktree from an up-to-date `master`:
 
 ```
 git fetch origin master
-git worktree add .claude/worktrees/<slug> -b <branch> origin/master
-cd .claude/worktrees/<slug>
-npm ci
+git worktree add .worktrees/<slug> -b <branch> origin/master
+cd .worktrees/<slug>
+corepack pnpm install --frozen-lockfile
 ```
 
 `<slug>` is the branch name with `/` replaced by `-`, so `feat/pane-resize`
-lives in `.claude/worktrees/feat-pane-resize`.
+lives in `.worktrees/feat-pane-resize`.
 
 Agents running in Claude Code use the `EnterWorktree` tool instead. It creates
 the same layout under `.claude/worktrees/` and switches the session into it.
 
 Constraints that follow from this layout:
 
-- `.claude/worktrees/` is gitignored. Never commit a worktree.
-- `node_modules/` is not shared between worktrees. Run `npm ci` in a fresh one
-  before `npm test`, `npx tsc --noEmit`, or `npm run build:web`.
-- The dev server binds fixed ports — 4317 for the API, 5173 for the frontend —
-  so only one worktree can run the live stack at a time. Stop one before
-  starting another.
+- `.worktrees/` is gitignored. Never commit a worktree.
+- `node_modules/` is not shared between worktrees. Run
+  `corepack pnpm install --frozen-lockfile` in a fresh one before Nx tasks.
+- The API binds fixed port 3737. Vite prefers 4200 and may use the first free
+  port above it when another application owns that port.
 - Remove the worktree once its pull request is merged. `git worktree remove`
   runs from the main checkout, and it must happen before the local branch can
   be deleted, because git refuses to delete a branch that is checked out
-  anywhere. `.claude/skills/complete-work/SKILL.md` covers the full sequence.
+  anywhere. `.agents/skills/complete-work/SKILL.md` covers the full sequence.
 
 ## Code Exploration Policy
 
 Always use jCodeMunch-MCP for code navigation. Never fall back to Read, Grep, Glob, or Bash for code exploration.
-**Exception:** use `Read` when you are about to edit a file — the harness requires a `Read` before `Edit`/`Write`. Use jCodeMunch to *find and understand* code, then `Read` only the file you are changing.
+**Exception:** use `Read` when you are about to edit a file — the harness requires a `Read` before `Edit`/`Write`. Use jCodeMunch to _find and understand_ code, then `Read` only the file you are changing.
 
 This server runs the **front door** surface: three tools reach every jCodeMunch capability, so the tool list stays small and the catalogue is fetched only when you need it.
 
 **Start any session:**
+
 1. `order { "action": "resolve_repo", "args": { "path": "." } }` — confirm the project is indexed. If it is not: `order { "action": "index_folder", "args": { "path": "." } }`
 
 **Then, for any task:**
+
 - Know what you want → `order { "action": "<name>", "args": { ... } }`
 - Know the goal, not the tool → `route { "query": "your task in a sentence" }` picks the action and shapes the arguments
 - Want to see what exists → `menu { "query": "what you are trying to do" }` returns matching actions with example arguments
@@ -51,11 +52,13 @@ This server runs the **front door** surface: three tools reach every jCodeMunch 
 `menu` and `jcodemunch_guide` list every action this server can run, including ones absent from your tool list. That is expected: the front door is the way to call them.
 
 **Interpreting results:**
+
 - A `verdict` of `no_implementation_found` is evidence of absence. Report the gap; do not re-search with different wording.
 - A `verdict` of `degraded` means a channel was unavailable, so absence is NOT proven. Read the note before relying on the result.
 - `source: ""` alongside `source_status` means the body could not be read, not that the symbol is empty.
 
 **After editing files:**
+
 - With PostToolUse hooks installed (Claude Code), edited files are reindexed automatically.
 - Otherwise `order { "action": "register_edit", "args": { "paths": [...] } }` after an edit, batched for bulk changes.
 
@@ -63,19 +66,12 @@ This server runs the **front door** surface: three tools reach every jCodeMunch 
 
 ## Testing Policy
 
-`npm test` and `npm run test:e2e` replay recorded streams from
-`tests/fixtures/streams/` and never spawn a real `claude` process. Both are
-free to run at any time.
+`corepack pnpm test` and `corepack pnpm e2e` use deterministic test drivers and
+do not spawn external Claude traffic. Both are free to run at any time.
 
-Two commands launch a real `claude` child and spend the user's subscription
-quota. Never run either without explicit permission:
-
-- `npm run dev` — the server owns a live project manager process
-- `npm run test:e2e:real` — the opt-in browser test against the real CLI
-
-`src/index.ts` honours `MESH_CLAUDE_BIN` and `MESH_CLAUDE_ARGS`, which point the
-supervisor at a stub binary. That is how the end-to-end suite exercises the real
-entry point for free; leave both unset in normal use.
+Starting or resuming a live session invokes Claude through the locally
+authenticated Claude Max subscription and spends subscription quota. Never set
+or fall back to `ANTHROPIC_API_KEY` or another pay-per-token billing override.
 
 ## Commit Policy
 
