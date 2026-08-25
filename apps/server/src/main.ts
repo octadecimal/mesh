@@ -195,8 +195,11 @@ export const startServer = async (
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
     projects,
+    tasks,
     taskService,
     attempts,
+    transitions,
+    projectEvents,
     workspaces,
     sessions,
     diagnostics,

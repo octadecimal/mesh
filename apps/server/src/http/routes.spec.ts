@@ -2,7 +2,11 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { idSchema, projectSchema } from '@mesh-session-platform/contracts';
+import {
+  idSchema,
+  projectSchema,
+  taskSchema,
+} from '@mesh-session-platform/contracts';
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { GitAdapter } from '../platform/git.js';
@@ -859,5 +863,221 @@ describe('HTTP command routes', () => {
     expect(fixture.repositories.sessions.get('s1')?.lifecycleState).toBe(
       'running',
     );
+  });
+
+  it('returns only the selected project records and its latest event cursor', async () => {
+    const fixture = setup();
+    cleanups.push(async () => {
+      await fixture.app.close();
+      fixture.repositories.dispose();
+    });
+    fixture.repositories.projects.create(
+      projectSchema.parse({
+        id: id('p2'),
+        displayName: 'Other',
+        repositoryPath: 'C:/code/other',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    fixture.repositories.workspaces.create({
+      id: id('w2'),
+      projectId: id('p2'),
+      type: 'shared',
+      path: 'C:/code/other',
+      cleanupState: 'active',
+    });
+    fixture.repositories.sessions.create({
+      id: id('s2'),
+      projectId: id('p2'),
+      workspaceId: id('w2'),
+      title: 'Other session',
+      permissionMode: 'interactive',
+      lifecycleState: 'idle',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const task = (taskId: string, projectId: string) =>
+      taskSchema.parse({
+        id: taskId,
+        projectId,
+        title: `Task ${taskId}`,
+        description: '',
+        acceptanceCriteria: [],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'backlog',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      });
+    const selectedTask = fixture.repositories.tasks.create(task('t1', 'p1'));
+    const otherTask = fixture.repositories.tasks.create(task('t2', 'p2'));
+    const actor = { type: 'human' as const, id: id('human-1') };
+    fixture.repositories.attempts.create({
+      id: id('a1'),
+      taskId: selectedTask.id,
+      sessionId: id('s1'),
+      ordinal: 1,
+      source: 'linked',
+      actor,
+      createdAt: now,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+    });
+    fixture.repositories.attempts.create({
+      id: id('a2'),
+      taskId: otherTask.id,
+      sessionId: id('s2'),
+      ordinal: 1,
+      source: 'linked',
+      actor,
+      createdAt: now,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+    });
+    fixture.repositories.transitions.append({
+      id: id('transition-1'),
+      taskId: selectedTask.id,
+      commandId: id('command-1'),
+      previousState: 'backlog',
+      nextState: 'ready',
+      actor,
+      reason: 'Ready',
+      occurredAt: now,
+    });
+    fixture.repositories.transitions.append({
+      id: id('transition-2'),
+      taskId: otherTask.id,
+      commandId: id('command-2'),
+      previousState: 'backlog',
+      nextState: 'ready',
+      actor,
+      reason: 'Ready',
+      occurredAt: now,
+    });
+    const appendTaskEvent = (
+      projectId: string,
+      eventId: string,
+      eventTask: typeof selectedTask,
+    ) =>
+      fixture.repositories.projectEvents.append(projectId, {
+        protocolVersion: 1,
+        id: id(eventId),
+        projectId: id(projectId),
+        occurredAt: now,
+        type: 'task.changed',
+        payload: { task: eventTask },
+      });
+    appendTaskEvent('p1', 'project-event-1', selectedTask);
+    appendTaskEvent('p1', 'project-event-2', selectedTask);
+    appendTaskEvent('p2', 'project-event-3', otherTask);
+
+    const snapshot = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/p1/snapshot',
+    });
+    const history = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/p1/history?after=1',
+    });
+
+    expect(snapshot.statusCode).toBe(200);
+    expect(snapshot.json()).toMatchObject({
+      project: { id: 'p1' },
+      tasks: [{ id: 't1' }],
+      attempts: [{ id: 'a1', taskId: 't1' }],
+      transitions: [{ id: 'transition-1', taskId: 't1' }],
+      repairs: [],
+      cursor: 2,
+    });
+    expect(JSON.stringify(snapshot.json())).not.toContain('t2');
+    expect(JSON.stringify(snapshot.json())).not.toContain('a2');
+    expect(JSON.stringify(snapshot.json())).not.toContain('transition-2');
+    expect(history.statusCode).toBe(200);
+    expect(history.json()).toMatchObject({
+      projectId: 'p1',
+      cursor: 2,
+      events: [{ projectId: 'p1', sequence: 2 }],
+    });
+  });
+
+  it('returns 404 for missing project reads and rejects negative history cursors', async () => {
+    const fixture = setup();
+    cleanups.push(async () => {
+      await fixture.app.close();
+      fixture.repositories.dispose();
+    });
+
+    const missingSnapshot = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/missing/snapshot',
+    });
+    const missingHistory = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/missing/history',
+    });
+    const invalidCursor = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/p1/history?after=-1',
+    });
+
+    expect(missingSnapshot.statusCode).toBe(404);
+    expect(missingSnapshot.json()).toMatchObject({
+      error: { code: 'project_not_found' },
+    });
+    expect(missingHistory.statusCode).toBe(404);
+    expect(missingHistory.json()).toMatchObject({
+      error: { code: 'project_not_found' },
+    });
+    expect(invalidCursor.statusCode).toBe(400);
+    expect(invalidCursor.json()).toMatchObject({
+      error: { code: 'invalid_command' },
+    });
+  });
+
+  it('publishes a project event only after the task mutation is committed', async () => {
+    const fixture = setup();
+    cleanups.push(async () => {
+      await fixture.app.close();
+      fixture.repositories.dispose();
+    });
+    const observed: Array<{ sequence: number; persistedSequence: number }> = [];
+    const unsubscribe = fixture.registry.publisher.subscribeProject(
+      'p1',
+      (event) => {
+        observed.push({
+          sequence: event.sequence,
+          persistedSequence:
+            fixture.repositories.projectEvents.latestSequence('p1'),
+        });
+      },
+    );
+    cleanups.push(unsubscribe);
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'task-create-1',
+        command: {
+          type: 'task.create',
+          payload: {
+            projectId: 'p1',
+            title: 'Stream me',
+            actor: { type: 'human', id: 'human-1' },
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(observed).toEqual([{ sequence: 1, persistedSequence: 1 }]);
   });
 });

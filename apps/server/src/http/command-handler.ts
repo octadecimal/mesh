@@ -79,10 +79,16 @@ const response = (
     warnings,
   });
 
-const taskResponse = (result: TaskMutationResult) => ({
-  ...result,
-  projectEventCursor: result.event.sequence,
-});
+const taskResponse = (
+  result: TaskMutationResult,
+  dependencies: CommandDependencies,
+) => {
+  dependencies.registry.publisher.publishProject(result.event);
+  return {
+    ...result,
+    projectEventCursor: result.event.sequence,
+  };
+};
 
 const requireTaskCommandId = (commandId: string | undefined): string => {
   if (!commandId) {
@@ -324,6 +330,7 @@ const executeMutation = async (
             ...command.payload,
             commandId: requireTaskCommandId(commandId),
           }),
+          dependencies,
         ),
       );
     case 'task.edit':
@@ -334,6 +341,7 @@ const executeMutation = async (
             ...command.payload,
             commandId: requireTaskCommandId(commandId),
           }),
+          dependencies,
         ),
       );
     case 'task.reorder':
@@ -344,6 +352,7 @@ const executeMutation = async (
             ...command.payload,
             commandId: requireTaskCommandId(commandId),
           }),
+          dependencies,
         ),
       );
     case 'task.block':
@@ -354,6 +363,7 @@ const executeMutation = async (
             ...command.payload,
             commandId: requireTaskCommandId(commandId),
           }),
+          dependencies,
         ),
       );
     case 'task.unblock':
@@ -364,6 +374,7 @@ const executeMutation = async (
             ...command.payload,
             commandId: requireTaskCommandId(commandId),
           }),
+          dependencies,
         ),
       );
     case 'task.transition':
@@ -374,6 +385,7 @@ const executeMutation = async (
             ...command.payload,
             commandId: requireTaskCommandId(commandId),
           }),
+          dependencies,
         ),
       );
     case 'project.import': {
