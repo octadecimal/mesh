@@ -22,7 +22,6 @@ import { authorizeTaskTransition } from '../domain/task-lifecycle.js';
 
 const rankAlphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
 const middleRankCharacter = 'h';
-const maximumFractionalRankLength = 32;
 const rebalancedRankWidth = 8;
 
 const rankBetween = (
@@ -41,26 +40,19 @@ const rankBetween = (
     return undefined;
   }
   if (successor === undefined) {
-    return predecessor.length < maximumFractionalRankLength
-      ? `${predecessor}${middleRankCharacter}`
-      : undefined;
+    return `${predecessor}${middleRankCharacter}`;
   }
   if (predecessor >= successor) {
     throw new Error('Task rank neighbors are not ordered');
   }
   if (!successor.startsWith(predecessor)) {
-    return predecessor.length < maximumFractionalRankLength
-      ? `${predecessor}${middleRankCharacter}`
-      : undefined;
+    return `${predecessor}${middleRankCharacter}`;
   }
 
   const suffix = successor.slice(predecessor.length);
   if (suffix.length > 1) return successor.slice(0, -1);
   const successorIndex = rankAlphabet.indexOf(suffix);
-  if (
-    successorIndex <= 0 ||
-    predecessor.length >= maximumFractionalRankLength
-  ) {
+  if (successorIndex <= 0) {
     return undefined;
   }
   return `${predecessor}${rankAlphabet.charAt(

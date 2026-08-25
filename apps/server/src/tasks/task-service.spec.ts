@@ -190,6 +190,36 @@ describe('TaskService', () => {
     ).toEqual(['task-predecessor', 'task-moving', 'task-successor']);
   });
 
+  it('appends after a long final predecessor without rebalancing', async () => {
+    const { repositories, service } = setup();
+    const longRank = 'z'.repeat(32);
+    seedTask(repositories, { id: 'task-moving', rank: 'a' });
+    seedTask(repositories, { id: 'task-before', rank: 'm' });
+    seedTask(repositories, { id: 'task-predecessor', rank: longRank });
+
+    const result = await service.reorder({
+      commandId: 'command-long-final-rank',
+      taskId: 'task-moving',
+      expectedRevision: 1,
+      rank: longRank,
+      actor: human,
+    });
+
+    expect(result.task.rank).toBe(`${longRank}h`);
+    expect(
+      repositories.tasks
+        .listByProject('project-1')
+        .map((task) => [task.id, task.rank, task.revision]),
+    ).toEqual([
+      ['task-before', 'm', 1],
+      ['task-predecessor', longRank, 1],
+      ['task-moving', `${longRank}h`, 2],
+    ]);
+    expect(repositories.projectEvents.after('project-1', 0)).toEqual([
+      result.event,
+    ]);
+  });
+
   it('rebalances a dense column only when no rank exists between neighbors', async () => {
     const { repositories, service } = setup();
     seedTask(repositories, {
