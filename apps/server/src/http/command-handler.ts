@@ -30,7 +30,10 @@ import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
-import { resolveRepositoryIdentity } from '../projects/repository-identity.js';
+import {
+  RepositoryIdentityError,
+  resolveRepositoryIdentity,
+} from '../projects/repository-identity.js';
 import { CommandError } from './errors.js';
 
 const commandResponseSchema = z.object({
@@ -248,6 +251,48 @@ const hasRunningTaskAttempt = (
         dependencies.attempts.getCurrentBySession(session.id),
     );
 
+const reconcileLegacyProjectIdentities = async (
+  dependencies: CommandDependencies,
+) => {
+  const pathOptions = dependencies.pathOptions;
+  if (!pathOptions) return;
+  const now = (dependencies.now ?? (() => new Date().toISOString()))();
+  for (const project of dependencies.projects.list()) {
+    if (project.repositoryIdentity !== project.repositoryPath) continue;
+    let identity;
+    try {
+      identity = await resolveRepositoryIdentity(
+        project.repositoryPath,
+        pathOptions,
+      );
+    } catch (error) {
+      if (
+        error instanceof RepositoryIdentityError &&
+        error.code === 'repository_invalid'
+      ) {
+        continue;
+      }
+      throw error;
+    }
+    const reconciled = dependencies.projects.update(
+      {
+        ...project,
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        updatedAt: now,
+      },
+      project.revision,
+    );
+    if (!reconciled) {
+      throw new CommandError(
+        'task_revision_conflict',
+        `Project '${project.id}' changed while reconciling its repository identity`,
+        { project: dependencies.projects.get(project.id) },
+      );
+    }
+  }
+};
+
 const executeMutation = async (
   command: Extract<Command, { idempotencyKey: string }>['command'],
   dependencies: CommandDependencies,
@@ -264,6 +309,7 @@ const executeMutation = async (
         command.payload.repositoryPath,
         dependencies.pathOptions,
       );
+      await reconcileLegacyProjectIdentities(dependencies);
       const existing = dependencies.projects.getByRepositoryIdentity(
         identity.repositoryIdentity,
       );

@@ -135,6 +135,66 @@ describe('executeCommand', () => {
     });
   });
 
+  it('rejects an import represented by duplicate upgraded legacy repository paths', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const linkedWorktreePath = join(directory, 'legacy-linked-worktree');
+    await runGit(
+      repositoryPath,
+      'worktree',
+      'add',
+      '--detach',
+      linkedWorktreePath,
+      'HEAD',
+    );
+    const { repositories, dependencies } = commandDependencies(directory);
+    for (const [id, legacyPath] of [
+      ['legacy-main', repositoryPath],
+      ['legacy-worktree', linkedWorktreePath],
+    ] as const) {
+      repositories.projects.create(
+        projectSchema.parse({
+          id,
+          displayName: id,
+          repositoryPath: legacyPath,
+          repositoryIdentity: legacyPath,
+          discoveredAt: now,
+          discoveryMetadata: { source: 'workspace_root' },
+        }),
+      );
+    }
+
+    await expect(
+      executeCommand(
+        projectCommand('import-upgraded-legacy', {
+          type: 'project.import',
+          payload: {
+            repositoryPath,
+            actor: { type: 'human', id: 'operator' },
+          },
+        }),
+        dependencies,
+      ),
+    ).rejects.toMatchObject({
+      code: 'repository_already_imported',
+      details: {
+        project: expect.objectContaining({ id: 'legacy-main' }),
+      },
+    });
+    const reconciledProjects = repositories.projects.list();
+    expect(reconciledProjects.map((project) => project.id)).toEqual([
+      'legacy-main',
+      'legacy-worktree',
+    ]);
+    expect([
+      ...new Set(
+        reconciledProjects.map((project) => project.repositoryIdentity),
+      ),
+    ]).toHaveLength(1);
+    expect(reconciledProjects.map((project) => project.revision)).toEqual([
+      2, 2,
+    ]);
+  });
+
   it('returns Git repository suggestions without persisting a project', async () => {
     const { directory, repositoryPath } = await createRepository();
     const { repositories, dependencies } = commandDependencies(directory);
