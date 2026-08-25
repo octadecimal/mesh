@@ -37,6 +37,11 @@ export class MeshSocket {
   private readonly maxBackoffMs: number;
   private socket?: WebSocket;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private projectRefreshBatch?: {
+    socket: WebSocket;
+    pending: number;
+    shouldResubscribe: boolean;
+  };
   private backoffMs: number;
   private closed = false;
 
@@ -57,6 +62,7 @@ export class MeshSocket {
   close() {
     this.closed = true;
     if (this.reconnectTimer) this.cancel(this.reconnectTimer);
+    this.projectRefreshBatch = undefined;
     this.socket?.close();
     this.socket = undefined;
   }
@@ -117,12 +123,38 @@ export class MeshSocket {
     }
     if (message.data.type === 'project.resync_required') {
       this.options.onProjectResyncRequired?.(message.data);
+      const sourceSocket = this.socket;
+      if (!sourceSocket || !this.options.projectResync) return;
+      const batch =
+        this.projectRefreshBatch?.socket === sourceSocket
+          ? this.projectRefreshBatch
+          : {
+              socket: sourceSocket,
+              pending: 0,
+              shouldResubscribe: false,
+            };
+      this.projectRefreshBatch = batch;
+      batch.pending += 1;
       void this.options
-        .projectResync?.(message.data.payload.projectId)
+        .projectResync(message.data.payload.projectId)
+        .then(() => {
+          batch.shouldResubscribe = true;
+        })
         .catch(() => {
           this.options.onDiagnostic(
             'Mesh socket could not refresh the project snapshot after resync.',
           );
+        })
+        .finally(() => {
+          batch.pending -= 1;
+          if (
+            batch.pending !== 0 ||
+            !batch.shouldResubscribe ||
+            this.projectRefreshBatch !== batch
+          )
+            return;
+          this.projectRefreshBatch = undefined;
+          if (!this.closed && this.socket === batch.socket) this.resubscribe();
         });
     }
   }
