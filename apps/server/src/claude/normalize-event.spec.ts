@@ -39,6 +39,30 @@ describe('normalizeDriverEvent', () => {
     });
   });
 
+  it('normalizes a subscription limit with reset metadata', () => {
+    expect(
+      normalizeDriverEvent({
+        kind: 'limit',
+        capability: 'five_hour',
+        message: 'Claude subscription limit reached',
+        resetAt: '2026-08-25T08:00:00.000Z',
+      }),
+    ).toEqual({
+      kind: 'event',
+      event: {
+        type: 'session.error',
+        payload: {
+          code: 'subscription_limit',
+          message: 'Claude subscription limit reached',
+          details: {
+            capability: 'five_hour',
+            resetAt: '2026-08-25T08:00:00.000Z',
+          },
+        },
+      },
+    });
+  });
+
   it('quarantines status events outside the lifecycle contract', () => {
     expect(
       normalizeDriverEvent({

@@ -1,15 +1,21 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useState } from 'react';
+import type {
+  PermissionMode,
+  Workspace,
+} from '@mesh-session-platform/contracts';
 
 import type { SessionFlowError } from './NewSessionDialog';
 
 export type DiscoveredSession = {
   id: string;
+  projectId: string;
+  workspaceId: string;
   title: string;
   claudeResumeId?: string;
   lastPath?: string;
   applicationMatch?: string;
-  permissionMode?: string;
+  permissionMode: PermissionMode;
   workspaceType?: string;
 };
 const errorMessage = (error: SessionFlowError) =>
@@ -33,20 +39,33 @@ export function ResumeSessionDialog({
   open,
   onOpenChange,
   sessions,
+  workspaces = [],
   error,
   onResume,
 }: {
   open: boolean;
   onOpenChange?: (open: boolean) => void;
   sessions: readonly DiscoveredSession[];
+  workspaces?: readonly Pick<Workspace, 'id' | 'projectId' | 'path' | 'type'>[];
   error?: SessionFlowError;
   onResume: (command: {
     type: 'session.resume';
-    payload: { sessionId: string };
+    payload: {
+      sessionId: string;
+      workspaceId: string;
+      permissionMode: PermissionMode;
+    };
   }) => void;
 }) {
   const [selectedId, setSelectedId] = useState(sessions[0]?.id ?? '');
-  const selected = sessions.find((session) => session.id === selectedId);
+  const selected =
+    sessions.find((session) => session.id === selectedId) ?? sessions[0];
+  const [workspaceId, setWorkspaceId] = useState(
+    sessions[0]?.workspaceId ?? '',
+  );
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(
+    sessions[0]?.permissionMode ?? 'inherit',
+  );
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -70,7 +89,11 @@ export function ResumeSessionDialog({
                     name="resume-session"
                     value={session.id}
                     checked={selectedId === session.id}
-                    onChange={() => setSelectedId(session.id)}
+                    onChange={() => {
+                      setSelectedId(session.id);
+                      setWorkspaceId(session.workspaceId);
+                      setPermissionMode(session.permissionMode);
+                    }}
                   />
                   <span>{session.title}</span>
                   <span>
@@ -86,6 +109,42 @@ export function ResumeSessionDialog({
               ))}
             </fieldset>
           )}
+          {selected ? (
+            <div>
+              <label>
+                Resume workspace
+                <select
+                  aria-label="Resume workspace"
+                  value={workspaceId || selected.workspaceId}
+                  onChange={(event) => setWorkspaceId(event.target.value)}
+                >
+                  {workspaces
+                    .filter(
+                      (workspace) => workspace.projectId === selected.projectId,
+                    )
+                    .map((workspace) => (
+                      <option key={workspace.id} value={workspace.id}>
+                        {workspace.path} ({workspace.type})
+                      </option>
+                    ))}
+                </select>
+              </label>
+              <label>
+                Resume permission mode
+                <select
+                  aria-label="Resume permission mode"
+                  value={permissionMode}
+                  onChange={(event) =>
+                    setPermissionMode(event.target.value as PermissionMode)
+                  }
+                >
+                  <option value="interactive">interactive</option>
+                  <option value="safe_auto">safe auto</option>
+                  <option value="inherit">inherit</option>
+                </select>
+              </label>
+            </div>
+          ) : null}
           <div>
             <Dialog.Close asChild>
               <button type="button">Cancel</button>
@@ -97,7 +156,11 @@ export function ResumeSessionDialog({
                 selected &&
                 onResume({
                   type: 'session.resume',
-                  payload: { sessionId: selected.id },
+                  payload: {
+                    sessionId: selected.id,
+                    workspaceId: workspaceId || selected.workspaceId,
+                    permissionMode,
+                  },
                 })
               }
             >

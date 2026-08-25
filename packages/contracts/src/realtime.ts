@@ -15,6 +15,12 @@ const serverMessage = <Type extends string, Payload extends z.ZodType>(
     payload,
   });
 
+export const subscribeFrameSchema = z.object({
+  protocolVersion: protocolVersionSchema,
+  type: z.literal('subscribe'),
+  cursors: z.record(idSchema, z.number().int().nonnegative()),
+});
+
 export const serverMessageSchema = z.discriminatedUnion('type', [
   serverMessage('snapshot', sessionSnapshotSchema),
   serverMessage('events', z.object({ events: z.array(sessionEventSchema) })),
@@ -32,3 +38,4 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
 ]);
 
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
+export type SubscribeFrame = z.infer<typeof subscribeFrameSchema>;

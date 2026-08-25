@@ -160,14 +160,16 @@ const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
   if (message.type === 'rate_limit_event') {
     const info = message.rate_limit_info;
     if (info.status === 'allowed') return [];
-    const reset = info.resetsAt
-      ? `; resets at ${new Date(info.resetsAt).toISOString()}`
-      : '';
+    const resetAt = info.resetsAt
+      ? new Date(info.resetsAt).toISOString()
+      : undefined;
+    const reset = resetAt ? `; resets at ${resetAt}` : '';
     return [
       {
         kind: 'limit',
         capability: info.rateLimitType ?? 'subscription',
         message: `Claude subscription limit ${info.status}${reset}`,
+        resetAt,
       },
     ];
   }

@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import { vi } from 'vitest';
+import type { Session } from '@mesh-session-platform/contracts';
 
 import { SessionWorkspace } from './SessionWorkspace';
 
@@ -33,6 +34,43 @@ describe('SessionWorkspace', () => {
       }),
     );
   });
+
+  it('updates an open panel when the session lifecycle changes', async () => {
+    const running = session('running');
+    const { rerender } = render(
+      <SessionWorkspace
+        sessions={[running]}
+        selectedSessionId={running.id}
+        promptDrafts={{ [running.id]: 'continue' }}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Send prompt' })).toBeEnabled();
+
+    rerender(
+      <SessionWorkspace
+        sessions={[session('failed')]}
+        selectedSessionId={running.id}
+        promptDrafts={{ [running.id]: 'continue' }}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Send prompt' }),
+      ).toBeDisabled(),
+    );
+  });
+});
+
+const session = (lifecycleState: Session['lifecycleState']): Session => ({
+  id: 's-live',
+  projectId: 'p1',
+  workspaceId: 'w1',
+  title: 'Live session',
+  permissionMode: 'interactive',
+  lifecycleState,
+  createdAt: '2026-08-25T00:00:00.000Z',
+  updatedAt: '2026-08-25T00:00:00.000Z',
 });
 
 const sessions = [

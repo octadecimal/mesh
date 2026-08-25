@@ -3,6 +3,8 @@ import {
   type ServerMessage,
 } from '@mesh-session-platform/contracts';
 
+import { subscribeFrameSchema } from '@mesh-session-platform/contracts';
+
 type WebSocketFactory = (url: string) => WebSocket;
 
 export type MeshSocketOptions = {
@@ -60,11 +62,13 @@ export class MeshSocket {
     socket.onopen = () => {
       this.backoffMs = this.initialBackoffMs;
       socket.send(
-        JSON.stringify({
-          protocolVersion: 1,
-          type: 'subscribe',
-          payload: { cursors: this.options.cursors() },
-        }),
+        JSON.stringify(
+          subscribeFrameSchema.parse({
+            protocolVersion: 1,
+            type: 'subscribe',
+            cursors: this.options.cursors(),
+          }),
+        ),
       );
     };
     socket.onmessage = (event) => this.receive(event.data);

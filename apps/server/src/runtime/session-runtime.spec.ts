@@ -219,6 +219,51 @@ describe('session runtime', () => {
     expect(driverSession.prompts).toEqual([]);
   });
 
+  it('blocks a subscription-limited session and rejects further prompts', async () => {
+    const { repos, driverSession, registry } = setup();
+    disposers.push(repos.dispose);
+    await registry.create('s1');
+
+    driverSession.enqueue({
+      kind: 'limit',
+      capability: 'five_hour',
+      message: 'Claude subscription limit reached',
+      resetAt: '2026-08-25T08:00:00.000Z',
+    });
+
+    await vi.waitFor(() =>
+      expect(repos.sessions.get('s1')?.lifecycleState).toBe('failed'),
+    );
+    expect(
+      repos.events
+        .after('s1', 0)
+        .find((event) => event.type === 'session.error'),
+    ).toMatchObject({
+      payload: {
+        code: 'subscription_limit',
+        details: {
+          capability: 'five_hour',
+          resetAt: '2026-08-25T08:00:00.000Z',
+        },
+      },
+    });
+    expect(
+      repos.events
+        .after('s1', 0)
+        .find(
+          (event) =>
+            event.type === 'session.status' && event.payload.to === 'failed',
+        ),
+    ).toMatchObject({ payload: { reason: 'subscription_limit' } });
+    await expect(
+      registry.sendPrompt('s1', 'keep running'),
+    ).rejects.toMatchObject({
+      code: 'invalid_session_state',
+      from: 'failed',
+    });
+    expect(driverSession.prompts).toEqual([]);
+  });
+
   it('persists a safe-auto permission resolution before approving it in the driver', async () => {
     const { repos, driverSession, registry } = setup({
       permissionMode: 'safe_auto',

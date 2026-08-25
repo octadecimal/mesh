@@ -32,7 +32,11 @@ type FakeDriverSessionControl = {
 type FakeClaudeSessionDriverControl = {
   createdRequests: unknown[];
   createdSessions: FakeDriverSessionControl[];
-  resumedRequests: Array<{ claudeResumeId: string }>;
+  resumedRequests: Array<{
+    claudeResumeId: string;
+    workspacePath?: string;
+    permissionMode?: string;
+  }>;
 };
 
 type RunningServer = {
@@ -76,6 +80,8 @@ export type FakeClaudeHarness = {
   worktreePath: string;
   driver: FakeClaudeSessionDriverControl;
   snapshot(): Promise<SessionSnapshot>;
+  projectId(): Promise<string>;
+  discoverProject(): Promise<string>;
   command(command: MutatingCommand): Promise<{ status: number; body: any }>;
   discovery(): Promise<{ status: number; body: any }>;
   waitForCreated(count?: number): Promise<void>;
@@ -131,22 +137,6 @@ const launchHarness = async (): Promise<{
   };
 
   await start();
-  const seed = new BetterSqlite3(databasePath);
-  seed
-    .prepare(
-      `
-    INSERT INTO projects (id, display_name, repository_path, discovered_at, discovery_metadata_json)
-    VALUES (?, ?, ?, ?, ?)
-  `,
-    )
-    .run(
-      'project-e2e',
-      'Acceptance Project',
-      repositoryPath,
-      new Date().toISOString(),
-      '{}',
-    );
-  seed.close();
 
   const request = async (path: string, init?: RequestInit) => {
     const response = await fetch(`${server.origin}${path}`, init);
@@ -163,6 +153,22 @@ const launchHarness = async (): Promise<{
     idempotencyKey: randomUUID(),
     command,
   });
+  const projectId = async () => {
+    const project = (await request('/api/snapshot')).body.projects?.[0];
+    if (!project?.id) throw new Error('No discovered E2E project is available');
+    return project.id as string;
+  };
+  const discoverProject = async () => {
+    const existing = (await request('/api/snapshot')).body.projects?.[0];
+    if (!existing) {
+      await post({
+        protocolVersion: 1,
+        type: 'projects.discover',
+        payload: {},
+      });
+    }
+    return projectId();
+  };
 
   const harness: FakeClaudeHarness = {
     get origin() {
@@ -174,12 +180,14 @@ const launchHarness = async (): Promise<{
     driver,
     snapshot: async () =>
       sessionSnapshotSchema.parse((await request('/api/snapshot')).body),
+    projectId,
+    discoverProject,
     command: (command) => post(envelope(command)),
-    discovery: () =>
+    discovery: async () =>
       post({
         protocolVersion: 1,
         type: 'sessions.discover',
-        payload: { projectId: 'project-e2e' },
+        payload: { projectId: await discoverProject() },
       }),
     waitForCreated: (count = 1) =>
       waitUntil(() => driver.createdSessions.length >= count),

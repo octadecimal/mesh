@@ -53,7 +53,11 @@ const mutatingCommandSchema = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('session.resume'),
-    payload: z.object({ sessionId: idSchema }),
+    payload: z.object({
+      sessionId: idSchema,
+      workspaceId: idSchema,
+      permissionMode: permissionModeSchema,
+    }),
   }),
   z.object({
     type: z.literal('session.prompt'),

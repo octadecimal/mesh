@@ -72,7 +72,14 @@ describe('session platform contracts', () => {
           permissionMode: 'interactive',
         },
       },
-      { type: 'session.resume', payload: { sessionId: 's1' } },
+      {
+        type: 'session.resume',
+        payload: {
+          sessionId: 's1',
+          workspaceId: 'w1',
+          permissionMode: 'safe_auto',
+        },
+      },
       { type: 'session.prompt', payload: { sessionId: 's1', prompt: 'hi' } },
       { type: 'session.interrupt', payload: { sessionId: 's1' } },
       {

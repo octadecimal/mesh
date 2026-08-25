@@ -3,6 +3,7 @@ import {
   sessionDiagnosticsSchema,
   sessionHistorySchema,
   sessionSnapshotSchema,
+  type DiscoveryCommand,
   type MutatingCommand,
   type SessionDiagnostics,
   type SessionHistory,
@@ -85,6 +86,16 @@ export class MeshApi {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(envelope),
+      }),
+    );
+  }
+
+  async discover(command: DiscoveryCommand): Promise<CommandResponse> {
+    return commandResponseSchema.parse(
+      await this.request('/api/commands', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(command),
       }),
     );
   }

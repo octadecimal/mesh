@@ -21,35 +21,38 @@ const setup = (options?: {
   useDatabaseDirectoryAsWorkspace?: boolean;
   withGit?: boolean;
   gitExitCode?: number;
+  seedProject?: boolean;
 }) => {
   const repositories = createTestRepositories();
   const workspacePath = options?.useDatabaseDirectoryAsWorkspace
     ? dirname(repositories.path)
     : 'C:/code/mesh';
-  repositories.projects.create({
-    id: id('p1'),
-    displayName: 'Mesh',
-    repositoryPath: workspacePath,
-    discoveredAt: now,
-    discoveryMetadata: {},
-  });
-  repositories.workspaces.create({
-    id: id('w1'),
-    projectId: id('p1'),
-    type: 'shared',
-    path: workspacePath,
-    cleanupState: 'active',
-  });
-  repositories.sessions.create({
-    id: id('s1'),
-    projectId: id('p1'),
-    workspaceId: id('w1'),
-    title: 'Session',
-    permissionMode: 'interactive',
-    lifecycleState: 'idle',
-    createdAt: now,
-    updatedAt: now,
-  });
+  if (options?.seedProject !== false) {
+    repositories.projects.create({
+      id: id('p1'),
+      displayName: 'Mesh',
+      repositoryPath: workspacePath,
+      discoveredAt: now,
+      discoveryMetadata: {},
+    });
+    repositories.workspaces.create({
+      id: id('w1'),
+      projectId: id('p1'),
+      type: 'shared',
+      path: workspacePath,
+      cleanupState: 'active',
+    });
+    repositories.sessions.create({
+      id: id('s1'),
+      projectId: id('p1'),
+      workspaceId: id('w1'),
+      title: 'Session',
+      permissionMode: 'interactive',
+      lifecycleState: 'idle',
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
   const driver = new FakeClaudeSessionDriver({
     discovered: options?.discovered,
   });
@@ -111,6 +114,37 @@ describe('HTTP command routes', () => {
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  });
+
+  it('bootstraps the configured workspace as a project on fresh install', async () => {
+    const fixture = setup({
+      createId: () => 'project-fresh',
+      seedProject: false,
+      useDatabaseDirectoryAsWorkspace: true,
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        type: 'projects.discover',
+        payload: {},
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().result.projects).toEqual([
+      expect.objectContaining({
+        id: 'project-fresh',
+        repositoryPath: fixture.workspacePath,
+      }),
+    ]);
+    expect(fixture.repositories.projects.get('project-fresh')).toBeDefined();
   });
 
   it('returns the original response for a repeated idempotency key', async () => {
@@ -390,11 +424,25 @@ describe('HTTP command routes', () => {
       },
       { lifecycleState: 'interrupted', claudeResumeId: 'claude-1' },
     );
+    fixture.repositories.workspaces.create({
+      id: id('w2'),
+      projectId: id('p1'),
+      type: 'shared',
+      path: join(fixture.workspacePath, 'alternate'),
+      cleanupState: 'active',
+    });
 
     const command = (key: string) => ({
       protocolVersion: 1,
       idempotencyKey: key,
-      command: { type: 'session.resume', payload: { sessionId: 's1' } },
+      command: {
+        type: 'session.resume',
+        payload: {
+          sessionId: 's1',
+          workspaceId: 'w2',
+          permissionMode: 'safe_auto',
+        },
+      },
     });
     const first = await fixture.app.inject({
       method: 'POST',
@@ -413,6 +461,14 @@ describe('HTTP command routes', () => {
       error: { code: 'invalid_session_state' },
     });
     expect(fixture.driver.resumedRequests).toHaveLength(1);
+    expect(fixture.driver.resumedRequests[0]).toMatchObject({
+      workspacePath: join(fixture.workspacePath, 'alternate'),
+      permissionMode: 'safe_auto',
+    });
+    expect(fixture.repositories.sessions.get('s1')).toMatchObject({
+      workspaceId: 'w2',
+      permissionMode: 'safe_auto',
+    });
   });
 
   it('requires deletion confirmation, preserves workspaces, and restores saved layout', async () => {

@@ -141,15 +141,21 @@ export const normalizeDriverEvent = (raw: unknown): NormalizedDriverEvent => {
     }
     case 'limit':
       return typeof raw.capability === 'string' &&
-        typeof raw.message === 'string'
+        typeof raw.message === 'string' &&
+        (raw.resetAt === undefined || typeof raw.resetAt === 'string')
         ? {
             kind: 'event',
             event: {
               type: 'session.error',
               payload: {
-                code: 'unsupported_claude_capability',
+                code: 'subscription_limit',
                 message: raw.message,
-                details: { capability: raw.capability },
+                details: {
+                  capability: raw.capability,
+                  ...(typeof raw.resetAt === 'string'
+                    ? { resetAt: raw.resetAt }
+                    : {}),
+                },
               },
             },
           }

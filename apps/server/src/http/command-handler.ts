@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { readdir, stat } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 
 import { z } from 'zod';
 import {
   commandSchema,
+  projectSchema,
   sessionDiagnosticsSchema,
   sessionHistorySchema,
   sessionSchema,
@@ -158,6 +161,45 @@ const discoverSessions = async (
   return discovered;
 };
 
+const discoverProjects = async (dependencies: CommandDependencies) => {
+  const known = dependencies.projects.list();
+  if (known.length > 0 || !dependencies.pathOptions) return known;
+
+  const baseDirectory = await resolveWorkspacePath(
+    dependencies.pathOptions.baseDirectory,
+    dependencies.pathOptions,
+  );
+  const entries = await readdir(baseDirectory, { withFileTypes: true });
+  let repositoryPath = baseDirectory;
+  for (const entry of entries.sort((left, right) =>
+    left.name.localeCompare(right.name),
+  )) {
+    if (!entry.isDirectory()) continue;
+    const candidate = join(baseDirectory, entry.name);
+    try {
+      const marker = await stat(join(candidate, '.git'));
+      if (marker.isDirectory() || marker.isFile()) {
+        repositoryPath = await resolveWorkspacePath(
+          candidate,
+          dependencies.pathOptions,
+        );
+        break;
+      }
+    } catch {
+      // Not a Git repository candidate.
+    }
+  }
+  const project = projectSchema.parse({
+    id: (dependencies.createId ?? randomUUID)(),
+    displayName: basename(repositoryPath) || 'Mesh workspace',
+    repositoryPath,
+    discoveredAt: (dependencies.now ?? (() => new Date().toISOString()))(),
+    discoveryMetadata: { source: 'workspace_root' },
+  });
+  dependencies.projects.create(project);
+  return [project];
+};
+
 const executeMutation = async (
   command: Extract<Command, { idempotencyKey: string }>['command'],
   dependencies: CommandDependencies,
@@ -300,13 +342,26 @@ const executeMutation = async (
     case 'session.resume': {
       assertBillingSafe(dependencies);
       const session = requireSession(dependencies, command.payload.sessionId);
+      const workspace = requireWorkspace(
+        dependencies,
+        command.payload.workspaceId,
+      );
+      if (workspace.projectId !== session.projectId) {
+        throw new CommandError(
+          'invalid_command',
+          'Workspace does not belong to the selected project',
+        );
+      }
       if (!session.claudeResumeId) {
         throw new CommandError(
           'invalid_session_state',
           'Session has no Claude resume ID',
         );
       }
-      await dependencies.registry.resume(session.id);
+      await dependencies.registry.resume(session.id, {
+        workspaceId: workspace.id,
+        permissionMode: command.payload.permissionMode,
+      });
       return response(command.type, dependencies.sessions.get(session.id));
     }
     case 'session.prompt':
@@ -454,7 +509,9 @@ export const executeCommand = async (
 
   switch (command.type) {
     case 'projects.discover':
-      return response(command.type, { projects: dependencies.projects.list() });
+      return response(command.type, {
+        projects: await discoverProjects(dependencies),
+      });
     case 'sessions.discover':
       return response(command.type, {
         sessions: await discoverSessions(

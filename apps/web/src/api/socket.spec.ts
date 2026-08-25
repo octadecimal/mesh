@@ -67,7 +67,7 @@ describe('MeshSocket', () => {
     expect(JSON.parse(connection.sent[0])).toEqual({
       protocolVersion: 1,
       type: 'subscribe',
-      payload: { cursors: { 'session-1': 4 } },
+      cursors: { 'session-1': 4 },
     });
     expect(messages).toEqual([healthMessage]);
     expect(diagnostics).toHaveLength(1);

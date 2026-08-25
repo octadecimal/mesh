@@ -225,6 +225,30 @@ export class SessionRuntime {
 
     this.persist(draft, raw, next, undefined, key);
     this.appliedDriverEvents.add(key);
+    if (
+      normalized.event.type === 'session.error' &&
+      normalized.event.payload.code === 'subscription_limit'
+    ) {
+      const failed = transition(this.state, { type: 'subscription_limited' });
+      this.persist(
+        {
+          type: 'session.status',
+          payload: {
+            from: this.state,
+            to: failed,
+            reason: 'subscription_limit',
+          },
+        },
+        {
+          kind: 'runtime_transition',
+          trigger: 'subscription_limited',
+        },
+        failed,
+      );
+      await this.dependencies.driverSession.close().catch(() => undefined);
+      this.dependencies.onStopped();
+      return;
+    }
     if (automaticPermission) {
       this.persist(
         {

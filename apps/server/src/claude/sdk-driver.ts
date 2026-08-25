@@ -22,7 +22,7 @@ export type SdkStreamEvent =
       output: unknown;
       isError: boolean;
     }
-  | { kind: 'limit'; capability: string; message: string }
+  | { kind: 'limit'; capability: string; message: string; resetAt?: string }
   | { kind: 'error'; code: string; message: string; details?: unknown }
   | { kind: 'malformed'; raw: unknown }
   | { kind: 'completed' };

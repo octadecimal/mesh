@@ -13,18 +13,23 @@ const createThroughUi = async (
   title: string,
   workspace: 'shared' | 'worktree' = 'shared',
 ) => {
+  const projectId = await harness.projectId();
   const createdBefore = harness.driver.createdSessions.length;
   await page.getByRole('button', { name: 'New session' }).click();
-  await page.getByLabel('Project', { exact: true }).selectOption('project-e2e');
+  await page.getByLabel('Project', { exact: true }).selectOption(projectId);
   await page.getByLabel('Session title').fill(title);
   await page.getByLabel('Workspace type').selectOption(workspace);
   if (workspace === 'shared') {
     await page.getByLabel('Shared folder path').fill(harness.sharedPath);
   } else {
-    await page.getByLabel('Repository').fill(harness.repositoryPath);
-    await page.getByLabel('Branch').fill('mesh-acceptance');
-    await page.getByLabel('Start point').fill('HEAD');
-    await page.getByLabel('Worktree path').fill(harness.worktreePath);
+    await page
+      .getByRole('textbox', { name: 'Repository' })
+      .fill(harness.repositoryPath);
+    await page.getByRole('textbox', { name: 'Branch' }).fill('mesh-acceptance');
+    await page.getByRole('textbox', { name: 'Start point' }).fill('HEAD');
+    await page
+      .getByRole('textbox', { name: 'Worktree path' })
+      .fill(harness.worktreePath);
   }
   await page.getByLabel('Permission mode').selectOption('interactive');
   await page.getByRole('button', { name: 'Create session' }).click();
@@ -32,10 +37,11 @@ const createThroughUi = async (
 };
 
 const createThroughApi = async (harness: FakeClaudeHarness, title: string) => {
+  const projectId = await harness.discoverProject();
   const result = await harness.command({
     type: 'session.create',
     payload: {
-      projectId: 'project-e2e',
+      projectId,
       title,
       permissionMode: 'interactive',
       workspace: { type: 'shared', path: harness.sharedPath },
@@ -96,7 +102,6 @@ test('creates shared and worktree sessions with the production-built server', as
   ).toBeVisible();
 
   await createThroughUi(page, harness, 'Shared acceptance');
-  await page.reload();
   await expect(
     page.getByRole('button', { name: /Shared acceptance/ }),
   ).toBeVisible();
@@ -106,6 +111,61 @@ test('creates shared and worktree sessions with the production-built server', as
   expect(snapshot.workspaces.map(({ type }) => type)).toEqual(
     expect.arrayContaining(['shared', 'worktree']),
   );
+});
+
+test('blocks prompting when the subscription limit is reached', async ({
+  page,
+  harness,
+}) => {
+  const sessionId = await createThroughApi(harness, 'Limited session');
+  await harness.waitForCreated();
+  const socketFrames: string[] = [];
+  page.on('websocket', (socket) => {
+    socket.on('framesent', ({ payload }) =>
+      socketFrames.push(`sent:${String(payload)}`),
+    );
+    socket.on('framereceived', ({ payload }) =>
+      socketFrames.push(`received:${String(payload)}`),
+    );
+    socket.on('socketerror', (error) => socketFrames.push(`error:${error}`));
+  });
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: /Limited session/ }).click();
+  const prompt = page.getByRole('textbox', { name: 'Prompt' });
+  await prompt.fill('Must not be sent after the limit');
+  const sendPrompt = page.getByRole('button', { name: 'Send prompt' });
+  await expect
+    .poll(() => socketFrames)
+    .toEqual(
+      expect.arrayContaining([expect.stringContaining('connection.health')]),
+    );
+  await expect(sendPrompt).toBeEnabled();
+
+  harness.driver.createdSessions[0].enqueue({
+    kind: 'limit',
+    capability: 'five_hour',
+    message: 'Claude subscription limit reached',
+    resetAt: '2026-08-25T08:00:00.000Z',
+  });
+
+  await expect
+    .poll(
+      async () =>
+        (await harness.snapshot()).sessions.find(({ id }) => id === sessionId)
+          ?.lifecycleState,
+    )
+    .toBe('failed');
+  await expect
+    .poll(
+      () =>
+        socketFrames.some(
+          (frame) =>
+            frame.includes('session.status') && frame.includes('failed'),
+        ),
+      { message: socketFrames.join('\n') },
+    )
+    .toBe(true);
+  await expect(sendPrompt).toBeDisabled();
 });
 
 test('restores tabs without duplicate events and renders tools plus raw diagnostics', async ({
@@ -144,6 +204,7 @@ test('restores tabs without duplicate events and renders tools plus raw diagnost
   await page.goto(harness.origin);
   const sessionSidebar = page.getByRole('complementary', { name: 'Sessions' });
   await sessionSidebar.getByRole('button', { name: /First session/ }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeEnabled();
   await sessionSidebar.getByRole('button', { name: /Second session/ }).click();
   const firstGroup = page.locator('.dv-groupview');
   const firstGroupBox = await firstGroup.boundingBox();
@@ -268,6 +329,7 @@ test('discovers and resumes a Claude session and records restart interruption tr
   await page.goto(harness.origin);
   await page.getByRole('button', { name: 'Resume session' }).click();
   await page.getByLabel(/Discovered Claude session/).check();
+  await page.getByLabel('Resume permission mode').selectOption('safe_auto');
   await page
     .getByRole('button', { name: 'Resume session', exact: true })
     .last()
@@ -276,6 +338,10 @@ test('discovers and resumes a Claude session and records restart interruption tr
   expect(harness.driver.resumedRequests[0].claudeResumeId).toBe(
     'discovered-resume-id',
   );
+  expect(harness.driver.resumedRequests[0]).toMatchObject({
+    workspacePath: harness.sharedPath,
+    permissionMode: 'safe_auto',
+  });
 
   await harness.restart({ recoverSessionId: originalId });
   const snapshot = await harness.snapshot();
@@ -297,11 +363,12 @@ test('refuses API-billing conflicts without invoking Claude', async ({
   harness,
 }) => {
   await harness.restart({ billingConflict: true });
+  const projectId = await harness.discoverProject();
   const before = harness.driver.createdRequests.length;
   const response = await harness.command({
     type: 'session.create',
     payload: {
-      projectId: 'project-e2e',
+      projectId,
       title: 'Must be refused',
       permissionMode: 'interactive',
       workspace: { type: 'shared', path: harness.sharedPath },

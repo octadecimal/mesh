@@ -171,10 +171,13 @@ function ConnectedApp({
         open={resumeSessionOpen}
         onOpenChange={setResumeSessionOpen}
         error={flowError}
+        workspaces={workspaces}
         sessions={sessions.map((session) => {
           const workspace = workspaceById.get(session.workspaceId);
           return {
             id: session.id,
+            projectId: session.projectId,
+            workspaceId: session.workspaceId,
             title: session.title,
             claudeResumeId: session.claudeResumeId,
             lastPath: workspace?.path,

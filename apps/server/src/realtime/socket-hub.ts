@@ -5,6 +5,7 @@ import {
   type ServerMessage,
   type SessionEvent,
 } from '@mesh-session-platform/contracts';
+import { subscribeFrameSchema } from '@mesh-session-platform/contracts';
 
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
@@ -54,18 +55,9 @@ const parseSubscribeFrame = (
     return undefined;
 
   try {
-    const frame = JSON.parse(text) as unknown;
-    if (!frame || typeof frame !== 'object' || Array.isArray(frame))
-      return undefined;
-    const candidate = frame as { type?: unknown; cursors?: unknown };
-    if (
-      candidate.type !== 'subscribe' ||
-      !candidate.cursors ||
-      typeof candidate.cursors !== 'object' ||
-      Array.isArray(candidate.cursors)
-    ) {
-      return undefined;
-    }
+    const parsed = subscribeFrameSchema.safeParse(JSON.parse(text) as unknown);
+    if (!parsed.success) return undefined;
+    const candidate = parsed.data;
     const entries = Object.entries(candidate.cursors);
     if (entries.length > maxSubscriptions) return undefined;
     if (
@@ -254,31 +246,33 @@ export const registerSocketHub = (
     ),
 ): void => {
   const hub = new SocketHub(options);
-  app.register(websocket);
-  app.get(
-    '/api/socket',
-    {
-      websocket: true,
-      preValidation: (request, reply, done) => {
-        if (
-          !isAllowedSocketUpgrade(
-            request.raw.socket.remoteAddress,
-            request.headers.origin,
-            options.originPolicy ?? options.servedOrigin,
-          )
-        ) {
-          void reply
-            .code(
-              options.originPolicy && !options.originPolicy.accepting
-                ? 503
-                : 403,
+  void app.register(async (scope) => {
+    await scope.register(websocket);
+    scope.get(
+      '/api/socket',
+      {
+        websocket: true,
+        preValidation: (request, reply, done) => {
+          if (
+            !isAllowedSocketUpgrade(
+              request.raw.socket.remoteAddress,
+              request.headers.origin,
+              options.originPolicy ?? options.servedOrigin,
             )
-            .send();
-          return;
-        }
-        done();
+          ) {
+            void reply
+              .code(
+                options.originPolicy && !options.originPolicy.accepting
+                  ? 503
+                  : 403,
+              )
+              .send();
+            return;
+          }
+          done();
+        },
       },
-    },
-    (socket) => hub.attach(socket as unknown as SocketConnection),
-  );
+      (socket) => hub.attach(socket as unknown as SocketConnection),
+    );
+  });
 };

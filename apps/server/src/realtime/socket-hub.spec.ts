@@ -51,7 +51,10 @@ class TestSocket {
   }
 
   subscribe(cursors: Record<string, number>): void {
-    this.emit('message', JSON.stringify({ type: 'subscribe', cursors }));
+    this.emit(
+      'message',
+      JSON.stringify({ protocolVersion: 1, type: 'subscribe', cursors }),
+    );
   }
 
   private emit(name: string, ...args: unknown[]): void {

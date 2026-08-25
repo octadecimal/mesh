@@ -13,12 +13,28 @@ describe('ResumeSessionDialog', () => {
         sessions={[
           {
             id: 'session-1',
+            projectId: 'project-1',
+            workspaceId: 'workspace-1',
             title: 'Investigate worktree',
             claudeResumeId: 'claude-session-1',
             lastPath: 'C:\\code\\mesh',
             applicationMatch: 'Matched Mesh session',
             permissionMode: 'interactive',
             workspaceType: 'worktree',
+          },
+        ]}
+        workspaces={[
+          {
+            id: 'workspace-1',
+            projectId: 'project-1',
+            path: 'C:\\code\\mesh',
+            type: 'worktree',
+          },
+          {
+            id: 'workspace-2',
+            projectId: 'project-1',
+            path: 'C:\\code\\mesh-alternate',
+            type: 'shared',
           },
         ]}
         onResume={(command) => commands.push(command)}
@@ -29,11 +45,23 @@ describe('ResumeSessionDialog', () => {
     expect(screen.getByText('C:\\code\\mesh')).toBeDefined();
     expect(screen.getByText('Matched Mesh session')).toBeDefined();
     expect(screen.queryByText(/still running|last prompt/i)).toBeNull();
+    await user.selectOptions(
+      screen.getByLabelText('Resume workspace'),
+      'workspace-2',
+    );
+    await user.selectOptions(
+      screen.getByLabelText('Resume permission mode'),
+      'safe_auto',
+    );
     await user.click(screen.getByRole('button', { name: 'Resume session' }));
 
     expect(commands).toContainEqual({
       type: 'session.resume',
-      payload: { sessionId: 'session-1' },
+      payload: {
+        sessionId: 'session-1',
+        workspaceId: 'workspace-2',
+        permissionMode: 'safe_auto',
+      },
     });
   });
 

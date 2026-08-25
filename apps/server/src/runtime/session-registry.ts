@@ -1,3 +1,5 @@
+import type { PermissionMode } from '@mesh-session-platform/contracts';
+
 import type { Database } from '../db/database.js';
 import type { ClaudeSessionDriver, DriverSession } from '../claude/driver.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
@@ -37,7 +39,16 @@ export class SessionRegistry {
     await this.attach(sessionId, 'create');
   }
 
-  async resume(sessionId: string): Promise<void> {
+  async resume(
+    sessionId: string,
+    configuration: { workspaceId: string; permissionMode: PermissionMode },
+  ): Promise<void> {
+    const configured = this.dependencies.sessions.configureResume(
+      sessionId,
+      configuration.workspaceId,
+      configuration.permissionMode,
+    );
+    if (!configured) throw { code: 'session_not_found', sessionId };
     await this.attach(sessionId, 'resume');
   }
 

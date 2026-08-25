@@ -47,7 +47,7 @@ export type DriverEvent =
       to: LifecycleState;
       reason?: string;
     }
-  | { kind: 'limit'; capability: string; message: string }
+  | { kind: 'limit'; capability: string; message: string; resetAt?: string }
   | { kind: 'malformed'; raw: unknown }
   | {
       kind: 'terminal_error';

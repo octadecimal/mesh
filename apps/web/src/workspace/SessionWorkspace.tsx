@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import {
   DockviewReact,
   type DockviewApi,
@@ -30,25 +30,33 @@ export {
   type SessionPanelParams,
 } from './layout-controller';
 
-function DockviewSessionPanel({
-  api,
-  params,
-  session,
-  workspace,
-  events,
-  panelApi,
-  auditAvailable,
-  promptDraft,
-  onPromptDraftChange,
-}: IDockviewPanelProps<SessionPanelParams> & {
-  session: Session;
-  workspace?: Workspace;
+type SessionWorkspaceContextValue = {
+  sessions: WorkspaceSession[];
+  workspaces: Workspace[];
   events: SessionEvent[];
   panelApi?: SessionPanelApi;
   auditAvailable: boolean;
-  promptDraft: string;
-  onPromptDraftChange: (value: string) => void;
-}) {
+  promptDrafts: Record<string, string>;
+  onPromptDraftChange?: (sessionId: string, value: string) => void;
+};
+
+const SessionWorkspaceContext = createContext<
+  SessionWorkspaceContextValue | undefined
+>(undefined);
+
+function DockviewSessionPanel({
+  api,
+  params,
+}: IDockviewPanelProps<SessionPanelParams>) {
+  const context = useContext(SessionWorkspaceContext);
+  if (!context) throw new Error('Session workspace context is unavailable');
+  const session = context.sessions.find(({ id }) => id === params.sessionId);
+  const panelSession = sessionForPanel(
+    session ?? {
+      id: params.sessionId,
+      title: api.title ?? params.sessionId,
+    },
+  );
   return (
     <section
       className="session-panel"
@@ -61,13 +69,19 @@ function DockviewSessionPanel({
         Close
       </button>
       <SessionPanel
-        session={session}
-        workspace={workspace}
-        events={events}
-        api={panelApi}
-        auditAvailable={auditAvailable}
-        promptDraft={promptDraft}
-        onPromptDraftChange={onPromptDraftChange}
+        session={panelSession}
+        workspace={context.workspaces.find(
+          (workspace) => workspace.id === panelSession.workspaceId,
+        )}
+        events={context.events.filter(
+          (event) => event.sessionId === params.sessionId,
+        )}
+        api={context.panelApi}
+        auditAvailable={context.auditAvailable}
+        promptDraft={context.promptDrafts[params.sessionId] ?? ''}
+        onPromptDraftChange={(value) =>
+          context.onPromptDraftChange?.(params.sessionId, value)
+        }
       />
     </section>
   );
@@ -126,45 +140,9 @@ export function SessionWorkspace({
   );
   const components = useMemo(
     () => ({
-      [SESSION_COMPONENT]: (props: IDockviewPanelProps<SessionPanelParams>) => {
-        const session = sessions.find(
-          ({ id }) => id === props.params.sessionId,
-        );
-        const panelSession = sessionForPanel(
-          session ?? {
-            id: props.params.sessionId,
-            title: props.api.title ?? props.params.sessionId,
-          },
-        );
-        return (
-          <DockviewSessionPanel
-            {...props}
-            session={panelSession}
-            workspace={workspaces.find(
-              (workspace) => workspace.id === panelSession.workspaceId,
-            )}
-            events={events.filter(
-              (event) => event.sessionId === props.params.sessionId,
-            )}
-            panelApi={panelApi}
-            auditAvailable={auditAvailable}
-            promptDraft={promptDrafts[props.params.sessionId] ?? ''}
-            onPromptDraftChange={(value) =>
-              onPromptDraftChange?.(props.params.sessionId, value)
-            }
-          />
-        );
-      },
+      [SESSION_COMPONENT]: DockviewSessionPanel,
     }),
-    [
-      sessions,
-      workspaces,
-      events,
-      panelApi,
-      auditAvailable,
-      promptDrafts,
-      onPromptDraftChange,
-    ],
+    [],
   );
 
   onSaveRef.current = onSaveLayout;
@@ -204,24 +182,36 @@ export function SessionWorkspace({
 
   return (
     <main className="session-workspace" aria-label="Session workspace">
-      <DockviewReact
-        className="dockview-theme-dark"
-        components={components}
-        onReady={({ api }) => {
-          apiRef.current = api;
-          restoringRef.current = true;
-          restoreSavedLayout(api, savedLayout, sessions, selectedSessionId);
-          restoredLayoutIdRef.current = savedLayout?.id;
-          restoringRef.current = false;
-
-          installTwoGroupPolicy(api);
-          api.onDidLayoutChange(() => scheduleSave(api));
-          api.onDidRemovePanel((panel) => {
-            if (!restoringRef.current) onCloseRef.current?.(panel.id);
-          });
-          scheduleSave(api);
+      <SessionWorkspaceContext.Provider
+        value={{
+          sessions,
+          workspaces,
+          events,
+          panelApi,
+          auditAvailable,
+          promptDrafts,
+          onPromptDraftChange,
         }}
-      />
+      >
+        <DockviewReact
+          className="dockview-theme-dark"
+          components={components}
+          onReady={({ api }) => {
+            apiRef.current = api;
+            restoringRef.current = true;
+            restoreSavedLayout(api, savedLayout, sessions, selectedSessionId);
+            restoredLayoutIdRef.current = savedLayout?.id;
+            restoringRef.current = false;
+
+            installTwoGroupPolicy(api);
+            api.onDidLayoutChange(() => scheduleSave(api));
+            api.onDidRemovePanel((panel) => {
+              if (!restoringRef.current) onCloseRef.current?.(panel.id);
+            });
+            scheduleSave(api);
+          }}
+        />
+      </SessionWorkspaceContext.Provider>
     </main>
   );
 }

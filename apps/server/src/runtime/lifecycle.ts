@@ -11,6 +11,7 @@ export type LifecycleTrigger =
   | { type: 'driver_completed' }
   | { type: 'driver_failed' }
   | { type: 'driver_crashed' }
+  | { type: 'subscription_limited' }
   | { type: 'recover' }
   | { type: 'archive' };
 
@@ -81,6 +82,12 @@ export const transition = (
         current === 'waiting_for_approval' ||
         current === 'interrupting'
         ? 'interrupted'
+        : invalid(current, trigger);
+    case 'subscription_limited':
+      return current === 'starting' ||
+        current === 'running' ||
+        current === 'waiting_for_approval'
+        ? 'failed'
         : invalid(current, trigger);
     case 'archive':
       return current === 'completed' ||

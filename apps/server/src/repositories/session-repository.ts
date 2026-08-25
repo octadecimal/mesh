@@ -1,4 +1,8 @@
-import { sessionSchema, type Session } from '@mesh-session-platform/contracts';
+import {
+  sessionSchema,
+  type PermissionMode,
+  type Session,
+} from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
 
@@ -33,6 +37,7 @@ export class SessionRepository {
   private readonly selectActiveByProject;
   private readonly selectAllByProject;
   private readonly archiveById;
+  private readonly configureResumeById;
   private readonly deleteById;
 
   constructor(private readonly database: Database) {
@@ -54,6 +59,9 @@ export class SessionRepository {
     );
     this.archiveById = database.prepare(
       "UPDATE sessions SET lifecycle_state = 'archived', updated_at = ? WHERE id = ?",
+    );
+    this.configureResumeById = database.prepare(
+      'UPDATE sessions SET workspace_id = ?, permission_mode = ?, updated_at = ? WHERE id = ?',
     );
     this.deleteById = database.prepare('DELETE FROM sessions WHERE id = ?');
   }
@@ -81,6 +89,20 @@ export class SessionRepository {
 
   archive(id: string): Session | undefined {
     this.archiveById.run(new Date().toISOString(), id);
+    return this.get(id);
+  }
+
+  configureResume(
+    id: string,
+    workspaceId: string,
+    permissionMode: PermissionMode,
+  ): Session | undefined {
+    this.configureResumeById.run(
+      workspaceId,
+      permissionMode,
+      new Date().toISOString(),
+      id,
+    );
     return this.get(id);
   }
 
