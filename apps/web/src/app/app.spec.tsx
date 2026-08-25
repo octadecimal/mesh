@@ -30,6 +30,32 @@ describe('App', () => {
     );
   });
 
+  it('keeps new session open when creation warns about a shared workspace collision', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    const api = createApi();
+    api.command.mockImplementation((command) => Promise.resolve({
+      protocolVersion: 1,
+      commandType: command.type,
+      result: {},
+      warnings: command.type === 'session.create'
+        ? [{ code: 'shared_workspace_collision', message: 'This shared folder is already used by Session A.' }]
+        : [],
+    }));
+    render(<App store={store} api={api} />);
+
+    await user.click(screen.getByRole('button', { name: 'New session' }));
+    await user.selectOptions(screen.getByLabelText('Project'), 'p1');
+    await user.type(screen.getByLabelText('Shared folder path'), '/mesh');
+    await user.selectOptions(screen.getByLabelText('Permission mode'), 'interactive');
+    await user.click(screen.getByRole('button', { name: 'Create session' }));
+
+    await waitFor(() => expect(screen.getByText('This shared folder is already used by Session A.')).toBeDefined());
+    expect(screen.getByRole('dialog', { name: 'New session' })).toBeDefined();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull());
+  });
+
   it('persists real Dockview JSON through MeshApi with Hookstate selection and sidebar state', async () => {
     const user = userEvent.setup();
     const store = createMeshStore(snapshot);

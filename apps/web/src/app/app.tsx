@@ -112,7 +112,7 @@ function ConnectedApp({
       const warning = response?.warnings.find((candidate) => /collision|shared/i.test(candidate.code));
       setCollisionWarning(warning?.message);
       setFlowError(undefined);
-      if (command.type === 'session.create') setNewSessionOpen(false);
+      if (command.type === 'session.create' && !warning) setNewSessionOpen(false);
       if (command.type === 'session.resume') setResumeSessionOpen(false);
     }).catch((caught: unknown) => {
       const failure = caught as { code?: string; message?: string };
