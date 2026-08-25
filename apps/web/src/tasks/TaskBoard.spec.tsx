@@ -55,15 +55,25 @@ describe('TaskBoard', () => {
 
     expect(screen.queryByText('Finished task')).toBeNull();
     expect(screen.queryByText('Cancelled task')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Show active tasks' }),
+    ).toHaveAttribute('aria-pressed', 'true');
 
-    await user.click(screen.getByRole('tab', { name: 'Completed 1' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Show completed tasks' }),
+    );
     expect(
       screen.getByRole('region', { name: 'Completed tasks' }),
     ).toBeDefined();
     expect(screen.getByText('Finished task')).toBeDefined();
     expect(screen.queryByRole('region', { name: 'Backlog tasks' })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Show completed tasks' }),
+    ).toHaveAttribute('aria-pressed', 'true');
 
-    await user.click(screen.getByRole('tab', { name: 'Cancelled 1' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Show cancelled tasks' }),
+    );
     expect(
       screen.getByRole('region', { name: 'Cancelled tasks' }),
     ).toBeDefined();
@@ -215,6 +225,114 @@ describe('TaskBoard', () => {
         'First task',
       ),
     ).toBeDefined();
+  });
+
+  it('settles a move on any newer authoritative revision and reports a conflict', async () => {
+    const command = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(command.promise);
+    const user = userEvent.setup();
+    const rendered = render(
+      <TaskBoard
+        project={project}
+        projection={boardProjection()}
+        onCommand={onCommand}
+      />,
+    );
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Move First task to' }),
+      'ready',
+    );
+    rendered.rerender(
+      <TaskBoard
+        project={project}
+        projection={boardProjection([
+          task({
+            id: 'first',
+            title: 'First task',
+            rank: 'a',
+            lifecycleState: 'in_progress',
+            revision: 2,
+          }),
+        ])}
+        onCommand={onCommand}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('article', { name: 'First task task card' }),
+      ).not.toHaveAttribute('data-pending'),
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Task changed before the requested move was applied.',
+    );
+    expect(
+      within(
+        screen.getByRole('region', { name: 'In progress tasks' }),
+      ).getByText('First task'),
+    ).toBeDefined();
+
+    await act(async () => command.resolve({}));
+  });
+
+  it('ignores a delayed rejection after a newer move starts', async () => {
+    const firstCommand = deferred<unknown>();
+    const secondCommand = deferred<unknown>();
+    const onCommand = vi
+      .fn()
+      .mockReturnValueOnce(firstCommand.promise)
+      .mockReturnValueOnce(secondCommand.promise);
+    const user = userEvent.setup();
+    const rendered = render(
+      <TaskBoard
+        project={project}
+        projection={boardProjection()}
+        onCommand={onCommand}
+      />,
+    );
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Move First task to' }),
+      'ready',
+    );
+    rendered.rerender(
+      <TaskBoard
+        project={project}
+        projection={boardProjection([
+          task({
+            id: 'first',
+            title: 'First task',
+            rank: 'a',
+            lifecycleState: 'ready',
+            revision: 2,
+          }),
+        ])}
+        onCommand={onCommand}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole('article', { name: 'First task task card' }),
+      ).not.toHaveAttribute('data-pending'),
+    );
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Move First task to' }),
+      'in_progress',
+    );
+    expect(
+      screen.getByRole('article', { name: 'First task task card' }),
+    ).toHaveAttribute('data-pending', 'true');
+
+    await act(async () => firstCommand.reject(new Error('Old move rejected')));
+
+    expect(
+      screen.getByRole('article', { name: 'First task task card' }),
+    ).toHaveAttribute('data-pending', 'true');
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    await act(async () => secondCommand.resolve({}));
   });
 
   it('restores interaction at the unchanged canonical location after rejection', async () => {

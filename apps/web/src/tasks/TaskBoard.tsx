@@ -5,7 +5,7 @@ import {
   type Task,
   type TaskLifecycleState,
 } from '@mesh-session-platform/contracts';
-import { useEffect, useMemo, useState, type DragEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 
 import type { MeshProjection } from '../state/reducer';
 import {
@@ -25,11 +25,21 @@ type TaskBoardProps = {
 type BoardView = 'active' | 'done' | 'cancelled';
 type PendingMove =
   | {
+      id: number;
       kind: 'transition';
       sourceRevision: number;
       nextState: TaskLifecycleState;
     }
-  | { kind: 'reorder'; sourceRevision: number; sourceRank: string };
+  | {
+      id: number;
+      kind: 'reorder';
+      sourceRevision: number;
+      nextState: TaskLifecycleState;
+      nextRank: string;
+    };
+type PendingMoveInput =
+  | Omit<Extract<PendingMove, { kind: 'transition' }>, 'id'>
+  | Omit<Extract<PendingMove, { kind: 'reorder' }>, 'id'>;
 
 const operator = taskActorSchema.parse({
   type: 'human',
@@ -90,6 +100,8 @@ export function TaskBoard({
     {},
   );
   const [moveErrors, setMoveErrors] = useState<Record<string, string>>({});
+  const moveSequence = useRef(0);
+  const activeMoveIds = useRef<Record<string, number>>({});
   const columns = selectBoardTasks(projection, project.id);
   const readOnly = Boolean(project.archivedAt);
   const terminalTasks = useMemo(() => {
@@ -107,33 +119,54 @@ export function TaskBoard({
   }, [project.id, projection.tasksById]);
 
   useEffect(() => {
-    const completed = Object.entries(pendingMoves).filter(([taskId, move]) => {
+    const settled = Object.entries(pendingMoves).filter(([taskId, move]) => {
       const task = projection.tasksById[taskId];
-      if (!task || task.revision <= move.sourceRevision) return false;
-      return move.kind === 'transition'
-        ? task.lifecycleState === move.nextState
-        : task.rank !== move.sourceRank;
+      return Boolean(task && task.revision > move.sourceRevision);
     });
-    if (completed.length === 0) return;
+    if (settled.length === 0) return;
+    const conflicts: string[] = [];
+    for (const [taskId, move] of settled) {
+      if (activeMoveIds.current[taskId] !== move.id) continue;
+      delete activeMoveIds.current[taskId];
+      const task = projection.tasksById[taskId];
+      const matches =
+        task?.lifecycleState === move.nextState &&
+        (move.kind === 'transition' || task.rank === move.nextRank);
+      if (!matches) conflicts.push(taskId);
+    }
     setPendingMoves((current) => {
       const next = { ...current };
-      for (const [taskId] of completed) delete next[taskId];
+      for (const [taskId, move] of settled) {
+        if (next[taskId]?.id === move.id) delete next[taskId];
+      }
       return next;
     });
+    if (conflicts.length > 0) {
+      setMoveErrors((current) => {
+        const next = { ...current };
+        for (const taskId of conflicts) {
+          next[taskId] =
+            'Task changed before the requested move was applied.';
+        }
+        return next;
+      });
+    }
   }, [pendingMoves, projection.tasksById]);
 
   const submitMove = (
     task: Task,
     command: MutatingCommand,
-    move: PendingMove,
+    move: PendingMoveInput,
   ) => {
     if (readOnly || pendingMoves[task.id]) return;
+    const pendingMove = { ...move, id: ++moveSequence.current } as PendingMove;
+    activeMoveIds.current[task.id] = pendingMove.id;
     setMoveErrors((current) => {
       const next = { ...current };
       delete next[task.id];
       return next;
     });
-    setPendingMoves((current) => ({ ...current, [task.id]: move }));
+    setPendingMoves((current) => ({ ...current, [task.id]: pendingMove }));
     let result: Promise<unknown>;
     try {
       result = Promise.resolve(onCommand(command));
@@ -141,7 +174,10 @@ export function TaskBoard({
       result = Promise.reject(caught);
     }
     void result.catch((caught: unknown) => {
+      if (activeMoveIds.current[task.id] !== pendingMove.id) return;
+      delete activeMoveIds.current[task.id];
       setPendingMoves((current) => {
+        if (current[task.id]?.id !== pendingMove.id) return current;
         const next = { ...current };
         delete next[task.id];
         return next;
@@ -174,7 +210,8 @@ export function TaskBoard({
         {
           kind: 'reorder',
           sourceRevision: task.revision,
-          sourceRank: task.rank,
+          nextState: task.lifecycleState,
+          nextRank: targetRank,
         },
       );
       return;
@@ -257,31 +294,27 @@ export function TaskBoard({
   return (
     <div className="task-board" data-read-only={readOnly ? 'true' : undefined}>
       <div className="task-board-toolbar">
-        <div
-          className="task-board-tabs"
-          role="tablist"
-          aria-label="Task filters"
-        >
+        <div className="task-board-tabs" role="group" aria-label="Task filters">
           <button
             type="button"
-            role="tab"
-            aria-selected={view === 'active'}
+            aria-label="Show active tasks"
+            aria-pressed={view === 'active'}
             onClick={() => setView('active')}
           >
             Active
           </button>
           <button
             type="button"
-            role="tab"
-            aria-selected={view === 'done'}
+            aria-label="Show completed tasks"
+            aria-pressed={view === 'done'}
             onClick={() => setView('done')}
           >
             Completed {terminalTasks.done.length}
           </button>
           <button
             type="button"
-            role="tab"
-            aria-selected={view === 'cancelled'}
+            aria-label="Show cancelled tasks"
+            aria-pressed={view === 'cancelled'}
             onClick={() => setView('cancelled')}
           >
             Cancelled {terminalTasks.cancelled.length}
