@@ -37,7 +37,10 @@ export function SessionPanel({
   const send: CommandSender = (command, idempotencyKey) =>
     api ? api.command(command, idempotencyKey) : unavailable();
   return (
-    <section className="session-panel" aria-label={`${session.title} panel`}>
+    <section
+      className="session-panel-content"
+      aria-label={`${session.title} panel`}
+    >
       <SessionHeader session={session} workspace={workspace} />
       <Transcript
         events={events}

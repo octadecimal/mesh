@@ -21,7 +21,7 @@ export function SessionActions({
     }
   };
   return (
-    <section aria-label="Session actions">
+    <section className="session-actions" aria-label="Session actions">
       <button
         disabled={busy}
         onClick={() =>

@@ -63,6 +63,7 @@ function DockviewSessionPanel({
       aria-label={`Session ${params.sessionId} panel`}
     >
       <button
+        className="panel-close"
         aria-label={`Close ${api.title ?? params.sessionId} panel`}
         onClick={() => api.close()}
       >

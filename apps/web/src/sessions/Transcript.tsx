@@ -32,7 +32,7 @@ export function Transcript({
     if (event.type === 'tool.completed')
       completed.add(event.payload.toolCallId);
   return (
-    <section aria-label="Session transcript">
+    <section className="transcript" aria-label="Session transcript">
       <h3>Transcript</h3>
       {events.map((event) =>
         event.type === 'tool.requested' &&

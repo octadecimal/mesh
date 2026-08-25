@@ -45,9 +45,15 @@ export function RawDiagnostics({
       void fetchPage({ limit: PAGE_SIZE }, false);
   };
   return (
-    <Collapsible.Root open={open} onOpenChange={onOpenChange}>
+    <Collapsible.Root
+      className="raw-diagnostics"
+      open={open}
+      onOpenChange={onOpenChange}
+    >
       <Collapsible.Trigger asChild>
-        <button aria-expanded={open}>Raw diagnostics</button>
+        <button className="button button-ghost" aria-expanded={open}>
+          Raw diagnostics
+        </button>
       </Collapsible.Trigger>
       <Collapsible.Content aria-label="Raw diagnostics content">
         {error ? <p role="alert">{error}</p> : null}

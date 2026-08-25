@@ -43,7 +43,11 @@ export function PromptComposer({
     }
   };
   return (
-    <form onSubmit={(event) => void submit(event)} aria-label="Prompt composer">
+    <form
+      className="prompt-composer"
+      onSubmit={(event) => void submit(event)}
+      aria-label="Prompt composer"
+    >
       <label>
         Prompt
         <textarea
@@ -56,7 +60,11 @@ export function PromptComposer({
           Prompting is unavailable until the permission audit is available.
         </p>
       ) : null}
-      <button type="submit" disabled={disabled}>
+      <button
+        className="button button-primary"
+        type="submit"
+        disabled={disabled}
+      >
         Send prompt
       </button>
     </form>

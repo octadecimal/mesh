@@ -184,6 +184,12 @@ test('creates shared and worktree sessions with the production-built server', as
   await expect(
     page.getByText('Created after the socket connected'),
   ).toBeVisible();
+  const activePanel = page.locator('.session-panel-content');
+  await expect(activePanel).toBeVisible();
+  await expect(activePanel).toHaveScreenshot('active-session-panel.png', {
+    animations: 'disabled',
+    mask: [activePanel.locator('.session-header dd').first()],
+  });
 
   await createThroughUi(page, harness, 'Worktree acceptance', 'worktree');
   const snapshot = await harness.snapshot();

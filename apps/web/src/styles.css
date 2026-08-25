@@ -480,53 +480,249 @@ textarea:focus-visible {
 }
 
 .session-panel {
+  position: relative;
   min-height: 18rem;
-  padding: 1rem;
+  height: 100%;
+  overflow: hidden;
+  padding: 0;
   background: var(--panel);
 }
-.session-panel > .session-panel {
-  display: grid;
-  grid-template-rows: auto minmax(8rem, 1fr) auto auto auto;
-  height: 100%;
-  gap: 0.75rem;
-  padding: 0;
+.panel-close {
+  position: absolute;
+  z-index: 4;
+  top: 0.65rem;
+  right: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.35rem 0.58rem;
+  color: var(--muted);
+  background: #0d131c;
+  font-size: 0.72rem;
 }
-.session-panel h2,
-.session-panel h3 {
+.panel-close:hover {
+  color: var(--text);
+  border-color: var(--strong);
+}
+.session-panel-content {
+  display: grid;
+  grid-template-rows: auto minmax(10rem, 1fr) auto auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: #0d1219;
+}
+.session-header {
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 4.5rem 0.9rem 1rem;
+  background: linear-gradient(180deg, #171e29, #121821);
+}
+.session-header h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+}
+.session-header dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem 1.6rem;
   margin: 0;
 }
-.session-panel p {
+.session-header dl div {
+  display: grid;
+  gap: 0.12rem;
+}
+.session-header dt {
+  color: var(--subtle);
+  font-size: 0.59rem;
+  font-weight: 750;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.session-header dd {
+  max-width: 30rem;
+  overflow: hidden;
+  margin: 0;
+  color: #c8d2df;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-header dd[aria-live] {
+  color: var(--success);
+}
+.session-panel-content h2,
+.session-panel-content h3 {
+  margin: 0;
+}
+.session-panel-content p {
   color: var(--muted);
 }
-.session-panel form {
-  display: grid;
-  gap: 0.5rem;
-  border-top: 1px solid var(--border);
-  padding-top: 0.75rem;
+.transcript {
+  min-height: 0;
+  overflow: auto;
+  padding: 1rem;
 }
-.session-panel form label {
+.transcript > h3 {
+  position: sticky;
+  z-index: 2;
+  top: -1rem;
+  margin: -1rem -1rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.7rem 1rem;
+  color: var(--muted);
+  background: #0d1219ed;
+  backdrop-filter: blur(8px);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.transcript-item {
+  max-width: min(52rem, 88%);
+  margin: 0.65rem 0;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  padding: 0.7rem 0.8rem;
+  background: var(--raised);
+  box-shadow: 0 4px 16px #0002;
+}
+.transcript-item strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: #dce6f5;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.transcript-item p {
+  margin: 0;
+  color: #c1cddd;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.transcript-user {
+  margin-left: auto;
+  background: #152540;
+  border-color: #294d82;
+}
+.transcript-assistant {
+  margin-right: auto;
+}
+.transcript-status,
+.transcript-audit,
+.transcript-diagnostic {
+  max-width: 100%;
+  border-style: dashed;
+  background: #101720;
+}
+.transcript-status strong,
+.transcript-audit strong {
+  color: #88a7d8;
+}
+.transcript-error {
+  max-width: 100%;
+  background: #29141b;
+  border-color: #713044;
+}
+.transcript-error strong {
+  color: #fda4af;
+}
+.transcript-tool details {
+  margin-top: 0.45rem;
+}
+.transcript-tool summary {
+  cursor: pointer;
+  color: #9ab6df;
+  font-size: 0.76rem;
+}
+.transcript-tool pre,
+.raw-diagnostics pre,
+.permission-card pre {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.65rem;
+  color: #bdc9d9;
+  background: #080c12;
+  font:
+    0.72rem/1.5 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+}
+.permission-card {
+  max-width: 100%;
+  border: 1px solid #765313;
+  border-radius: 0.55rem;
+  padding: 0.8rem;
+  background: #2a210f;
+}
+.permission-card > div {
+  display: flex;
+  gap: 0.5rem;
+}
+.raw-diagnostics {
+  border-top: 1px solid var(--border);
+  padding: 0.6rem 1rem;
+  background: #10161f;
+}
+.raw-diagnostics > button {
+  min-height: 1.9rem;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.7rem;
+}
+.prompt-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  border-top: 1px solid var(--border);
+  padding: 0.8rem 1rem;
+  background: #111722;
+}
+.prompt-composer label {
   display: grid;
   gap: 0.35rem;
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.68rem;
   font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
-.session-panel textarea {
-  min-height: 5.5rem;
+.prompt-composer textarea {
+  min-height: 3.2rem;
+  max-height: 12rem;
   resize: vertical;
 }
-.session-panel form button,
-.session-panel > button {
-  justify-self: end;
-  border: 1px solid var(--strong);
-  border-radius: 0.4rem;
-  padding: 0.42rem 0.7rem;
-  background: var(--raised);
+.prompt-composer > button {
+  align-self: end;
 }
-.session-panel form button[type='submit'] {
-  color: white;
-  background: var(--accent);
-  border-color: #3b74e7;
+.prompt-composer > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.75rem;
+}
+.session-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  border-top: 1px solid var(--border);
+  padding: 0.55rem 1rem;
+  background: #0d1219;
+}
+.session-actions > button {
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.38rem 0.62rem;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.7rem;
+}
+.session-actions > button:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+.session-actions > button:last-of-type {
+  color: #fda4af;
 }
 .dockview-theme-dark {
   --dv-background-color: #0d1219;

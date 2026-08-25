@@ -26,21 +26,30 @@ export function TranscriptItem({
   switch (event.type) {
     case 'message.user':
       return (
-        <article aria-label="User message">
+        <article
+          className="transcript-item transcript-user"
+          aria-label="User message"
+        >
           <strong>User</strong>
           <p>{event.payload.text}</p>
         </article>
       );
     case 'message.assistant':
       return (
-        <article aria-label="Assistant message">
+        <article
+          className="transcript-item transcript-assistant"
+          aria-label="Assistant message"
+        >
           <strong>Assistant</strong>
           <p>{event.payload.text}</p>
         </article>
       );
     case 'tool.requested':
       return (
-        <article aria-label={`Tool request ${event.payload.name}`}>
+        <article
+          className="transcript-item transcript-tool"
+          aria-label={`Tool request ${event.payload.name}`}
+        >
           <strong>Tool request: {event.payload.name}</strong>
           <details>
             <summary>Tool input</summary>
@@ -51,6 +60,7 @@ export function TranscriptItem({
     case 'tool.completed':
       return (
         <article
+          className="transcript-item transcript-tool"
           aria-label={`Tool call ${toolRequest?.payload.name ?? event.payload.toolCallId}`}
         >
           <strong>
@@ -82,7 +92,10 @@ export function TranscriptItem({
       );
     case 'permission.resolved':
       return (
-        <article aria-label="Permission audit">
+        <article
+          className="transcript-item transcript-audit"
+          aria-label="Permission audit"
+        >
           <strong>Permission audit</strong>
           <p>
             {event.payload.permissionId}: {event.payload.decision}
@@ -91,7 +104,10 @@ export function TranscriptItem({
       );
     case 'session.status':
       return (
-        <article aria-label="Session status">
+        <article
+          className="transcript-item transcript-status"
+          aria-label="Session status"
+        >
           <strong>Status</strong>
           <p>
             {event.payload.from} → {event.payload.to}
@@ -101,14 +117,23 @@ export function TranscriptItem({
       );
     case 'session.error':
       return (
-        <article role="alert" aria-label="Session error">
+        <article
+          className="transcript-item transcript-error"
+          role="alert"
+          aria-label="Session error"
+        >
           <strong>{event.payload.code}</strong>
           <p>{event.payload.message}</p>
         </article>
       );
     case 'diagnostic.recorded':
       return (
-        <article aria-label="Diagnostic indicator">Diagnostic recorded</article>
+        <article
+          className="transcript-item transcript-diagnostic"
+          aria-label="Diagnostic indicator"
+        >
+          Diagnostic recorded
+        </article>
       );
     default:
       return exhaustive(event);
