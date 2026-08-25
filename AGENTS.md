@@ -64,6 +64,32 @@ This server runs the **front door** surface: three tools reach every jCodeMunch 
 
 **Announce your model once per session** so the server can size its answers: `announce_model { "model": "<your-model-id>" }`.
 
+## Doc Exploration Policy
+
+Always use jDocMunch-MCP tools for documentation navigation. Never fall back to Read for doc exploration.
+**Exception:** Use `Read` when you need exact line numbers for `Edit`.
+
+**Start any session:**
+
+1. `doc_list_repos` — check what's indexed. If your docs aren't there: `index_local { "path": "." }`
+
+**Finding content:**
+
+- keyword/topic search -> `search_sections` (returns summaries only)
+- browse structure -> `get_toc` (flat) or `get_toc_tree` (nested)
+- single document -> `get_document_outline`
+
+**Reading content:**
+
+- one section -> `get_section` (full content via byte-range)
+- multiple sections -> `get_sections` (batch)
+- section + context -> `get_section_context` (ancestors + children)
+
+**Maintenance:**
+
+- broken internal links -> `get_broken_links`
+- code/doc coverage gap -> `get_doc_coverage`
+
 ## Testing Policy
 
 `corepack pnpm test` and `corepack pnpm e2e` use deterministic test drivers and
