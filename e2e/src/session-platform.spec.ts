@@ -61,6 +61,23 @@ const waitForHistory = async (
     .toBe(true);
 };
 
+const expectTwoGroupLayout = async (page: Page) => {
+  const groups = page.locator('.dv-groupview');
+  await expect(groups).toHaveCount(2);
+
+  const firstSessionGroup = groups.filter({
+    has: page.getByRole('tab', { name: 'First session' }),
+  });
+  const secondSessionGroup = groups.filter({
+    has: page.getByRole('tab', { name: 'Second session' }),
+  });
+  await expect(firstSessionGroup).toBeVisible();
+  await expect(secondSessionGroup).toBeVisible();
+  await expect(
+    secondSessionGroup.getByRole('tab', { name: 'Third session' }),
+  ).toBeVisible();
+};
+
 test('creates shared and worktree sessions with the production-built server', async ({
   page,
   harness,
@@ -97,7 +114,7 @@ test('restores tabs without duplicate events and renders tools plus raw diagnost
 }) => {
   const firstId = await createThroughApi(harness, 'First session');
   const secondId = await createThroughApi(harness, 'Second session');
-  await createThroughApi(harness, 'Third session');
+  const thirdId = await createThroughApi(harness, 'Third session');
   await harness.waitForCreated(3);
 
   const session = harness.driver.createdSessions[0];
@@ -125,18 +142,43 @@ test('restores tabs without duplicate events and renders tools plus raw diagnost
   );
 
   await page.goto(harness.origin);
-  for (const title of ['First session', 'Second session', 'Third session']) {
-    await page.getByRole('button', { name: new RegExp(title) }).click();
-  }
-  await expect(page.getByRole('tab', { name: 'Third session' })).toBeVisible();
-  expect(await page.locator('.dv-groupview').count()).toBeLessThanOrEqual(2);
+  const sessionSidebar = page.getByRole('complementary', { name: 'Sessions' });
+  await sessionSidebar.getByRole('button', { name: /First session/ }).click();
+  await sessionSidebar.getByRole('button', { name: /Second session/ }).click();
+  const firstGroup = page.locator('.dv-groupview');
+  const firstGroupBox = await firstGroup.boundingBox();
+  if (!firstGroupBox) throw new Error('Dockview group is not visible');
+  await page.getByRole('tab', { name: 'Second session' }).dragTo(firstGroup, {
+    targetPosition: {
+      x: firstGroupBox.width - 8,
+      y: firstGroupBox.height / 2,
+    },
+  });
+  await expect(page.locator('.dv-groupview')).toHaveCount(2);
 
-  await page.getByRole('button', { name: /First session/ }).click();
+  await sessionSidebar.getByRole('button', { name: /Third session/ }).click();
+  await expectTwoGroupLayout(page);
+
+  await expect
+    .poll(async () => {
+      const snapshot = await harness.snapshot();
+      return snapshot.layouts.some((layout) =>
+        [firstId, secondId, thirdId].every((id) =>
+          layout.visiblePanels.includes(id),
+        ),
+      );
+    })
+    .toBe(true);
+
+  await sessionSidebar.getByRole('button', { name: /First session/ }).click();
   await expect(
     page.getByLabel('Assistant message', { exact: true }),
   ).toHaveCount(1);
   await expect(page.getByLabel('Tool call Read')).toContainText('fixture');
-  await page.getByRole('button', { name: 'Raw diagnostics' }).click();
+  await page
+    .getByLabel(`Session ${firstId}`)
+    .getByRole('button', { name: 'Raw diagnostics' })
+    .click();
   await expect(
     page
       .getByLabel(/Diagnostic diagnostic-/)
@@ -147,6 +189,7 @@ test('restores tabs without duplicate events and renders tools plus raw diagnost
     `${harness.origin}/api/sessions/${firstId}/events`,
   ).then((response) => response.json())) as { events: any[] };
   await page.reload();
+  await expectTwoGroupLayout(page);
   const afterRefresh = (await fetch(
     `${harness.origin}/api/sessions/${firstId}/events`,
   ).then((response) => response.json())) as { events: any[] };
@@ -158,7 +201,7 @@ test('restores tabs without duplicate events and renders tools plus raw diagnost
     ),
   ).toHaveLength(1);
 
-  await page.getByRole('button', { name: /First session/ }).click();
+  await sessionSidebar.getByRole('button', { name: /First session/ }).click();
   await page.getByRole('button', { name: /Close First session panel/ }).click();
   expect(session.interrupted).toBe(false);
   expect(secondId).toBeTruthy();
