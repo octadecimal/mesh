@@ -29,6 +29,7 @@ import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
+import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
 import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { recoverInterruptedSessions } from './runtime/recovery.js';
 import { SessionRegistry } from './runtime/session-registry.js';
@@ -154,6 +155,7 @@ export const startServer = async (
   recoverInterruptedSessions(database);
 
   const projects = new ProjectRepository(database);
+  const attempts = new TaskAttemptRepository(database);
   const workspaces = new WorkspaceRepository(database);
   const sessions = new SessionRepository(database);
   const diagnostics = new DiagnosticRepository(database);
@@ -178,6 +180,7 @@ export const startServer = async (
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
     projects,
+    attempts,
     workspaces,
     sessions,
     diagnostics,

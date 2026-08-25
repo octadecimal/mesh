@@ -118,7 +118,7 @@ describe('HTTP command routes', () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
   });
 
-  it('bootstraps the configured workspace as a project on fresh install', async () => {
+  it('does not persist a project while discovering a fresh workspace', async () => {
     const fixture = setup({
       createId: () => 'project-fresh',
       seedProject: false,
@@ -140,13 +140,11 @@ describe('HTTP command routes', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json().result.projects).toEqual([
-      expect.objectContaining({
-        id: 'project-fresh',
-        repositoryPath: fixture.workspacePath,
-      }),
-    ]);
-    expect(fixture.repositories.projects.get('project-fresh')).toBeDefined();
+    expect(response.json().result).toEqual({
+      projects: [],
+      suggestions: [],
+    });
+    expect(fixture.repositories.projects.get('project-fresh')).toBeUndefined();
   });
 
   it('returns the original response for a repeated idempotency key', async () => {

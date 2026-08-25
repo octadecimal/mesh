@@ -27,8 +27,10 @@ import type { EventRepository } from '../repositories/event-repository.js';
 import type { LayoutRepository } from '../repositories/layout-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
+import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
+import { resolveRepositoryIdentity } from '../projects/repository-identity.js';
 import { CommandError } from './errors.js';
 
 const commandResponseSchema = z.object({
@@ -44,6 +46,7 @@ export type CommandResponse = z.infer<typeof commandResponseSchema>;
 
 export interface CommandDependencies {
   projects: ProjectRepository;
+  attempts: Pick<TaskAttemptRepository, 'getCurrentBySession'>;
   workspaces: WorkspaceRepository;
   sessions: SessionRepository;
   events: EventRepository;
@@ -163,48 +166,175 @@ const discoverSessions = async (
 
 const discoverProjects = async (dependencies: CommandDependencies) => {
   const known = dependencies.projects.list();
-  if (known.length > 0 || !dependencies.pathOptions) return known;
+  if (!dependencies.pathOptions) return { projects: known, suggestions: [] };
 
   const baseDirectory = await resolveWorkspacePath(
     dependencies.pathOptions.baseDirectory,
     dependencies.pathOptions,
   );
   const entries = await readdir(baseDirectory, { withFileTypes: true });
-  let repositoryPath = baseDirectory;
-  for (const entry of entries.sort((left, right) =>
-    left.name.localeCompare(right.name),
-  )) {
-    if (!entry.isDirectory()) continue;
-    const candidate = join(baseDirectory, entry.name);
+  const candidates = [
+    baseDirectory,
+    ...entries
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(baseDirectory, entry.name)),
+  ];
+  const suggestions: Array<{ displayName: string; repositoryPath: string }> =
+    [];
+  for (const candidate of candidates) {
     try {
       const marker = await stat(join(candidate, '.git'));
       if (marker.isDirectory() || marker.isFile()) {
-        repositoryPath = await resolveWorkspacePath(
+        const repositoryPath = await resolveWorkspacePath(
           candidate,
           dependencies.pathOptions,
         );
-        break;
+        suggestions.push({
+          displayName: basename(repositoryPath) || 'Mesh workspace',
+          repositoryPath,
+        });
       }
     } catch {
       // Not a Git repository candidate.
     }
   }
-  const project = projectSchema.parse({
-    id: (dependencies.createId ?? randomUUID)(),
-    displayName: basename(repositoryPath) || 'Mesh workspace',
-    repositoryPath,
-    discoveredAt: (dependencies.now ?? (() => new Date().toISOString()))(),
-    discoveryMetadata: { source: 'workspace_root' },
-  });
-  dependencies.projects.create(project);
-  return [project];
+  return { projects: known, suggestions };
 };
+
+const requireActiveProject = (
+  dependencies: CommandDependencies,
+  id: string,
+) => {
+  const project = requireProject(dependencies, id);
+  if (project.archivedAt) {
+    throw new CommandError('project_archived', `Project '${id}' is archived`, {
+      project,
+    });
+  }
+  return project;
+};
+
+const updateProject = (
+  dependencies: CommandDependencies,
+  project: ReturnType<typeof requireProject>,
+  expectedRevision: number,
+  patch: Partial<
+    Pick<ReturnType<typeof requireProject>, 'displayName' | 'archivedAt'>
+  >,
+) => {
+  const now = (dependencies.now ?? (() => new Date().toISOString()))();
+  const updated = dependencies.projects.update(
+    { ...project, ...patch, updatedAt: now },
+    expectedRevision,
+  );
+  if (updated) return updated;
+  throw new CommandError(
+    'task_revision_conflict',
+    `Project '${project.id}' has changed`,
+    { project: dependencies.projects.get(project.id) },
+  );
+};
+
+const hasRunningTaskAttempt = (
+  dependencies: CommandDependencies,
+  projectId: string,
+) =>
+  dependencies.sessions
+    .listByProject(projectId, { includeArchived: true })
+    .some(
+      (session) =>
+        isLive(session) &&
+        dependencies.attempts.getCurrentBySession(session.id),
+    );
 
 const executeMutation = async (
   command: Extract<Command, { idempotencyKey: string }>['command'],
   dependencies: CommandDependencies,
 ): Promise<CommandResponse> => {
   switch (command.type) {
+    case 'project.import': {
+      if (!dependencies.pathOptions) {
+        throw new CommandError(
+          'repository_invalid',
+          'Workspace path configuration is unavailable',
+        );
+      }
+      const identity = await resolveRepositoryIdentity(
+        command.payload.repositoryPath,
+        dependencies.pathOptions,
+      );
+      const existing = dependencies.projects.getByRepositoryIdentity(
+        identity.repositoryIdentity,
+      );
+      if (existing) {
+        throw new CommandError(
+          'repository_already_imported',
+          'This Git repository is already imported',
+          { project: existing },
+        );
+      }
+      const now = (dependencies.now ?? (() => new Date().toISOString()))();
+      return response(
+        command.type,
+        dependencies.projects.create(
+          projectSchema.parse({
+            id: (dependencies.createId ?? randomUUID)(),
+            displayName:
+              command.payload.displayName ??
+              basename(identity.canonicalPath) ??
+              'Git repository',
+            repositoryPath: identity.canonicalPath,
+            repositoryIdentity: identity.repositoryIdentity,
+            discoveredAt: now,
+            discoveryMetadata: { source: 'explicit_import' },
+            createdAt: now,
+            updatedAt: now,
+          }),
+        ),
+      );
+    }
+    case 'project.rename': {
+      const project = requireActiveProject(
+        dependencies,
+        command.payload.projectId,
+      );
+      return response(
+        command.type,
+        updateProject(dependencies, project, command.payload.expectedRevision, {
+          displayName: command.payload.displayName,
+        }),
+      );
+    }
+    case 'project.archive': {
+      const project = requireActiveProject(
+        dependencies,
+        command.payload.projectId,
+      );
+      if (hasRunningTaskAttempt(dependencies, project.id)) {
+        throw new CommandError(
+          'project_has_running_attempt',
+          'A project with a running task attempt cannot be archived',
+          { project },
+        );
+      }
+      const now = (dependencies.now ?? (() => new Date().toISOString()))();
+      return response(
+        command.type,
+        updateProject(dependencies, project, command.payload.expectedRevision, {
+          archivedAt: now,
+        }),
+      );
+    }
+    case 'project.restore': {
+      const project = requireProject(dependencies, command.payload.projectId);
+      return response(
+        command.type,
+        updateProject(dependencies, project, command.payload.expectedRevision, {
+          archivedAt: null,
+        }),
+      );
+    }
     case 'session.create': {
       assertBillingSafe(dependencies);
       const project = requireProject(dependencies, command.payload.projectId);
@@ -509,9 +639,7 @@ export const executeCommand = async (
 
   switch (command.type) {
     case 'projects.discover':
-      return response(command.type, {
-        projects: await discoverProjects(dependencies),
-      });
+      return response(command.type, await discoverProjects(dependencies));
     case 'sessions.discover':
       return response(command.type, {
         sessions: await discoverSessions(

@@ -1,8 +1,16 @@
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   idSchema,
   projectSchema,
   sessionSchema,
+  taskAttemptSchema,
+  taskSchema,
   workspaceSchema,
 } from '@mesh-session-platform/contracts';
 
@@ -12,12 +20,256 @@ import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
 
 const now = '2026-08-24T00:00:00.000Z';
+const exec = promisify(execFile);
+
+const runGit = async (cwd: string, ...args: string[]) => {
+  await exec('git', args, { cwd, windowsHide: true });
+};
 
 describe('executeCommand', () => {
   const cleanups: Array<() => Promise<void> | void> = [];
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  });
+
+  const createRepository = async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mesh-command-project-'));
+    const repositoryPath = join(directory, 'repository');
+    await runGit(directory, 'init', repositoryPath);
+    await writeFile(join(repositoryPath, 'README.md'), 'repository\n');
+    await runGit(repositoryPath, 'add', 'README.md');
+    await runGit(
+      repositoryPath,
+      '-c',
+      'user.name=Mesh Test',
+      '-c',
+      'user.email=mesh@example.test',
+      'commit',
+      '-m',
+      'initial',
+    );
+    cleanups.push(() => rm(directory, { force: true, recursive: true }));
+    return { directory, repositoryPath };
+  };
+
+  const commandDependencies = (
+    baseDirectory: string,
+    createId: () => string = () => 'project-created',
+  ) => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    return {
+      repositories,
+      dependencies: {
+        ...repositories,
+        registry,
+        driver,
+        pathOptions: { baseDirectory },
+        now: () => now,
+        createId,
+      },
+    };
+  };
+
+  const projectCommand = (idempotencyKey: string, command: unknown) => ({
+    protocolVersion: 1,
+    idempotencyKey,
+    command,
+  });
+
+  it('imports a Git repository once and reports the existing project for a duplicate identity', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    const linkedWorktreePath = join(directory, 'linked-worktree');
+    await runGit(
+      repositoryPath,
+      'worktree',
+      'add',
+      '--detach',
+      linkedWorktreePath,
+      'HEAD',
+    );
+
+    const imported = await executeCommand(
+      projectCommand('project-import', {
+        type: 'project.import',
+        payload: {
+          repositoryPath,
+          displayName: 'Imported repository',
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(imported.result).toMatchObject({
+      id: 'project-created',
+      displayName: 'Imported repository',
+      repositoryPath,
+    });
+    expect(repositories.projects.list()).toHaveLength(1);
+    await expect(
+      executeCommand(
+        projectCommand('project-import-duplicate', {
+          type: 'project.import',
+          payload: {
+            repositoryPath: linkedWorktreePath,
+            actor: { type: 'human', id: 'operator' },
+          },
+        }),
+        dependencies,
+      ),
+    ).rejects.toMatchObject({
+      code: 'repository_already_imported',
+      details: { project: expect.objectContaining({ id: 'project-created' }) },
+    });
+  });
+
+  it('returns Git repository suggestions without persisting a project', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+
+    const discovered = await executeCommand(
+      { protocolVersion: 1, type: 'projects.discover', payload: {} },
+      dependencies,
+    );
+
+    expect(discovered.result).toEqual({
+      projects: [],
+      suggestions: [
+        expect.objectContaining({
+          displayName: 'repository',
+          repositoryPath,
+        }),
+      ],
+    });
+    expect(repositories.projects.list()).toEqual([]);
+  });
+
+  it('refuses to archive a project with a running task attempt', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'w1',
+        projectId: 'p1',
+        type: 'shared',
+        path: directory,
+      }),
+    );
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 's1',
+        projectId: 'p1',
+        workspaceId: 'w1',
+        title: 'Running attempt',
+        permissionMode: 'interactive',
+        lifecycleState: 'running',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    repositories.tasks.create(
+      taskSchema.parse({
+        id: 't1',
+        projectId: 'p1',
+        title: 'Task',
+        description: '',
+        acceptanceCriteria: [],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'in_progress',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: 'a1',
+        taskId: 't1',
+        sessionId: 's1',
+        ordinal: 1,
+        source: 'launched',
+        actor: { type: 'human', id: 'operator' },
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+      }),
+    );
+
+    await expect(
+      executeCommand(
+        projectCommand('project-archive', {
+          type: 'project.archive',
+          payload: {
+            projectId: 'p1',
+            expectedRevision: 1,
+            actor: { type: 'human', id: 'operator' },
+          },
+        }),
+        dependencies,
+      ),
+    ).rejects.toMatchObject({ code: 'project_has_running_attempt' });
+    expect(repositories.projects.get('p1')?.archivedAt).toBeNull();
+  });
+
+  it('restores an archived project with the next revision', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+        archivedAt: now,
+      }),
+    );
+
+    const restored = await executeCommand(
+      projectCommand('project-restore', {
+        type: 'project.restore',
+        payload: {
+          projectId: 'p1',
+          expectedRevision: 1,
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(restored.result).toMatchObject({
+      id: 'p1',
+      archivedAt: null,
+      revision: 2,
+    });
   });
 
   it('does not decide an already-resolved permission request', async () => {

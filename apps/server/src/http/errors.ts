@@ -10,6 +10,12 @@ export type StableErrorCode =
   | 'session_not_found'
   | 'workspace_not_found'
   | 'project_not_found'
+  | 'project_archived'
+  | 'project_has_running_attempt'
+  | 'repository_invalid'
+  | 'repository_ambiguous'
+  | 'repository_already_imported'
+  | 'task_revision_conflict'
   | 'command_reconciliation_required'
   | 'internal_error';
 
@@ -45,6 +51,12 @@ const statusCodes: Record<StableErrorCode, number> = {
   session_not_found: 404,
   workspace_not_found: 404,
   project_not_found: 404,
+  project_archived: 409,
+  project_has_running_attempt: 409,
+  repository_invalid: 400,
+  repository_ambiguous: 400,
+  repository_already_imported: 409,
+  task_revision_conflict: 409,
   command_reconciliation_required: 409,
   internal_error: 500,
 };
