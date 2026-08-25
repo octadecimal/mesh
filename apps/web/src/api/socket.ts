@@ -10,13 +10,18 @@ type WebSocketFactory = (url: string) => WebSocket;
 export type MeshSocketOptions = {
   url: string;
   cursors: () => Record<string, number>;
+  projectCursors?: () => Record<string, number>;
   onMessage: (message: ServerMessage) => void;
   onDiagnostic: (message: string) => void;
   onReconnect?: (delayMs: number) => void;
   onResyncRequired?: (
     message: Extract<ServerMessage, { type: 'resync.required' }>,
   ) => void;
+  onProjectResyncRequired?: (
+    message: Extract<ServerMessage, { type: 'project.resync_required' }>,
+  ) => void;
   resync?: () => Promise<void>;
+  projectResync?: (projectId: string) => Promise<void>;
   webSocket?: WebSocketFactory;
   setTimeout?: typeof globalThis.setTimeout;
   clearTimeout?: typeof globalThis.clearTimeout;
@@ -75,6 +80,9 @@ export class MeshSocket {
             protocolVersion: 1,
             type: 'subscribe',
             cursors: this.options.cursors(),
+            ...(this.options.projectCursors
+              ? { projectCursors: this.options.projectCursors() }
+              : {}),
           }),
         ),
       );
@@ -106,6 +114,16 @@ export class MeshSocket {
           'Mesh socket could not refresh the snapshot after resync.',
         );
       });
+    }
+    if (message.data.type === 'project.resync_required') {
+      this.options.onProjectResyncRequired?.(message.data);
+      void this.options
+        .projectResync?.(message.data.payload.projectId)
+        .catch(() => {
+          this.options.onDiagnostic(
+            'Mesh socket could not refresh the project snapshot after resync.',
+          );
+        });
     }
   }
 

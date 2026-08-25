@@ -42,6 +42,11 @@ const start = async () => {
         string,
         number
       >,
+    projectCursors: () =>
+      store.state.projectCursors.get({ noproxy: true }) as Record<
+        string,
+        number
+      >,
     onMessage: (message) => {
       if (message.type === 'snapshot') store.replaceSnapshot(message.payload);
       if (message.type === 'assistant.delta') {
@@ -63,6 +68,17 @@ const start = async () => {
             ),
           );
       }
+      if (message.type === 'project.event') {
+        eventQueue = eventQueue
+          .then(async () => {
+            await coordinator.applyProjectEvent(message.payload.event);
+          })
+          .catch(() =>
+            store.notifyInvalidPayload(
+              'Mesh socket could not apply a project event.',
+            ),
+          );
+      }
       if (message.type === 'connection.health') {
         store.setConnectionHealth(message.payload.status);
       }
@@ -70,6 +86,7 @@ const start = async () => {
     onDiagnostic: store.notifyInvalidPayload,
     onReconnect: () => store.setConnectionHealth('disconnected'),
     resync: coordinator.refresh,
+    projectResync: coordinator.refreshProject,
   });
   const connectedApi = {
     diagnostics: api.diagnostics.bind(api),

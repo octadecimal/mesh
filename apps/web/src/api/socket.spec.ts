@@ -46,13 +46,15 @@ describe('MeshSocket', () => {
   it('subscribes with current cursors and delivers only contract-valid frames', () => {
     const messages: ServerMessage[] = [];
     const diagnostics: string[] = [];
-    const socket = new MeshSocket({
+    const options = {
       url: 'ws://mesh.test/api/realtime',
       webSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
       cursors: () => ({ 'session-1': 4 }),
+      projectCursors: () => ({ 'project-1': 9 }),
       onMessage: (message) => messages.push(message),
       onDiagnostic: (message) => diagnostics.push(message),
-    });
+    };
+    const socket = new MeshSocket(options);
 
     socket.connect();
     const connection = FakeSocket.instances[0];
@@ -68,9 +70,39 @@ describe('MeshSocket', () => {
       protocolVersion: 1,
       type: 'subscribe',
       cursors: { 'session-1': 4 },
+      projectCursors: { 'project-1': 9 },
     });
     expect(messages).toEqual([healthMessage]);
     expect(diagnostics).toHaveLength(1);
+    socket.close();
+  });
+
+  it('refreshes only the project named by a project resync frame', async () => {
+    const refreshed: string[] = [];
+    const options = {
+      url: 'ws://mesh.test/api/realtime',
+      webSocket: (url: string) => new FakeSocket(url) as unknown as WebSocket,
+      cursors: () => ({}),
+      onMessage: () => undefined,
+      onDiagnostic: () => undefined,
+      projectResync: async (projectId: string) => {
+        refreshed.push(projectId);
+      },
+    };
+    const socket = new MeshSocket(options);
+
+    socket.connect();
+    const connection = FakeSocket.instances[0];
+    connection.open();
+    connection.receive({
+      protocolVersion: 1,
+      type: 'project.resync_required',
+      payload: { projectId: 'project-1', reason: 'event_sequence_gap' },
+    });
+
+    await Promise.resolve();
+
+    expect(refreshed).toEqual(['project-1']);
     socket.close();
   });
 

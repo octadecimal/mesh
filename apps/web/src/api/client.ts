@@ -1,10 +1,14 @@
 import {
   commandEnvelopeSchema,
+  projectHistorySchema,
+  projectSnapshotSchema,
   sessionDiagnosticsSchema,
   sessionHistorySchema,
   sessionSnapshotSchema,
   type DiscoveryCommand,
   type MutatingCommand,
+  type ProjectHistory,
+  type ProjectSnapshot,
   type SessionDiagnostics,
   type SessionHistory,
   type SessionSnapshot,
@@ -68,6 +72,26 @@ export class MeshApi {
     return sessionDiagnosticsSchema.parse(
       await this.request(
         `/api/sessions/${encodeURIComponent(sessionId)}/diagnostics${query}`,
+      ),
+    );
+  }
+
+  async projectSnapshot(projectId: string): Promise<ProjectSnapshot> {
+    return projectSnapshotSchema.parse(
+      await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/snapshot`,
+      ),
+    );
+  }
+
+  async projectHistory(
+    projectId: string,
+    after?: number,
+  ): Promise<ProjectHistory> {
+    const query = after === undefined ? '' : `?after=${after}`;
+    return projectHistorySchema.parse(
+      await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/history${query}`,
       ),
     );
   }

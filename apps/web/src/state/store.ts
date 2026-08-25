@@ -1,14 +1,18 @@
 import { hookstate } from '@hookstate/core';
 import type {
+  ProjectEvent,
+  ProjectSnapshot,
   SessionEvent,
   SessionSnapshot,
 } from '@mesh-session-platform/contracts';
 
 import {
   applyEvent,
+  applyProjectEvent,
   createProjection,
   diagnosticNotification,
   replaceSnapshot,
+  replaceProjectSnapshot,
   type ConnectionHealth,
   type MeshProjection,
 } from './reducer';
@@ -27,8 +31,16 @@ export const createMeshStore = (snapshot: SessionSnapshot) => {
       if (result.kind === 'applied') state.set(result.state);
       return result;
     },
+    applyProjectEvent(event: ProjectEvent) {
+      const result = applyProjectEvent(currentProjection(state), event);
+      if (result.kind === 'applied') state.set(result.state);
+      return result;
+    },
     replaceSnapshot(next: SessionSnapshot) {
       state.set(replaceSnapshot(currentProjection(state), next));
+    },
+    replaceProjectSnapshot(next: ProjectSnapshot) {
+      state.set(replaceProjectSnapshot(currentProjection(state), next));
     },
     setConnectionHealth(connectionHealth: ConnectionHealth) {
       state.connectionHealth.set(connectionHealth);
