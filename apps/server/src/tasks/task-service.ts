@@ -20,6 +20,64 @@ import type { TaskRepository } from '../repositories/task-repository.js';
 import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
 import { authorizeTaskTransition } from '../domain/task-lifecycle.js';
 
+const rankAlphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
+const middleRankCharacter = 'h';
+const maximumFractionalRankLength = 32;
+const rebalancedRankWidth = 8;
+
+const rankBetween = (
+  predecessor: string | undefined,
+  successor: string | undefined,
+): string | undefined => {
+  if (predecessor === undefined) {
+    if (successor === undefined) return middleRankCharacter;
+    const firstIndex = rankAlphabet.indexOf(successor.charAt(0));
+    if (firstIndex > 0) {
+      return rankAlphabet.charAt(Math.floor((firstIndex - 1) / 2));
+    }
+    if (firstIndex === 0 && successor.length > 1) {
+      return successor.slice(0, -1);
+    }
+    return undefined;
+  }
+  if (successor === undefined) {
+    return predecessor.length < maximumFractionalRankLength
+      ? `${predecessor}${middleRankCharacter}`
+      : undefined;
+  }
+  if (predecessor >= successor) {
+    throw new Error('Task rank neighbors are not ordered');
+  }
+  if (!successor.startsWith(predecessor)) {
+    return predecessor.length < maximumFractionalRankLength
+      ? `${predecessor}${middleRankCharacter}`
+      : undefined;
+  }
+
+  const suffix = successor.slice(predecessor.length);
+  if (suffix.length > 1) return successor.slice(0, -1);
+  const successorIndex = rankAlphabet.indexOf(suffix);
+  if (
+    successorIndex <= 0 ||
+    predecessor.length >= maximumFractionalRankLength
+  ) {
+    return undefined;
+  }
+  return `${predecessor}${rankAlphabet.charAt(
+    Math.floor((successorIndex - 1) / 2),
+  )}`;
+};
+
+const rebalancedRanks = (count: number): string[] => {
+  const maximum = rankAlphabet.length ** rebalancedRankWidth - 1;
+  const step = Math.floor(maximum / (count + 1));
+  return Array.from({ length: count }, (_, index) =>
+    (step * (index + 1))
+      .toString(rankAlphabet.length)
+      .padStart(rebalancedRankWidth, rankAlphabet.charAt(0)),
+  );
+};
+
 type TaskMutationCommandType =
   | 'task.create'
   | 'task.edit'
@@ -167,10 +225,11 @@ export class TaskService {
         input.taskId,
         input.expectedRevision,
       );
-      const updated = this.update(task, input.expectedRevision, {
-        rank: this.availableRank(task, input.rank),
-        updatedAt: this.now(),
-      });
+      const updated = this.reorderTask(
+        task,
+        input.expectedRevision,
+        input.rank,
+      );
       return {
         task: updated,
         event: this.appendTaskEvent(updated, 'task.rank_changed'),
@@ -374,19 +433,56 @@ export class TaskService {
     return last ? `${last}m` : 'm';
   }
 
-  private availableRank(task: Task, requested: string): string {
-    const occupied = new Set(
-      this.dependencies.tasks
-        .listByProject(task.projectId)
-        .filter(
-          (candidate) =>
-            candidate.id !== task.id &&
-            candidate.lifecycleState === task.lifecycleState,
-        )
-        .map((candidate) => candidate.rank),
+  private reorderTask(
+    task: Task,
+    expectedRevision: number,
+    requestedRank: string,
+  ): Task {
+    const siblings = this.dependencies.tasks
+      .listByProject(task.projectId)
+      .filter(
+        (candidate) =>
+          candidate.id !== task.id &&
+          candidate.lifecycleState === task.lifecycleState,
+      );
+    if (!siblings.some((candidate) => candidate.rank === requestedRank)) {
+      return this.update(task, expectedRevision, {
+        rank: requestedRank,
+        updatedAt: this.now(),
+      });
+    }
+
+    let targetIndex = 0;
+    for (const [index, candidate] of siblings.entries()) {
+      if (candidate.rank > requestedRank) break;
+      targetIndex = index + 1;
+    }
+    const rank = rankBetween(
+      siblings[targetIndex - 1]?.rank,
+      siblings[targetIndex]?.rank,
     );
-    let rank = requested;
-    while (occupied.has(rank)) rank += 'm';
-    return rank;
+    if (rank !== undefined) {
+      return this.update(task, expectedRevision, {
+        rank,
+        updatedAt: this.now(),
+      });
+    }
+
+    const ordered = [...siblings];
+    ordered.splice(targetIndex, 0, task);
+    const ranks = rebalancedRanks(ordered.length);
+    const occurredAt = this.now();
+    for (const [index, candidate] of ordered.entries()) {
+      if (candidate.id === task.id || candidate.rank === ranks[index]) continue;
+      const updated = this.update(candidate, candidate.revision, {
+        rank: ranks[index],
+        updatedAt: occurredAt,
+      });
+      this.appendTaskEvent(updated, 'task.rank_changed');
+    }
+    return this.update(task, expectedRevision, {
+      rank: ranks[targetIndex],
+      updatedAt: occurredAt,
+    });
   }
 }

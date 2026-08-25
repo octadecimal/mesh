@@ -507,6 +507,38 @@ const transition = (overrides: Record<string, unknown> = {}) =>
     ).toThrow(CommandReconciliationRequiredError);
   });
 
+  it('keeps a failed atomic command while rolling back its application writes', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const original = repos.tasks.create(task());
+    let executions = 0;
+
+    expect(() =>
+      repos.commands.executeOnceInImmediateTransaction('atomic-failure', () => {
+        executions += 1;
+        repos.tasks.update({ ...original, notes: 'Must roll back' }, 1);
+        throw new Error('atomic mutation failed');
+      }),
+    ).toThrow('atomic mutation failed');
+
+    expect(repos.tasks.get(original.id)).toEqual(original);
+    expect(
+      repos.database
+        .prepare(
+          'SELECT state FROM processed_commands WHERE idempotency_key = ?',
+        )
+        .get('atomic-failure'),
+    ).toEqual({ state: 'failed' });
+    expect(() =>
+      repos.commands.executeOnceInImmediateTransaction('atomic-failure', () => {
+        executions += 1;
+        return { accepted: true };
+      }),
+    ).toThrow(CommandReconciliationRequiredError);
+    expect(executions).toBe(1);
+  });
+
   it('marks an unserializable response indeterminate and blocks automatic retry', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);

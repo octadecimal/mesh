@@ -44,7 +44,10 @@ describe('TaskService', () => {
 
   const seedTask = (
     repositories: ReturnType<typeof createTestRepositories>,
-    overrides: Partial<Task> = {},
+    overrides: Partial<Omit<Task, 'id' | 'projectId'>> & {
+      id?: string;
+      projectId?: string;
+    } = {},
   ) =>
     repositories.tasks.create(
       taskSchema.parse({
@@ -143,6 +146,91 @@ describe('TaskService', () => {
     });
   });
 
+  it('places an occupied target rank between its neighboring tasks', async () => {
+    const { repositories, service } = setup();
+    seedTask(repositories, {
+      id: 'task-moving',
+      rank: 'x',
+      priority: 'urgent',
+    });
+    seedTask(repositories, { id: 'task-target', rank: 'm' });
+    seedTask(repositories, { id: 'task-successor', rank: 't' });
+
+    const result = await service.reorder({
+      commandId: 'command-occupied-rank',
+      taskId: 'task-moving',
+      expectedRevision: 1,
+      rank: 'm',
+      actor: human,
+    });
+
+    expect(result.task).toMatchObject({ rank: 'mh', priority: 'urgent' });
+    expect(
+      repositories.tasks.listByProject('project-1').map((task) => task.id),
+    ).toEqual(['task-target', 'task-moving', 'task-successor']);
+  });
+
+  it('keeps an available requested rank between its neighboring tasks', async () => {
+    const { repositories, service } = setup();
+    seedTask(repositories, { id: 'task-moving', rank: 'x' });
+    seedTask(repositories, { id: 'task-predecessor', rank: 'm' });
+    seedTask(repositories, { id: 'task-successor', rank: 't' });
+
+    const result = await service.reorder({
+      commandId: 'command-between-ranks',
+      taskId: 'task-moving',
+      expectedRevision: 1,
+      rank: 'p',
+      actor: human,
+    });
+
+    expect(result.task.rank).toBe('p');
+    expect(
+      repositories.tasks.listByProject('project-1').map((task) => task.id),
+    ).toEqual(['task-predecessor', 'task-moving', 'task-successor']);
+  });
+
+  it('rebalances a dense column only when no rank exists between neighbors', async () => {
+    const { repositories, service } = setup();
+    seedTask(repositories, {
+      id: 'task-moving',
+      rank: 'x',
+      priority: 'urgent',
+    });
+    seedTask(repositories, { id: 'task-predecessor', rank: 'a' });
+    seedTask(repositories, { id: 'task-successor', rank: 'a0' });
+    seedTask(repositories, { id: 'task-last', rank: 'z' });
+
+    const result = await service.reorder({
+      commandId: 'command-dense-ranks',
+      taskId: 'task-moving',
+      expectedRevision: 1,
+      rank: 'a',
+      actor: human,
+    });
+
+    const tasks = repositories.tasks.listByProject('project-1');
+    expect(tasks.map((task) => [task.id, task.rank, task.revision])).toEqual([
+      ['task-predecessor', '77777777', 2],
+      ['task-moving', 'eeeeeeee', 2],
+      ['task-successor', 'llllllll', 2],
+      ['task-last', 'ssssssss', 2],
+    ]);
+    expect(result.task).toMatchObject({
+      id: 'task-moving',
+      rank: 'eeeeeeee',
+      priority: 'urgent',
+    });
+    const events = repositories.projectEvents.after('project-1', 0);
+    expect(events).toHaveLength(4);
+    expect(events.at(-1)).toEqual(result.event);
+    expect(result.event).toMatchObject({
+      sequence: 4,
+      type: 'task.rank_changed',
+      payload: { task: { id: 'task-moving' } },
+    });
+  });
+
   it('records block and unblock reasons as durable history', async () => {
     const { repositories, service } = setup();
     seedTask(repositories);
@@ -221,20 +309,28 @@ describe('TaskService', () => {
   it('rejects stale revisions without mutating canonical state or audit rows', async () => {
     const { repositories, service } = setup();
     const task = seedTask(repositories);
+    const input = {
+      commandId: 'command-stale',
+      taskId: task.id,
+      expectedRevision: 2,
+      patch: { notes: 'This must not be written.' },
+      actor: human,
+    };
 
-    await expect(
-      service.edit({
-        commandId: 'command-stale',
-        taskId: task.id,
-        expectedRevision: 2,
-        patch: { notes: 'This must not be written.' },
-        actor: human,
-      }),
-    ).rejects.toMatchObject({
+    await expect(service.edit(input)).rejects.toMatchObject({
       code: 'task_revision_conflict',
       task,
     });
-    expect(repositories.tasks.get(task.id)).toEqual(task);
+    const externallyUpdated = repositories.tasks.update(
+      { ...task, notes: 'External update', updatedAt: now },
+      1,
+    );
+    expect(externallyUpdated?.revision).toBe(2);
+    await expect(service.edit(input)).rejects.toMatchObject({
+      code: 'command_reconciliation_required',
+      state: 'failed',
+    });
+    expect(repositories.tasks.get(task.id)).toEqual(externallyUpdated);
     expect(repositories.transitions.listByTask(task.id)).toEqual([]);
     expect(repositories.projectEvents.after('project-1', 0)).toEqual([]);
   });
@@ -242,16 +338,25 @@ describe('TaskService', () => {
   it('rolls back task and history writes when project-event persistence fails', async () => {
     const { repositories, service } = setup({ failProjectEventInsert: true });
     const task = seedTask(repositories, { lifecycleState: 'ready' });
+    const input = {
+      commandId: 'command-audit-failure',
+      taskId: task.id,
+      expectedRevision: 1,
+      nextState: 'in_progress' as const,
+      actor: human,
+    };
 
-    await expect(
-      service.transition({
-        commandId: 'command-audit-failure',
-        taskId: task.id,
-        expectedRevision: 1,
-        nextState: 'in_progress',
-        actor: human,
-      }),
-    ).rejects.toThrow('project event insert failed');
+    await expect(service.transition(input)).rejects.toThrow(
+      'project event insert failed',
+    );
+    expect(repositories.tasks.get(task.id)).toEqual(task);
+    expect(repositories.transitions.listByTask(task.id)).toEqual([]);
+    expect(repositories.projectEvents.after('project-1', 0)).toEqual([]);
+    repositories.database.exec('DROP TRIGGER fail_project_event_insert');
+    await expect(service.transition(input)).rejects.toMatchObject({
+      code: 'command_reconciliation_required',
+      state: 'failed',
+    });
     expect(repositories.tasks.get(task.id)).toEqual(task);
     expect(repositories.transitions.listByTask(task.id)).toEqual([]);
     expect(repositories.projectEvents.after('project-1', 0)).toEqual([]);
