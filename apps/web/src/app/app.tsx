@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useHookstate } from '@hookstate/core';
 import {
   savedLayoutSchema,
@@ -23,6 +23,8 @@ import {
   selectWorkspaces,
 } from '../state/selectors';
 import { createMeshStore } from '../state/store';
+import { NewSessionDialog, type SessionFlowError } from '../sessions/NewSessionDialog';
+import { ResumeSessionDialog } from '../sessions/ResumeSessionDialog';
 import { SessionSidebar } from '../sessions/SessionSidebar';
 import { SessionWorkspace } from '../workspace/SessionWorkspace';
 import type { DockviewLayoutSnapshot } from '../workspace/layout-controller';
@@ -98,6 +100,25 @@ function ConnectedApp({
   const filter = selectSessionFilter(projection, savedLayout);
   const unread = new Set(selectUnreadSessionIds(projection));
   const selected = sessions.find(({ id }) => id === selectedSessionId);
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
+  const [resumeSessionOpen, setResumeSessionOpen] = useState(false);
+  const [flowError, setFlowError] = useState<SessionFlowError>();
+  const [collisionWarning, setCollisionWarning] = useState<string>();
+  const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+  const submit = (command: MutatingCommand) => {
+    onCommand?.({ type: command.type, payload: command.payload });
+    const execute = api ? api.command(command) : Promise.resolve(undefined);
+    void execute.then((response) => {
+      const warning = response?.warnings.find((candidate) => /collision|shared/i.test(candidate.code));
+      setCollisionWarning(warning?.message);
+      setFlowError(undefined);
+      if (command.type === 'session.create') setNewSessionOpen(false);
+      if (command.type === 'session.resume') setResumeSessionOpen(false);
+    }).catch((caught: unknown) => {
+      const failure = caught as { code?: string; message?: string };
+      setFlowError({ code: failure.code ?? 'unknown', message: failure.message });
+    });
+  };
 
   return (
     <div className="app-shell">
@@ -111,7 +132,34 @@ function ConnectedApp({
         )}
         onFilterChange={(value) => store.setFilter('sessions', value)}
         onOpenSession={store.selectSession}
-        onNewSession={() => undefined}
+        onNewSession={() => { setFlowError(undefined); setCollisionWarning(undefined); setNewSessionOpen(true); }}
+        onResumeSession={() => { setFlowError(undefined); setResumeSessionOpen(true); }}
+      />
+      <NewSessionDialog
+        open={newSessionOpen}
+        onOpenChange={setNewSessionOpen}
+        projects={projects}
+        collisionWarning={collisionWarning}
+        error={flowError}
+        onCreate={(command) => submit(command as MutatingCommand)}
+      />
+      <ResumeSessionDialog
+        open={resumeSessionOpen}
+        onOpenChange={setResumeSessionOpen}
+        error={flowError}
+        sessions={sessions.map((session) => {
+          const workspace = workspaceById.get(session.workspaceId);
+          return {
+            id: session.id,
+            title: session.title,
+            claudeResumeId: session.claudeResumeId,
+            lastPath: workspace?.path,
+            applicationMatch: 'Matched Mesh session',
+            permissionMode: session.permissionMode,
+            workspaceType: workspace?.type,
+          };
+        })}
+        onResume={(command) => submit(command as MutatingCommand)}
       />
       <SessionWorkspace
         sessions={sessions}

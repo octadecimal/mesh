@@ -4,12 +4,13 @@ type SidebarProject = { id: string; displayName: string };
 type SidebarWorkspace = { id: string; projectId: string; type: 'shared' | 'worktree' };
 type SidebarSession = { id: string; projectId: string; workspaceId: string; title: string; lifecycleState: string; unreadCount?: number };
 
-export function SessionSidebar({ projects, workspaces, sessions, onOpenSession, onNewSession, filter: controlledFilter, onFilterChange: controlledFilterChange, unreadSessionIds = {} }: {
+export function SessionSidebar({ projects, workspaces, sessions, onOpenSession, onNewSession, onResumeSession, filter: controlledFilter, onFilterChange: controlledFilterChange, unreadSessionIds = {} }: {
   projects: SidebarProject[];
   workspaces: SidebarWorkspace[];
   sessions: SidebarSession[];
   onOpenSession: (sessionId: string) => void;
   onNewSession: () => void;
+  onResumeSession?: () => void;
   filter?: string;
   onFilterChange?: (filter: string) => void;
   unreadSessionIds?: Record<string, boolean>;
@@ -20,7 +21,7 @@ export function SessionSidebar({ projects, workspaces, sessions, onOpenSession, 
   const workspaceById = useMemo(() => new Map(workspaces.map((workspace) => [workspace.id, workspace])), [workspaces]);
   const matching = (session: SidebarSession) => session.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase());
   return <aside className="session-sidebar" aria-label="Sessions">
-    <header><h1>Mesh</h1><button onClick={onNewSession}>New session</button></header>
+    <header><h1>Mesh</h1><button onClick={onNewSession}>New session</button><button onClick={onResumeSession}>Resume session</button></header>
     <label>Filter sessions<input type="search" aria-label="Filter sessions" value={filter} onChange={(event) => onFilterChange(event.target.value)} /></label>
     {projects.map((project) => {
       const projectSessions = sessions.filter((session) => session.projectId === project.id && matching(session));
