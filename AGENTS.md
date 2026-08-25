@@ -1,125 +1,186 @@
+# Mesh Agent Guide
+
+Mesh is a local session platform for running, observing, and steering coding
+agents against a repository. It must remain safe around real worktrees,
+credentials, subscription quota, and durable session history.
+
+`AGENTS.md` is the shared source of truth for every agent harness. Keep hard
+rules and high-value defaults here. Put explanations and evolving architecture
+in the linked development guides.
+
+## Product Invariants
+
+- **Local and subscription-backed.** Mesh uses the operator's installed Claude
+  subscription. It does not silently switch to pay-per-token API billing.
+- **Durable before optimistic.** Persisted session events are the audit record
+  for server-backed session history. Transient streaming and local interaction
+  state may be ephemeral and must not be mistaken for durable truth.
+- **Safe around real work.** Preserve user changes, worktrees, credentials, and
+  live sessions. Ambiguous ownership is a reason to stop, not to delete.
+- **Explicit behavior.** Lifecycle transitions, permissions, contracts, and
+  failure states should be visible and testable rather than implied.
+- **Simple systems.** Solve the current constraint with the smallest coherent
+  model. Add indirection only when it creates a real boundary or removes proven
+  duplication.
+
+These are constraints. The preferences in
+[`docs/development/engineering-principles.md`](docs/development/engineering-principles.md)
+are defaults that a maintainer may override.
+
+## Before Changing Code
+
+1. Understand the relevant behavior and its callers before editing.
+2. Read
+   [`docs/development/architecture.md`](docs/development/architecture.md) for
+   component boundaries and the request/event flow.
+3. Check whether the change crosses contracts, persistence, lifecycle,
+   realtime transport, UI projections, or operational documentation.
+4. Choose the smallest verification that proves the changed behavior.
+
+Do not preserve complexity merely because it exists, and do not introduce a
+framework, abstraction layer, or generalized extension point for a hypothetical
+future requirement. Improve nearby structure when it directly supports the
+change; leave unrelated refactors for separate work.
+
+## High-Impact Safety Rules
+
+1. **Never enable API billing.** Starting or resuming a live session spends
+   Claude subscription quota. Never set or fall back to `ANTHROPIC_API_KEY` or
+   another pay-per-token override.
+2. **Never treat live state as test data.** Routine tests use the fake driver,
+   temporary repositories, and temporary databases. Do not point tests at the
+   operator's runtime database, credentials, or active worktree.
+3. **Never delete ambiguous work.** Remove only a worktree or process that Mesh
+   or the current task demonstrably owns. Inspect paths and changes first.
+   Avoid name- or path-pattern process killing.
+4. **Never bypass runtime audit writes.** Persist normalized driver input and
+   runtime-emitted session events with their required diagnostics before
+   publishing them. Audit persistence failure must stop that runtime from
+   continuing unsafely.
+5. **Never weaken boundaries silently.** Permission, origin, billing, path, and
+   lifecycle checks are product behavior. Changes require focused tests and a
+   clear explanation.
+
+## Check Every Affected Surface
+
+Before calling a behavior change complete, decide which of these apply:
+
+- **Contracts:** schemas and shared types in `packages/contracts`.
+- **Commands:** HTTP validation, command handling, and error mapping.
+- **Runtime:** lifecycle transitions, driver behavior, interruption, and
+  recovery after restart or failure.
+- **Persistence:** migrations, repositories, ordering, idempotency, and audit
+  diagnostics.
+- **Realtime:** durable replay, transient deltas, reconnect, and resync.
+- **Web:** state projection, loading/error/empty states, permissions, and user
+  feedback.
+- **Workspace safety:** repository paths, worktree ownership, concurrent
+  sessions, archive, and deletion.
+- **Operating modes:** development and production builds, Windows paths, fake
+  and real drivers, fresh and existing databases.
+- **Reverse states:** start/stop, create/archive/delete, approve/deny,
+  connect/disconnect, and failure/recovery.
+- **Documentation:** update user-visible or operational guidance when behavior
+  changes.
+
+Not every item applies. State the relevant decisions rather than mechanically
+touching every layer.
+
 ## Worktree Policy
 
-Every unit of work that becomes a pull request is done in its own git worktree.
-No exceptions — docs-only and chore changes included. The main checkout at the
-repository root stays on `master` and is never used for feature work.
+Every unit of work intended to become a pull request uses its own git worktree,
+including docs and chores. The repository root remains on `master` and is not a
+feature workspace.
 
-Create the worktree from an up-to-date `master`:
+Create a worktree from current `origin/master`:
 
-```
+```text
 git fetch origin master
 git worktree add .worktrees/<slug> -b <branch> origin/master
 cd .worktrees/<slug>
 corepack pnpm install --frozen-lockfile
 ```
 
-`<slug>` is the branch name with `/` replaced by `-`, so `feat/pane-resize`
-lives in `.worktrees/feat-pane-resize`.
-
-Agents running in Claude Code use the `EnterWorktree` tool instead. It creates
-the same layout under `.claude/worktrees/` and switches the session into it.
-
-Constraints that follow from this layout:
-
-- `.worktrees/` is gitignored. Never commit a worktree.
-- `node_modules/` is not shared between worktrees. Run
-  `corepack pnpm install --frozen-lockfile` in a fresh one before Nx tasks.
-- The API binds fixed port 3737. Vite prefers 4200 and may use the first free
-  port above it when another application owns that port.
-- Remove the worktree once its pull request is merged. `git worktree remove`
-  runs from the main checkout, and it must happen before the local branch can
-  be deleted, because git refuses to delete a branch that is checked out
-  anywhere. `.agents/skills/complete-work/SKILL.md` covers the full sequence.
+Use the harness-native worktree tool when one is available. `.worktrees/` is
+gitignored, and dependencies are installed separately in each worktree. Remove
+a worktree only after its work is integrated or explicitly abandoned and its
+changes have been inspected. The API uses port 3737; Vite prefers 4200 and may
+select a higher free port.
 
 ## Code Exploration Policy
 
-Always use jCodeMunch-MCP for code navigation. Never fall back to Read, Grep, Glob, or Bash for code exploration.
-**Exception:** use `Read` when you are about to edit a file — the harness requires a `Read` before `Edit`/`Write`. Use jCodeMunch to _find and understand_ code, then `Read` only the file you are changing.
+Use the jCodeMunch-MCP surface supplied by the current harness for code
+navigation. Follow its briefing and prefer its semantic planning, search, and
+context operations. Do not substitute broad Read, Grep, Glob, or shell
+exploration. Reading the exact file being edited is allowed when the harness
+requires it.
 
-This server runs the **front door** surface: three tools reach every jCodeMunch capability, so the tool list stays small and the catalogue is fetched only when you need it.
+When the compact front-door surface is available, announce the model and
+resolve the repository at session start:
 
-**Start any session:**
-
-1. `order { "action": "resolve_repo", "args": { "path": "." } }` — confirm the project is indexed. If it is not: `order { "action": "index_folder", "args": { "path": "." } }`
-
-**Then, for any task:**
-
-- Know what you want → `order { "action": "<name>", "args": { ... } }`
-- Know the goal, not the tool → `route { "query": "your task in a sentence" }` picks the action and shapes the arguments
-- Want to see what exists → `menu { "query": "what you are trying to do" }` returns matching actions with example arguments
-- Want the whole catalogue and the usage rules → `jcodemunch_guide`
-
-`menu` and `jcodemunch_guide` list every action this server can run, including ones absent from your tool list. That is expected: the front door is the way to call them.
-
-**Interpreting results:**
-
-- A `verdict` of `no_implementation_found` is evidence of absence. Report the gap; do not re-search with different wording.
-- A `verdict` of `degraded` means a channel was unavailable, so absence is NOT proven. Read the note before relying on the result.
-- `source: ""` alongside `source_status` means the body could not be read, not that the symbol is empty.
-
-**After editing files:**
-
-- With PostToolUse hooks installed (Claude Code), edited files are reindexed automatically.
-- Otherwise `order { "action": "register_edit", "args": { "paths": [...] } }` after an edit, batched for bulk changes.
-
-**Announce your model once per session** so the server can size its answers: `announce_model { "model": "<your-model-id>" }`.
-
-## Doc Exploration Policy
-
-Always use jDocMunch-MCP tools for documentation navigation. Never fall back to Read for doc exploration.
-**Exception:** Use `Read` when you need exact line numbers for `Edit`.
-
-**Start any session:**
-
-1. `doc_list_repos` — check what's indexed. If your docs aren't there: `index_local { "path": "." }`
-
-**Finding content:**
-
-- keyword/topic search -> `search_sections` (returns summaries only)
-- browse structure -> `get_toc` (flat) or `get_toc_tree` (nested)
-- single document -> `get_document_outline`
-
-**Reading content:**
-
-- one section -> `get_section` (full content via byte-range)
-- multiple sections -> `get_sections` (batch)
-- section + context -> `get_section_context` (ancestors + children)
-
-**Maintenance:**
-
-- broken internal links -> `get_broken_links`
-- code/doc coverage gap -> `get_doc_coverage`
-
-## Testing Policy
-
-`corepack pnpm test` and `corepack pnpm e2e` use deterministic test drivers and
-do not spawn external Claude traffic. Both are free to run at any time.
-
-Starting or resuming a live session invokes Claude through the locally
-authenticated Claude Max subscription and spends subscription quota. Never set
-or fall back to `ANTHROPIC_API_KEY` or another pay-per-token billing override.
-
-## Commit Policy
-
-Every commit in this repository uses the Conventional Commits format:
-
+```text
+announce_model { "model": "<model-id>" }
+order { "action": "resolve_repo", "args": { "path": "." } }
 ```
+
+If it is not indexed, use `index_folder`. Then use `order` when the action is
+known, `route` when the goal is known, and `menu` or `jcodemunch_guide` for
+discovery. On a direct surface, use the equivalent operations named in the
+harness briefing rather than attempting unavailable front-door tools.
+
+- `no_implementation_found` is evidence of absence; do not keep rephrasing the
+  same search.
+- `degraded` means a channel was unavailable and absence is not proven.
+- Empty `source` with `source_status` means the body could not be read.
+- After edits, rely on installed hooks or call `register_edit` once with the
+  complete changed-path batch.
+
+## Documentation Exploration Policy
+
+Use jDocMunch-MCP for documentation navigation. Start with `doc_list_repos` and
+use `index_local` when necessary. Use `search_sections` for topics, TOC and
+outline tools for structure, and section retrieval tools for content. Use
+`get_broken_links` and `get_doc_coverage` for maintenance. Read exact files only
+when editing or when exact line numbers are required.
+
+If a required MCP surface is unavailable, report that limitation rather than
+pretending its guarantees were met.
+
+## Testing and Verification
+
+`corepack pnpm test` and `corepack pnpm e2e` are deterministic and do not start
+external Claude traffic. Prefer the narrowest relevant Nx target during
+iteration. Run `corepack pnpm verify` for the normal complete local/CI gate when
+the scope warrants it.
+
+Backend behavior changes require focused tests. Test asynchronous behavior by
+waiting on observable events or drains, not arbitrary sleeps. For user-visible
+changes, exercise the integrated path when requested or when unit-level proof
+cannot cover the risk. Always report what was and was not verified.
+
+The real Claude smoke test is opt-in, consumes subscription capacity, and must
+never enter default verification or CI. See
+[`docs/development/session-platform.md`](docs/development/session-platform.md).
+
+## Pull Requests and Commits
+
+Do not create or publish a pull request unless the maintainer explicitly asks.
+Keep one concern per pull request; UI changes should include appropriate visual
+evidence when a pull request is requested. Do not commit temporary plans,
+research notes, logs, screenshots, or agent scratch files unless they are an
+explicit project deliverable.
+
+Use Conventional Commits:
+
+```text
 <type>(<optional scope>): <description>
 ```
 
 Allowed types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`,
 `build`, `ci`, `chore`, `revert`.
 
-Rules:
-
-- Description is imperative mood, lower case, no trailing period.
-- Breaking changes append `!` after the type or scope, and explain the break in
-  the commit body.
-- Keep the subject line at 72 characters or fewer; put detail in the body.
-- Never sign a commit as an agent. Do not add `Co-Authored-By` trailers naming
-  Claude, Claude Code, Codex, Copilot, or any other assistant, and do not add
-  "Generated with ..." footers. The commit author is the human running the tool,
-  and the message body carries no tool attribution.
-
-If history is created that does not follow this format, rewrite it before
+Use imperative lower-case wording, no trailing period, and at most 72
+characters in the subject. Mark breaking changes with `!` and explain them in
+the body. Never add assistant attribution, `Co-Authored-By` trailers naming an
+agent, or generated-by footers. Rewrite nonconforming local history before
 pushing.

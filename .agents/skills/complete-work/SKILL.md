@@ -1,6 +1,6 @@
 ---
 name: complete-work
-description: Use when a Mesh development branch is finished, its pull request is open, and the user wants it merged, cleaned up, and made available for hands-on testing.
+description: Use when a Mesh development branch is finished and the user wants it committed, proposed as a pull request if needed, merged, cleaned up, and made available for hands-on testing.
 ---
 
 # Complete Work
@@ -10,32 +10,64 @@ wrapper script. Create one todo per numbered step and work in order. Stop on the
 first unresolved failure, report it plainly, and never claim an action succeeded
 without checking its result.
 
-## 1. Identify the branch and PR
+## 1. Prepare the branch and PR
 
-Record the current root, branch, linked-worktree path, primary checkout, and PR:
+Record the current root, branch, linked-worktree path, primary checkout, working
+tree state, commits ahead of `origin/master`, and any matching PR:
 
 ```powershell
 git rev-parse --show-toplevel
 git branch --show-current
 git worktree list --porcelain
-gh pr view --json number,url,title,body,state,headRefName,baseRefName,mergeStateStatus,statusCheckRollup
+git status --short
+git log --oneline origin/master..HEAD
+gh pr list --head <branch> --state open --json number,url,title,body,state,headRefName,baseRefName,mergeStateStatus,statusCheckRollup
 ```
 
-The primary checkout is `C:\code\mesh`. Stop if the branch is detached, the PR
-does not match it, or no open PR exists.
+The primary checkout is `C:\code\mesh`. Before any mutation, require an explicit
+user request to complete the branch through commit, PR, merge, cleanup, and
+restart. Skill selection alone does not grant that authority. Stop if the branch
+is detached, is `master`, is rooted at the primary checkout, or is not a linked
+worktree distinct from the primary checkout. Stop if an existing open PR does
+not match the current branch.
+
+If the working tree has intended finished changes, confirm that fresh
+verification appropriate to their risk passed in the current work session.
+Review the complete tracked diff and read every intended untracked file. Stage
+only explicit intended paths, then inspect both `git diff --cached --name-status`
+and the full `git diff --cached` before committing. Stop if the staged paths or
+content differ from the reviewed intent. Commit with a Conventional Commit
+message that follows `AGENTS.md`. Never sweep unrelated or unreviewed files into
+the commit. If verification evidence is missing or the scope is ambiguous, stop
+and resolve that before committing.
+
+If no open PR exists:
+
+1. Confirm the branch contains at least one commit ahead of `origin/master`.
+2. Push it with `git push -u origin <branch>`.
+3. Create the PR with `gh pr create --base master --head <branch>`. Use a
+   Conventional Commit title. In the body, state the problem, the solution, and
+   the exact verification performed.
+4. Re-run `gh pr view` and require an open PR whose head is the current branch
+   and whose base is `master`.
+
+The user's explicit complete-work request authorizes the normal commit, push, PR
+creation, squash merge, cleanup, and restart operations in this workflow. It
+does not authorize including unrelated changes, bypassing failed checks,
+force-pushing, or weakening branch protection.
 
 ## 2. Apply the pre-merge gate
 
 Require all of the following:
 
-- The working tree is clean (`git status --short`).
+- The working tree is clean (`git status --short`) after preparation.
 - The PR is open and mergeable.
 - No check is pending, queued, or in progress. Offer `gh pr checks --watch` and
   re-evaluate if CI is still running.
 - No check concluded failure, error, or cancellation. On failure, ask the user to
   choose: diagnose and fix, explicitly merge anyway, or abort. Never infer a CI
   bypass from urgency or prior local verification.
-- If the branch is behind `main`, run `gh pr update-branch`, wait for checks, and
+- If the branch is behind `master`, run `gh pr update-branch`, wait for checks, and
   re-evaluate the complete gate.
 
 Do not rerun Mesh's full verification suite here. This gate trusts the fresh
@@ -143,14 +175,16 @@ walkthrough.
 
 ## Quick reference
 
-| Condition                    | Action                                          |
-| ---------------------------- | ----------------------------------------------- |
-| CI pending                   | Watch, then re-evaluate the full gate           |
-| CI failed                    | Ask: fix, explicit bypass, or abort             |
-| PR behind                    | Update branch and re-check CI                   |
-| Unknown port owner           | Stop; do not kill it                            |
-| API billing override present | Stop; subscription-only policy is not satisfied |
-| Self-rooted worktree lock    | Continue with exact leftovers documented        |
+| Condition                    | Action                                           |
+| ---------------------------- | ------------------------------------------------ |
+| Finished changes uncommitted | Verify, review, stage intended paths, and commit |
+| No matching PR               | Push and create one against `master`             |
+| CI pending                   | Watch, then re-evaluate the full gate            |
+| CI failed                    | Ask: fix, explicit bypass, or abort              |
+| PR behind                    | Update branch and re-check CI                    |
+| Unknown port owner           | Stop; do not kill it                             |
+| API billing override present | Stop; subscription-only policy is not satisfied  |
+| Self-rooted worktree lock    | Continue with exact leftovers documented         |
 
 ## Common mistakes
 
