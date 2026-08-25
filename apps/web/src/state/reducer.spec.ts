@@ -49,6 +49,55 @@ describe('applyEvent', () => {
     }
     expect(state.lastSequenceBySession['session-1']).toBe(3);
   });
+
+  it('accumulates transient text and clears it when the durable reply arrives', () => {
+    const store = createMeshStore(snapshot(0));
+
+    store.appendAssistantDelta('session-1', 'Hel');
+    store.appendAssistantDelta('session-1', 'lo');
+    expect(store.state.streamingAssistantTextBySession['session-1'].get()).toBe(
+      'Hello',
+    );
+
+    store.applyEvent(event(1));
+    expect(
+      store.state.streamingAssistantTextBySession['session-1'].get(),
+    ).toBeUndefined();
+  });
+
+  it('clears transient text at every stale-stream boundary', () => {
+    const store = createMeshStore(snapshot(0));
+    const append = () =>
+      store.appendAssistantDelta('session-1', 'unfinished response');
+    const expectCleared = () =>
+      expect(
+        store.state.streamingAssistantTextBySession['session-1'].get(),
+      ).toBeUndefined();
+
+    append();
+    store.applyEvent({
+      ...event(1),
+      type: 'session.error',
+      payload: { code: 'driver_crashed', message: 'stopped' },
+    });
+    expectCleared();
+
+    append();
+    store.applyEvent({
+      ...event(2),
+      type: 'session.status',
+      payload: { from: 'running', to: 'interrupted' },
+    });
+    expectCleared();
+
+    append();
+    store.replaceSnapshot(snapshot(2));
+    expectCleared();
+
+    append();
+    store.setConnectionHealth('disconnected');
+    expectCleared();
+  });
 });
 
 describe('replaceSnapshot', () => {

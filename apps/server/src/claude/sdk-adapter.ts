@@ -260,7 +260,7 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
         title: options.title,
         resume: options.resume,
         sessionId: options.resume ? undefined : sessionId,
-        includePartialMessages: false,
+        includePartialMessages: true,
         permissionMode: 'default',
         ...(canUseTool ? { canUseTool } : {}),
       },

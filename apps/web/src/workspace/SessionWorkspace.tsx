@@ -37,6 +37,7 @@ type SessionWorkspaceContextValue = {
   panelApi?: SessionPanelApi;
   auditAvailable: boolean;
   promptDrafts: Record<string, string>;
+  streamingAssistantTextBySession: Record<string, string>;
   onPromptDraftChange?: (sessionId: string, value: string) => void;
 };
 
@@ -80,6 +81,9 @@ function DockviewSessionPanel({
         api={context.panelApi}
         auditAvailable={context.auditAvailable}
         promptDraft={context.promptDrafts[params.sessionId] ?? ''}
+        streamingAssistantText={
+          context.streamingAssistantTextBySession[params.sessionId]
+        }
         onPromptDraftChange={(value) =>
           context.onPromptDraftChange?.(params.sessionId, value)
         }
@@ -113,6 +117,7 @@ export function SessionWorkspace({
   api: panelApi,
   auditAvailable = true,
   promptDrafts = {},
+  streamingAssistantTextBySession = {},
   onPromptDraftChange,
   onNewSession,
   onResumeSession,
@@ -128,6 +133,7 @@ export function SessionWorkspace({
   api?: SessionPanelApi;
   auditAvailable?: boolean;
   promptDrafts?: Record<string, string>;
+  streamingAssistantTextBySession?: Record<string, string>;
   onPromptDraftChange?: (sessionId: string, value: string) => void;
   onNewSession?: () => void;
   onResumeSession?: () => void;
@@ -240,6 +246,7 @@ export function SessionWorkspace({
           panelApi,
           auditAvailable,
           promptDrafts,
+          streamingAssistantTextBySession,
           onPromptDraftChange,
         }}
       >

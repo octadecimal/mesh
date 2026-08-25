@@ -185,6 +185,13 @@ export class SessionRuntime {
   }
 
   private async applyDriverEvent(raw: DriverEvent): Promise<void> {
+    if (raw.kind === 'text_delta') {
+      this.dependencies.publisher.publishTransient({
+        sessionId: this.dependencies.session.id,
+        text: raw.text,
+      });
+      return;
+    }
     const key = fingerprint(this.dependencies.session.id, raw);
     if (this.appliedDriverEvents.has(key)) return;
     const normalized = normalizeDriverEvent(raw);

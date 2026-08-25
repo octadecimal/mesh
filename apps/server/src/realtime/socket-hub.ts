@@ -176,6 +176,15 @@ export class SocketHub {
           else deliver([event]);
         }),
       );
+      cleanups.push(
+        this.options.publisher.subscribeTransient(sessionId, (delta) => {
+          this.send(socket, {
+            protocolVersion: 1,
+            type: 'assistant.delta',
+            payload: delta,
+          });
+        }),
+      );
     }
 
     try {

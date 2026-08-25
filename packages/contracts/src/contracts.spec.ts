@@ -296,4 +296,18 @@ describe('session platform contracts', () => {
       serverMessageSchema.parse(serverMessage).payload.protocolVersion,
     ).toBe(1);
   });
+
+  it('accepts transient assistant text deltas on the realtime boundary', () => {
+    expect(
+      serverMessageSchema.parse({
+        protocolVersion: 1,
+        type: 'assistant.delta',
+        payload: { sessionId: 's1', text: 'Hello' },
+      }),
+    ).toEqual({
+      protocolVersion: 1,
+      type: 'assistant.delta',
+      payload: { sessionId: 's1', text: 'Hello' },
+    });
+  });
 });

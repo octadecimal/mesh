@@ -44,6 +44,12 @@ const start = async () => {
       >,
     onMessage: (message) => {
       if (message.type === 'snapshot') store.replaceSnapshot(message.payload);
+      if (message.type === 'assistant.delta') {
+        store.appendAssistantDelta(
+          message.payload.sessionId,
+          message.payload.text,
+        );
+      }
       if (message.type === 'events') {
         eventQueue = eventQueue
           .then(async () => {

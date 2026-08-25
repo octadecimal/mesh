@@ -98,6 +98,30 @@ describe('SocketHub', () => {
     ).toEqual([2, 3, 4]);
   });
 
+  it('forwards transient assistant deltas without assigning replay sequence', () => {
+    const publisher = new EventPublisher();
+    const hub = new SocketHub({
+      publisher,
+      events: { after: () => [] },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({ s1: 0 });
+    publisher.publishTransient({
+      sessionId: idSchema.parse('s1'),
+      text: 'Hello',
+    });
+
+    expect(socket.messages).toContainEqual({
+      protocolVersion: 1,
+      type: 'assistant.delta',
+      payload: { sessionId: 's1', text: 'Hello' },
+    });
+  });
+
   it('emits connected heartbeats with fresh observation timestamps', () => {
     vi.useFakeTimers();
     let observedAt = '2026-08-24T00:00:00.000Z';

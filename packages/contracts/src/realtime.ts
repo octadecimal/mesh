@@ -25,6 +25,10 @@ export const serverMessageSchema = z.discriminatedUnion('type', [
   serverMessage('snapshot', sessionSnapshotSchema),
   serverMessage('events', z.object({ events: z.array(sessionEventSchema) })),
   serverMessage(
+    'assistant.delta',
+    z.object({ sessionId: idSchema, text: z.string() }),
+  ),
+  serverMessage(
     'connection.health',
     z.object({
       status: z.enum(['connected', 'degraded', 'disconnected']),

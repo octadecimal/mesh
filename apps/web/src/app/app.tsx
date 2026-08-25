@@ -196,6 +196,9 @@ function ConnectedApp({
         api={api}
         auditAvailable={projection.connectionHealth === 'connected'}
         promptDrafts={projection.promptDrafts}
+        streamingAssistantTextBySession={
+          projection.streamingAssistantTextBySession
+        }
         onPromptDraftChange={store.setPromptDraft}
         onNewSession={() => {
           setFlowError(undefined);

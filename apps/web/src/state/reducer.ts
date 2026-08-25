@@ -24,6 +24,7 @@ export type MeshProjection = {
   selectedSessionId?: string;
   filters: Record<string, string>;
   promptDrafts: Record<string, string>;
+  streamingAssistantTextBySession: Record<string, string>;
   unreadSessionIds: Record<string, boolean>;
   connectionHealth: ConnectionHealth;
   notifications: Notification[];
@@ -73,6 +74,7 @@ export const createProjection = (
   layouts: snapshot.layouts,
   filters: {},
   promptDrafts: {},
+  streamingAssistantTextBySession: {},
   unreadSessionIds: {},
   connectionHealth: 'disconnected',
   notifications: [],
@@ -89,11 +91,22 @@ export const applyEvent = (
   }
 
   const events = [...state.events, event];
+  const streamingAssistantTextBySession = {
+    ...state.streamingAssistantTextBySession,
+  };
+  if (
+    event.type === 'message.assistant' ||
+    event.type === 'session.error' ||
+    event.type === 'session.status'
+  ) {
+    delete streamingAssistantTextBySession[event.sessionId];
+  }
   return {
     kind: 'applied',
     state: {
       ...state,
       events,
+      streamingAssistantTextBySession,
       sessions: sessionsAfter(state.sessions, event),
       pendingApprovals: pendingApprovals(events),
       lastSequenceBySession: {

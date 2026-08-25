@@ -91,6 +91,22 @@ describe('SessionPanel', () => {
     });
   });
 
+  it('renders accumulated streaming text as one temporary assistant card', () => {
+    render(
+      <SessionPanel
+        session={session}
+        workspace={workspace}
+        events={events}
+        streamingAssistantText="Response in progress"
+      />,
+    );
+
+    expect(
+      screen.getByLabelText('Streaming assistant message'),
+    ).toHaveTextContent('Response in progress');
+    expect(screen.getAllByText('Response in progress')).toHaveLength(1);
+  });
+
   it('loads diagnostics one cursor page at a time only after opening and appends the next page', async () => {
     const user = userEvent.setup();
     const requests: Array<[string, unknown]> = [];

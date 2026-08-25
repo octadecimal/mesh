@@ -139,6 +139,21 @@ describe('session runtime', () => {
     expect(create).toHaveBeenCalledOnce();
   });
 
+  it('publishes text deltas without persisting them as transcript events', async () => {
+    const { repos, driverSession, publisher, registry } = setup();
+    disposers.push(repos.dispose);
+    const deltas: string[] = [];
+    publisher.subscribeTransient('s1', ({ text }) => deltas.push(text));
+    await registry.create('s1');
+    const eventsBeforeDelta = repos.events.after('s1', 0);
+
+    driverSession.enqueue({ kind: 'text_delta', text: 'Hel' });
+    driverSession.enqueue({ kind: 'text_delta', text: 'lo' });
+
+    await vi.waitFor(() => expect(deltas).toEqual(['Hel', 'lo']));
+    expect(repos.events.after('s1', 0)).toEqual(eventsBeforeDelta);
+  });
+
   it('isolates a throwing subscriber while other subscribers receive persisted events', async () => {
     const { repos, driverSession, publisher, registry } = setup();
     disposers.push(repos.dispose);

@@ -198,6 +198,38 @@ test('creates shared and worktree sessions with the production-built server', as
   );
 });
 
+test('streams one live assistant card before persisting the final reply', async ({
+  page,
+  harness,
+}) => {
+  const sessionId = await createThroughApi(harness, 'Streaming session');
+  await harness.waitForCreated();
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: /Streaming session/ }).click();
+  const driverSession = harness.driver.createdSessions[0];
+  const liveMessage = page.getByLabel('Streaming assistant message');
+
+  driverSession.enqueue({ kind: 'text_delta', text: 'Streaming ' });
+  await expect(liveMessage).toHaveText('AssistantStreaming');
+  driverSession.enqueue({ kind: 'text_delta', text: 'works' });
+  await expect(liveMessage).toHaveText('AssistantStreaming works');
+  expect(
+    (await harness.snapshot()).events.some(
+      (event) =>
+        event.sessionId === sessionId && event.type === 'message.assistant',
+    ),
+  ).toBe(false);
+
+  driverSession.enqueue({
+    kind: 'text_completed',
+    text: 'Streaming works',
+  });
+  await expect(liveMessage).toHaveCount(0);
+  await expect(
+    page.getByLabel('Assistant message', { exact: true }),
+  ).toHaveText('AssistantStreaming works');
+});
+
 test('blocks prompting when the subscription limit is reached', async ({
   page,
   harness,

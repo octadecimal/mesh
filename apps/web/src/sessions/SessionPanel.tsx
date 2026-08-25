@@ -21,6 +21,7 @@ export function SessionPanel({
   api,
   auditAvailable = true,
   promptDraft = '',
+  streamingAssistantText,
   onPromptDraftChange = () => undefined,
 }: {
   session: Session;
@@ -29,6 +30,7 @@ export function SessionPanel({
   api?: SessionPanelApi;
   auditAvailable?: boolean;
   promptDraft?: string;
+  streamingAssistantText?: string;
   onPromptDraftChange?: (value: string) => void;
 }) {
   const unavailable = async () => {
@@ -46,6 +48,7 @@ export function SessionPanel({
         events={events}
         permissionMode={session.permissionMode}
         send={send}
+        streamingAssistantText={streamingAssistantText}
       />
       <RawDiagnostics
         sessionId={session.id}

@@ -11,10 +11,12 @@ export function Transcript({
   events,
   permissionMode,
   send,
+  streamingAssistantText,
 }: {
   events: SessionEvent[];
   permissionMode: PermissionMode;
   send: CommandSender;
+  streamingAssistantText?: string;
 }) {
   const resolutions = new Map<string, PermissionResolution>();
   const requests = new Map<
@@ -51,6 +53,16 @@ export function Transcript({
           />
         ),
       )}
+      {streamingAssistantText ? (
+        <article
+          className="transcript-item transcript-assistant transcript-streaming"
+          aria-label="Streaming assistant message"
+          aria-live="polite"
+        >
+          <strong>Assistant</strong>
+          <p>{streamingAssistantText}</p>
+        </article>
+      ) : null}
     </section>
   );
 }

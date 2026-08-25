@@ -32,6 +32,8 @@ export const createMeshStore = (snapshot: SessionSnapshot) => {
     },
     setConnectionHealth(connectionHealth: ConnectionHealth) {
       state.connectionHealth.set(connectionHealth);
+      if (connectionHealth === 'disconnected')
+        state.streamingAssistantTextBySession.set({});
     },
     notifyInvalidPayload(message: string) {
       const current = currentProjection(state);
@@ -62,6 +64,14 @@ export const createMeshStore = (snapshot: SessionSnapshot) => {
       state.set({
         ...current,
         promptDrafts: { ...current.promptDrafts, [sessionId]: value },
+      });
+    },
+    appendAssistantDelta(sessionId: string, text: string) {
+      const current = currentProjection(state);
+      state.streamingAssistantTextBySession.set({
+        ...current.streamingAssistantTextBySession,
+        [sessionId]:
+          (current.streamingAssistantTextBySession[sessionId] ?? '') + text,
       });
     },
   };
