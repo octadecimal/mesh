@@ -90,6 +90,8 @@ const start = async () => {
   });
   const connectedApi = {
     diagnostics: api.diagnostics.bind(api),
+    discover: api.discover.bind(api),
+    projectSnapshot: api.projectSnapshot.bind(api),
     command: async (...args: Parameters<MeshApi['command']>) => {
       const response = await api.command(...args);
       await coordinator.refresh();

@@ -68,7 +68,7 @@ textarea:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 19rem minmax(0, 1fr);
+  grid-template-columns: 19rem 13rem minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
 }
@@ -79,6 +79,76 @@ textarea:focus-visible {
   background: var(--panel);
   border-right: 1px solid var(--border);
   box-shadow: 12px 0 40px #0003;
+}
+.project-navigation {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  padding: 1.1rem;
+  overflow: auto;
+  background: #0d1219;
+  border-right: 1px solid var(--border);
+}
+.project-navigation-heading {
+  display: grid;
+  gap: 0.7rem;
+}
+.project-navigation label {
+  display: grid;
+  gap: 0.38rem;
+  color: #b9c4d4;
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+.project-navigation select {
+  width: 100%;
+  color: var(--text);
+  background: #090e15;
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  padding: 0.6rem;
+}
+.project-navigation-actions {
+  display: grid;
+  gap: 0.45rem;
+}
+.project-navigation-actions .button {
+  justify-content: flex-start;
+}
+.project-navigation-actions .button[aria-current='page'] {
+  color: #dbeafe;
+  background: #17243b;
+  border-color: #31558b;
+}
+.project-board-boundary {
+  display: grid;
+  align-content: center;
+  min-width: 0;
+  padding: clamp(2rem, 8vw, 7rem);
+  background: linear-gradient(145deg, #0b1017, #101824 55%, #0a0e14);
+}
+.project-view {
+  min-width: 0;
+  min-height: 0;
+}
+.project-view > div:not([hidden]) {
+  height: 100%;
+}
+.project-board-boundary > div {
+  max-width: 42rem;
+}
+.project-board-boundary h2 {
+  margin: 0.35rem 0 0;
+  font-size: clamp(1.7rem, 4vw, 2.8rem);
+  letter-spacing: -0.04em;
+}
+.project-board-boundary p {
+  max-width: 34rem;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.project-board-boundary[aria-readonly='true'] {
+  background: linear-gradient(145deg, #17120d, #111720 55%, #0a0e14);
 }
 .sidebar-brand {
   margin-bottom: 1.15rem;
@@ -122,6 +192,61 @@ textarea:focus-visible {
 .dialog-actions {
   display: flex;
   gap: 0.6rem;
+}
+.project-suggestions {
+  margin: 0 0 1.15rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  padding: 0.8rem;
+  background: #0c1118;
+}
+.project-suggestions h3,
+.project-suggestions p {
+  margin: 0;
+}
+.project-suggestions h3 {
+  font-size: 0.85rem;
+}
+.project-suggestions p {
+  margin-top: 0.3rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.project-suggestions ul {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0.8rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.project-suggestions li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.65rem;
+}
+.project-suggestions li div {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+}
+.project-suggestions strong,
+.project-suggestions code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-suggestions strong {
+  font-size: 0.8rem;
+}
+.project-suggestions code {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+.project-suggestions .button {
+  flex: 0 0 auto;
 }
 .sidebar-actions {
   display: grid;
@@ -765,13 +890,25 @@ textarea:focus-visible {
 @media (max-width: 760px) {
   .app-shell {
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
     height: 100dvh;
   }
   .session-sidebar {
     max-height: 42vh;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+  .project-navigation {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: end;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .project-navigation-actions {
+    grid-template-columns: repeat(2, auto);
+  }
+  .project-navigation-heading {
+    gap: 0.45rem;
   }
   .empty-details {
     gap: 1rem;
@@ -785,6 +922,12 @@ textarea:focus-visible {
 @media (max-width: 460px) {
   .sidebar-actions {
     grid-template-columns: 1fr;
+  }
+  .project-navigation {
+    grid-template-columns: 1fr;
+  }
+  .project-navigation-actions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .empty-actions {
     flex-direction: column;

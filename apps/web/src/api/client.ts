@@ -35,6 +35,17 @@ export type DiagnosticsOptions = {
   limit?: number;
 };
 
+export class MeshApiError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly details?: unknown,
+  ) {
+    super(message);
+    this.name = 'MeshApiError';
+  }
+}
+
 export class MeshApi {
   private readonly fetcher: typeof globalThis.fetch;
   private readonly baseUrl: string;
@@ -127,8 +138,28 @@ export class MeshApi {
   private async request(path: string, init?: RequestInit): Promise<unknown> {
     const response = await this.fetcher(`${this.baseUrl}${path}`, init);
     const payload: unknown = await response.json();
-    if (!response.ok)
-      throw new Error(`Mesh API request failed (${response.status})`);
+    if (!response.ok) {
+      const failure = z
+        .object({
+          error: z.object({
+            code: z.string(),
+            message: z.string(),
+            details: z.unknown().optional(),
+          }),
+        })
+        .safeParse(payload);
+      if (failure.success) {
+        throw new MeshApiError(
+          failure.data.error.code,
+          failure.data.error.message,
+          failure.data.error.details,
+        );
+      }
+      throw new MeshApiError(
+        'request_failed',
+        `Mesh API request failed (${response.status})`,
+      );
+    }
     return payload;
   }
 }
