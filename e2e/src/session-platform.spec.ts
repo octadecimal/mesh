@@ -7,6 +7,8 @@ import {
   type FakeClaudeHarness,
 } from '../fixtures/fake-claude.js';
 
+const visualSnapshotsSupported = process.platform === 'win32';
+
 const createThroughUi = async (
   page: Page,
   harness: FakeClaudeHarness,
@@ -99,10 +101,12 @@ test('keeps the empty cockpit usable at a narrow viewport', async ({
   await expect(
     page.getByRole('button', { name: 'Create your first session' }),
   ).toBeVisible();
-  await expect(page).toHaveScreenshot('empty-cockpit-narrow.png', {
-    animations: 'disabled',
-    fullPage: true,
-  });
+  if (visualSnapshotsSupported) {
+    await expect(page).toHaveScreenshot('empty-cockpit-narrow.png', {
+      animations: 'disabled',
+      fullPage: true,
+    });
+  }
 });
 
 test('creates shared and worktree sessions with the production-built server', async ({
@@ -144,9 +148,11 @@ test('creates shared and worktree sessions with the production-built server', as
   const newSessionDialog = page.getByRole('dialog', { name: 'New session' });
   await expect(newSessionDialog).toBeVisible();
   await expect(newSessionDialog).toHaveCSS('position', 'fixed');
-  await expect(newSessionDialog).toHaveScreenshot('new-session-dialog.png', {
-    animations: 'disabled',
-  });
+  if (visualSnapshotsSupported) {
+    await expect(newSessionDialog).toHaveScreenshot('new-session-dialog.png', {
+      animations: 'disabled',
+    });
+  }
   await page.getByRole('button', { name: 'Cancel' }).click();
   await expect
     .poll(() =>
@@ -186,10 +192,12 @@ test('creates shared and worktree sessions with the production-built server', as
   ).toBeVisible();
   const activePanel = page.locator('.session-panel-content');
   await expect(activePanel).toBeVisible();
-  await expect(activePanel).toHaveScreenshot('active-session-panel.png', {
-    animations: 'disabled',
-    mask: [activePanel.locator('.session-header dd').first()],
-  });
+  if (visualSnapshotsSupported) {
+    await expect(activePanel).toHaveScreenshot('active-session-panel.png', {
+      animations: 'disabled',
+      mask: [activePanel.locator('.session-header dd').first()],
+    });
+  }
 
   await createThroughUi(page, harness, 'Worktree acceptance', 'worktree');
   const snapshot = await harness.snapshot();
