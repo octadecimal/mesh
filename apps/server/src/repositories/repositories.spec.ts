@@ -11,6 +11,10 @@ import {
   rawDiagnosticSchema,
   savedLayoutSchema,
   sessionSchema,
+  taskAttemptSchema,
+  taskSchema,
+  taskTransitionSchema,
+  taskActorSchema,
   workspaceSchema,
 } from '@mesh-session-platform/contracts';
 
@@ -101,6 +105,55 @@ describe('repositories', () => {
     ]);
   });
 
+const actor = () => taskActorSchema.parse({ type: 'human', id: 'user-1' });
+
+const task = (overrides: Record<string, unknown> = {}) =>
+  taskSchema.parse({
+    id: 'task-1',
+    projectId: 'p1',
+    title: 'Persist tasks',
+    description: 'Store board tasks in SQLite.',
+    acceptanceCriteria: ['Task is persisted'],
+    priority: 'normal',
+    rank: 'b',
+    lifecycleState: 'backlog',
+    labels: ['persistence'],
+    notes: '',
+    blocked: null,
+    revision: 1,
+    createdAt: '2026-08-24T00:00:00.000Z',
+    updatedAt: '2026-08-24T00:00:00.000Z',
+    ...overrides,
+  });
+
+const attempt = (overrides: Record<string, unknown> = {}) =>
+  taskAttemptSchema.parse({
+    id: 'attempt-1',
+    taskId: 'task-1',
+    sessionId: 's1',
+    ordinal: 1,
+    source: 'linked',
+    actor: actor(),
+    createdAt: '2026-08-24T00:00:00.000Z',
+    unlinkedAt: null,
+    unlinkedBy: null,
+    unlinkReason: null,
+    ...overrides,
+  });
+
+const transition = (overrides: Record<string, unknown> = {}) =>
+  taskTransitionSchema.parse({
+    id: 'transition-1',
+    taskId: 'task-1',
+    commandId: 'command-1',
+    previousState: 'backlog',
+    nextState: 'ready',
+    actor: actor(),
+    reason: 'Ready to start',
+    occurredAt: '2026-08-24T00:01:00.000Z',
+    ...overrides,
+  });
+
   it('persists additive project metadata for new project records', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
@@ -121,6 +174,145 @@ describe('repositories', () => {
       updated_at: '2026-08-24T00:00:00.000Z',
       archived_at: null,
     });
+  });
+
+  it('finds projects by repository identity and guards updates by revision', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+
+    expect(repos.projects.getByRepositoryIdentity('C:/code/platform')).toMatchObject({
+      id: 'p1',
+    });
+    expect(
+      repos.projects.update(
+        { ...project(), displayName: 'Renamed', updatedAt: '2026-08-24T00:03:00.000Z' },
+        1,
+      ),
+    ).toMatchObject({ displayName: 'Renamed', revision: 2 });
+    expect(repos.projects.update({ ...project(), displayName: 'Stale' }, 1)).toBeUndefined();
+    expect(repos.projects.archive('p1', '2026-08-24T00:04:00.000Z')).toMatchObject({
+      archivedAt: '2026-08-24T00:04:00.000Z',
+      revision: 3,
+    });
+    expect(repos.projects.restore('p1', '2026-08-24T00:05:00.000Z')).toMatchObject({
+      archivedAt: null,
+      revision: 4,
+    });
+  });
+
+  it('orders project tasks for the board and guards task updates by revision', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    repos.tasks.create(task({ id: 'task-ready', lifecycleState: 'ready', rank: 'a' }));
+    repos.tasks.create(task({ id: 'task-backlog-later', rank: 'c' }));
+    repos.tasks.create(task({ id: 'task-backlog-first', rank: 'a' }));
+
+    expect(repos.tasks.listByProject('p1').map((value) => value.id)).toEqual([
+      'task-backlog-first',
+      'task-backlog-later',
+      'task-ready',
+    ]);
+    const stored = repos.tasks.get('task-backlog-first');
+    expect(stored).toBeDefined();
+    if (!stored) throw new Error('Expected stored task');
+    expect(
+      repos.tasks.update(
+        { ...stored, title: 'Updated task', updatedAt: '2026-08-24T00:04:00.000Z' },
+        1,
+      ),
+    ).toMatchObject({ title: 'Updated task', revision: 2 });
+    expect(repos.tasks.update({ ...stored, title: 'Stale task' }, 1)).toBeUndefined();
+  });
+
+  it('creates monotonic task attempts and preserves unlink history', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    repos.tasks.create(task());
+
+    const first = repos.attempts.createForTask('task-1', 's1', 'linked', actor());
+    const unlinked = repos.attempts.unlink(
+      first.id,
+      actor(),
+      'Session completed',
+      '2026-08-24T00:02:00.000Z',
+    );
+    const second = repos.attempts.create(
+      attempt({
+        id: 'attempt-2',
+        ordinal: 2,
+        createdAt: '2026-08-24T00:03:00.000Z',
+      }),
+    );
+
+    expect(unlinked).toMatchObject({
+      unlinkedAt: '2026-08-24T00:02:00.000Z',
+      unlinkReason: 'Session completed',
+    });
+    expect(first.ordinal).toBe(1);
+    expect(second.ordinal).toBe(2);
+    expect(repos.attempts.listByTask('task-1').map((value) => value.ordinal)).toEqual([
+      1,
+      2,
+    ]);
+    expect(repos.attempts.getCurrentBySession('s1')).toMatchObject({ id: 'attempt-2' });
+    expect(() =>
+      repos.attempts.create(attempt({ id: 'attempt-3', ordinal: 3 })),
+    ).toThrow();
+  });
+
+  it('appends immutable task transitions and rejects duplicate commands', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    repos.tasks.create(task());
+    repos.transitions.append(transition());
+
+    expect(repos.transitions.listByTask('task-1')).toEqual([transition()]);
+    expect(() =>
+      repos.transitions.append(transition({ id: 'transition-2' })),
+    ).toThrow();
+  });
+
+  it('appends project events with monotonic cursor sequences and rejects duplicate ids', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const first = repos.projectEvents.append('p1', {
+      protocolVersion: 1,
+      id: 'project-event-1',
+      projectId: project().id,
+      occurredAt: '2026-08-24T00:01:00.000Z',
+      type: 'project.changed',
+      payload: { project: project() },
+    });
+    const second = repos.projectEvents.append('p1', {
+      protocolVersion: 1,
+      id: 'project-event-2',
+      projectId: project().id,
+      occurredAt: '2026-08-24T00:02:00.000Z',
+      type: 'project.changed',
+      payload: { project: project() },
+    });
+
+    expect([first.sequence, second.sequence]).toEqual([1, 2]);
+    expect(repos.projectEvents.after('p1', 0).map((event) => event.sequence)).toEqual([
+      1,
+      2,
+    ]);
+    expect(repos.projectEvents.latestSequence('p1')).toBe(2);
+    expect(() =>
+      repos.projectEvents.append('p1', {
+        protocolVersion: 1,
+        id: 'project-event-2',
+        projectId: project().id,
+        occurredAt: '2026-08-24T00:03:00.000Z',
+        type: 'project.changed',
+        payload: { project: project() },
+      }),
+    ).toThrow();
   });
 
   it('omits archived sessions unless requested', () => {

@@ -10,6 +10,10 @@ import { EventRepository } from '../repositories/event-repository.js';
 import { LayoutRepository } from '../repositories/layout-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
 import { SessionRepository } from '../repositories/session-repository.js';
+import { ProjectEventRepository } from '../repositories/project-event-repository.js';
+import { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
+import { TaskRepository } from '../repositories/task-repository.js';
+import { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
 import { WorkspaceRepository } from '../repositories/workspace-repository.js';
 
 export const createTestRepositories = (options?: {
@@ -56,6 +60,10 @@ export const createTestRepositories = (options?: {
     path,
     database,
     projects: new ProjectRepository(database),
+    tasks: new TaskRepository(database),
+    attempts: new TaskAttemptRepository(database),
+    transitions: new TaskTransitionRepository(database),
+    projectEvents: new ProjectEventRepository(database),
     workspaces: new WorkspaceRepository(database),
     sessions: new SessionRepository(database),
     diagnostics: new DiagnosticRepository(database),
