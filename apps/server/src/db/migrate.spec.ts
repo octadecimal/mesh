@@ -23,6 +23,11 @@ const runProductionBuild = (
   workspaceRoot: string,
   outputPath: string,
 ): void => {
+  const buildEnvironment = { ...process.env };
+  delete buildEnvironment.NX_TASK_HASH;
+  delete buildEnvironment.NX_TASK_TARGET_CONFIGURATION;
+  delete buildEnvironment.NX_TASK_TARGET_PROJECT;
+  delete buildEnvironment.NX_TASK_TARGET_TARGET;
   const pnpmArgs = [
     'nx',
     'build',
@@ -32,7 +37,7 @@ const runProductionBuild = (
   ];
   const options = {
     cwd: workspaceRoot,
-    env: { ...process.env },
+    env: buildEnvironment,
     shell: false,
     stdio: 'pipe',
     timeout: 120_000,
