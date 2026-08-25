@@ -57,7 +57,9 @@ export class TaskAttemptRepository {
         @unlinkedAt, @unlinkedByJson, @unlinkReason
       )
     `);
-    this.selectById = database.prepare('SELECT * FROM task_attempts WHERE id = ?');
+    this.selectById = database.prepare(
+      'SELECT * FROM task_attempts WHERE id = ?',
+    );
     this.selectCurrentBySession = database.prepare(
       'SELECT * FROM task_attempts WHERE session_id = ? AND unlinked_at IS NULL',
     );
@@ -89,7 +91,7 @@ export class TaskAttemptRepository {
     const parsedTaskId = idSchema.parse(taskId);
     const parsedSessionId = idSchema.parse(sessionId);
     const parsedActor = taskActorSchema.parse(actor);
-    return this.inImmediateTransaction(() => {
+    const create = () => {
       const ordinal = (
         this.nextOrdinal.get(parsedTaskId) as { ordinal: number }
       ).ordinal;
@@ -107,23 +109,31 @@ export class TaskAttemptRepository {
       });
       this.insert.run(this.toParameters(attempt));
       return attempt;
-    });
+    };
+    return this.database.inTransaction
+      ? create()
+      : this.inImmediateTransaction(create);
   }
 
   getCurrentBySession(sessionId: string): TaskAttempt | undefined {
-    const row = this.selectCurrentBySession.get(
-      idSchema.parse(sessionId),
-    ) as TaskAttemptRow | undefined;
+    const row = this.selectCurrentBySession.get(idSchema.parse(sessionId)) as
+      | TaskAttemptRow
+      | undefined;
     return row ? toTaskAttempt(row) : undefined;
   }
 
   listByTask(taskId: string): TaskAttempt[] {
-    return (this.selectByTask.all(idSchema.parse(taskId)) as TaskAttemptRow[]).map(
-      toTaskAttempt,
-    );
+    return (
+      this.selectByTask.all(idSchema.parse(taskId)) as TaskAttemptRow[]
+    ).map(toTaskAttempt);
   }
 
-  unlink(id: string, actor: TaskActor, reason: string, at: string): TaskAttempt {
+  unlink(
+    id: string,
+    actor: TaskActor,
+    reason: string,
+    at: string,
+  ): TaskAttempt {
     const current = this.get(id);
     if (!current) throw new Error(`Task attempt '${id}' was not found`);
     const value = taskAttemptSchema.parse({
@@ -145,13 +155,16 @@ export class TaskAttemptRepository {
   }
 
   private get(id: string): TaskAttempt | undefined {
-    const row = this.selectById.get(idSchema.parse(id)) as TaskAttemptRow | undefined;
+    const row = this.selectById.get(idSchema.parse(id)) as
+      | TaskAttemptRow
+      | undefined;
     return row ? toTaskAttempt(row) : undefined;
   }
 
   private insertWithOrdinal(attempt: TaskAttempt): TaskAttempt {
-    const ordinal = (this.nextOrdinal.get(attempt.taskId) as { ordinal: number })
-      .ordinal;
+    const ordinal = (
+      this.nextOrdinal.get(attempt.taskId) as { ordinal: number }
+    ).ordinal;
     if (attempt.ordinal !== ordinal) {
       throw new Error(`Task attempt ordinal must be ${ordinal}`);
     }

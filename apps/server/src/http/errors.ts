@@ -15,12 +15,16 @@ export type StableErrorCode =
   | 'repository_invalid'
   | 'repository_ambiguous'
   | 'repository_already_imported'
-  | 'task_not_found'
   | 'task_revision_conflict'
+  | 'task_not_found'
   | 'task_not_ready'
   | 'task_blocked'
   | 'task_transition_invalid'
   | 'task_transition_unauthorized'
+  | 'session_already_linked'
+  | 'session_repository_mismatch'
+  | 'attempt_start_failed'
+  | 'attempt_reconciliation_required'
   | 'command_reconciliation_required'
   | 'internal_error';
 
@@ -61,8 +65,12 @@ const statusCodes: Record<StableErrorCode, number> = {
   repository_invalid: 400,
   repository_ambiguous: 400,
   repository_already_imported: 409,
-  task_not_found: 404,
   task_revision_conflict: 409,
+  task_not_found: 404,
+  session_already_linked: 409,
+  session_repository_mismatch: 409,
+  attempt_start_failed: 409,
+  attempt_reconciliation_required: 409,
   task_not_ready: 422,
   task_blocked: 409,
   task_transition_invalid: 409,

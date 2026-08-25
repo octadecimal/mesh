@@ -31,6 +31,10 @@ import type { TaskAttemptRepository } from '../repositories/task-attempt-reposit
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
 import type { TaskMutationResult, TaskService } from '../tasks/task-service.js';
+import type {
+  AttemptMutationResult,
+  AttemptService,
+} from '../tasks/attempt-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
@@ -58,6 +62,7 @@ export interface CommandDependencies {
   layouts: LayoutRepository;
   commands: CommandRepository;
   taskService: TaskService;
+  attemptService?: AttemptService;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
@@ -88,6 +93,21 @@ const taskResponse = (
     ...result,
     projectEventCursor: result.event.sequence,
   };
+};
+
+const attemptResponse = (result: AttemptMutationResult) => ({
+  ...result,
+  projectEventCursor: result.event.sequence,
+});
+
+const requireAttemptService = (dependencies: CommandDependencies) => {
+  if (!dependencies.attemptService) {
+    throw new CommandError(
+      'invalid_command',
+      'Task attempt support is unavailable',
+    );
+  }
+  return dependencies.attemptService;
 };
 
 const requireTaskCommandId = (commandId: string | undefined): string => {
@@ -386,6 +406,36 @@ const executeMutation = async (
             commandId: requireTaskCommandId(commandId),
           }),
           dependencies,
+        ),
+      );
+    case 'task.attempt.launch':
+      return response(
+        command.type,
+        attemptResponse(
+          await requireAttemptService(dependencies).launch({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.attempt.link':
+      return response(
+        command.type,
+        attemptResponse(
+          await requireAttemptService(dependencies).link({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.attempt.unlink':
+      return response(
+        command.type,
+        attemptResponse(
+          await requireAttemptService(dependencies).unlink({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
         ),
       );
     case 'project.import': {
@@ -776,6 +826,9 @@ export const executeCommand = async (
         'task.block',
         'task.unblock',
         'task.transition',
+        'task.attempt.launch',
+        'task.attempt.link',
+        'task.attempt.unlink',
       ].includes(command.command.type)
     ) {
       return executeMutation(

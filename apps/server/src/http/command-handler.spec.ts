@@ -17,6 +17,7 @@ import {
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
+import { AttemptService } from '../tasks/attempt-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
 import { toHttpError } from './errors.js';
@@ -71,6 +72,15 @@ describe('executeCommand', () => {
       now: () => now,
       createId,
     });
+    const pathOptions = { baseDirectory };
+    const attemptService = new AttemptService({
+      ...repositories,
+      taskService,
+      registry,
+      pathOptions,
+      now: () => now,
+      createId,
+    });
     cleanups.push(async () => {
       await registry.shutdown();
       repositories.dispose();
@@ -80,9 +90,10 @@ describe('executeCommand', () => {
       dependencies: {
         ...repositories,
         taskService,
+        attemptService,
         registry,
         driver,
-        pathOptions: { baseDirectory },
+        pathOptions,
         now: () => now,
         createId,
       },
@@ -398,6 +409,104 @@ describe('executeCommand', () => {
       body: { error: { code: 'task_revision_conflict' } },
     });
     expect(repositories.tasks.get('task-created')?.revision).toBe(1);
+  });
+
+  it('routes attempt launch, unlink, and relink through the application saga', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    let nextId = 0;
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => `attempt-generated-${++nextId}`,
+    );
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath,
+        repositoryIdentity: repositoryPath,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    repositories.tasks.create(
+      taskSchema.parse({
+        id: 't1',
+        projectId: 'p1',
+        title: 'Launch from the board',
+        description: 'Start one audited attempt.',
+        acceptanceCriteria: ['The task advances after startup.'],
+        priority: 'normal',
+        rank: 'm',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const launch = projectCommand('attempt-launch-command', {
+      type: 'task.attempt.launch',
+      payload: {
+        taskId: 't1',
+        expectedRevision: 1,
+        title: 'Attempt one',
+        permissionMode: 'interactive',
+        workspace: { type: 'shared', path: repositoryPath },
+        actor: { type: 'human', id: 'operator' },
+      },
+    });
+
+    const launched = await executeCommand(launch, dependencies);
+    const duplicate = await executeCommand(launch, dependencies);
+
+    expect(duplicate).toEqual(launched);
+    expect(launched).toMatchObject({
+      commandType: 'task.attempt.launch',
+      result: {
+        task: { id: 't1', lifecycleState: 'in_progress', revision: 2 },
+        attempt: { ordinal: 1, source: 'launched' },
+        session: { lifecycleState: 'running' },
+        projectEventCursor: 2,
+      },
+    });
+    const attemptId = (launched.result as { attempt: { id: string } }).attempt
+      .id;
+    const sessionId = (launched.result as { session: { id: string } }).session
+      .id;
+
+    const unlinked = await executeCommand(
+      projectCommand('attempt-unlink-command', {
+        type: 'task.attempt.unlink',
+        payload: {
+          taskId: 't1',
+          expectedRevision: 2,
+          attemptId,
+          reason: 'Correct the association',
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    );
+    const relinked = await executeCommand(
+      projectCommand('attempt-relink-command', {
+        type: 'task.attempt.link',
+        payload: {
+          taskId: 't1',
+          expectedRevision: 2,
+          sessionId,
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(unlinked.result).toMatchObject({
+      attempt: { unlinkReason: 'Correct the association' },
+    });
+    expect(relinked.result).toMatchObject({ attempt: { ordinal: 2 } });
+    expect(repositories.attempts.listByTask('t1')).toHaveLength(2);
   });
 
   it('does not decide an already-resolved permission request', async () => {

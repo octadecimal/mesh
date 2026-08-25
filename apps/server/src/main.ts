@@ -37,6 +37,7 @@ import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { recoverInterruptedSessions } from './runtime/recovery.js';
 import { SessionRegistry } from './runtime/session-registry.js';
 import { TaskService } from './tasks/task-service.js';
+import { AttemptService } from './tasks/attempt-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
   constructor(private readonly conflicts: readonly BillingConflict[]) {}
@@ -192,12 +193,30 @@ export const startServer = async (
     driver,
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
+  const git = new GitAdapter(new NodeProcessRunner(), pathOptions);
+  const attemptService = new AttemptService({
+    database,
+    projects,
+    tasks,
+    attempts,
+    sessions,
+    workspaces,
+    diagnostics,
+    projectEvents,
+    commands,
+    taskService,
+    registry,
+    git,
+    pathOptions,
+    billingConflicts,
+  });
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
     database,
     projects,
     tasks,
     taskService,
+    attemptService,
     attempts,
     transitions,
     projectEvents,
@@ -209,7 +228,7 @@ export const startServer = async (
     commands,
     registry,
     driver,
-    git: new GitAdapter(new NodeProcessRunner(), pathOptions),
+    git,
     pathOptions,
     billingConflicts,
     originPolicy,
