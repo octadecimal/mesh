@@ -70,6 +70,7 @@ const start = async () => {
     command: async (...args: Parameters<MeshApi['command']>) => {
       const response = await api.command(...args);
       await coordinator.refresh();
+      if (args[0].type === 'session.create') socket.resubscribe();
       return response;
     },
   };

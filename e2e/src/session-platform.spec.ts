@@ -88,6 +88,15 @@ test('creates shared and worktree sessions with the production-built server', as
   page,
   harness,
 }) => {
+  const socketFrames: string[] = [];
+  page.on('websocket', (socket) => {
+    socket.on('framesent', ({ payload }) =>
+      socketFrames.push(`sent:${String(payload)}`),
+    );
+    socket.on('framereceived', ({ payload }) =>
+      socketFrames.push(`received:${String(payload)}`),
+    );
+  });
   await harness.snapshot();
   await page.goto(harness.origin);
   const browserSnapshot = await page.evaluate(async () => {
@@ -100,10 +109,41 @@ test('creates shared and worktree sessions with the production-built server', as
   await expect(
     page.getByRole('complementary', { name: 'Sessions' }),
   ).toBeVisible();
+  await expect
+    .poll(() =>
+      socketFrames.some(
+        (frame) => frame.startsWith('sent:') && frame.includes('subscribe'),
+      ),
+    )
+    .toBe(true);
 
   await createThroughUi(page, harness, 'Shared acceptance');
   await expect(
     page.getByRole('button', { name: /Shared acceptance/ }),
+  ).toBeVisible();
+  await expect
+    .poll(
+      () =>
+        socketFrames.filter(
+          (frame) => frame.startsWith('sent:') && frame.includes('subscribe'),
+        ).length,
+    )
+    .toBe(2);
+  await page.getByRole('button', { name: /Shared acceptance/ }).click();
+
+  harness.driver.createdSessions[0].enqueue({
+    kind: 'text_completed',
+    text: 'Created after the socket connected',
+  });
+  await expect
+    .poll(() =>
+      socketFrames.some((frame) =>
+        frame.includes('Created after the socket connected'),
+      ),
+    )
+    .toBe(true);
+  await expect(
+    page.getByText('Created after the socket connected'),
   ).toBeVisible();
 
   await createThroughUi(page, harness, 'Worktree acceptance', 'worktree');

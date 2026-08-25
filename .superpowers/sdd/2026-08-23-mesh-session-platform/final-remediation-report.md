@@ -22,6 +22,11 @@ was rejected.
    `subscription_limit`, close the driver, and leave the session in the existing
    non-runnable `failed` lifecycle state. This reuses the MVP lifecycle schema
    and avoids a migration while still allowing explicit resume.
+6. The follow-up review blocker was verified and fixed: a successful
+   `session.create` refresh now immediately reopens the production socket so its
+   shared subscribe frame contains the new session cursor. Sessions created
+   after the initial connection therefore receive live events without a page
+   reload or an unrelated reconnect.
 
 ## Changed files
 
@@ -52,6 +57,11 @@ was rejected.
 - Socket contract: web 2/2, server 6/6, contracts 8/8 passing.
 - Subscription limit: normalize/runtime 15/15, workspace 3/3, focused Chromium
   acceptance 1/1 passing.
+- Create-after-connect socket acceptance: RED timed out because the live event
+  never appeared in a received WebSocket frame; GREEN observed a second shared
+  subscribe frame and the subsequent live event, 1/1 Chromium passing.
+- Focused web socket tests: 2/2 passing. Focused web/E2E lint and typecheck
+  targets passed.
 - `corepack pnpm verify`: PASS. Format check, lint, typecheck, test, and build
   targets passed; server 133 passed/1 skipped, web 25 passed, and Chromium
   acceptance 6/6 passed.
@@ -60,7 +70,8 @@ was rejected.
 
 ## Commit
 
-`fix: close session platform MVP gaps` (this remediation commit).
+- `fix: close session platform MVP gaps` (initial remediation).
+- `fix: resubscribe newly created sessions` (follow-up remediation).
 
 ## Deferred observations
 

@@ -56,6 +56,14 @@ export class MeshSocket {
     this.socket = undefined;
   }
 
+  resubscribe() {
+    if (this.closed || this.reconnectTimer || !this.socket) return;
+    const socket = this.socket;
+    socket.onclose = null;
+    socket.close();
+    this.open();
+  }
+
   private open() {
     const socket = this.makeSocket(this.options.url);
     this.socket = socket;
