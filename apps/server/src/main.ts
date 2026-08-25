@@ -36,8 +36,9 @@ import { TaskTransitionRepository } from './repositories/task-transition-reposit
 import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { recoverInterruptedSessions } from './runtime/recovery.js';
 import { SessionRegistry } from './runtime/session-registry.js';
-import { TaskService } from './tasks/task-service.js';
 import { AttemptService } from './tasks/attempt-service.js';
+import { reconcileTaskAttempts } from './tasks/reconcile-attempts.js';
+import { TaskService } from './tasks/task-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
   constructor(private readonly conflicts: readonly BillingConflict[]) {}
@@ -210,6 +211,15 @@ export const startServer = async (
     pathOptions,
     billingConflicts,
   });
+  const reconciliation = reconcileTaskAttempts({
+    database,
+    projects,
+    tasks,
+    attempts,
+    sessions,
+    diagnostics,
+    projectEvents,
+  });
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
     database,
@@ -220,6 +230,7 @@ export const startServer = async (
     attempts,
     transitions,
     projectEvents,
+    repairs: reconciliation.repairs,
     workspaces,
     sessions,
     diagnostics,

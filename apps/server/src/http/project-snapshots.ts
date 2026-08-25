@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   projectHistorySchema,
   projectSnapshotSchema,
+  type AttemptRepair,
 } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
@@ -19,6 +20,7 @@ export interface ProjectSnapshotDependencies {
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
   transitions: TaskTransitionRepository;
   projectEvents: ProjectEventRepository;
+  repairs?: readonly AttemptRepair[];
 }
 
 const projectHistoryQuerySchema = z.object({
@@ -57,7 +59,9 @@ export const buildProjectSnapshot = (
       transitions: tasks.flatMap((task) =>
         dependencies.transitions.listByTask(task.id),
       ),
-      repairs: [],
+      repairs: (dependencies.repairs ?? []).filter((repair) =>
+        tasks.some((task) => task.id === repair.taskId),
+      ),
       cursor: dependencies.projectEvents.latestSequence(project.id),
     });
   })();
