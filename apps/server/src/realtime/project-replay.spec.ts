@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { idSchema, type ProjectEvent } from '@mesh-session-platform/contracts';
+import {
+  attemptRepairSchema,
+  idSchema,
+  projectEventSchema,
+  type ProjectEvent,
+} from '@mesh-session-platform/contracts';
 
 import { ProjectReplayService } from './project-replay.js';
 
@@ -30,7 +35,36 @@ const event = (projectId: string, sequence: number): ProjectEvent => ({
   },
 });
 
+const repairEvent = projectEventSchema.parse({
+  protocolVersion: 1,
+  id: 'repair-event-1',
+  projectId: 'project-1',
+  sequence: 1,
+  occurredAt: '2026-08-24T00:00:00.000Z',
+  type: 'task.attempt_repair_detected',
+  payload: {
+    repair: attemptRepairSchema.parse({
+      taskId: 'task-1',
+      attemptId: 'attempt-1',
+      sessionId: 'session-1',
+      reason: 'task_in_progress_without_live_session',
+    }),
+  },
+});
+
 describe('ProjectReplayService', () => {
+  it('replays repair-bearing project events without losing repair data', () => {
+    const replay = new ProjectReplayService({
+      retainedAfter: () => ({
+        events: [repairEvent],
+        lowWater: 1,
+        highWater: 1,
+      }),
+    });
+
+    expect(replay.after({ 'project-1': 0 }).events).toEqual([repairEvent]);
+  });
+
   it('replays retained project events after independent cursors', () => {
     const retained = {
       'project-1': [event('project-1', 4), event('project-1', 5)],

@@ -7,6 +7,7 @@ import {
   taskSchema,
   workspaceSchema,
   type LifecycleState,
+  type TaskAttemptSource,
   type TaskLifecycleState,
 } from '@mesh-session-platform/contracts';
 
@@ -28,8 +29,10 @@ describe('reconcileTaskAttempts', () => {
     taskState: TaskLifecycleState;
     sessionState: LifecycleState;
     cleanupState?: 'active' | 'pending';
+    source?: TaskAttemptSource;
+    repositories?: Parameters<typeof createTestRepositories>[0];
   }) => {
-    const repositories = createTestRepositories();
+    const repositories = createTestRepositories(options.repositories);
     disposals.push(repositories.dispose);
     repositories.projects.create(
       projectSchema.parse({
@@ -89,7 +92,7 @@ describe('reconcileTaskAttempts', () => {
         taskId: 'task-1',
         sessionId: 'session-1',
         ordinal: 1,
-        source: 'launched',
+        source: options.source ?? 'launched',
         actor,
         createdAt: now,
         unlinkedAt: null,
@@ -98,6 +101,52 @@ describe('reconcileTaskAttempts', () => {
       }),
     );
     return repositories;
+  };
+
+  const addAttempt = (
+    repositories: ReturnType<typeof setup>,
+    options: {
+      ordinal: number;
+      sessionId: string;
+      sessionState: LifecycleState;
+      source?: TaskAttemptSource;
+    },
+  ) => {
+    const workspaceId = `workspace-${options.sessionId}`;
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: workspaceId,
+        projectId: 'project-1',
+        type: 'shared',
+        path: `C:/work/project-1/${options.sessionId}`,
+      }),
+    );
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: options.sessionId,
+        projectId: 'project-1',
+        workspaceId,
+        title: `Attempt ${options.ordinal}`,
+        permissionMode: 'interactive',
+        lifecycleState: options.sessionState,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: `attempt-${options.ordinal}`,
+        taskId: 'task-1',
+        sessionId: options.sessionId,
+        ordinal: options.ordinal,
+        source: options.source ?? 'launched',
+        actor,
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+      }),
+    );
   };
 
   const reconcile = (repositories: ReturnType<typeof setup>) =>
@@ -137,8 +186,8 @@ describe('reconcileTaskAttempts', () => {
     expect(first.events).toHaveLength(1);
     expect(first.events[0]).toMatchObject({
       projectId: 'project-1',
-      type: 'task.attempt_changed',
-      payload: { attempt: { id: 'attempt-1' } },
+      type: 'task.attempt_repair_detected',
+      payload: { repair: first.repairs[0] },
     });
     expect(second).toEqual({ repairs: first.repairs, events: [] });
 
@@ -176,6 +225,51 @@ describe('reconcileTaskAttempts', () => {
         reason: 'startup_outcome_unknown',
       },
     ]);
+  });
+
+  it('does not treat a recovered linked session as an unknown startup', () => {
+    const repositories = setup({
+      taskState: 'ready',
+      sessionState: 'running',
+      source: 'linked',
+    });
+
+    recoverInterruptedSessions(repositories.database);
+
+    expect(reconcile(repositories)).toEqual({ repairs: [], events: [] });
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe('ready');
+  });
+
+  it('does not repair an in-progress task while any current attempt is live', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'completed',
+    });
+    addAttempt(repositories, {
+      ordinal: 2,
+      sessionId: 'session-2',
+      sessionState: 'running',
+    });
+
+    expect(reconcile(repositories)).toEqual({ repairs: [], events: [] });
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe(
+      'in_progress',
+    );
+  });
+
+  it('rolls back the diagnostic when the repair project event fails', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'interrupted',
+      repositories: { failProjectEventInsert: true },
+    });
+
+    expect(() => reconcile(repositories)).toThrow(
+      'project event insert failed',
+    );
+    expect(repositories.diagnostics.list('session-1')).toEqual([]);
+    expect(repositories.projectEvents.after('project-1', 0)).toEqual([]);
+    expect(repositories.projectEvents.latestSequence('project-1')).toBe(0);
   });
 
   it('retains a ready task after a known failed startup without inventing a repair', () => {

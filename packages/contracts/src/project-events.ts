@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import {
+  attemptRepairSchema,
   blockedConditionSchema,
   idSchema,
   isoTimestampSchema,
@@ -49,6 +50,10 @@ export const taskAttemptChangedEventSchema = projectEvent(
   'task.attempt_changed',
   z.object({ attempt: taskAttemptSchema }),
 );
+export const taskAttemptRepairDetectedEventSchema = projectEvent(
+  'task.attempt_repair_detected',
+  z.object({ repair: attemptRepairSchema }),
+);
 
 export const projectEventSchema = z.discriminatedUnion('type', [
   projectChangedEventSchema,
@@ -57,6 +62,7 @@ export const projectEventSchema = z.discriminatedUnion('type', [
   taskBlockChangedEventSchema,
   taskRankChangedEventSchema,
   taskAttemptChangedEventSchema,
+  taskAttemptRepairDetectedEventSchema,
 ]);
 
 export type ProjectEvent = z.infer<typeof projectEventSchema>;

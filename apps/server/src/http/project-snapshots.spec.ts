@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  attemptRepairSchema,
   projectSchema,
   taskSchema,
-  type ProjectEvent,
 } from '@mesh-session-platform/contracts';
 
 import { openDatabase } from '../db/database.js';
@@ -89,12 +89,44 @@ const boundProxy = <Target extends object>(
 };
 
 describe('project snapshot read consistency', () => {
+  it('returns repair records in snapshots and durable project history', () => {
+    const fixture = seed();
+    const repair = attemptRepairSchema.parse({
+      taskId: fixture.task.id,
+      attemptId: 'attempt-1',
+      sessionId: 'session-1',
+      reason: 'task_in_progress_without_live_session',
+    });
+    fixture.repositories.projectEvents.append(fixture.project.id, {
+      protocolVersion: 1,
+      id: 'repair-event-1',
+      projectId: fixture.project.id,
+      occurredAt: now,
+      type: 'task.attempt_repair_detected',
+      payload: { repair },
+    });
+
+    expect(
+      buildProjectSnapshot(
+        { ...fixture.repositories, repairs: [repair] },
+        fixture.project.id,
+      ).repairs,
+    ).toEqual([repair]);
+    expect(
+      readProjectHistory(fixture.repositories, fixture.project.id, { after: 1 })
+        .events,
+    ).toEqual([
+      expect.objectContaining({
+        type: 'task.attempt_repair_detected',
+        payload: { repair },
+      }),
+    ]);
+  });
+
   it('keeps snapshot projections and cursor in one SQLite read view', () => {
     const fixture = seed();
-    const tasks = boundProxy(
-      fixture.repositories.tasks,
-      'listByProject',
-      () => fixture.append(fixture.writerEvents, 'event-2'),
+    const tasks = boundProxy(fixture.repositories.tasks, 'listByProject', () =>
+      fixture.append(fixture.writerEvents, 'event-2'),
     );
 
     const snapshot = buildProjectSnapshot(

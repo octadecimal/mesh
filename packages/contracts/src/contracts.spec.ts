@@ -253,7 +253,9 @@ describe('session platform contracts', () => {
       },
     });
 
-    expect(commandEnvelopeSchema.parse(envelope('Dependency delivered'))).toMatchObject({
+    expect(
+      commandEnvelopeSchema.parse(envelope('Dependency delivered')),
+    ).toMatchObject({
       command: { payload: { reason: 'Dependency delivered' } },
     });
     expect(() => commandEnvelopeSchema.parse(envelope(undefined))).toThrow();
@@ -348,6 +350,43 @@ describe('session platform contracts', () => {
       }).type,
     ).toBe('project.resync_required');
     expect(taskActorSchema.parse(actor)).toEqual(actor);
+  });
+
+  it('parses durable attempt repair project events', () => {
+    const event = projectEventSchema.parse({
+      protocolVersion: 1,
+      id: 'project-event-repair-1',
+      projectId: 'project-1',
+      sequence: 4,
+      occurredAt: now,
+      type: 'task.attempt_repair_detected',
+      payload: {
+        repair: {
+          taskId: 'task-1',
+          attemptId: 'attempt-1',
+          sessionId: 'session-1',
+          reason: 'startup_outcome_unknown',
+        },
+      },
+    });
+
+    expect(event).toMatchObject({
+      type: 'task.attempt_repair_detected',
+      payload: {
+        repair: {
+          attemptId: 'attempt-1',
+          reason: 'startup_outcome_unknown',
+        },
+      },
+    });
+    expect(
+      projectHistorySchema.parse({
+        protocolVersion: 1,
+        projectId: 'project-1',
+        events: [event],
+        cursor: 4,
+      }).events[0],
+    ).toEqual(event);
   });
 
   it('rejects a mutating command without an idempotency key', () => {

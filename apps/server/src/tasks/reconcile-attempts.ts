@@ -73,24 +73,46 @@ const isRecordedRepair = (
 
 const repairFor = (
   taskState: string,
-  attempt: TaskAttempt,
-  sessionState: string,
-  diagnostics: RawDiagnostic[],
+  attempts: Array<{
+    attempt: TaskAttempt;
+    sessionState: string;
+    diagnostics: RawDiagnostic[];
+  }>,
 ): AttemptRepair | undefined => {
-  const reason =
-    taskState === 'in_progress' && !liveSessionStates.has(sessionState)
-      ? 'task_in_progress_without_live_session'
-      : taskState === 'ready' &&
+  let candidate:
+    | ((typeof attempts)[number] & { reason: AttemptRepair['reason'] })
+    | undefined;
+
+  if (
+    taskState === 'in_progress' &&
+    attempts.length > 0 &&
+    !attempts.some(({ sessionState }) => liveSessionStates.has(sessionState))
+  ) {
+    const latest = attempts.at(-1);
+    if (latest) {
+      candidate = {
+        ...latest,
+        reason: 'task_in_progress_without_live_session',
+      };
+    }
+  } else if (taskState === 'ready') {
+    const latest = attempts
+      .filter(
+        ({ attempt, sessionState, diagnostics }) =>
+          attempt.source === 'launched' &&
           sessionState === 'interrupted' &&
-          diagnostics.some(isRecoveryFromLiveState)
-        ? 'startup_outcome_unknown'
-        : undefined;
-  return reason
+          diagnostics.some(isRecoveryFromLiveState),
+      )
+      .at(-1);
+    if (latest) candidate = { ...latest, reason: 'startup_outcome_unknown' };
+  }
+
+  return candidate
     ? attemptRepairSchema.parse({
-        taskId: attempt.taskId,
-        attemptId: attempt.id,
-        sessionId: attempt.sessionId,
-        reason,
+        taskId: candidate.attempt.taskId,
+        attemptId: candidate.attempt.id,
+        sessionId: candidate.attempt.sessionId,
+        reason: candidate.reason,
       })
     : undefined;
 };
@@ -98,18 +120,17 @@ const repairFor = (
 const persistRepair = (
   dependencies: ReconciliationDependencies,
   projectId: Project['id'],
-  attempt: TaskAttempt,
   repair: AttemptRepair,
   occurredAt: string,
 ): ProjectEvent => {
-  const eventId = `attempt-repair-event-${attempt.id}-${repair.reason}`;
-  const diagnosticId = `attempt-repair-diagnostic-${attempt.id}-${repair.reason}`;
+  const eventId = `attempt-repair-event-${repair.attemptId}-${repair.reason}`;
+  const diagnosticId = `attempt-repair-diagnostic-${repair.attemptId}-${repair.reason}`;
   dependencies.database.exec('BEGIN IMMEDIATE');
   try {
     dependencies.diagnostics.insert(
       rawDiagnosticSchema.parse({
         id: diagnosticId,
-        sessionId: attempt.sessionId,
+        sessionId: repair.sessionId,
         capturedAt: occurredAt,
         payload: { kind: 'attempt_repair', repair },
       }),
@@ -119,8 +140,8 @@ const persistRepair = (
       id: eventId,
       projectId,
       occurredAt,
-      type: 'task.attempt_changed',
-      payload: { attempt },
+      type: 'task.attempt_repair_detected',
+      payload: { repair },
     });
     dependencies.database.exec('COMMIT');
     return event;
@@ -139,29 +160,33 @@ export const reconcileTaskAttempts = (
 
   for (const project of dependencies.projects.list()) {
     for (const task of dependencies.tasks.listByProject(project.id)) {
-      for (const attempt of dependencies.attempts
+      const attempts = dependencies.attempts
         .listByTask(task.id)
-        .filter((candidate) => candidate.unlinkedAt === null)) {
-        const session = dependencies.sessions.get(attempt.sessionId);
-        if (!session) continue;
-        const diagnostics = dependencies.diagnostics.list(attempt.sessionId);
-        const repair = repairFor(
-          task.lifecycleState,
-          attempt,
-          session.lifecycleState,
-          diagnostics,
-        );
-        if (!repair) continue;
-        repairs.push(repair);
-        if (
-          diagnostics.some((diagnostic) => isRecordedRepair(diagnostic, repair))
-        ) {
-          continue;
-        }
-        events.push(
-          persistRepair(dependencies, project.id, attempt, repair, now()),
-        );
+        .filter((candidate) => candidate.unlinkedAt === null)
+        .flatMap((attempt) => {
+          const session = dependencies.sessions.get(attempt.sessionId);
+          return session
+            ? [
+                {
+                  attempt,
+                  sessionState: session.lifecycleState,
+                  diagnostics: dependencies.diagnostics.list(attempt.sessionId),
+                },
+              ]
+            : [];
+        });
+      const repair = repairFor(task.lifecycleState, attempts);
+      if (!repair) continue;
+      repairs.push(repair);
+      const diagnostics =
+        attempts.find(({ attempt }) => attempt.id === repair.attemptId)
+          ?.diagnostics ?? [];
+      if (
+        diagnostics.some((diagnostic) => isRecordedRepair(diagnostic, repair))
+      ) {
+        continue;
       }
+      events.push(persistRepair(dependencies, project.id, repair, now()));
     }
   }
 
