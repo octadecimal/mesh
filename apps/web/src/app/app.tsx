@@ -143,6 +143,7 @@ function ConnectedApp({
         projects={projects}
         workspaces={workspaces}
         sessions={sessions}
+        selectedSessionId={selectedSessionId}
         filter={filter}
         unreadSessionIds={Object.fromEntries(
           sessions.map(({ id }) => [id, unread.has(id)]),
@@ -196,6 +197,15 @@ function ConnectedApp({
         auditAvailable={projection.connectionHealth === 'connected'}
         promptDrafts={projection.promptDrafts}
         onPromptDraftChange={store.setPromptDraft}
+        onNewSession={() => {
+          setFlowError(undefined);
+          setCollisionWarning(undefined);
+          setNewSessionOpen(true);
+        }}
+        onResumeSession={() => {
+          setFlowError(undefined);
+          setResumeSessionOpen(true);
+        }}
         savedLayout={savedLayout}
         selectedSessionId={selectedSessionId}
         sidebar={{ filter }}

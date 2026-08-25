@@ -105,16 +105,34 @@ export function NewSessionDialog({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay />
-        <Dialog.Content aria-describedby="new-session-description">
-          <Dialog.Title>New session</Dialog.Title>
-          <Dialog.Description id="new-session-description">
-            Choose a project, workspace, and explicit permission mode.
-          </Dialog.Description>
-          {collisionWarning ? <p role="alert">{collisionWarning}</p> : null}
-          {error ? <p role="alert">{errorMessage(error)}</p> : null}
-          {validationError ? <p role="alert">{validationError}</p> : null}
-          <form onSubmit={submit}>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content"
+          aria-describedby="new-session-description"
+        >
+          <div className="dialog-heading">
+            <span className="eyebrow">Create workspace</span>
+            <Dialog.Title>New session</Dialog.Title>
+            <Dialog.Description id="new-session-description">
+              Choose a project, workspace, and explicit permission mode.
+            </Dialog.Description>
+          </div>
+          {collisionWarning ? (
+            <p className="notice notice-warning" role="alert">
+              {collisionWarning}
+            </p>
+          ) : null}
+          {error ? (
+            <p className="notice notice-error" role="alert">
+              {errorMessage(error)}
+            </p>
+          ) : null}
+          {validationError ? (
+            <p className="notice notice-error" role="alert">
+              {validationError}
+            </p>
+          ) : null}
+          <form className="dialog-form" onSubmit={submit}>
             <label>
               Project
               <select
@@ -155,11 +173,15 @@ export function NewSessionDialog({
                 <option value="inherit">Inherit Claude settings</option>
               </select>
             </label>
-            <div>
+            <div className="dialog-actions">
               <Dialog.Close asChild>
-                <button type="button">Cancel</button>
+                <button className="button button-ghost" type="button">
+                  Cancel
+                </button>
               </Dialog.Close>
-              <button type="submit">Create session</button>
+              <button className="button button-primary" type="submit">
+                Create session
+              </button>
             </div>
           </form>
         </Dialog.Content>

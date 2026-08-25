@@ -84,6 +84,27 @@ const expectTwoGroupLayout = async (page: Page) => {
   ).toBeVisible();
 };
 
+test('keeps the empty cockpit usable at a narrow viewport', async ({
+  page,
+  harness,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await harness.snapshot();
+  await page.goto(harness.origin);
+
+  await expect(page.getByRole('button', { name: 'New session' })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Start a Claude session' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Create your first session' }),
+  ).toBeVisible();
+  await expect(page).toHaveScreenshot('empty-cockpit-narrow.png', {
+    animations: 'disabled',
+    fullPage: true,
+  });
+});
+
 test('creates shared and worktree sessions with the production-built server', async ({
   page,
   harness,
@@ -109,6 +130,24 @@ test('creates shared and worktree sessions with the production-built server', as
   await expect(
     page.getByRole('complementary', { name: 'Sessions' }),
   ).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Start a Claude session' }),
+  ).toBeVisible();
+  const newSessionButton = page
+    .getByRole('button', { name: 'New session' })
+    .first();
+  await expect(newSessionButton).toHaveCSS(
+    'background-color',
+    'rgb(37, 99, 235)',
+  );
+  await newSessionButton.click();
+  const newSessionDialog = page.getByRole('dialog', { name: 'New session' });
+  await expect(newSessionDialog).toBeVisible();
+  await expect(newSessionDialog).toHaveCSS('position', 'fixed');
+  await expect(newSessionDialog).toHaveScreenshot('new-session-dialog.png', {
+    animations: 'disabled',
+  });
+  await page.getByRole('button', { name: 'Cancel' }).click();
   await expect
     .poll(() =>
       socketFrames.some(

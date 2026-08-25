@@ -113,6 +113,8 @@ export function SessionWorkspace({
   auditAvailable = true,
   promptDrafts = {},
   onPromptDraftChange,
+  onNewSession,
+  onResumeSession,
 }: {
   sessions: WorkspaceSession[];
   savedLayout?: SavedLayout;
@@ -126,6 +128,8 @@ export function SessionWorkspace({
   auditAvailable?: boolean;
   promptDrafts?: Record<string, string>;
   onPromptDraftChange?: (sessionId: string, value: string) => void;
+  onNewSession?: () => void;
+  onResumeSession?: () => void;
 }) {
   const apiRef = useRef<DockviewApi | null>(null);
   const restoringRef = useRef(false);
@@ -181,7 +185,52 @@ export function SessionWorkspace({
   );
 
   return (
-    <main className="session-workspace" aria-label="Session workspace">
+    <main
+      className="session-workspace"
+      data-empty={sessions.length === 0}
+      aria-label="Session workspace"
+    >
+      {sessions.length === 0 ? (
+        <section
+          className="workspace-empty"
+          aria-labelledby="empty-workspace-title"
+        >
+          <span className="eyebrow">Local session runtime</span>
+          <div className="empty-glyph" aria-hidden="true">
+            M
+          </div>
+          <h2 id="empty-workspace-title">Start a Claude session</h2>
+          <p>
+            Open a shared folder or create an isolated Git worktree. Your
+            workspace stays active even when this browser closes.
+          </p>
+          <div className="empty-actions">
+            <button className="button button-primary" onClick={onNewSession}>
+              Create your first session
+            </button>
+            <button
+              className="button button-secondary"
+              onClick={onResumeSession}
+            >
+              Resume Claude history
+            </button>
+          </div>
+          <dl className="empty-details">
+            <div>
+              <dt>Local-first</dt>
+              <dd>Loopback only</dd>
+            </div>
+            <div>
+              <dt>Billing</dt>
+              <dd>Claude subscription</dd>
+            </div>
+            <div>
+              <dt>Workspace</dt>
+              <dd>Shared or isolated</dd>
+            </div>
+          </dl>
+        </section>
+      ) : null}
       <SessionWorkspaceContext.Provider
         value={{
           sessions,

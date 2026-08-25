@@ -69,14 +69,24 @@ export function ResumeSessionDialog({
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
-        <Dialog.Overlay />
-        <Dialog.Content aria-describedby="resume-session-description">
-          <Dialog.Title>Resume session</Dialog.Title>
-          <Dialog.Description id="resume-session-description">
-            Resume a discovered Claude session using its saved Mesh
-            configuration. Prompts are not replayed.
-          </Dialog.Description>
-          {error ? <p role="alert">{errorMessage(error)}</p> : null}
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content dialog-content-wide"
+          aria-describedby="resume-session-description"
+        >
+          <div className="dialog-heading">
+            <span className="eyebrow">Claude history</span>
+            <Dialog.Title>Resume session</Dialog.Title>
+            <Dialog.Description id="resume-session-description">
+              Resume a discovered Claude session using its saved Mesh
+              configuration. Prompts are not replayed.
+            </Dialog.Description>
+          </div>
+          {error ? (
+            <p className="notice notice-error" role="alert">
+              {errorMessage(error)}
+            </p>
+          ) : null}
           {sessions.length === 0 ? (
             <p>No discovered Claude sessions are available.</p>
           ) : (
@@ -145,11 +155,14 @@ export function ResumeSessionDialog({
               </label>
             </div>
           ) : null}
-          <div>
+          <div className="dialog-actions">
             <Dialog.Close asChild>
-              <button type="button">Cancel</button>
+              <button className="button button-ghost" type="button">
+                Cancel
+              </button>
             </Dialog.Close>
             <button
+              className="button button-primary"
               type="button"
               disabled={!selected}
               onClick={() =>

@@ -7,11 +7,20 @@ import { createMeshStore } from '../state/store';
 import App from './app';
 
 describe('App', () => {
-  it('renders the minimal Mesh application shell', () => {
+  it('renders a useful empty workspace with direct session actions', async () => {
+    const user = userEvent.setup();
     render(<App />);
 
     expect(screen.getByRole('heading', { name: 'Mesh' })).toBeDefined();
-    expect(screen.getByText('Session platform')).toBeDefined();
+    expect(
+      screen.getByRole('heading', { name: 'Start a Claude session' }),
+    ).toBeDefined();
+    expect(screen.getByText(/workspace stays active/i)).toBeDefined();
+
+    await user.click(
+      screen.getByRole('button', { name: 'Create your first session' }),
+    );
+    expect(screen.getByRole('dialog', { name: 'New session' })).toBeDefined();
   });
 
   it('hiding a panel does not send an interrupt command', async () => {
