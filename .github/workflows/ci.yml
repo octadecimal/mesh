@@ -23,5 +23,7 @@ jobs:
 
       - run: corepack pnpm install --frozen-lockfile
 
+      - run: corepack pnpm exec playwright install --with-deps chromium
+
       - name: Verify
         run: corepack pnpm verify
