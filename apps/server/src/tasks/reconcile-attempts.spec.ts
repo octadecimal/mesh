@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   projectSchema,
+  rawDiagnosticSchema,
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
@@ -270,6 +271,73 @@ describe('reconcileTaskAttempts', () => {
     expect(repositories.diagnostics.list('session-1')).toEqual([]);
     expect(repositories.projectEvents.after('project-1', 0)).toEqual([]);
     expect(repositories.projectEvents.latestSequence('project-1')).toBe(0);
+  });
+
+  it('backfills one repair event when a legacy diagnostic and event already exist', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'interrupted',
+    });
+    const repair = {
+      taskId: 'task-1',
+      attemptId: 'attempt-1',
+      sessionId: 'session-1',
+      reason: 'task_in_progress_without_live_session' as const,
+    };
+    const attempt = repositories.attempts.listByTask('task-1')[0];
+    if (!attempt) throw new Error('Expected seeded task attempt');
+    const project = repositories.projects.list()[0];
+    if (!project) throw new Error('Expected seeded project');
+    repositories.diagnostics.insert(
+      rawDiagnosticSchema.parse({
+        id: `attempt-repair-diagnostic-${repair.attemptId}-${repair.reason}`,
+        sessionId: repair.sessionId,
+        capturedAt: now,
+        payload: { kind: 'attempt_repair', repair },
+      }),
+    );
+    repositories.projectEvents.append(project.id, {
+      protocolVersion: 1,
+      id: `attempt-repair-event-${repair.attemptId}-${repair.reason}`,
+      projectId: project.id,
+      occurredAt: now,
+      type: 'task.attempt_changed',
+      payload: { attempt },
+    });
+
+    const first = reconcile(repositories);
+    const second = reconcile(repositories);
+    const history = repositories.projectEvents.after('project-1', 0);
+
+    expect(first.repairs).toEqual([repair]);
+    expect(first.events).toHaveLength(1);
+    expect(first.events[0]).toMatchObject({
+      id: `attempt-repair-event-v2-${repair.attemptId}-${repair.reason}`,
+      type: 'task.attempt_repair_detected',
+      payload: { repair },
+    });
+    expect(second).toEqual({ repairs: [repair], events: [] });
+    expect(
+      repositories.diagnostics
+        .list('session-1')
+        .filter(
+          (diagnostic) =>
+            typeof diagnostic.payload === 'object' &&
+            diagnostic.payload !== null &&
+            'kind' in diagnostic.payload &&
+            diagnostic.payload.kind === 'attempt_repair',
+        ),
+    ).toHaveLength(1);
+    expect(
+      history.filter((event) => event.type === 'task.attempt_repair_detected'),
+    ).toEqual(first.events);
+    expect(history).toHaveLength(2);
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe(
+      'in_progress',
+    );
+    expect(repositories.workspaces.get('workspace-1')?.cleanupState).toBe(
+      'active',
+    );
   });
 
   it('retains a ready task after a known failed startup without inventing a repair', () => {

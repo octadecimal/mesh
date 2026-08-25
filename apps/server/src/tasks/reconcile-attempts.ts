@@ -35,7 +35,7 @@ type ReconciliationDependencies = {
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
   sessions: Pick<SessionRepository, 'get'>;
   diagnostics: Pick<DiagnosticRepository, 'insert' | 'list'>;
-  projectEvents: Pick<ProjectEventRepository, 'appendInTransaction'>;
+  projectEvents: Pick<ProjectEventRepository, 'after' | 'appendInTransaction'>;
   now?: () => string;
 };
 
@@ -68,6 +68,20 @@ const isRecordedRepair = (
     (recorded as Record<string, unknown>).attemptId === repair.attemptId &&
     (recorded as Record<string, unknown>).sessionId === repair.sessionId &&
     (recorded as Record<string, unknown>).reason === repair.reason
+  );
+};
+
+const isRecordedRepairEvent = (
+  event: ProjectEvent,
+  repair: AttemptRepair,
+): boolean => {
+  if (event.type !== 'task.attempt_repair_detected') return false;
+  const recorded = event.payload.repair;
+  return (
+    recorded.taskId === repair.taskId &&
+    recorded.attemptId === repair.attemptId &&
+    recorded.sessionId === repair.sessionId &&
+    recorded.reason === repair.reason
   );
 };
 
@@ -122,19 +136,22 @@ const persistRepair = (
   projectId: Project['id'],
   repair: AttemptRepair,
   occurredAt: string,
+  diagnosticRecorded: boolean,
 ): ProjectEvent => {
-  const eventId = `attempt-repair-event-${repair.attemptId}-${repair.reason}`;
+  const eventId = `attempt-repair-event-v2-${repair.attemptId}-${repair.reason}`;
   const diagnosticId = `attempt-repair-diagnostic-${repair.attemptId}-${repair.reason}`;
   dependencies.database.exec('BEGIN IMMEDIATE');
   try {
-    dependencies.diagnostics.insert(
-      rawDiagnosticSchema.parse({
-        id: diagnosticId,
-        sessionId: repair.sessionId,
-        capturedAt: occurredAt,
-        payload: { kind: 'attempt_repair', repair },
-      }),
-    );
+    if (!diagnosticRecorded) {
+      dependencies.diagnostics.insert(
+        rawDiagnosticSchema.parse({
+          id: diagnosticId,
+          sessionId: repair.sessionId,
+          capturedAt: occurredAt,
+          payload: { kind: 'attempt_repair', repair },
+        }),
+      );
+    }
     const event = dependencies.projectEvents.appendInTransaction(projectId, {
       protocolVersion: 1,
       id: eventId,
@@ -159,6 +176,7 @@ export const reconcileTaskAttempts = (
   const now = dependencies.now ?? (() => new Date().toISOString());
 
   for (const project of dependencies.projects.list()) {
+    const recordedEvents = dependencies.projectEvents.after(project.id, 0);
     for (const task of dependencies.tasks.listByProject(project.id)) {
       const attempts = dependencies.attempts
         .listByTask(task.id)
@@ -182,11 +200,19 @@ export const reconcileTaskAttempts = (
         attempts.find(({ attempt }) => attempt.id === repair.attemptId)
           ?.diagnostics ?? [];
       if (
-        diagnostics.some((diagnostic) => isRecordedRepair(diagnostic, repair))
+        recordedEvents.some((event) => isRecordedRepairEvent(event, repair))
       ) {
         continue;
       }
-      events.push(persistRepair(dependencies, project.id, repair, now()));
+      const event = persistRepair(
+        dependencies,
+        project.id,
+        repair,
+        now(),
+        diagnostics.some((diagnostic) => isRecordedRepair(diagnostic, repair)),
+      );
+      recordedEvents.push(event);
+      events.push(event);
     }
   }
 
