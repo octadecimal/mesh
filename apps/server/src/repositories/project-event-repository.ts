@@ -20,6 +20,17 @@ type ProjectEventRow = {
   payload_json: string;
 };
 
+type RetainedProjectEventRow = ProjectEventRow & {
+  low_water: number;
+  high_water: number;
+};
+
+export type RetainedProjectEventWindow = {
+  events: ProjectEvent[];
+  lowWater: number;
+  highWater: number;
+};
+
 const toProjectEvent = (row: ProjectEventRow): ProjectEvent =>
   projectEventSchema.parse({
     protocolVersion: 1,
@@ -32,15 +43,20 @@ const toProjectEvent = (row: ProjectEventRow): ProjectEvent =>
   });
 
 export class ProjectEventRepository {
-  private readonly nextSequence;
+  private readonly advanceSequence;
   private readonly insert;
   private readonly selectAfter;
+  private readonly selectRetainedAfter;
   private readonly selectLatestSequence;
 
   constructor(private readonly database: Database) {
-    this.nextSequence = database.prepare(
-      'SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM project_events WHERE project_id = ?',
-    );
+    this.advanceSequence = database.prepare(`
+      INSERT INTO project_event_streams (project_id, high_water)
+      VALUES (?, 1)
+      ON CONFLICT(project_id) DO UPDATE
+      SET high_water = high_water + 1
+      RETURNING high_water AS sequence
+    `);
     this.insert = database.prepare(`
       INSERT INTO project_events (
         id, project_id, sequence, occurred_at, type, payload_json
@@ -51,8 +67,34 @@ export class ProjectEventRepository {
     this.selectAfter = database.prepare(
       'SELECT * FROM project_events WHERE project_id = ? AND sequence > ? ORDER BY sequence',
     );
+    this.selectRetainedAfter = database.prepare(`
+      WITH stream AS (
+        SELECT COALESCE(
+          (SELECT high_water FROM project_event_streams WHERE project_id = @projectId),
+          0
+        ) AS high_water
+      ), retained AS (
+        SELECT MIN(sequence) AS low_water
+        FROM project_events
+        WHERE project_id = @projectId
+      )
+      SELECT
+        COALESCE(retained.low_water, stream.high_water + 1) AS low_water,
+        stream.high_water,
+        event.id,
+        event.project_id,
+        event.sequence,
+        event.occurred_at,
+        event.type,
+        event.payload_json
+      FROM stream
+      CROSS JOIN retained
+      LEFT JOIN project_events AS event
+        ON event.project_id = @projectId AND event.sequence > @sequence
+      ORDER BY event.sequence
+    `);
     this.selectLatestSequence = database.prepare(
-      'SELECT COALESCE(MAX(sequence), 0) AS sequence FROM project_events WHERE project_id = ?',
+      'SELECT COALESCE((SELECT high_water FROM project_event_streams WHERE project_id = ?), 0) AS sequence',
     );
   }
 
@@ -93,6 +135,30 @@ export class ProjectEventRepository {
     ).map(toProjectEvent);
   }
 
+  retainedAfter(
+    projectId: string,
+    sequence: number,
+  ): RetainedProjectEventWindow {
+    if (!Number.isInteger(sequence) || sequence < 0) {
+      throw new TypeError(
+        'Project event sequence must be a non-negative integer',
+      );
+    }
+    const rows = this.selectRetainedAfter.all({
+      projectId: idSchema.parse(projectId),
+      sequence,
+    }) as Array<RetainedProjectEventRow & { id: string | null }>;
+    const first = rows[0];
+    if (!first) throw new Error('Project event retained window is unavailable');
+    return {
+      events: rows
+        .filter((row): row is RetainedProjectEventRow => row.id !== null)
+        .map(toProjectEvent),
+      lowWater: first.low_water,
+      highWater: first.high_water,
+    };
+  }
+
   latestSequence(projectId: string): number {
     return (
       this.selectLatestSequence.get(idSchema.parse(projectId)) as {
@@ -105,8 +171,9 @@ export class ProjectEventRepository {
     projectId: ReturnType<typeof idSchema.parse>,
     draft: ProjectEventAppendDraft,
   ): ProjectEvent {
-    const sequence = (this.nextSequence.get(projectId) as { sequence: number })
-      .sequence;
+    const sequence = (
+      this.advanceSequence.get(projectId) as { sequence: number }
+    ).sequence;
     const event = projectEventSchema.parse({
       ...draft,
       id: draft.id ?? randomUUID(),

@@ -194,6 +194,7 @@ export const startServer = async (
   const pathOptions = { baseDirectory: config.baseDirectory };
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
+    database,
     projects,
     tasks,
     taskService,

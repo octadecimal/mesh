@@ -37,32 +37,50 @@ describe('ProjectReplayService', () => {
       'project-2': [event('project-2', 1)],
     };
     const replay = new ProjectReplayService({
-      after: (projectId) =>
-        retained[projectId as keyof typeof retained] ?? [],
+      retainedAfter: (projectId, sequence) => {
+        const events = retained[projectId as keyof typeof retained] ?? [];
+        return {
+          events: events.filter((candidate) => candidate.sequence > sequence),
+          lowWater: events[0]?.sequence ?? 1,
+          highWater: events.at(-1)?.sequence ?? 0,
+        };
+      },
     });
 
     expect(replay.after({ 'project-1': 4, 'project-2': 1 })).toEqual({
       events: [event('project-1', 5)],
+      highWaterByProject: { 'project-1': 5, 'project-2': 1 },
       resyncProjectIds: [],
     });
   });
 
   it('requires an explicit resync when retained project history has a gap', () => {
     const replay = new ProjectReplayService({
-      after: () => [event('project-1', 4), event('project-1', 5)],
+      retainedAfter: () => ({
+        events: [event('project-1', 4), event('project-1', 5)],
+        lowWater: 4,
+        highWater: 5,
+      }),
     });
 
     expect(replay.after({ 'project-1': 1 })).toEqual({
       events: [],
+      highWaterByProject: { 'project-1': 5 },
       resyncProjectIds: ['project-1'],
     });
   });
 
   it('requires resync for an ahead cursor or unavailable positive history', () => {
     const ahead = new ProjectReplayService({
-      after: () => [event('project-1', 4), event('project-1', 5)],
+      retainedAfter: () => ({
+        events: [],
+        lowWater: 4,
+        highWater: 5,
+      }),
     });
-    const unavailable = new ProjectReplayService({ after: () => [] });
+    const unavailable = new ProjectReplayService({
+      retainedAfter: () => ({ events: [], lowWater: 1, highWater: 0 }),
+    });
 
     expect(ahead.after({ 'project-1': 6 }).resyncProjectIds).toEqual([
       'project-1',
@@ -74,12 +92,43 @@ describe('ProjectReplayService', () => {
 
   it('never replays an event returned under another project subscription', () => {
     const replay = new ProjectReplayService({
-      after: () => [event('project-2', 1)],
+      retainedAfter: () => ({
+        events: [event('project-2', 1)],
+        lowWater: 1,
+        highWater: 1,
+      }),
     });
 
     expect(replay.after({ 'project-1': 0 })).toEqual({
       events: [],
-      resyncProjectIds: [],
+      highWaterByProject: { 'project-1': 1 },
+      resyncProjectIds: ['project-1'],
+    });
+  });
+
+  it('requires resync when retained replay has an interior sequence gap', () => {
+    const replay = new ProjectReplayService({
+      retainedAfter: () => ({
+        events: [event('project-1', 1), event('project-1', 3)],
+        lowWater: 1,
+        highWater: 3,
+      }),
+    });
+
+    expect(replay.after({ 'project-1': 0 })).toMatchObject({
+      events: [],
+      resyncProjectIds: ['project-1'],
+    });
+  });
+
+  it('requires resync when history was fully purged after prior events', () => {
+    const replay = new ProjectReplayService({
+      retainedAfter: () => ({ events: [], lowWater: 6, highWater: 5 }),
+    });
+
+    expect(replay.after({ 'project-1': 0 })).toMatchObject({
+      events: [],
+      resyncProjectIds: ['project-1'],
     });
   });
 });

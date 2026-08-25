@@ -250,12 +250,16 @@ describe('SocketHub', () => {
       publisher,
       events: { after: () => [] },
       projectEvents: {
-        after: () => {
+        retainedAfter: () => {
           if (!publishedDuringReplay) {
             publishedDuringReplay = true;
             publisher.publishProject(projectEvent('p1', 3));
           }
-          return [projectEvent('p1', 1), projectEvent('p1', 2)];
+          return {
+            events: [projectEvent('p1', 2)],
+            lowWater: 1,
+            highWater: 2,
+          };
         },
       },
       now: () => '2026-08-24T00:00:00.000Z',
@@ -288,7 +292,11 @@ describe('SocketHub', () => {
       publisher: new EventPublisher(),
       events: { after: () => [] },
       projectEvents: {
-        after: () => [projectEvent('p1', 4), projectEvent('p1', 5)],
+        retainedAfter: () => ({
+          events: [projectEvent('p1', 4), projectEvent('p1', 5)],
+          lowWater: 4,
+          highWater: 5,
+        }),
       },
       now: () => '2026-08-24T00:00:00.000Z',
       heartbeatIntervalMs: 0,
@@ -313,7 +321,9 @@ describe('SocketHub', () => {
     const hub = new SocketHub({
       publisher,
       events: { after: () => [] },
-      projectEvents: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({ events: [], lowWater: 1, highWater: 0 }),
+      },
       now: () => '2026-08-24T00:00:00.000Z',
       heartbeatIntervalMs: 0,
     });
@@ -327,6 +337,61 @@ describe('SocketHub', () => {
     expect(
       socket.messages.some((message) => message.type === 'project.event'),
     ).toBe(false);
+  });
+
+  it('requires project resync instead of streaming across a live sequence gap', () => {
+    const publisher = new EventPublisher();
+    const hub = new SocketHub({
+      publisher,
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({
+          events: [projectEvent('p1', 1)],
+          lowWater: 1,
+          highWater: 1,
+        }),
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 0 });
+    publisher.publishProject(projectEvent('p1', 3));
+
+    expect(socket.messages).toContainEqual({
+      protocolVersion: 1,
+      type: 'project.resync_required',
+      payload: { projectId: 'p1', reason: 'event_sequence_gap' },
+    });
+    expect(
+      socket.messages
+        .filter((message) => message.type === 'project.event')
+        .map((message) => message.payload.event.sequence),
+    ).toEqual([1]);
+  });
+
+  it('requires project resync when subscribed history was fully purged', () => {
+    const hub = new SocketHub({
+      publisher: new EventPublisher(),
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({ events: [], lowWater: 6, highWater: 5 }),
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 0 });
+
+    expect(socket.messages).toContainEqual({
+      protocolVersion: 1,
+      type: 'project.resync_required',
+      payload: { projectId: 'p1', reason: 'requested_history_unavailable' },
+    });
   });
 });
 

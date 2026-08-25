@@ -21,11 +21,19 @@ const taskBoardStorageMigration = {
     'utf8',
   ),
 };
+const projectEventStreamsMigration = {
+  id: '004-project-event-streams',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '004-project-event-streams.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
   commandStateMigration,
   taskBoardStorageMigration,
+  projectEventStreamsMigration,
 ];
 
 export const migrate = (database: Database): void => {

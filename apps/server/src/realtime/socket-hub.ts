@@ -9,6 +9,7 @@ import {
 import { subscribeFrameSchema } from '@mesh-session-platform/contracts';
 
 import type { EventRepository } from '../repositories/event-repository.js';
+import type { RetainedProjectEventWindow } from '../repositories/project-event-repository.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { OriginPolicy } from '../app.js';
 import { ProjectReplayService } from './project-replay.js';
@@ -27,7 +28,10 @@ type SocketConnection = {
 
 type EventHistory = Pick<EventRepository, 'after'>;
 type ProjectEventHistory = {
-  after(projectId: string, sequence: number): ProjectEvent[];
+  retainedAfter(
+    projectId: string,
+    sequence: number,
+  ): RetainedProjectEventWindow;
 };
 
 export type SocketHubOptions = {
@@ -175,6 +179,8 @@ export class SocketHub {
     const deliveredProjectEvents = new Set<string>();
     const resyncRequired = new Set<string>();
     const projectResyncRequired = new Set<string>();
+    const subscribedProjectIds = new Set(Object.keys(projectCursors));
+    const projectCursorById = { ...projectCursors };
     let replaying = true;
 
     const deliver = (events: SessionEvent[]) => {
@@ -195,13 +201,30 @@ export class SocketHub {
       }
     };
 
+    const requireProjectResync = (projectId: string, reason: string) => {
+      if (projectResyncRequired.has(projectId)) return;
+      projectResyncRequired.add(projectId);
+      this.send(socket, {
+        protocolVersion: 1,
+        type: 'project.resync_required',
+        payload: { projectId: idSchema.parse(projectId), reason },
+      });
+    };
+
     const deliverProjectEvents = (events: ProjectEvent[]) => {
       for (const event of events) {
+        if (!subscribedProjectIds.has(event.projectId)) continue;
         if (projectResyncRequired.has(event.projectId)) continue;
-        if (event.sequence <= (projectCursors[event.projectId] ?? 0)) continue;
+        const cursor = projectCursorById[event.projectId] ?? 0;
+        if (event.sequence <= cursor) continue;
+        if (event.sequence !== cursor + 1) {
+          requireProjectResync(event.projectId, 'event_sequence_gap');
+          continue;
+        }
         const key = `${event.projectId}\u0000${event.sequence}`;
         if (deliveredProjectEvents.has(key)) continue;
         deliveredProjectEvents.add(key);
+        projectCursorById[event.projectId] = event.sequence;
         this.send(socket, {
           protocolVersion: 1,
           type: 'project.event',
@@ -254,28 +277,22 @@ export class SocketHub {
       if (this.projectReplay) {
         const projectResult = this.projectReplay.after(projectCursors);
         for (const projectId of projectResult.resyncProjectIds) {
-          projectResyncRequired.add(projectId);
-          this.send(socket, {
-            protocolVersion: 1,
-            type: 'project.resync_required',
-            payload: {
-              projectId: idSchema.parse(projectId),
-              reason: 'requested_history_unavailable',
-            },
-          });
+          requireProjectResync(projectId, 'requested_history_unavailable');
         }
         deliverProjectEvents(projectResult.events);
+        for (const [projectId, highWater] of Object.entries(
+          projectResult.highWaterByProject,
+        )) {
+          if (
+            !projectResyncRequired.has(projectId) &&
+            projectCursorById[projectId] !== highWater
+          ) {
+            requireProjectResync(projectId, 'event_sequence_gap');
+          }
+        }
       } else {
         for (const projectId of Object.keys(projectCursors)) {
-          projectResyncRequired.add(projectId);
-          this.send(socket, {
-            protocolVersion: 1,
-            type: 'project.resync_required',
-            payload: {
-              projectId: idSchema.parse(projectId),
-              reason: 'requested_history_unavailable',
-            },
-          });
+          requireProjectResync(projectId, 'requested_history_unavailable');
         }
       }
 

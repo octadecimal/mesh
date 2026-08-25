@@ -125,6 +125,7 @@ describe('migrate', () => {
       { id: '001-initial' },
       { id: '002-command-state' },
       { id: '003-task-board-storage' },
+      { id: '004-project-event-streams' },
     ]);
     expect(
       database
@@ -158,6 +159,7 @@ describe('migrate', () => {
       { id: '001-initial' },
       { id: '002-command-state' },
       { id: '003-task-board-storage' },
+      { id: '004-project-event-streams' },
     ]);
   });
 
@@ -179,6 +181,10 @@ describe('migrate', () => {
     copyFileSync(
       join(__dirname, 'migrations', '003-task-board-storage.sql'),
       join(directory, 'migrations', '003-task-board-storage.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '004-project-event-streams.sql'),
+      join(directory, 'migrations', '004-project-event-streams.sql'),
     );
     buildSync({
       bundle: true,
@@ -228,6 +234,7 @@ describe('migrate', () => {
         { id: '001-initial' },
         { id: '002-command-state' },
         { id: '003-task-board-storage' },
+        { id: '004-project-event-streams' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -297,6 +304,7 @@ describe('migrate', () => {
       { id: '001-initial' },
       { id: '002-command-state' },
       { id: '003-task-board-storage' },
+      { id: '004-project-event-streams' },
     ]);
   });
 
@@ -496,6 +504,66 @@ describe('migrate', () => {
     ]);
   });
 
+  it('backfills durable project event high-water marks on upgrade', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-project-stream-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    for (const [id, file] of [
+      ['001-initial', '001-initial.sql'],
+      ['002-command-state', '002-command-state.sql'],
+      ['003-task-board-storage', '003-task-board-storage.sql'],
+    ] as const) {
+      database.exec(
+        readFileSync(join(__dirname, 'migrations', file), 'utf8'),
+      );
+      database
+        .prepare(
+          'INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)',
+        )
+        .run(id, '2026-08-24T00:00:00.000Z');
+    }
+    database
+      .prepare(
+        `INSERT INTO projects (
+          id, display_name, repository_path, discovered_at,
+          discovery_metadata_json, repository_identity, revision, created_at,
+          updated_at, archived_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'p1',
+        'Mesh',
+        'C:/code/mesh',
+        '2026-08-24T00:00:00.000Z',
+        '{}',
+        'C:/code/mesh',
+        1,
+        '2026-08-24T00:00:00.000Z',
+        '2026-08-24T00:00:00.000Z',
+        null,
+      );
+    const insert = database.prepare(
+      `INSERT INTO project_events (
+        id, project_id, sequence, occurred_at, type, payload_json
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    insert.run('event-1', 'p1', 1, '2026-08-24T00:00:00.000Z', 'x', '{}');
+    insert.run('event-2', 'p1', 2, '2026-08-24T00:00:00.000Z', 'x', '{}');
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare(
+          'SELECT project_id, high_water FROM project_event_streams WHERE project_id = ?',
+        )
+        .get('p1'),
+    ).toEqual({ project_id: 'p1', high_water: 2 });
+  });
+
   it('loads the built migration registry and applies every migration from a fresh production output', () => {
     const workspaceRoot = join(__dirname, '..', '..', '..', '..');
     const directory = mkdtempSync(
@@ -519,6 +587,7 @@ describe('migrate', () => {
         { id: '001-initial' },
         { id: '002-command-state' },
         { id: '003-task-board-storage' },
+        { id: '004-project-event-streams' },
       ]);
       expect(
         database

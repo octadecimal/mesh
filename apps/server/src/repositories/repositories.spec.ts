@@ -367,6 +367,34 @@ const transition = (overrides: Record<string, unknown> = {}) =>
     ).toThrow();
   });
 
+  it('retains durable project stream watermarks after all events are purged', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const append = (id: string) =>
+      repos.projectEvents.append('p1', {
+        protocolVersion: 1,
+        id,
+        projectId: project().id,
+        occurredAt: '2026-08-24T00:01:00.000Z',
+        type: 'project.changed',
+        payload: { project: project() },
+      });
+    append('project-event-1');
+    append('project-event-2');
+
+    repos.database
+      .prepare('DELETE FROM project_events WHERE project_id = ?')
+      .run('p1');
+
+    expect(repos.projectEvents.retainedAfter('p1', 0)).toEqual({
+      events: [],
+      lowWater: 3,
+      highWater: 2,
+    });
+    expect(append('project-event-3').sequence).toBe(3);
+  });
+
   it('omits archived sessions unless requested', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
