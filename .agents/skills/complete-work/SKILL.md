@@ -143,14 +143,14 @@ walkthrough.
 
 ## Quick reference
 
-| Condition | Action |
-| --- | --- |
-| CI pending | Watch, then re-evaluate the full gate |
-| CI failed | Ask: fix, explicit bypass, or abort |
-| PR behind | Update branch and re-check CI |
-| Unknown port owner | Stop; do not kill it |
+| Condition                    | Action                                          |
+| ---------------------------- | ----------------------------------------------- |
+| CI pending                   | Watch, then re-evaluate the full gate           |
+| CI failed                    | Ask: fix, explicit bypass, or abort             |
+| PR behind                    | Update branch and re-check CI                   |
+| Unknown port owner           | Stop; do not kill it                            |
 | API billing override present | Stop; subscription-only policy is not satisfied |
-| Self-rooted worktree lock | Continue with exact leftovers documented |
+| Self-rooted worktree lock    | Continue with exact leftovers documented        |
 
 ## Common mistakes
 
