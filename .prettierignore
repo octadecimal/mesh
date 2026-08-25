@@ -5,3 +5,5 @@
 /.nx/workspace-data
 /docs
 /.superpowers
+/.agents/skills
+/.claude/skills

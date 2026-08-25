@@ -1,16 +1,10 @@
 ---
 name: safe-refactor
-description: Restructure code while preserving behavior. Use for extraction, consolidation, ownership moves, or cleanup where verification must bracket structural edits.
+description: Use when restructuring code while preserving behavior and bracketing edits with verification.
 ---
 
-# Safe refactor
+# Safe Refactor
 
-Define behavior-preservation boundary and establish verification before structural edits.
-
-- Keep feature changes outside refactor.
-- Move one ownership boundary at a time.
-- Preserve public interfaces, failure behavior, ordering, and compatibility unless explicitly scoped.
-- Keep intermediate states buildable and testable.
-- Avoid dependency or configuration growth without correctness need.
-
-Run same proof after change. Stop when behavior matches and requested structure is achieved.
+Read and faithfully follow
+[`../../../.agents/skills/safe-refactor/SKILL.md`](../../../.agents/skills/safe-refactor/SKILL.md).
+That file is the cross-runtime source of truth for this skill.
