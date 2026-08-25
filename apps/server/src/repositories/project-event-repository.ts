@@ -60,26 +60,7 @@ export class ProjectEventRepository {
     const parsedProjectId = idSchema.parse(projectId);
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const sequence = (
-        this.nextSequence.get(parsedProjectId) as { sequence: number }
-      ).sequence;
-      const event = projectEventSchema.parse({
-        ...draft,
-        id: draft.id ?? randomUUID(),
-        projectId: parsedProjectId,
-        sequence,
-      });
-      if (draft.projectId !== parsedProjectId) {
-        throw new Error('Project event project must match the append project');
-      }
-      this.insert.run({
-        id: event.id,
-        projectId: event.projectId,
-        sequence: event.sequence,
-        occurredAt: event.occurredAt,
-        type: event.type,
-        payloadJson: JSON.stringify(event.payload),
-      });
+      const event = this.insertEvent(parsedProjectId, draft);
       this.database.exec('COMMIT');
       return event;
     } catch (error) {
@@ -88,12 +69,27 @@ export class ProjectEventRepository {
     }
   }
 
+  appendInTransaction(
+    projectId: string,
+    draft: ProjectEventAppendDraft,
+  ): ProjectEvent {
+    if (!this.database.inTransaction) {
+      throw new Error('Project event transaction is not active');
+    }
+    return this.insertEvent(idSchema.parse(projectId), draft);
+  }
+
   after(projectId: string, sequence: number): ProjectEvent[] {
     if (!Number.isInteger(sequence) || sequence < 0) {
-      throw new TypeError('Project event sequence must be a non-negative integer');
+      throw new TypeError(
+        'Project event sequence must be a non-negative integer',
+      );
     }
     return (
-      this.selectAfter.all(idSchema.parse(projectId), sequence) as ProjectEventRow[]
+      this.selectAfter.all(
+        idSchema.parse(projectId),
+        sequence,
+      ) as ProjectEventRow[]
     ).map(toProjectEvent);
   }
 
@@ -103,5 +99,31 @@ export class ProjectEventRepository {
         sequence: number;
       }
     ).sequence;
+  }
+
+  private insertEvent(
+    projectId: ReturnType<typeof idSchema.parse>,
+    draft: ProjectEventAppendDraft,
+  ): ProjectEvent {
+    const sequence = (this.nextSequence.get(projectId) as { sequence: number })
+      .sequence;
+    const event = projectEventSchema.parse({
+      ...draft,
+      id: draft.id ?? randomUUID(),
+      projectId,
+      sequence,
+    });
+    if (draft.projectId !== projectId) {
+      throw new Error('Project event project must match the append project');
+    }
+    this.insert.run({
+      id: event.id,
+      projectId: event.projectId,
+      sequence: event.sequence,
+      occurredAt: event.occurredAt,
+      type: event.type,
+      payloadJson: JSON.stringify(event.payload),
+    });
+    return event;
   }
 }

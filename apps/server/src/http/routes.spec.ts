@@ -7,6 +7,7 @@ import { idSchema, projectSchema } from '@mesh-session-platform/contracts';
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { GitAdapter } from '../platform/git.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
+import { TaskService } from '../tasks/task-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { buildApp } from '../app.js';
 
@@ -93,6 +94,11 @@ const setup = (options?: {
     driver,
     closeDatabase: () => undefined,
   });
+  const taskService = new TaskService({
+    ...repositories,
+    ...(createId ? { createId } : {}),
+    now: () => now,
+  });
   return {
     repositories,
     driver,
@@ -101,6 +107,7 @@ const setup = (options?: {
     workspacePath,
     app: buildApp({
       ...repositories,
+      taskService,
       registry,
       driver,
       pathOptions,

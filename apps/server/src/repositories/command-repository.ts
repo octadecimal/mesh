@@ -139,6 +139,49 @@ export class CommandRepository {
     return this.completeResponse(idempotencyKey, response);
   }
 
+  executeOnceInImmediateTransaction<Response>(
+    idempotencyKey: string,
+    execute: () => Response,
+  ): Response {
+    this.database.exec('BEGIN IMMEDIATE');
+    let committed = false;
+    try {
+      const existing = this.selectByKey.get(idempotencyKey) as
+        | CommandRow
+        | undefined;
+      if (existing) {
+        this.database.exec('COMMIT');
+        committed = true;
+        return this.resolveExisting<Response>(idempotencyKey, existing);
+      }
+
+      const now = new Date().toISOString();
+      this.reserve.run(randomUUID(), idempotencyKey, now, now);
+      const response = execute();
+      assertJsonSafe(response);
+      const serialized = JSON.stringify(response);
+      if (serialized === undefined) {
+        throw new TypeError('Command response must be JSON-serializable');
+      }
+      const result = this.complete.run(
+        serialized,
+        new Date().toISOString(),
+        idempotencyKey,
+      );
+      if (result.changes !== 1) {
+        throw new Error(
+          `Command reservation disappeared for '${idempotencyKey}'`,
+        );
+      }
+      this.database.exec('COMMIT');
+      committed = true;
+      return JSON.parse(serialized) as Response;
+    } catch (error) {
+      if (!committed) this.database.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   private completeResponse<Response>(
     idempotencyKey: string,
     response: Response,

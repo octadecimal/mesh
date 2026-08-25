@@ -30,6 +30,7 @@ import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
+import type { TaskMutationResult, TaskService } from '../tasks/task-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
@@ -56,6 +57,7 @@ export interface CommandDependencies {
   diagnostics: DiagnosticRepository;
   layouts: LayoutRepository;
   commands: CommandRepository;
+  taskService: TaskService;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
@@ -76,6 +78,21 @@ const response = (
     result: JSON.parse(JSON.stringify(result)),
     warnings,
   });
+
+const taskResponse = (result: TaskMutationResult) => ({
+  ...result,
+  projectEventCursor: result.event.sequence,
+});
+
+const requireTaskCommandId = (commandId: string | undefined): string => {
+  if (!commandId) {
+    throw new CommandError(
+      'invalid_command',
+      'Task commands require an idempotency key',
+    );
+  }
+  return commandId;
+};
 
 const requireProject = (dependencies: CommandDependencies, id: string) => {
   const project = dependencies.projects.get(id);
@@ -296,8 +313,69 @@ const reconcileLegacyProjectIdentities = async (
 const executeMutation = async (
   command: Extract<Command, { idempotencyKey: string }>['command'],
   dependencies: CommandDependencies,
+  commandId?: string,
 ): Promise<CommandResponse> => {
   switch (command.type) {
+    case 'task.create':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.create({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.edit':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.edit({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.reorder':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.reorder({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.block':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.block({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.unblock':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.unblock({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.transition':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.transition({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
     case 'project.import': {
       if (!dependencies.pathOptions) {
         throw new CommandError(
@@ -678,6 +756,22 @@ export const executeCommand = async (
 ): Promise<CommandResponse> => {
   const command = commandSchema.parse(input);
   if ('idempotencyKey' in command) {
+    if (
+      [
+        'task.create',
+        'task.edit',
+        'task.reorder',
+        'task.block',
+        'task.unblock',
+        'task.transition',
+      ].includes(command.command.type)
+    ) {
+      return executeMutation(
+        command.command,
+        dependencies,
+        command.idempotencyKey,
+      );
+    }
     return dependencies.commands.executeOnce(command.idempotencyKey, () =>
       executeMutation(command.command, dependencies),
     );

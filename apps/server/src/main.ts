@@ -27,12 +27,16 @@ import { CommandRepository } from './repositories/command-repository.js';
 import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
 import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
+import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
 import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
+import { TaskRepository } from './repositories/task-repository.js';
+import { TaskTransitionRepository } from './repositories/task-transition-repository.js';
 import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { recoverInterruptedSessions } from './runtime/recovery.js';
 import { SessionRegistry } from './runtime/session-registry.js';
+import { TaskService } from './tasks/task-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
   constructor(private readonly conflicts: readonly BillingConflict[]) {}
@@ -155,13 +159,24 @@ export const startServer = async (
   recoverInterruptedSessions(database);
 
   const projects = new ProjectRepository(database);
+  const tasks = new TaskRepository(database);
   const attempts = new TaskAttemptRepository(database);
+  const transitions = new TaskTransitionRepository(database);
+  const projectEvents = new ProjectEventRepository(database);
   const workspaces = new WorkspaceRepository(database);
   const sessions = new SessionRepository(database);
   const diagnostics = new DiagnosticRepository(database);
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
+  const taskService = new TaskService({
+    database,
+    projects,
+    tasks,
+    transitions,
+    projectEvents,
+    commands,
+  });
   const driver = selectClaudeDriver(
     billingConflicts,
     () => new SdkClaudeSessionDriver(createClaudeSdkFacade()),
@@ -180,6 +195,7 @@ export const startServer = async (
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
     projects,
+    taskService,
     attempts,
     workspaces,
     sessions,

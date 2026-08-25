@@ -16,8 +16,10 @@ import {
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
+import { TaskService } from '../tasks/task-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
+import { toHttpError } from './errors.js';
 
 const now = '2026-08-24T00:00:00.000Z';
 const exec = promisify(execFile);
@@ -64,6 +66,11 @@ describe('executeCommand', () => {
       driver,
       closeDatabase: () => undefined,
     });
+    const taskService = new TaskService({
+      ...repositories,
+      now: () => now,
+      createId,
+    });
     cleanups.push(async () => {
       await registry.shutdown();
       repositories.dispose();
@@ -72,6 +79,7 @@ describe('executeCommand', () => {
       repositories,
       dependencies: {
         ...repositories,
+        taskService,
         registry,
         driver,
         pathOptions: { baseDirectory },
@@ -332,6 +340,66 @@ describe('executeCommand', () => {
     });
   });
 
+  it('routes task commands through the audited service and maps stale revisions', async () => {
+    const { directory } = await createRepository();
+    const ids = ['task-created', 'event-created'];
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => ids.shift() ?? 'unexpected-id',
+    );
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const create = projectCommand('task-create-command', {
+      type: 'task.create',
+      payload: {
+        projectId: 'p1',
+        title: 'Add audited task commands',
+        actor: { type: 'human', id: 'operator' },
+      },
+    });
+
+    const first = await executeCommand(create, dependencies);
+    const duplicate = await executeCommand(create, dependencies);
+
+    expect(first).toEqual(duplicate);
+    expect(first).toMatchObject({
+      commandType: 'task.create',
+      result: {
+        task: { id: 'task-created', revision: 1 },
+        event: { id: 'event-created', sequence: 1 },
+        projectEventCursor: 1,
+      },
+    });
+    expect(repositories.tasks.listByProject('p1')).toHaveLength(1);
+    expect(repositories.projectEvents.after('p1', 0)).toHaveLength(1);
+
+    const error = await executeCommand(
+      projectCommand('task-edit-stale', {
+        type: 'task.edit',
+        payload: {
+          taskId: 'task-created',
+          expectedRevision: 2,
+          patch: { notes: 'Must not overwrite canonical state.' },
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    ).catch((caught: unknown) => caught);
+    expect(toHttpError(error)).toMatchObject({
+      statusCode: 409,
+      body: { error: { code: 'task_revision_conflict' } },
+    });
+    expect(repositories.tasks.get('task-created')?.revision).toBe(1);
+  });
+
   it('does not decide an already-resolved permission request', async () => {
     const repositories = createTestRepositories();
     repositories.projects.create(
@@ -369,6 +437,7 @@ describe('executeCommand', () => {
       driver,
       closeDatabase: () => undefined,
     });
+    const taskService = new TaskService({ ...repositories, now: () => now });
     cleanups.push(async () => {
       await registry.shutdown();
       repositories.dispose();
@@ -419,7 +488,13 @@ describe('executeCommand', () => {
             payload: { permissionId: 'permission-1', decision: 'approve' },
           },
         },
-        { ...repositories, registry, driver, billingConflicts: [] },
+        {
+          ...repositories,
+          taskService,
+          registry,
+          driver,
+          billingConflicts: [],
+        },
       ),
     ).rejects.toMatchObject({ code: 'invalid_session_state' });
     expect(driver.createdSessions[0]?.permissionDecisions).toEqual([]);
