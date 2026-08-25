@@ -3,9 +3,38 @@ import { relative, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { loadServerConfig } from './config.js';
-import { createProcessLifecycle, originFromAddress } from './main.js';
+import { FakeClaudeSessionDriver } from './claude/fake-driver.js';
+import {
+  createProcessLifecycle,
+  originFromAddress,
+  selectClaudeDriver,
+} from './main.js';
 
 describe('server configuration', () => {
+  it('permits fake-driver injection only in explicit test configuration', () => {
+    const fakeDriver = new FakeClaudeSessionDriver();
+    const createSdkDriver = vi.fn(() => new FakeClaudeSessionDriver());
+
+    expect(
+      selectClaudeDriver([], createSdkDriver, fakeDriver, {
+        NODE_ENV: 'test',
+      }),
+    ).toBe(fakeDriver);
+    expect(createSdkDriver).not.toHaveBeenCalled();
+    expect(() =>
+      selectClaudeDriver([], createSdkDriver, fakeDriver, {
+        NODE_ENV: 'production',
+      }),
+    ).toThrow('Fake Claude driver is restricted to test configuration');
+  });
+
+  it('permits an ephemeral port only in explicit test configuration', () => {
+    expect(loadServerConfig({ NODE_ENV: 'test', MESH_PORT: '0' }).port).toBe(0);
+    expect(() =>
+      loadServerConfig({ NODE_ENV: 'production', MESH_PORT: '0' }),
+    ).toThrow('MESH_PORT must be an integer between 1 and 65535');
+  });
+
   it('defaults to loopback and keeps runtime data outside the repository', () => {
     const repository = resolve('C:/code/mesh');
     const config = loadServerConfig({}, repository);

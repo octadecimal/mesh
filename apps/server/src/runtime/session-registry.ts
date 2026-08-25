@@ -67,7 +67,9 @@ export class SessionRegistry {
     const runtimes = [...this.runtimes.values()];
     const timeoutMs = this.dependencies.shutdownTimeoutMs ?? 5_000;
     const deadline = Date.now() + timeoutMs;
-    const waitWithinDeadline = async (pending: Promise<unknown>): Promise<void> => {
+    const waitWithinDeadline = async (
+      pending: Promise<unknown>,
+    ): Promise<void> => {
       const remaining = Math.max(0, deadline - Date.now());
       if (remaining === 0) return;
       let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -79,46 +81,70 @@ export class SessionRegistry {
       ]);
       if (timeout) clearTimeout(timeout);
     };
-    const interruptions = runtimes.map((runtime) => runtime.interrupt().catch(() => undefined));
+    const interruptions = runtimes.map((runtime) =>
+      runtime.interrupt().catch(() => undefined),
+    );
     await waitWithinDeadline(Promise.allSettled(interruptions));
-    const closures = runtimes.map((runtime) => runtime.forceClose().catch(() => undefined));
+    const closures = runtimes.map((runtime) =>
+      runtime.forceClose().catch(() => undefined),
+    );
     await waitWithinDeadline(Promise.allSettled(closures));
-    (this.dependencies.closeDatabase ?? (() => this.dependencies.database.close()))();
+    (
+      this.dependencies.closeDatabase ??
+      (() => this.dependencies.database.close())
+    )();
   }
 
-  private async attach(sessionId: string, mode: 'create' | 'resume'): Promise<void> {
+  private async attach(
+    sessionId: string,
+    mode: 'create' | 'resume',
+  ): Promise<void> {
     this.assertWritable();
     if (this.runtimes.has(sessionId)) {
-      const state = this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
+      const state =
+        this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
       throw { code: 'invalid_session_state', from: state, trigger: mode };
     }
     const session = this.dependencies.sessions.get(sessionId);
     if (!session) throw { code: 'session_not_found', sessionId };
     const workspace = this.dependencies.workspaces.get(session.workspaceId);
-    if (!workspace) throw { code: 'workspace_not_found', workspaceId: session.workspaceId };
+    if (!workspace)
+      throw { code: 'workspace_not_found', workspaceId: session.workspaceId };
     if (mode === 'create' && session.lifecycleState !== 'idle') {
-      throw { code: 'invalid_session_state', from: session.lifecycleState, trigger: 'start' };
+      throw {
+        code: 'invalid_session_state',
+        from: session.lifecycleState,
+        trigger: 'start',
+      };
     }
     if (mode === 'resume' && !session.claudeResumeId) {
-      throw { code: 'invalid_session_state', from: session.lifecycleState, trigger: 'resume' };
+      throw {
+        code: 'invalid_session_state',
+        from: session.lifecycleState,
+        trigger: 'resume',
+      };
     }
 
-    let runtime: SessionRuntime | undefined;
+    const runtimeRef: { current?: SessionRuntime } = {};
     const onStopped = () => {
-      if (runtime && this.runtimes.get(sessionId) === runtime) this.runtimes.delete(sessionId);
+      if (
+        runtimeRef.current &&
+        this.runtimes.get(sessionId) === runtimeRef.current
+      )
+        this.runtimes.delete(sessionId);
     };
     const placeholder: DriverSession = await (mode === 'create'
       ? this.dependencies.driver.create({
-        title: session.title,
-        workspacePath: workspace.path,
-        permissionMode: session.permissionMode,
-      })
+          title: session.title,
+          workspacePath: workspace.path,
+          permissionMode: session.permissionMode,
+        })
       : this.dependencies.driver.resume({
-        claudeResumeId: session.claudeResumeId!,
-        workspacePath: workspace.path,
-        permissionMode: session.permissionMode,
-      }));
-    runtime = new SessionRuntime({
+          claudeResumeId: session.claudeResumeId!,
+          workspacePath: workspace.path,
+          permissionMode: session.permissionMode,
+        }));
+    const runtime = new SessionRuntime({
       session,
       driverSession: placeholder,
       events: this.dependencies.events,
@@ -127,10 +153,17 @@ export class SessionRegistry {
       onAuditFailure: (error) => this.tripAuditBarrier(error),
       onStopped,
     });
+    runtimeRef.current = runtime;
     this.runtimes.set(sessionId, runtime);
     try {
-      runtime.persistTransition({ type: mode === 'create' ? 'start' : 'resume' });
-      runtime.persistTransition({ type: 'driver_started' }, undefined, placeholder.claudeResumeId);
+      runtime.persistTransition({
+        type: mode === 'create' ? 'start' : 'resume',
+      });
+      runtime.persistTransition(
+        { type: 'driver_started' },
+        undefined,
+        placeholder.claudeResumeId,
+      );
       runtime.startConsuming();
     } catch (error) {
       this.runtimes.delete(sessionId);
@@ -142,14 +175,25 @@ export class SessionRegistry {
 
   private assertWritable(): void {
     if (this.unavailable) throw new AuditUnavailableError();
-    if (this.shuttingDown) throw { code: 'invalid_session_state', from: 'interrupting', trigger: 'shutdown' };
+    if (this.shuttingDown)
+      throw {
+        code: 'invalid_session_state',
+        from: 'interrupting',
+        trigger: 'shutdown',
+      };
   }
 
   private requireRuntime(sessionId: string): SessionRuntime {
     const runtime = this.runtimes.get(sessionId);
     if (runtime) return runtime;
-    const state = this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'interrupted';
-    throw { code: 'invalid_session_state', from: state, trigger: 'driver_required' };
+    const state =
+      this.dependencies.sessions.get(sessionId)?.lifecycleState ??
+      'interrupted';
+    throw {
+      code: 'invalid_session_state',
+      from: state,
+      trigger: 'driver_required',
+    };
   }
 
   private tripAuditBarrier(_error: unknown): void {

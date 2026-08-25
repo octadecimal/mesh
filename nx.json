@@ -80,6 +80,10 @@
     "typecheck": {
       "cache": true,
       "inputs": ["default", "^production"]
+    },
+    "e2e": {
+      "cache": false,
+      "inputs": ["default", "^production"]
     }
   }
 }

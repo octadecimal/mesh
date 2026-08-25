@@ -16,7 +16,12 @@ export type SdkStreamEvent =
   | { kind: 'assistant_delta'; text: string }
   | { kind: 'assistant_text'; text: string }
   | { kind: 'tool_requested'; toolCallId: string; name: string; input: unknown }
-  | { kind: 'tool_completed'; toolCallId: string; output: unknown; isError: boolean }
+  | {
+      kind: 'tool_completed';
+      toolCallId: string;
+      output: unknown;
+      isError: boolean;
+    }
   | { kind: 'limit'; capability: string; message: string }
   | { kind: 'error'; code: string; message: string; details?: unknown }
   | { kind: 'malformed'; raw: unknown }
@@ -47,7 +52,9 @@ export interface SdkQuery {
 }
 
 export interface SdkFacade {
-  listSessions(options: { cwd?: string }): Promise<Array<{ sessionId: string; title?: string }>>;
+  listSessions(options: {
+    cwd?: string;
+  }): Promise<Array<{ sessionId: string; title?: string }>>;
   startQuery(options: SdkQueryOptions): SdkQuery;
 }
 
@@ -55,7 +62,9 @@ export class UnsupportedSdkCapabilityError extends Error {
   readonly code = 'unsupported_claude_capability';
 
   constructor(readonly capability: string) {
-    super(`Installed Claude Agent SDK does not support required capability: ${capability}`);
+    super(
+      `Installed Claude Agent SDK does not support required capability: ${capability}`,
+    );
     this.name = 'UnsupportedSdkCapabilityError';
   }
 }
@@ -140,17 +149,23 @@ class SdkDriverSession implements DriverSession {
     }
   }
 
-  async handlePermission(request: SdkPermissionRequest): Promise<SdkPermissionDecision> {
+  async handlePermission(
+    request: SdkPermissionRequest,
+  ): Promise<SdkPermissionDecision> {
     const decision = permissionPolicy(this.mode).decide({
       toolName: request.toolName,
       input: request.input,
     });
     if (decision.action === 'approve') return 'approve';
     if (decision.action === 'delegate') {
-      throw new Error('Inherited permissions must not install an SDK permission callback');
+      throw new Error(
+        'Inherited permissions must not install an SDK permission callback',
+      );
     }
     if (this.pendingPermissions.has(request.requestId)) {
-      throw new Error(`Permission request '${request.requestId}' is already pending`);
+      throw new Error(
+        `Permission request '${request.requestId}' is already pending`,
+      );
     }
     const result = new Promise<SdkPermissionDecision>((resolve) => {
       this.pendingPermissions.set(request.requestId, { resolve });
@@ -170,9 +185,13 @@ class SdkDriverSession implements DriverSession {
     await this.query.sendPrompt(prompt);
   }
 
-  async resolvePermission(requestId: string, decision: 'approve' | 'deny'): Promise<void> {
+  async resolvePermission(
+    requestId: string,
+    decision: 'approve' | 'deny',
+  ): Promise<void> {
     const pending = this.pendingPermissions.get(requestId);
-    if (!pending) throw new Error(`Permission request '${requestId}' is not pending`);
+    if (!pending)
+      throw new Error(`Permission request '${requestId}' is not pending`);
     this.pendingPermissions.delete(requestId);
     pending.resolve(decision);
   }
@@ -184,7 +203,8 @@ class SdkDriverSession implements DriverSession {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    for (const pending of this.pendingPermissions.values()) pending.resolve('deny');
+    for (const pending of this.pendingPermissions.values())
+      pending.resolve('deny');
     this.pendingPermissions.clear();
     this.query.close();
     this.signalSideEvent();
@@ -229,8 +249,12 @@ class SdkDriverSession implements DriverSession {
 export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
   constructor(private readonly sdk: SdkFacade) {}
 
-  async discover(request: DiscoverClaudeSessionsRequest): Promise<DiscoveredClaudeSession[]> {
-    const sessions = await this.sdk.listSessions({ cwd: request.workspacePath });
+  async discover(
+    request: DiscoverClaudeSessionsRequest,
+  ): Promise<DiscoveredClaudeSession[]> {
+    const sessions = await this.sdk.listSessions({
+      cwd: request.workspacePath,
+    });
     return sessions.map((session) => ({
       claudeResumeId: session.sessionId,
       title: session.title,
@@ -250,7 +274,7 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
     resume?: string,
   ): Promise<SdkDriverSession> {
     const mode = request.permissionMode ?? 'interactive';
-    let session: SdkDriverSession | undefined;
+    const sessionRef: { current?: SdkDriverSession } = {};
     const options: SdkQueryOptions = {
       cwd: request.workspacePath,
       title: 'title' in request ? request.title : undefined,
@@ -258,12 +282,16 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
     };
     if (mode !== 'inherit') {
       options.onPermission = (permission) => {
-        if (!session) throw new Error('Claude SDK requested permission before session initialization');
-        return session.handlePermission(permission);
+        if (!sessionRef.current)
+          throw new Error(
+            'Claude SDK requested permission before session initialization',
+          );
+        return sessionRef.current.handlePermission(permission);
       };
     }
     const query = this.sdk.startQuery(options);
-    session = new SdkDriverSession(query, mode);
+    const session = new SdkDriverSession(query, mode);
+    sessionRef.current = session;
     await session.initialize();
     return session;
   }

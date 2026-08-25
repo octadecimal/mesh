@@ -23,7 +23,10 @@ import {
   selectWorkspaces,
 } from '../state/selectors';
 import { createMeshStore } from '../state/store';
-import { NewSessionDialog, type SessionFlowError } from '../sessions/NewSessionDialog';
+import {
+  NewSessionDialog,
+  type SessionFlowError,
+} from '../sessions/NewSessionDialog';
 import { ResumeSessionDialog } from '../sessions/ResumeSessionDialog';
 import { SessionSidebar } from '../sessions/SessionSidebar';
 import { SessionWorkspace } from '../workspace/SessionWorkspace';
@@ -41,7 +44,11 @@ type AppProps = {
   api?: Pick<MeshApi, 'command' | 'diagnostics'>;
 };
 
-const snapshotFor = ({ projects = [], workspaces = [], sessions = [] }: AppProps): SessionSnapshot => ({
+const snapshotFor = ({
+  projects = [],
+  workspaces = [],
+  sessions = [],
+}: AppProps): SessionSnapshot => ({
   protocolVersion: 1,
   projects,
   workspaces,
@@ -104,20 +111,30 @@ function ConnectedApp({
   const [resumeSessionOpen, setResumeSessionOpen] = useState(false);
   const [flowError, setFlowError] = useState<SessionFlowError>();
   const [collisionWarning, setCollisionWarning] = useState<string>();
-  const workspaceById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+  const workspaceById = new Map(
+    workspaces.map((workspace) => [workspace.id, workspace]),
+  );
   const submit = (command: MutatingCommand) => {
     onCommand?.({ type: command.type, payload: command.payload });
     const execute = api ? api.command(command) : Promise.resolve(undefined);
-    void execute.then((response) => {
-      const warning = response?.warnings.find((candidate) => /collision|shared/i.test(candidate.code));
-      setCollisionWarning(warning?.message);
-      setFlowError(undefined);
-      if (command.type === 'session.create' && !warning) setNewSessionOpen(false);
-      if (command.type === 'session.resume') setResumeSessionOpen(false);
-    }).catch((caught: unknown) => {
-      const failure = caught as { code?: string; message?: string };
-      setFlowError({ code: failure.code ?? 'unknown', message: failure.message });
-    });
+    void execute
+      .then((response) => {
+        const warning = response?.warnings.find((candidate) =>
+          /collision|shared/i.test(candidate.code),
+        );
+        setCollisionWarning(warning?.message);
+        setFlowError(undefined);
+        if (command.type === 'session.create' && !warning)
+          setNewSessionOpen(false);
+        if (command.type === 'session.resume') setResumeSessionOpen(false);
+      })
+      .catch((caught: unknown) => {
+        const failure = caught as { code?: string; message?: string };
+        setFlowError({
+          code: failure.code ?? 'unknown',
+          message: failure.message,
+        });
+      });
   };
 
   return (
@@ -132,8 +149,15 @@ function ConnectedApp({
         )}
         onFilterChange={(value) => store.setFilter('sessions', value)}
         onOpenSession={store.selectSession}
-        onNewSession={() => { setFlowError(undefined); setCollisionWarning(undefined); setNewSessionOpen(true); }}
-        onResumeSession={() => { setFlowError(undefined); setResumeSessionOpen(true); }}
+        onNewSession={() => {
+          setFlowError(undefined);
+          setCollisionWarning(undefined);
+          setNewSessionOpen(true);
+        }}
+        onResumeSession={() => {
+          setFlowError(undefined);
+          setResumeSessionOpen(true);
+        }}
       />
       <NewSessionDialog
         open={newSessionOpen}

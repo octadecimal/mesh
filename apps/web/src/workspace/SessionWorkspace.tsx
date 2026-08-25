@@ -5,7 +5,11 @@ import {
   type IDockviewPanelProps,
 } from 'dockview-react';
 import type { SavedLayout } from '@mesh-session-platform/contracts';
-import type { Session, SessionEvent, Workspace } from '@mesh-session-platform/contracts';
+import type {
+  Session,
+  SessionEvent,
+  Workspace,
+} from '@mesh-session-platform/contracts';
 
 import type { SessionPanelApi } from '../sessions/SessionPanel';
 import { SessionPanel } from '../sessions/SessionPanel';
@@ -21,9 +25,22 @@ import {
   type WorkspaceSession,
 } from './layout-controller';
 
-export { SESSION_COMPONENT, type SessionPanelParams } from './layout-controller';
+export {
+  SESSION_COMPONENT,
+  type SessionPanelParams,
+} from './layout-controller';
 
-function DockviewSessionPanel({ api, params, session, workspace, events, panelApi, auditAvailable, promptDraft, onPromptDraftChange }: IDockviewPanelProps<SessionPanelParams> & {
+function DockviewSessionPanel({
+  api,
+  params,
+  session,
+  workspace,
+  events,
+  panelApi,
+  auditAvailable,
+  promptDraft,
+  onPromptDraftChange,
+}: IDockviewPanelProps<SessionPanelParams> & {
   session: Session;
   workspace?: Workspace;
   events: SessionEvent[];
@@ -33,29 +50,41 @@ function DockviewSessionPanel({ api, params, session, workspace, events, panelAp
   onPromptDraftChange: (value: string) => void;
 }) {
   return (
-    <section className="session-panel" aria-label={`Session ${params.sessionId} panel`}>
+    <section
+      className="session-panel"
+      aria-label={`Session ${params.sessionId} panel`}
+    >
       <button
         aria-label={`Close ${api.title ?? params.sessionId} panel`}
         onClick={() => api.close()}
       >
         Close
       </button>
-      <SessionPanel session={session} workspace={workspace} events={events} api={panelApi} auditAvailable={auditAvailable} promptDraft={promptDraft} onPromptDraftChange={onPromptDraftChange} />
+      <SessionPanel
+        session={session}
+        workspace={workspace}
+        events={events}
+        api={panelApi}
+        auditAvailable={auditAvailable}
+        promptDraft={promptDraft}
+        onPromptDraftChange={onPromptDraftChange}
+      />
     </section>
   );
 }
 
-const sessionForPanel = (session: WorkspaceSession): Session => ({
-  id: session.id,
-  projectId: 'unknown-project',
-  workspaceId: 'unknown-workspace',
-  title: session.title,
-  permissionMode: 'interactive',
-  lifecycleState: 'idle',
-  createdAt: new Date(0).toISOString(),
-  updatedAt: new Date(0).toISOString(),
-  ...(session as Partial<Session>),
-} as Session);
+const sessionForPanel = (session: WorkspaceSession): Session =>
+  ({
+    id: session.id,
+    projectId: 'unknown-project',
+    workspaceId: 'unknown-workspace',
+    title: session.title,
+    permissionMode: 'interactive',
+    lifecycleState: 'idle',
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+    ...(session as Partial<Session>),
+  }) as Session;
 
 export function SessionWorkspace({
   sessions,
@@ -95,22 +124,48 @@ export function SessionWorkspace({
     () => sessions.map(({ id, title }) => `${id}:${title}`).join('|'),
     [sessions],
   );
-  const components = useMemo(() => ({
-    [SESSION_COMPONENT]: (props: IDockviewPanelProps<SessionPanelParams>) => {
-      const session = sessions.find(({ id }) => id === props.params.sessionId);
-      const panelSession = sessionForPanel(session ?? { id: props.params.sessionId, title: props.api.title ?? props.params.sessionId });
-      return <DockviewSessionPanel
-        {...props}
-        session={panelSession}
-        workspace={workspaces.find((workspace) => workspace.id === panelSession.workspaceId)}
-        events={events.filter((event) => event.sessionId === props.params.sessionId)}
-        panelApi={panelApi}
-        auditAvailable={auditAvailable}
-        promptDraft={promptDrafts[props.params.sessionId] ?? ''}
-        onPromptDraftChange={(value) => onPromptDraftChange?.(props.params.sessionId, value)}
-      />;
-    },
-  }), [sessions, workspaces, events, panelApi, auditAvailable, promptDrafts, onPromptDraftChange]);
+  const components = useMemo(
+    () => ({
+      [SESSION_COMPONENT]: (props: IDockviewPanelProps<SessionPanelParams>) => {
+        const session = sessions.find(
+          ({ id }) => id === props.params.sessionId,
+        );
+        const panelSession = sessionForPanel(
+          session ?? {
+            id: props.params.sessionId,
+            title: props.api.title ?? props.params.sessionId,
+          },
+        );
+        return (
+          <DockviewSessionPanel
+            {...props}
+            session={panelSession}
+            workspace={workspaces.find(
+              (workspace) => workspace.id === panelSession.workspaceId,
+            )}
+            events={events.filter(
+              (event) => event.sessionId === props.params.sessionId,
+            )}
+            panelApi={panelApi}
+            auditAvailable={auditAvailable}
+            promptDraft={promptDrafts[props.params.sessionId] ?? ''}
+            onPromptDraftChange={(value) =>
+              onPromptDraftChange?.(props.params.sessionId, value)
+            }
+          />
+        );
+      },
+    }),
+    [
+      sessions,
+      workspaces,
+      events,
+      panelApi,
+      auditAvailable,
+      promptDrafts,
+      onPromptDraftChange,
+    ],
+  );
 
   onSaveRef.current = onSaveLayout;
   onCloseRef.current = onCloseSession;
@@ -118,7 +173,8 @@ export function SessionWorkspace({
 
   const scheduleSave = (api: DockviewApi) => {
     if (restoringRef.current || !onSaveRef.current) return;
-    if (saveTimerRef.current !== undefined) window.clearTimeout(saveTimerRef.current);
+    if (saveTimerRef.current !== undefined)
+      window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => {
       onSaveRef.current?.(serializeDockview(api, sidebarRef.current));
     }, 300);
@@ -140,7 +196,8 @@ export function SessionWorkspace({
 
   useEffect(
     () => () => {
-      if (saveTimerRef.current !== undefined) window.clearTimeout(saveTimerRef.current);
+      if (saveTimerRef.current !== undefined)
+        window.clearTimeout(saveTimerRef.current);
     },
     [],
   );

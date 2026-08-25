@@ -95,7 +95,9 @@ export function restoreSavedLayout(
     api.clear();
   }
 
-  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  const sessionsById = new Map(
+    sessions.map((session) => [session.id, session]),
+  );
   pruneDeletedSessions(api, new Set(sessionsById.keys()));
   enforceGroupLimit(api);
 
@@ -110,7 +112,9 @@ export function reconcileDockview(
   sessions: WorkspaceSession[],
   selectedSessionId?: string,
 ): void {
-  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  const sessionsById = new Map(
+    sessions.map((session) => [session.id, session]),
+  );
   pruneDeletedSessions(api, new Set(sessionsById.keys()));
   enforceGroupLimit(api);
   const selected = selectedSessionId
@@ -121,7 +125,8 @@ export function reconcileDockview(
 
 export function installTwoGroupPolicy(api: DockviewApi) {
   const drop = api.onWillDrop((event) => {
-    if (event.position === 'center' || api.groups.length < MAX_VISIBLE_GROUPS) return;
+    if (event.position === 'center' || api.groups.length < MAX_VISIBLE_GROUPS)
+      return;
 
     event.preventDefault();
     const transfer = event.getData?.();

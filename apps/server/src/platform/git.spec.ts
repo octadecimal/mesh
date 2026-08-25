@@ -1,5 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 
@@ -49,7 +55,9 @@ const removeTemporaryDirectory = (directory: string): void => {
     !resolvedDirectory.startsWith(temporaryRoot) ||
     !resolvedDirectory.startsWith(`${temporaryRoot}mesh-session-platform-git-`)
   ) {
-    throw new Error(`Refusing to remove unexpected test directory: ${resolvedDirectory}`);
+    throw new Error(
+      `Refusing to remove unexpected test directory: ${resolvedDirectory}`,
+    );
   }
   rmSync(resolvedDirectory, { force: true, recursive: true });
 };
@@ -62,14 +70,21 @@ afterEach(() => {
 
 describe('GitAdapter', () => {
   it('creates a worktree with argv arguments, preserving spaces in its path', async () => {
-    const calls: Array<{ executable: string; args: readonly string[]; cwd: string }> = [];
+    const calls: Array<{
+      executable: string;
+      args: readonly string[];
+      cwd: string;
+    }> = [];
     const runner: ProcessRunner = {
       run: async (executable, args, options) => {
         calls.push({ executable, args, cwd: options.cwd });
         return { exitCode: 0, stdout: '', stderr: '' };
       },
     };
-    const git = new GitAdapter(runner, { baseDirectory: 'C:\\repo', fs: directoryFs });
+    const git = new GitAdapter(runner, {
+      baseDirectory: 'C:\\repo',
+      fs: directoryFs,
+    });
 
     await expect(
       git.createWorktree({
@@ -82,7 +97,16 @@ describe('GitAdapter', () => {
     expect(calls).toEqual([
       {
         executable: 'git',
-        args: ['-C', 'C:\\repo', 'worktree', 'add', '-b', 'feature/test', 'C:\\repo worktree', 'main'],
+        args: [
+          '-C',
+          'C:\\repo',
+          'worktree',
+          'add',
+          '-b',
+          'feature/test',
+          'C:\\repo worktree',
+          'main',
+        ],
         cwd: 'C:\\repo',
       },
     ]);
@@ -96,7 +120,10 @@ describe('GitAdapter', () => {
         return { exitCode: 0, stdout: ' M changes.txt\n', stderr: '' };
       },
     };
-    const git = new GitAdapter(runner, { baseDirectory: 'C:\\repo', fs: directoryFs });
+    const git = new GitAdapter(runner, {
+      baseDirectory: 'C:\\repo',
+      fs: directoryFs,
+    });
 
     await expect(
       git.removeOwnedWorktree({
@@ -106,7 +133,9 @@ describe('GitAdapter', () => {
         workspace: workspace(),
       }),
     ).resolves.toEqual({ removed: false, reason: 'dirty' });
-    expect(calls).toEqual([['-C', 'C:\\repo worktree', 'status', '--porcelain=v1']]);
+    expect(calls).toEqual([
+      ['-C', 'C:\\repo worktree', 'status', '--porcelain=v1'],
+    ]);
   });
 
   it('preserves a shared folder without asking Git to inspect or remove it', async () => {
@@ -115,7 +144,10 @@ describe('GitAdapter', () => {
         throw new Error('Git must not run for a shared folder');
       },
     };
-    const git = new GitAdapter(runner, { baseDirectory: 'C:\\repo', fs: directoryFs });
+    const git = new GitAdapter(runner, {
+      baseDirectory: 'C:\\repo',
+      fs: directoryFs,
+    });
 
     await expect(
       git.removeOwnedWorktree({
@@ -135,7 +167,10 @@ describe('GitAdapter', () => {
         return { exitCode: 0, stdout: '', stderr: '' };
       },
     };
-    const git = new GitAdapter(runner, { baseDirectory: 'C:\\repo', fs: directoryFs });
+    const git = new GitAdapter(runner, {
+      baseDirectory: 'C:\\repo',
+      fs: directoryFs,
+    });
 
     await expect(
       git.removeOwnedWorktree({
@@ -154,10 +189,15 @@ describe('GitAdapter', () => {
   it('preserves a worktree with an active session before inspecting Git', async () => {
     const runner: ProcessRunner = {
       run: async () => {
-        throw new Error('Git must not run while the workspace has an active session');
+        throw new Error(
+          'Git must not run while the workspace has an active session',
+        );
       },
     };
-    const git = new GitAdapter(runner, { baseDirectory: 'C:\\repo', fs: directoryFs });
+    const git = new GitAdapter(runner, {
+      baseDirectory: 'C:\\repo',
+      fs: directoryFs,
+    });
 
     await expect(
       git.removeOwnedWorktree({
@@ -175,7 +215,10 @@ describe('GitAdapter', () => {
         throw new Error('Git must not run for ambiguous paths');
       },
     };
-    const git = new GitAdapter(runner, { baseDirectory: 'C:\\repo', fs: directoryFs });
+    const git = new GitAdapter(runner, {
+      baseDirectory: 'C:\\repo',
+      fs: directoryFs,
+    });
 
     await expect(
       git.removeOwnedWorktree({
@@ -194,13 +237,27 @@ describe('GitAdapter', () => {
     const worktreePath = join(directory, 'worktree with spaces');
     mkdirSync(repositoryPath);
     execFileSync('git', ['init', repositoryPath]);
-    execFileSync('git', ['-C', repositoryPath, 'config', 'user.email', 'mesh@example.test']);
-    execFileSync('git', ['-C', repositoryPath, 'config', 'user.name', 'Mesh Test']);
+    execFileSync('git', [
+      '-C',
+      repositoryPath,
+      'config',
+      'user.email',
+      'mesh@example.test',
+    ]);
+    execFileSync('git', [
+      '-C',
+      repositoryPath,
+      'config',
+      'user.name',
+      'Mesh Test',
+    ]);
     writeFileSync(join(repositoryPath, 'README.md'), 'seed\n');
     execFileSync('git', ['-C', repositoryPath, 'add', 'README.md']);
     execFileSync('git', ['-C', repositoryPath, 'commit', '-m', 'seed']);
 
-    const git = new GitAdapter(new NodeProcessRunner(), { baseDirectory: directory });
+    const git = new GitAdapter(new NodeProcessRunner(), {
+      baseDirectory: directory,
+    });
     await expect(
       git.createWorktree({
         branch: 'feature/real-test',
@@ -216,7 +273,10 @@ describe('GitAdapter', () => {
         confirmed: true,
         repositoryPath: repositoryPath as AbsolutePath,
         sessions: [],
-        workspace: workspace({ path: worktreePath, gitWorktreePath: worktreePath }),
+        workspace: workspace({
+          path: worktreePath,
+          gitWorktreePath: worktreePath,
+        }),
       }),
     ).resolves.toEqual({ removed: true });
     expect(existsSync(worktreePath)).toBe(false);

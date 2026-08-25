@@ -10,11 +10,7 @@ import {
 
 describe('Dockview layout controller', () => {
   it('restores the saved Dockview JSON, prunes deleted sessions, caps groups, and opens the selected session', () => {
-    const dockview = fakeDockview([
-      ['s1'],
-      ['deleted'],
-      ['s2'],
-    ]);
+    const dockview = fakeDockview([['s1'], ['deleted'], ['s2']]);
     const saved = {
       id: 'layout-1',
       dockview: { saved: 'dockview-json' },
@@ -22,12 +18,7 @@ describe('Dockview layout controller', () => {
       updatedAt: '2026-08-24T00:00:00.000Z',
     } as SavedLayout;
 
-    restoreSavedLayout(
-      dockview.api,
-      saved,
-      sessions,
-      's3',
-    );
+    restoreSavedLayout(dockview.api, saved, sessions, 's3');
 
     expect(dockview.fromJSON).toHaveBeenCalledWith(saved.dockview);
     expect(dockview.api.groups).toHaveLength(2);
@@ -39,7 +30,9 @@ describe('Dockview layout controller', () => {
         params: { sessionId: 's3' },
       }),
     );
-    expect(Object.keys(dockview.addPanel.mock.calls[0][0].params)).toEqual(['sessionId']);
+    expect(Object.keys(dockview.addPanel.mock.calls[0][0].params)).toEqual([
+      'sessionId',
+    ]);
   });
 
   it('turns a programmatic third-group request into a tab in an existing group', () => {
@@ -65,7 +58,9 @@ describe('Dockview layout controller', () => {
 
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(dockview.api.groups.length).toBeLessThanOrEqual(2);
-    expect(dockview.api.groups.flatMap(({ panels }) => panels.map(({ id }) => id))).toContain('s1');
+    expect(
+      dockview.api.groups.flatMap(({ panels }) => panels.map(({ id }) => id)),
+    ).toContain('s1');
     policy.dispose();
   });
 });
@@ -84,13 +79,19 @@ function fakeDockview(initialGroups: string[][]) {
     panels: [],
     activeGroup: undefined,
     fromJSON: vi.fn(),
-    toJSON: vi.fn(() => ({ grid: { root: {}, height: 1, width: 1, orientation: 'HORIZONTAL' }, panels: {} })),
+    toJSON: vi.fn(() => ({
+      grid: { root: {}, height: 1, width: 1, orientation: 'HORIZONTAL' },
+      panels: {},
+    })),
     getPanel(id: string) {
       return api.panels.find((panel: any) => panel.id === id);
     },
     removePanel(panel: any) {
       api.panels = api.panels.filter((candidate: any) => candidate !== panel);
-      for (const group of api.groups) group.panels = group.panels.filter((candidate: any) => candidate !== panel);
+      for (const group of api.groups)
+        group.panels = group.panels.filter(
+          (candidate: any) => candidate !== panel,
+        );
       api.groups = api.groups.filter((group: any) => group.panels.length > 0);
     },
     removeGroup(group: any) {
@@ -111,11 +112,17 @@ function fakeDockview(initialGroups: string[][]) {
     }),
     onWillDrop(listener: (event: any) => void) {
       willDropListeners.push(listener);
-      return { dispose: () => willDropListeners.splice(willDropListeners.indexOf(listener), 1) };
+      return {
+        dispose: () =>
+          willDropListeners.splice(willDropListeners.indexOf(listener), 1),
+      };
     },
     onDidAddGroup(listener: () => void) {
       addGroupListeners.push(listener);
-      return { dispose: () => addGroupListeners.splice(addGroupListeners.indexOf(listener), 1) };
+      return {
+        dispose: () =>
+          addGroupListeners.splice(addGroupListeners.indexOf(listener), 1),
+      };
     },
   };
 
@@ -129,10 +136,14 @@ function fakeDockview(initialGroups: string[][]) {
         setActive: vi.fn(),
         moveTo: ({ group }: any) => {
           for (const candidate of api.groups) {
-            candidate.panels = candidate.panels.filter((item: any) => item !== panel);
+            candidate.panels = candidate.panels.filter(
+              (item: any) => item !== panel,
+            );
           }
           group.panels.push(panel);
-          api.groups = api.groups.filter((candidate: any) => candidate.panels.length > 0);
+          api.groups = api.groups.filter(
+            (candidate: any) => candidate.panels.length > 0,
+          );
           api.activeGroup = group;
         },
       },
@@ -155,7 +166,8 @@ function fakeDockview(initialGroups: string[][]) {
     api: api as DockviewApi,
     addPanel: api.addPanel as ReturnType<typeof vi.fn>,
     fromJSON: api.fromJSON as ReturnType<typeof vi.fn>,
-    fireWillDrop: (event: any) => willDropListeners.forEach((listener) => listener(event)),
+    fireWillDrop: (event: any) =>
+      willDropListeners.forEach((listener) => listener(event)),
     fireAddGroup: () => addGroupListeners.forEach((listener) => listener()),
   };
 }

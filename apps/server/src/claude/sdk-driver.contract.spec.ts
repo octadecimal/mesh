@@ -68,8 +68,18 @@ describe('SdkClaudeSessionDriver contract', () => {
     const sdk = new ScriptedFacade([
       { kind: 'started', sessionId: 'resume-1', apiKeySource: 'none' },
       { kind: 'assistant_text', text: 'hello' },
-      { kind: 'tool_requested', toolCallId: 'tool-1', name: 'Read', input: { path: 'a.ts' } },
-      { kind: 'tool_completed', toolCallId: 'tool-1', output: 'ok', isError: false },
+      {
+        kind: 'tool_requested',
+        toolCallId: 'tool-1',
+        name: 'Read',
+        input: { path: 'a.ts' },
+      },
+      {
+        kind: 'tool_completed',
+        toolCallId: 'tool-1',
+        output: 'ok',
+        isError: false,
+      },
       { kind: 'completed' },
     ]);
 
@@ -82,8 +92,18 @@ describe('SdkClaudeSessionDriver contract', () => {
     expect(session.claudeResumeId).toBe('resume-1');
     expect(await collect(session.events())).toEqual([
       { kind: 'text_completed', text: 'hello' },
-      { kind: 'tool_requested', toolCallId: 'tool-1', name: 'Read', input: { path: 'a.ts' } },
-      { kind: 'tool_completed', toolCallId: 'tool-1', output: 'ok', isError: false },
+      {
+        kind: 'tool_requested',
+        toolCallId: 'tool-1',
+        name: 'Read',
+        input: { path: 'a.ts' },
+      },
+      {
+        kind: 'tool_completed',
+        toolCallId: 'tool-1',
+        output: 'ok',
+        isError: false,
+      },
     ]);
   });
 
@@ -106,7 +126,10 @@ describe('SdkClaudeSessionDriver contract', () => {
     await session.interrupt();
     await session.close();
 
-    expect(sdk.queryCalls[0]).toMatchObject({ cwd: 'C:\\repo', resume: 'resume-2' });
+    expect(sdk.queryCalls[0]).toMatchObject({
+      cwd: 'C:\\repo',
+      resume: 'resume-2',
+    });
     expect(sdk.query.prompts).toEqual(['continue']);
     expect(sdk.query.interrupted).toBe(true);
     expect(sdk.query.closed).toBe(true);
@@ -182,14 +205,29 @@ describe('SdkClaudeSessionDriver contract', () => {
   it('maps subscription limits and execution failures without throwing SDK values', async () => {
     const sdk = new ScriptedFacade([
       { kind: 'started', sessionId: 'resume-4', apiKeySource: 'none' },
-      { kind: 'limit', capability: 'seven_day', message: 'Usage limit reached' },
-      { kind: 'error', code: 'error_during_execution', message: 'Claude failed', details: ['failure'] },
+      {
+        kind: 'limit',
+        capability: 'seven_day',
+        message: 'Usage limit reached',
+      },
+      {
+        kind: 'error',
+        code: 'error_during_execution',
+        message: 'Claude failed',
+        details: ['failure'],
+      },
       { kind: 'completed' },
     ]);
-    const session = await new SdkClaudeSessionDriver(sdk).create({ title: 'Session' });
+    const session = await new SdkClaudeSessionDriver(sdk).create({
+      title: 'Session',
+    });
 
     expect(await collect(session.events())).toEqual([
-      { kind: 'limit', capability: 'seven_day', message: 'Usage limit reached' },
+      {
+        kind: 'limit',
+        capability: 'seven_day',
+        message: 'Usage limit reached',
+      },
       {
         kind: 'terminal_error',
         code: 'error_during_execution',
@@ -202,7 +240,9 @@ describe('SdkClaudeSessionDriver contract', () => {
   it('fails with a typed capability error when the SDK stream has no session identity', async () => {
     const sdk = new ScriptedFacade([{ kind: 'completed' }]);
 
-    await expect(new SdkClaudeSessionDriver(sdk).create({ title: 'Session' })).rejects.toEqual(
+    await expect(
+      new SdkClaudeSessionDriver(sdk).create({ title: 'Session' }),
+    ).rejects.toEqual(
       expect.objectContaining<Partial<UnsupportedSdkCapabilityError>>({
         code: 'unsupported_claude_capability',
         capability: 'session_identity',

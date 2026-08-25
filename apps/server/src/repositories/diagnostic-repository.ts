@@ -58,6 +58,8 @@ export class DiagnosticRepository {
   }
 
   list(sessionId: string): RawDiagnostic[] {
-    return (this.selectBySession.all(sessionId) as DiagnosticRow[]).map(toDiagnostic);
+    return (this.selectBySession.all(sessionId) as DiagnosticRow[]).map(
+      toDiagnostic,
+    );
   }
 }

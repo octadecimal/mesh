@@ -24,6 +24,10 @@ export default [
               sourceTag: 'type:app',
               onlyDependOnLibsWithTags: ['type:contracts'],
             },
+            {
+              sourceTag: 'type:e2e',
+              onlyDependOnLibsWithTags: ['type:contracts'],
+            },
           ],
         },
       ],

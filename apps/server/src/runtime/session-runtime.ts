@@ -9,12 +9,22 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import type { DriverEvent, DriverSession } from '../claude/driver.js';
-import { normalizeDriverEvent, type DriverEventDraft } from '../claude/normalize-event.js';
+import {
+  normalizeDriverEvent,
+  type DriverEventDraft,
+} from '../claude/normalize-event.js';
 import { permissionPolicy } from '../claude/permission-policy.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
-import type { EventRepository, SessionEventDraft } from '../repositories/event-repository.js';
+import type {
+  EventRepository,
+  SessionEventDraft,
+} from '../repositories/event-repository.js';
 import { EventPublisher } from './event-publisher.js';
-import { InvalidSessionStateError, transition, type LifecycleTrigger } from './lifecycle.js';
+import {
+  InvalidSessionStateError,
+  transition,
+  type LifecycleTrigger,
+} from './lifecycle.js';
 
 export class AuditUnavailableError extends Error {
   readonly code = 'audit_unavailable';
@@ -32,7 +42,11 @@ const stablePayload = (value: unknown): string => {
       if (seen.has(item)) return '[Circular]';
       seen.add(item);
       if (!Array.isArray(item)) {
-        return Object.fromEntries(Object.entries(item as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)));
+        return Object.fromEntries(
+          Object.entries(item as Record<string, unknown>).sort(([a], [b]) =>
+            a.localeCompare(b),
+          ),
+        );
       }
     }
     return item;
@@ -41,7 +55,11 @@ const stablePayload = (value: unknown): string => {
 };
 
 const fingerprint = (sessionId: string, raw: unknown): string =>
-  createHash('sha256').update(sessionId).update('\0').update(stablePayload(raw)).digest('hex');
+  createHash('sha256')
+    .update(sessionId)
+    .update('\0')
+    .update(stablePayload(raw))
+    .digest('hex');
 
 const now = (): string => new Date().toISOString();
 
@@ -72,40 +90,63 @@ export class SessionRuntime {
     this.consuming ??= this.consume();
   }
 
-  persistTransition(trigger: LifecycleTrigger, reason?: string, claudeResumeId?: string): SessionEvent {
+  persistTransition(
+    trigger: LifecycleTrigger,
+    reason?: string,
+    claudeResumeId?: string,
+  ): SessionEvent {
     const next = transition(this.state, trigger);
-    return this.persist({
-      type: 'session.status',
-      payload: { from: this.state, to: next, reason },
-    }, { kind: 'runtime_transition', trigger: trigger.type, reason }, next, claudeResumeId);
+    return this.persist(
+      {
+        type: 'session.status',
+        payload: { from: this.state, to: next, reason },
+      },
+      { kind: 'runtime_transition', trigger: trigger.type, reason },
+      next,
+      claudeResumeId,
+    );
   }
 
   async sendPrompt(prompt: string): Promise<void> {
     if (this.state !== 'idle' && this.state !== 'running') {
       throw new InvalidSessionStateError(this.state, 'start');
     }
-    this.persist({ type: 'message.user', payload: { text: prompt } }, { kind: 'user_prompt', prompt });
+    this.persist(
+      { type: 'message.user', payload: { text: prompt } },
+      { kind: 'user_prompt', prompt },
+    );
     await this.dependencies.driverSession.sendPrompt(prompt);
   }
 
-  async resolvePermission(requestId: string, decision: 'approve' | 'deny'): Promise<void> {
+  async resolvePermission(
+    requestId: string,
+    decision: 'approve' | 'deny',
+  ): Promise<void> {
     if (this.state !== 'waiting_for_approval') {
       throw new InvalidSessionStateError(this.state, 'permission_resolved');
     }
     const next = transition(this.state, { type: 'permission_resolved' });
-    this.persist({
-      type: 'permission.resolved',
-      payload: {
-        permissionId: requestId,
-        decision: decision === 'approve' ? 'approved' : 'denied',
-        resolvedAt: now(),
+    this.persist(
+      {
+        type: 'permission.resolved',
+        payload: {
+          permissionId: requestId,
+          decision: decision === 'approve' ? 'approved' : 'denied',
+          resolvedAt: now(),
+        },
       },
-    }, { kind: 'permission_resolution', requestId, decision }, next);
-    await this.dependencies.driverSession.resolvePermission(requestId, decision);
+      { kind: 'permission_resolution', requestId, decision },
+      next,
+    );
+    await this.dependencies.driverSession.resolvePermission(
+      requestId,
+      decision,
+    );
   }
 
   async interrupt(): Promise<void> {
-    if (this.state !== 'interrupting') this.persistTransition({ type: 'interrupt' });
+    if (this.state !== 'interrupting')
+      this.persistTransition({ type: 'interrupt' });
     await this.dependencies.driverSession.interrupt();
     await this.forceClose();
   }
@@ -115,7 +156,8 @@ export class SessionRuntime {
   }
 
   async forceClose(): Promise<void> {
-    if (this.state === 'interrupting') this.persistTransition({ type: 'driver_stopped' });
+    if (this.state === 'interrupting')
+      this.persistTransition({ type: 'driver_stopped' });
     await this.dependencies.driverSession.close().catch(() => undefined);
     this.dependencies.onStopped();
   }
@@ -125,8 +167,15 @@ export class SessionRuntime {
       for await (const raw of this.dependencies.driverSession.events()) {
         await this.applyDriverEvent(raw);
       }
-      if (this.state !== 'interrupting' && this.state !== 'completed' && this.state !== 'failed' && this.state !== 'interrupted') {
-        await this.handleCrash(new Error('Driver event stream ended unexpectedly'));
+      if (
+        this.state !== 'interrupting' &&
+        this.state !== 'completed' &&
+        this.state !== 'failed' &&
+        this.state !== 'interrupted'
+      ) {
+        await this.handleCrash(
+          new Error('Driver event stream ended unexpectedly'),
+        );
       }
     } catch (error) {
       await this.handleCrash(error);
@@ -147,17 +196,28 @@ export class SessionRuntime {
 
     let draft: DriverEventDraft | SessionEventDraft = normalized.event;
     let next: LifecycleState | undefined;
-    let automaticPermission: { requestId: string; decision: 'approve' } | undefined;
+    let automaticPermission:
+      | { requestId: string; decision: 'approve' }
+      | undefined;
     if (normalized.event.type === 'permission.requested') {
       const request = normalized.event.payload;
-      draft = { ...normalized.event, payload: { ...request, actions: ['approve', 'deny'] } };
-      const decision = permissionPolicy(this.dependencies.session.permissionMode).decide({
+      draft = {
+        ...normalized.event,
+        payload: { ...request, actions: ['approve', 'deny'] },
+      };
+      const decision = permissionPolicy(
+        this.dependencies.session.permissionMode,
+      ).decide({
         toolName: request.name,
         input: request.input,
       });
-      if (decision.action === 'prompt') next = transition(this.state, { type: 'permission_requested' });
+      if (decision.action === 'prompt')
+        next = transition(this.state, { type: 'permission_requested' });
       if (decision.action === 'approve') {
-        automaticPermission = { requestId: request.permissionId, decision: 'approve' };
+        automaticPermission = {
+          requestId: request.permissionId,
+          decision: 'approve',
+        };
       }
     } else if (normalized.event.type === 'session.status') {
       next = this.statusTransition(normalized.event.payload.to);
@@ -166,14 +226,17 @@ export class SessionRuntime {
     this.persist(draft, raw, next, undefined, key);
     this.appliedDriverEvents.add(key);
     if (automaticPermission) {
-      this.persist({
-        type: 'permission.resolved',
-        payload: {
-          permissionId: automaticPermission.requestId,
-          decision: 'approved',
-          resolvedAt: now(),
+      this.persist(
+        {
+          type: 'permission.resolved',
+          payload: {
+            permissionId: automaticPermission.requestId,
+            decision: 'approved',
+            resolvedAt: now(),
+          },
         },
-      }, { kind: 'permission_resolution', ...automaticPermission });
+        { kind: 'permission_resolution', ...automaticPermission },
+      );
       await this.dependencies.driverSession.resolvePermission(
         automaticPermission.requestId,
         automaticPermission.decision,
@@ -182,26 +245,41 @@ export class SessionRuntime {
   }
 
   private statusTransition(to: LifecycleState): LifecycleState {
-    if (to === 'completed') return transition(this.state, { type: 'driver_completed' });
-    if (to === 'failed') return transition(this.state, { type: 'driver_failed' });
-    if (to === 'interrupted') return transition(this.state, { type: 'driver_crashed' });
+    if (to === 'completed')
+      return transition(this.state, { type: 'driver_completed' });
+    if (to === 'failed')
+      return transition(this.state, { type: 'driver_failed' });
+    if (to === 'interrupted')
+      return transition(this.state, { type: 'driver_crashed' });
     if (to === this.state) return this.state;
     throw new InvalidSessionStateError(this.state, 'driver_started');
   }
 
   private async handleCrash(error: unknown): Promise<void> {
-    if (this.state === 'completed' || this.state === 'failed' || this.state === 'interrupted') return;
+    if (
+      this.state === 'completed' ||
+      this.state === 'failed' ||
+      this.state === 'interrupted'
+    )
+      return;
     try {
       const message = error instanceof Error ? error.message : String(error);
-      this.persist({
-        type: 'session.error',
-        payload: { code: 'driver_crashed', message },
-      }, { kind: 'driver_crash', message });
+      this.persist(
+        {
+          type: 'session.error',
+          payload: { code: 'driver_crashed', message },
+        },
+        { kind: 'driver_crash', message },
+      );
       const next = transition(this.state, { type: 'driver_crashed' });
-      this.persist({
-        type: 'session.status',
-        payload: { from: this.state, to: next, reason: 'driver_crashed' },
-      }, { kind: 'runtime_transition', trigger: 'driver_crashed', message }, next);
+      this.persist(
+        {
+          type: 'session.status',
+          payload: { from: this.state, to: next, reason: 'driver_crashed' },
+        },
+        { kind: 'runtime_transition', trigger: 'driver_crashed', message },
+        next,
+      );
     } catch {
       // Persistence failure already trips the global audit barrier.
     }

@@ -18,12 +18,12 @@ describe('App', () => {
     const user = userEvent.setup();
     const store = createMeshStore(snapshot);
     const api = createApi();
-    render(
-      <App store={store} api={api} />,
-    );
+    render(<App store={store} api={api} />);
 
     await user.click(screen.getByRole('button', { name: /Session A/ }));
-    await user.click(screen.getByRole('button', { name: 'Close Session A panel' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Close Session A panel' }),
+    );
 
     expect(api.command).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'session.interrupt' }),
@@ -34,26 +34,43 @@ describe('App', () => {
     const user = userEvent.setup();
     const store = createMeshStore(snapshot);
     const api = createApi();
-    api.command.mockImplementation((command) => Promise.resolve({
-      protocolVersion: 1,
-      commandType: command.type,
-      result: {},
-      warnings: command.type === 'session.create'
-        ? [{ code: 'shared_workspace_collision', message: 'This shared folder is already used by Session A.' }]
-        : [],
-    }));
+    api.command.mockImplementation((command) =>
+      Promise.resolve({
+        protocolVersion: 1,
+        commandType: command.type,
+        result: {},
+        warnings:
+          command.type === 'session.create'
+            ? [
+                {
+                  code: 'shared_workspace_collision',
+                  message: 'This shared folder is already used by Session A.',
+                },
+              ]
+            : [],
+      }),
+    );
     render(<App store={store} api={api} />);
 
     await user.click(screen.getByRole('button', { name: 'New session' }));
     await user.selectOptions(screen.getByLabelText('Project'), 'p1');
     await user.type(screen.getByLabelText('Shared folder path'), '/mesh');
-    await user.selectOptions(screen.getByLabelText('Permission mode'), 'interactive');
+    await user.selectOptions(
+      screen.getByLabelText('Permission mode'),
+      'interactive',
+    );
     await user.click(screen.getByRole('button', { name: 'Create session' }));
 
-    await waitFor(() => expect(screen.getByText('This shared folder is already used by Session A.')).toBeDefined());
+    await waitFor(() =>
+      expect(
+        screen.getByText('This shared folder is already used by Session A.'),
+      ).toBeDefined(),
+    );
     expect(screen.getByRole('dialog', { name: 'New session' })).toBeDefined();
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull(),
+    );
   });
 
   it('persists real Dockview JSON through MeshApi with Hookstate selection and sidebar state', async () => {
@@ -63,7 +80,10 @@ describe('App', () => {
     const api = createApi();
     render(<App store={store} api={api} />);
 
-    await user.type(screen.getByRole('searchbox', { name: 'Filter sessions' }), 'Session');
+    await user.type(
+      screen.getByRole('searchbox', { name: 'Filter sessions' }),
+      'Session',
+    );
     await user.click(screen.getByRole('button', { name: /Session A/ }));
 
     await waitFor(() => expect(api.command).toHaveBeenCalled());
@@ -134,7 +154,12 @@ const project = {
   discoveredAt: '2026-08-24T00:00:00.000Z',
   discoveryMetadata: {},
 };
-const workspace = { id: 'w1', projectId: 'p1', type: 'shared' as const, path: '/mesh' };
+const workspace = {
+  id: 'w1',
+  projectId: 'p1',
+  type: 'shared' as const,
+  path: '/mesh',
+};
 const session = {
   id: 's1',
   projectId: 'p1',

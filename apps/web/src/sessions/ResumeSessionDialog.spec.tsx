@@ -10,15 +10,17 @@ describe('ResumeSessionDialog', () => {
     render(
       <ResumeSessionDialog
         open
-        sessions={[{
-          id: 'session-1',
-          title: 'Investigate worktree',
-          claudeResumeId: 'claude-session-1',
-          lastPath: 'C:\\code\\mesh',
-          applicationMatch: 'Matched Mesh session',
-          permissionMode: 'interactive',
-          workspaceType: 'worktree',
-        }]}
+        sessions={[
+          {
+            id: 'session-1',
+            title: 'Investigate worktree',
+            claudeResumeId: 'claude-session-1',
+            lastPath: 'C:\\code\\mesh',
+            applicationMatch: 'Matched Mesh session',
+            permissionMode: 'interactive',
+            workspaceType: 'worktree',
+          },
+        ]}
         onResume={(command) => commands.push(command)}
       />,
     );
@@ -29,7 +31,10 @@ describe('ResumeSessionDialog', () => {
     expect(screen.queryByText(/still running|last prompt/i)).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Resume session' }));
 
-    expect(commands).toContainEqual({ type: 'session.resume', payload: { sessionId: 'session-1' } });
+    expect(commands).toContainEqual({
+      type: 'session.resume',
+      payload: { sessionId: 'session-1' },
+    });
   });
 
   it('renders typed resume failures as actionable messages', () => {
@@ -38,10 +43,15 @@ describe('ResumeSessionDialog', () => {
         open
         sessions={[]}
         onResume={() => undefined}
-        error={{ code: 'worktree_dirty', message: 'Commit, stash, or choose another worktree before resuming.' }}
+        error={{
+          code: 'worktree_dirty',
+          message: 'Commit, stash, or choose another worktree before resuming.',
+        }}
       />,
     );
 
-    expect(screen.getByRole('alert')).toHaveTextContent('Commit, stash, or choose another worktree before resuming.');
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Commit, stash, or choose another worktree before resuming.',
+    );
   });
 });

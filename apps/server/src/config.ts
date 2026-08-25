@@ -69,7 +69,12 @@ export const loadServerConfig = (
     throw new Error('MESH_HOST must be a loopback address');
   }
   const port = Number(environment.MESH_PORT ?? '3737');
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+  const ephemeralTestPort = environment.NODE_ENV === 'test' && port === 0;
+  if (
+    !Number.isInteger(port) ||
+    (!ephemeralTestPort && port < 1) ||
+    port > 65_535
+  ) {
     throw new Error('MESH_PORT must be an integer between 1 and 65535');
   }
   const baseDirectory = resolve(

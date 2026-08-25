@@ -11,9 +11,7 @@ const root = ReactDOM.createRoot(
 );
 const api = new MeshApi();
 
-root.render(
-  <main aria-busy="true">Loading Mesh…</main>,
-);
+root.render(<main aria-busy="true">Loading Mesh…</main>);
 
 void api.snapshot().then(
   (snapshot) => {
@@ -24,6 +22,8 @@ void api.snapshot().then(
     );
   },
   () => {
-    root.render(<main role="alert">Mesh could not load the session snapshot.</main>);
+    root.render(
+      <main role="alert">Mesh could not load the session snapshot.</main>,
+    );
   },
 );

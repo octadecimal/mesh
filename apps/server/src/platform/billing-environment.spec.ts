@@ -1,3 +1,4 @@
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -20,7 +21,7 @@ describe('detectBillingOverrides', () => {
 });
 
 describe('loadServerConfig', () => {
-  it('keeps the server on loopback and resolves persistence from the configured base directory', () => {
+  it('keeps the server on loopback and resolves persistence outside the repository', () => {
     const baseDirectory = process.cwd();
     expect(
       loadServerConfig(
@@ -31,7 +32,14 @@ describe('loadServerConfig', () => {
       host: '127.0.0.1',
       port: 4567,
       baseDirectory,
-      databasePath: join(baseDirectory, 'state', 'mesh.sqlite'),
+      databasePath: join(
+        homedir(),
+        '.mesh-session-platform',
+        'state',
+        'mesh.sqlite',
+      ),
+      developmentOrigin: undefined,
+      webRoot: undefined,
     });
   });
 });

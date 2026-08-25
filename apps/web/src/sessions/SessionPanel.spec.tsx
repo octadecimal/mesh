@@ -8,14 +8,46 @@ import { SessionPanel } from './SessionPanel';
 import { createMeshStore } from '../state/store';
 
 const session = {
-  id: 's1', projectId: 'p1', workspaceId: 'w1', title: 'Session A',
-  permissionMode: 'interactive' as const, lifecycleState: 'running' as const,
-  createdAt: '2026-08-24T00:00:00.000Z', updatedAt: '2026-08-24T00:00:00.000Z',
+  id: 's1',
+  projectId: 'p1',
+  workspaceId: 'w1',
+  title: 'Session A',
+  permissionMode: 'interactive' as const,
+  lifecycleState: 'running' as const,
+  createdAt: '2026-08-24T00:00:00.000Z',
+  updatedAt: '2026-08-24T00:00:00.000Z',
 };
-const workspace = { id: 'w1', projectId: 'p1', type: 'worktree' as const, path: '/mesh', gitBranch: 'task-11' };
+const workspace = {
+  id: 'w1',
+  projectId: 'p1',
+  type: 'worktree' as const,
+  path: '/mesh',
+  gitBranch: 'task-11',
+};
 const events: SessionEvent[] = [
-  { protocolVersion: 1, id: 'e1', sessionId: 's1', sequence: 1, occurredAt: '2026-08-24T00:00:00.000Z', type: 'message.assistant', payload: { text: 'Assistant reply' } },
-  { protocolVersion: 1, id: 'e2', sessionId: 's1', sequence: 2, occurredAt: '2026-08-24T00:01:00.000Z', type: 'permission.requested', payload: { permissionId: 'permission-1', name: 'Bash', input: { command: 'git status' }, actions: ['approve', 'deny'] } },
+  {
+    protocolVersion: 1,
+    id: 'e1',
+    sessionId: 's1',
+    sequence: 1,
+    occurredAt: '2026-08-24T00:00:00.000Z',
+    type: 'message.assistant',
+    payload: { text: 'Assistant reply' },
+  },
+  {
+    protocolVersion: 1,
+    id: 'e2',
+    sessionId: 's1',
+    sequence: 2,
+    occurredAt: '2026-08-24T00:01:00.000Z',
+    type: 'permission.requested',
+    payload: {
+      permissionId: 'permission-1',
+      name: 'Bash',
+      input: { command: 'git status' },
+      actions: ['approve', 'deny'],
+    },
+  },
 ];
 
 describe('SessionPanel', () => {
@@ -34,7 +66,15 @@ describe('SessionPanel', () => {
       },
     };
 
-    render(<SessionPanel session={session} workspace={workspace} events={events} api={api} auditAvailable />);
+    render(
+      <SessionPanel
+        session={session}
+        workspace={workspace}
+        events={events}
+        api={api}
+        auditAvailable
+      />,
+    );
 
     expect(screen.getByText('Assistant reply')).toBeVisible();
     expect(diagnosticRequests).toHaveLength(0);
@@ -42,64 +82,150 @@ describe('SessionPanel', () => {
     expect(diagnosticRequests).toEqual(['s1']);
     await user.click(screen.getByRole('button', { name: 'Delete session' }));
     expect(commands).toHaveLength(0);
-    await user.click(screen.getByRole('button', { name: 'Delete permanently' }));
-    expect(commands.at(-1)).toMatchObject({ type: 'session.delete', payload: { sessionId: 's1', confirmed: true } });
+    await user.click(
+      screen.getByRole('button', { name: 'Delete permanently' }),
+    );
+    expect(commands.at(-1)).toMatchObject({
+      type: 'session.delete',
+      payload: { sessionId: 's1', confirmed: true },
+    });
   });
 
   it('loads diagnostics one cursor page at a time only after opening and appends the next page', async () => {
     const user = userEvent.setup();
     const requests: Array<[string, unknown]> = [];
-    const firstPage = Array.from({ length: 10 }, (_, index) => diagnostic(`d${index + 1}`));
+    const firstPage = Array.from({ length: 10 }, (_, index) =>
+      diagnostic(`d${index + 1}`),
+    );
     const api = {
       diagnostics: async (sessionId: string, options?: unknown) => {
         requests.push([sessionId, options]);
         return requests.length === 1
-          ? { protocolVersion: 1 as const, sessionId, diagnostics: firstPage, nextAfter: 'd10' }
-          : { protocolVersion: 1 as const, sessionId, diagnostics: [diagnostic('d11')] };
+          ? {
+              protocolVersion: 1 as const,
+              sessionId,
+              diagnostics: firstPage,
+              nextAfter: 'd10',
+            }
+          : {
+              protocolVersion: 1 as const,
+              sessionId,
+              diagnostics: [diagnostic('d11')],
+            };
       },
-      command: async () => ({ protocolVersion: 1 as const, commandType: 'ok', result: {} }),
+      command: async () => ({
+        protocolVersion: 1 as const,
+        commandType: 'ok',
+        result: {},
+      }),
     };
-    render(<SessionPanel session={session} workspace={workspace} events={events} api={api} auditAvailable />);
+    render(
+      <SessionPanel
+        session={session}
+        workspace={workspace}
+        events={events}
+        api={api}
+        auditAvailable
+      />,
+    );
 
     expect(requests).toEqual([]);
     await user.click(screen.getByRole('button', { name: 'Raw diagnostics' }));
     await waitFor(() => expect(requests).toEqual([['s1', { limit: 10 }]]));
-    await user.click(screen.getByRole('button', { name: 'Load more diagnostics' }));
-    await waitFor(() => expect(requests).toEqual([
-      ['s1', { limit: 10 }],
-      ['s1', { after: 'd10', limit: 10 }],
-    ]));
+    await user.click(
+      screen.getByRole('button', { name: 'Load more diagnostics' }),
+    );
+    await waitFor(() =>
+      expect(requests).toEqual([
+        ['s1', { limit: 10 }],
+        ['s1', { after: 'd10', limit: 10 }],
+      ]),
+    );
     expect(screen.getByLabelText('Diagnostic d11')).toBeVisible();
   });
 
   it('keeps a Hookstate prompt draft when the panel remounts and gates sending when audit is unavailable', async () => {
     const user = userEvent.setup();
     const store = createMeshStore(snapshot());
-    const api = { diagnostics: async () => ({ protocolVersion: 1 as const, sessionId: 's1', diagnostics: [] }), command: async () => ({ protocolVersion: 1 as const, commandType: 'ok', result: {} }) };
+    const api = {
+      diagnostics: async () => ({
+        protocolVersion: 1 as const,
+        sessionId: 's1',
+        diagnostics: [],
+      }),
+      command: async () => ({
+        protocolVersion: 1 as const,
+        commandType: 'ok',
+        result: {},
+      }),
+    };
     function Harness() {
       const projection = useHookstate(store.state).get({ noproxy: true });
       const [mounted, setMounted] = useState(true);
-      return <>
-        <button onClick={() => setMounted((value) => !value)}>Toggle panel</button>
-        {mounted ? <SessionPanel session={session} workspace={workspace} events={events} api={api} auditAvailable promptDraft={projection.promptDrafts.s1 ?? ''} onPromptDraftChange={(value) => store.setPromptDraft('s1', value)} /> : null}
-      </>;
+      return (
+        <>
+          <button onClick={() => setMounted((value) => !value)}>
+            Toggle panel
+          </button>
+          {mounted ? (
+            <SessionPanel
+              session={session}
+              workspace={workspace}
+              events={events}
+              api={api}
+              auditAvailable
+              promptDraft={projection.promptDrafts.s1 ?? ''}
+              onPromptDraftChange={(value) => store.setPromptDraft('s1', value)}
+            />
+          ) : null}
+        </>
+      );
     }
     render(<Harness />);
-    await user.type(screen.getByRole('textbox', { name: 'Prompt' }), 'persist me');
+    await user.type(
+      screen.getByRole('textbox', { name: 'Prompt' }),
+      'persist me',
+    );
     await user.click(screen.getByRole('button', { name: 'Toggle panel' }));
     await user.click(screen.getByRole('button', { name: 'Toggle panel' }));
-    expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue('persist me');
+    expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue(
+      'persist me',
+    );
 
-    render(<SessionPanel session={session} workspace={workspace} events={events} api={api} auditAvailable={false} promptDraft="send this" onPromptDraftChange={() => undefined} />);
-    expect(screen.getAllByRole('button', { name: 'Send prompt' }).at(-1)).toBeDisabled();
+    render(
+      <SessionPanel
+        session={session}
+        workspace={workspace}
+        events={events}
+        api={api}
+        auditAvailable={false}
+        promptDraft="send this"
+        onPromptDraftChange={() => undefined}
+      />,
+    );
+    expect(
+      screen.getAllByRole('button', { name: 'Send prompt' }).at(-1),
+    ).toBeDisabled();
   });
 
   it('pairs interleaved tool results with their matching requests and shows policy mode while deciding permissions', async () => {
     const user = userEvent.setup();
     let resolveCommand: (() => void) | undefined;
     const api = {
-      diagnostics: async () => ({ protocolVersion: 1 as const, sessionId: 's1', diagnostics: [] }),
-      command: async () => new Promise((resolve) => { resolveCommand = () => resolve({ protocolVersion: 1 as const, commandType: 'ok', result: {} }); }),
+      diagnostics: async () => ({
+        protocolVersion: 1 as const,
+        sessionId: 's1',
+        diagnostics: [],
+      }),
+      command: async () =>
+        new Promise((resolve) => {
+          resolveCommand = () =>
+            resolve({
+              protocolVersion: 1 as const,
+              commandType: 'ok',
+              result: {},
+            });
+        }),
     };
     const interleaved: SessionEvent[] = [
       toolRequested('e3', 'call-a', 'Read', { path: 'a.ts' }),
@@ -108,7 +234,15 @@ describe('SessionPanel', () => {
       toolCompleted('e6', 'call-a', { message: 'missing' }, true),
       events[1],
     ];
-    render(<SessionPanel session={session} workspace={workspace} events={interleaved} api={api} auditAvailable />);
+    render(
+      <SessionPanel
+        session={session}
+        workspace={workspace}
+        events={interleaved}
+        api={api}
+        auditAvailable
+      />,
+    );
 
     const bash = screen.getByLabelText('Tool call Bash');
     expect(bash).toHaveTextContent('git status');
@@ -124,7 +258,47 @@ describe('SessionPanel', () => {
   });
 });
 
-const diagnostic = (id: string) => ({ id, sessionId: 's1', capturedAt: '2026-08-24T00:00:00.000Z', payload: { id } });
-const toolRequested = (id: string, toolCallId: string, name: string, input: unknown): SessionEvent => ({ protocolVersion: 1, id, sessionId: 's1', sequence: Number(id.slice(1)), occurredAt: '2026-08-24T00:00:00.000Z', type: 'tool.requested', payload: { toolCallId, name, input } });
-const toolCompleted = (id: string, toolCallId: string, output: unknown, isError: boolean): SessionEvent => ({ protocolVersion: 1, id, sessionId: 's1', sequence: Number(id.slice(1)), occurredAt: '2026-08-24T00:00:00.000Z', type: 'tool.completed', payload: { toolCallId, output, isError } });
-const snapshot = () => ({ protocolVersion: 1 as const, projects: [], workspaces: [], sessions: [session], events: [], pendingApprovals: [], lastSequenceBySession: {}, layouts: [] });
+const diagnostic = (id: string) => ({
+  id,
+  sessionId: 's1',
+  capturedAt: '2026-08-24T00:00:00.000Z',
+  payload: { id },
+});
+const toolRequested = (
+  id: string,
+  toolCallId: string,
+  name: string,
+  input: unknown,
+): SessionEvent => ({
+  protocolVersion: 1,
+  id,
+  sessionId: 's1',
+  sequence: Number(id.slice(1)),
+  occurredAt: '2026-08-24T00:00:00.000Z',
+  type: 'tool.requested',
+  payload: { toolCallId, name, input },
+});
+const toolCompleted = (
+  id: string,
+  toolCallId: string,
+  output: unknown,
+  isError: boolean,
+): SessionEvent => ({
+  protocolVersion: 1,
+  id,
+  sessionId: 's1',
+  sequence: Number(id.slice(1)),
+  occurredAt: '2026-08-24T00:00:00.000Z',
+  type: 'tool.completed',
+  payload: { toolCallId, output, isError },
+});
+const snapshot = () => ({
+  protocolVersion: 1 as const,
+  projects: [],
+  workspaces: [],
+  sessions: [session],
+  events: [],
+  pendingApprovals: [],
+  lastSequenceBySession: {},
+  layouts: [],
+});

@@ -61,13 +61,34 @@ class BillingBlockedDriver implements ClaudeSessionDriver {
 export const selectClaudeDriver = (
   conflicts: readonly BillingConflict[],
   createDriver: () => ClaudeSessionDriver,
-): ClaudeSessionDriver =>
-  conflicts.length > 0 ? new BillingBlockedDriver(conflicts) : createDriver();
+  testDriver?: ClaudeSessionDriver,
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): ClaudeSessionDriver => {
+  if (testDriver) {
+    if (environment.NODE_ENV !== 'test') {
+      throw new Error('Fake Claude driver is restricted to test configuration');
+    }
+    return conflicts.length > 0
+      ? new BillingBlockedDriver(conflicts)
+      : testDriver;
+  }
+  return conflicts.length > 0
+    ? new BillingBlockedDriver(conflicts)
+    : createDriver();
+};
 
 export interface RunningServer {
   app: FastifyInstance;
   origin: string;
   close(): Promise<void>;
+}
+
+export interface StartServerOptions {
+  environment?: Readonly<Record<string, string | undefined>>;
+  test?: {
+    driver: ClaudeSessionDriver;
+    webRoot: string;
+  };
 }
 
 export const originFromAddress = (
@@ -121,9 +142,12 @@ export const createProcessLifecycle = (
   };
 };
 
-export const startServer = async (): Promise<RunningServer> => {
-  const config = loadServerConfig(process.env);
-  const billingConflicts = detectBillingOverrides(process.env);
+export const startServer = async (
+  options: StartServerOptions = {},
+): Promise<RunningServer> => {
+  const environment = options.environment ?? process.env;
+  const config = loadServerConfig(environment);
+  const billingConflicts = detectBillingOverrides(environment);
   mkdirSync(dirname(config.databasePath), { recursive: true });
   const database = openDatabase(config.databasePath);
   migrate(database);
@@ -139,6 +163,8 @@ export const startServer = async (): Promise<RunningServer> => {
   const driver = selectClaudeDriver(
     billingConflicts,
     () => new SdkClaudeSessionDriver(createClaudeSdkFacade()),
+    options.test?.driver,
+    environment,
   );
   const registry = new SessionRegistry({
     database,
@@ -164,7 +190,7 @@ export const startServer = async (): Promise<RunningServer> => {
     pathOptions,
     billingConflicts,
     originPolicy,
-    webRoot: config.webRoot,
+    webRoot: options.test?.webRoot ?? config.webRoot,
   });
 
   const lifecycle = createProcessLifecycle({

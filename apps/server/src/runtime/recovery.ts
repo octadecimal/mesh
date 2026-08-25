@@ -7,11 +7,15 @@ import type { Database } from '../db/database.js';
 type LiveSessionRow = { id: string; lifecycle_state: LifecycleState };
 
 export const recoverInterruptedSessions = (database: Database): number => {
-  const sessions = database.prepare(`
+  const sessions = database
+    .prepare(
+      `
     SELECT id, lifecycle_state FROM sessions
     WHERE lifecycle_state IN ('starting', 'running', 'waiting_for_approval', 'interrupting')
     ORDER BY id
-  `).all() as LiveSessionRow[];
+  `,
+    )
+    .all() as LiveSessionRow[];
   if (sessions.length === 0) return 0;
 
   const nextSequence = database.prepare(
@@ -38,12 +42,17 @@ export const recoverInterruptedSessions = (database: Database): number => {
       const occurredAt = new Date().toISOString();
       const eventId = `event-${randomUUID()}`;
       const diagnosticId = `diagnostic-${randomUUID()}`;
-      const sequence = (nextSequence.get(session.id) as { sequence: number }).sequence;
+      const sequence = (nextSequence.get(session.id) as { sequence: number })
+        .sequence;
       insertDiagnostic.run({
         id: diagnosticId,
         sessionId: session.id,
         capturedAt: occurredAt,
-        payloadJson: JSON.stringify({ kind: 'recovery', reason: 'backend_restart', from: session.lifecycle_state }),
+        payloadJson: JSON.stringify({
+          kind: 'recovery',
+          reason: 'backend_restart',
+          from: session.lifecycle_state,
+        }),
       });
       insertEvent.run({
         id: eventId,

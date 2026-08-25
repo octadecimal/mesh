@@ -1,5 +1,8 @@
 import { hookstate } from '@hookstate/core';
-import type { SessionEvent, SessionSnapshot } from '@mesh-session-platform/contracts';
+import type {
+  SessionEvent,
+  SessionSnapshot,
+} from '@mesh-session-platform/contracts';
 
 import {
   applyEvent,
@@ -10,8 +13,9 @@ import {
   type MeshProjection,
 } from './reducer';
 
-const currentProjection = (state: ReturnType<typeof hookstate<MeshProjection>>) =>
-  state.get({ noproxy: true }) as unknown as MeshProjection;
+const currentProjection = (
+  state: ReturnType<typeof hookstate<MeshProjection>>,
+) => state.get({ noproxy: true }) as unknown as MeshProjection;
 
 export const createMeshStore = (snapshot: SessionSnapshot) => {
   const state = hookstate(createProjection(snapshot));
@@ -31,7 +35,10 @@ export const createMeshStore = (snapshot: SessionSnapshot) => {
     },
     notifyInvalidPayload(message: string) {
       const current = currentProjection(state);
-      state.notifications.set([...current.notifications, diagnosticNotification(message)]);
+      state.notifications.set([
+        ...current.notifications,
+        diagnosticNotification(message),
+      ]);
     },
     selectSession(sessionId: string | undefined) {
       const current = currentProjection(state);
@@ -45,11 +52,17 @@ export const createMeshStore = (snapshot: SessionSnapshot) => {
     },
     setFilter(scope: string, value: string) {
       const current = currentProjection(state);
-      state.set({ ...current, filters: { ...current.filters, [scope]: value } });
+      state.set({
+        ...current,
+        filters: { ...current.filters, [scope]: value },
+      });
     },
     setPromptDraft(sessionId: string, value: string) {
       const current = currentProjection(state);
-      state.set({ ...current, promptDrafts: { ...current.promptDrafts, [sessionId]: value } });
+      state.set({
+        ...current,
+        promptDrafts: { ...current.promptDrafts, [sessionId]: value },
+      });
     },
   };
 };

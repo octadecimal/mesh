@@ -48,7 +48,9 @@ export const resolveWorkspacePath = async (
     const canonicalParent = await fs.realpath(path.dirname(candidate));
     const parentStat = await fs.stat(canonicalParent);
     if (!parentStat.isDirectory()) {
-      throw new Error(`Workspace path parent must be a directory: ${candidate}`);
+      throw new Error(
+        `Workspace path parent must be a directory: ${candidate}`,
+      );
     }
     canonical = path.resolve(canonicalParent, path.basename(candidate));
     missingLeaf = true;
@@ -56,11 +58,15 @@ export const resolveWorkspacePath = async (
   if (!missingLeaf) {
     const stat = await fs.stat(canonical);
     if (!stat.isDirectory()) {
-      throw new Error(`Workspace path must resolve to a directory: ${candidate}`);
+      throw new Error(
+        `Workspace path must resolve to a directory: ${candidate}`,
+      );
     }
   }
   if (!path.isAbsolute(canonical)) {
-    throw new Error(`Workspace path did not resolve to an absolute path: ${candidate}`);
+    throw new Error(
+      `Workspace path did not resolve to an absolute path: ${candidate}`,
+    );
   }
   return canonical as AbsolutePath;
 };

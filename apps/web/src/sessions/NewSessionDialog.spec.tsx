@@ -10,17 +10,32 @@ describe('NewSessionDialog', () => {
     render(
       <NewSessionDialog
         open
-        projects={[{ id: 'project-1', displayName: 'Mesh', repositoryPath: 'C:\\code\\mesh' }]}
+        projects={[
+          {
+            id: 'project-1',
+            displayName: 'Mesh',
+            repositoryPath: 'C:\\code\\mesh',
+          },
+        ]}
         onCreate={(command) => commands.push(command)}
       />,
     );
 
     await user.selectOptions(screen.getByLabelText('Project'), 'project-1');
-    await user.selectOptions(screen.getByLabelText('Workspace type'), 'worktree');
+    await user.selectOptions(
+      screen.getByLabelText('Workspace type'),
+      'worktree',
+    );
     await user.type(screen.getByLabelText('Branch'), 'mesh/session-a');
     await user.type(screen.getByLabelText('Start point'), 'main');
-    await user.type(screen.getByLabelText('Worktree path'), 'C:\\code\\worktrees\\session-a');
-    await user.selectOptions(screen.getByLabelText('Permission mode'), 'interactive');
+    await user.type(
+      screen.getByLabelText('Worktree path'),
+      'C:\\code\\worktrees\\session-a',
+    );
+    await user.selectOptions(
+      screen.getByLabelText('Permission mode'),
+      'interactive',
+    );
     await user.click(screen.getByRole('button', { name: 'Create session' }));
 
     expect(commands).toContainEqual(
@@ -46,7 +61,13 @@ describe('NewSessionDialog', () => {
     render(
       <NewSessionDialog
         open
-        projects={[{ id: 'project-1', displayName: 'Mesh', repositoryPath: 'C:\\code\\mesh' }]}
+        projects={[
+          {
+            id: 'project-1',
+            displayName: 'Mesh',
+            repositoryPath: 'C:\\code\\mesh',
+          },
+        ]}
         collisionWarning="This shared folder is already used by Session A."
         onCreate={() => undefined}
       />,
@@ -54,11 +75,19 @@ describe('NewSessionDialog', () => {
 
     await user.selectOptions(screen.getByLabelText('Project'), 'project-1');
     await user.selectOptions(screen.getByLabelText('Workspace type'), 'shared');
-    await user.type(screen.getByLabelText('Shared folder path'), 'relative/path');
-    await user.selectOptions(screen.getByLabelText('Permission mode'), 'safe_auto');
+    await user.type(
+      screen.getByLabelText('Shared folder path'),
+      'relative/path',
+    );
+    await user.selectOptions(
+      screen.getByLabelText('Permission mode'),
+      'safe_auto',
+    );
     await user.click(screen.getByRole('button', { name: 'Create session' }));
 
     expect(screen.getByText('Enter an absolute folder path.')).toBeDefined();
-    expect(screen.getByText('This shared folder is already used by Session A.')).toBeDefined();
+    expect(
+      screen.getByText('This shared folder is already used by Session A.'),
+    ).toBeDefined();
   });
 });

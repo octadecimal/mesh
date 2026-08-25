@@ -33,42 +33,59 @@ export const transition = (
   current: LifecycleState,
   input: LifecycleTrigger | LifecycleTrigger['type'],
 ): LifecycleState => {
-  const trigger: LifecycleTrigger = typeof input === 'string' ? { type: input } : input;
+  const trigger: LifecycleTrigger =
+    typeof input === 'string' ? { type: input } : input;
   switch (trigger.type) {
     case 'start':
       return current === 'idle' ? 'starting' : invalid(current, trigger);
     case 'resume':
-      return current === 'interrupted' || current === 'failed' || current === 'completed'
+      return current === 'interrupted' ||
+        current === 'failed' ||
+        current === 'completed'
         ? 'starting'
         : invalid(current, trigger);
     case 'driver_started':
       return current === 'starting' ? 'running' : invalid(current, trigger);
     case 'permission_requested':
-      return current === 'running' ? 'waiting_for_approval' : invalid(current, trigger);
+      return current === 'running'
+        ? 'waiting_for_approval'
+        : invalid(current, trigger);
     case 'permission_resolved':
-      return current === 'waiting_for_approval' ? 'running' : invalid(current, trigger);
+      return current === 'waiting_for_approval'
+        ? 'running'
+        : invalid(current, trigger);
     case 'interrupt':
-      return current === 'starting' || current === 'running' || current === 'waiting_for_approval'
+      return current === 'starting' ||
+        current === 'running' ||
+        current === 'waiting_for_approval'
         ? 'interrupting'
         : invalid(current, trigger);
     case 'driver_stopped':
-      return current === 'interrupting' ? 'interrupted' : invalid(current, trigger);
+      return current === 'interrupting'
+        ? 'interrupted'
+        : invalid(current, trigger);
     case 'driver_completed':
       return current === 'running' || current === 'waiting_for_approval'
         ? 'completed'
         : invalid(current, trigger);
     case 'driver_failed':
-      return current === 'starting' || current === 'running' || current === 'waiting_for_approval'
+      return current === 'starting' ||
+        current === 'running' ||
+        current === 'waiting_for_approval'
         ? 'failed'
         : invalid(current, trigger);
     case 'driver_crashed':
     case 'recover':
-      return current === 'starting' || current === 'running' ||
-          current === 'waiting_for_approval' || current === 'interrupting'
+      return current === 'starting' ||
+        current === 'running' ||
+        current === 'waiting_for_approval' ||
+        current === 'interrupting'
         ? 'interrupted'
         : invalid(current, trigger);
     case 'archive':
-      return current === 'completed' || current === 'failed' || current === 'interrupted'
+      return current === 'completed' ||
+        current === 'failed' ||
+        current === 'interrupted'
         ? 'archived'
         : invalid(current, trigger);
     default: {

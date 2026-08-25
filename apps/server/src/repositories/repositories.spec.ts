@@ -332,7 +332,14 @@ describe('repositories', () => {
       'object symbol property',
       () => Object.assign({ value: 1 }, { [Symbol('hidden')]: true }),
     ],
-    ['array hole', () => [1, , 3]],
+    [
+      'array hole',
+      () => {
+        const value = [1, 2, 3];
+        delete value[1];
+        return value;
+      },
+    ],
     ['array extra key', () => Object.assign([1], { extra: true })],
     [
       'array symbol property',

@@ -1,4 +1,7 @@
-import type { SessionEvent, SessionSnapshot } from '@mesh-session-platform/contracts';
+import type {
+  SessionEvent,
+  SessionSnapshot,
+} from '@mesh-session-platform/contracts';
 
 import { applyEvent, createProjection, replaceSnapshot } from './reducer';
 import { createResyncCoordinator } from './resync';
@@ -97,7 +100,10 @@ describe('createResyncCoordinator', () => {
       store,
     );
 
-    await Promise.all([coordinator.applyEvent(event(5)), coordinator.applyEvent(event(6))]);
+    await Promise.all([
+      coordinator.applyEvent(event(5)),
+      coordinator.applyEvent(event(6)),
+    ]);
 
     expect(requests).toBe(1);
     expect(store.state.lastSequenceBySession['session-1'].get()).toBe(7);

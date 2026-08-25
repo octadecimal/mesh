@@ -9,7 +9,10 @@ const initialMigration = {
 };
 const commandStateMigration = {
   id: '002-command-state',
-  sql: readFileSync(join(__dirname, 'migrations', '002-command-state.sql'), 'utf8'),
+  sql: readFileSync(
+    join(__dirname, 'migrations', '002-command-state.sql'),
+    'utf8',
+  ),
 };
 
 const migrations = [initialMigration, commandStateMigration];

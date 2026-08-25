@@ -69,7 +69,10 @@ export class EventRepository {
     sessionId: string,
     draft: SessionEventDraft,
     rawDiagnostic: RawDiagnostic,
-    sessionUpdate?: { lifecycleState?: LifecycleState; claudeResumeId?: string },
+    sessionUpdate?: {
+      lifecycleState?: LifecycleState;
+      claudeResumeId?: string;
+    },
   ): SessionEvent {
     const diagnostic = rawDiagnosticSchema.parse(rawDiagnostic);
     if (diagnostic.sessionId !== sessionId) {
@@ -78,7 +81,9 @@ export class EventRepository {
 
     this.database.exec('BEGIN IMMEDIATE');
     try {
-      const sequence = (this.nextSequence.get(sessionId) as { sequence: number }).sequence;
+      const sequence = (
+        this.nextSequence.get(sessionId) as { sequence: number }
+      ).sequence;
       const event = sessionEventSchema.parse({
         ...draft,
         protocolVersion: 1,
@@ -113,6 +118,8 @@ export class EventRepository {
   }
 
   after(sessionId: string, sequence: number): SessionEvent[] {
-    return (this.selectAfter.all(sessionId, sequence) as EventRow[]).map(toEvent);
+    return (this.selectAfter.all(sessionId, sequence) as EventRow[]).map(
+      toEvent,
+    );
   }
 }

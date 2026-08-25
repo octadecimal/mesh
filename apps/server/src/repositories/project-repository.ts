@@ -31,7 +31,9 @@ export class ProjectRepository {
       VALUES (@id, @displayName, @repositoryPath, @discoveredAt, @discoveryMetadataJson)
     `);
     this.selectById = database.prepare('SELECT * FROM projects WHERE id = ?');
-    this.selectAll = database.prepare('SELECT * FROM projects ORDER BY discovered_at, id');
+    this.selectAll = database.prepare(
+      'SELECT * FROM projects ORDER BY discovered_at, id',
+    );
     this.deleteById = database.prepare('DELETE FROM projects WHERE id = ?');
   }
 

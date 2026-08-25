@@ -1,4 +1,7 @@
-import { serverMessageSchema, type ServerMessage } from '@mesh-session-platform/contracts';
+import {
+  serverMessageSchema,
+  type ServerMessage,
+} from '@mesh-session-platform/contracts';
 
 type WebSocketFactory = (url: string) => WebSocket;
 
@@ -8,7 +11,9 @@ export type MeshSocketOptions = {
   onMessage: (message: ServerMessage) => void;
   onDiagnostic: (message: string) => void;
   onReconnect?: (delayMs: number) => void;
-  onResyncRequired?: (message: Extract<ServerMessage, { type: 'resync.required' }>) => void;
+  onResyncRequired?: (
+    message: Extract<ServerMessage, { type: 'resync.required' }>,
+  ) => void;
   resync?: () => Promise<void>;
   webSocket?: WebSocketFactory;
   setTimeout?: typeof globalThis.setTimeout;
@@ -76,14 +81,18 @@ export class MeshSocket {
     }
     const message = serverMessageSchema.safeParse(parsed);
     if (!message.success) {
-      this.options.onDiagnostic('Mesh socket received an invalid server payload.');
+      this.options.onDiagnostic(
+        'Mesh socket received an invalid server payload.',
+      );
       return;
     }
     this.options.onMessage(message.data);
     if (message.data.type === 'resync.required') {
       this.options.onResyncRequired?.(message.data);
       void this.options.resync?.().catch(() => {
-        this.options.onDiagnostic('Mesh socket could not refresh the snapshot after resync.');
+        this.options.onDiagnostic(
+          'Mesh socket could not refresh the snapshot after resync.',
+        );
       });
     }
   }

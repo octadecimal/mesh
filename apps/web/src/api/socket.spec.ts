@@ -58,7 +58,11 @@ describe('MeshSocket', () => {
     const connection = FakeSocket.instances[0];
     connection.open();
     connection.receive(healthMessage);
-    connection.receive({ protocolVersion: 1, type: 'events', payload: { events: [{}] } });
+    connection.receive({
+      protocolVersion: 1,
+      type: 'events',
+      payload: { events: [{}] },
+    });
 
     expect(JSON.parse(connection.sent[0])).toEqual({
       protocolVersion: 1,
@@ -124,7 +128,9 @@ describe('MeshSocket', () => {
 
     expect(requests).toBe(1);
     expect(store.state.lastSequenceBySession['session-1'].get()).toBe(8);
-    expect(store.state.promptDrafts['session-1'].get()).toBe('draft survives resync');
+    expect(store.state.promptDrafts['session-1'].get()).toBe(
+      'draft survives resync',
+    );
     socket.close();
   });
 });

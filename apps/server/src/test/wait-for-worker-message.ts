@@ -8,10 +8,10 @@ export const waitForWorkerMessage = <Message = unknown>(
 ): Promise<Message> =>
   new Promise<Message>((resolve, reject) => {
     let settled = false;
-    let timeout: NodeJS.Timeout | undefined;
+    const timeoutRef: { current?: NodeJS.Timeout } = {};
 
     const cleanup = () => {
-      if (timeout) clearTimeout(timeout);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
       worker.off('message', onMessage);
       worker.off('error', onError);
       worker.off('exit', onExit);
@@ -34,7 +34,7 @@ export const waitForWorkerMessage = <Message = unknown>(
     worker.once('message', onMessage);
     worker.once('error', onError);
     worker.once('exit', onExit);
-    timeout = setTimeout(
+    timeoutRef.current = setTimeout(
       () =>
         finish(() =>
           reject(

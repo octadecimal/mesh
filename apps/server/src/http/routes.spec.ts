@@ -291,7 +291,7 @@ describe('HTTP command routes', () => {
     });
     const diagnostics = await fixture.app.inject({
       method: 'GET',
-      url: '/api/sessions/s1/diagnostics?after=1&limit=1',
+      url: '/api/sessions/s1/diagnostics?after=d1&limit=1',
     });
 
     expect(history.statusCode).toBe(200);

@@ -23,19 +23,19 @@ export const savedLayoutMatchesSession = (
   (!layout.workspaceId || layout.workspaceId === session.workspaceId) &&
   (!layout.sessionId || layout.sessionId === session.id);
 
-export const selectSavedLayout = (state: MeshProjection): SavedLayout | undefined => {
-  const selected = state.sessions.find(({ id }) => id === state.selectedSessionId);
+export const selectSavedLayout = (
+  state: MeshProjection,
+): SavedLayout | undefined => {
+  const selected = state.sessions.find(
+    ({ id }) => id === state.selectedSessionId,
+  );
   if (!selected) return state.layouts[0];
 
   return state.layouts
     .filter((layout) => savedLayoutMatchesSession(layout, selected))
-    .reduce<SavedLayout | undefined>(
-      (best, layout) =>
-        !best || layoutSpecificity(layout) > layoutSpecificity(best)
-          ? layout
-          : best,
-      undefined,
-    );
+    .reduce<
+      SavedLayout | undefined
+    >((best, layout) => (!best || layoutSpecificity(layout) > layoutSpecificity(best) ? layout : best), undefined);
 };
 
 export const selectSessionFilter = (
@@ -55,10 +55,14 @@ export const selectSessionFilter = (
 export const selectSessionEvents = (state: MeshProjection, sessionId: string) =>
   state.events.filter((event) => event.sessionId === sessionId);
 
-export const selectPendingApprovals = (state: MeshProjection): PendingApproval[] =>
+export const selectPendingApprovals = (
+  state: MeshProjection,
+): PendingApproval[] =>
   state.pendingApprovals.filter(
     (event): event is PendingApproval => event.type === 'permission.requested',
   );
 
 export const selectUnreadSessionIds = (state: MeshProjection) =>
-  Object.keys(state.unreadSessionIds).filter((id) => state.unreadSessionIds[id]);
+  Object.keys(state.unreadSessionIds).filter(
+    (id) => state.unreadSessionIds[id],
+  );

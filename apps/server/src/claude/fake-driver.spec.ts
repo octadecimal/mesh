@@ -33,7 +33,9 @@ describe('FakeClaudeSessionDriver', () => {
       code: 'subscription_limit_reached',
     });
 
-    const session = await new FakeClaudeSessionDriver().create({ title: 'crash' });
+    const session = await new FakeClaudeSessionDriver().create({
+      title: 'crash',
+    });
     const iterator = session.events()[Symbol.asyncIterator]();
     session.crash(new Error('stream failed'));
     await expect(iterator.next()).rejects.toThrow('stream failed');

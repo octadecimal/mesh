@@ -37,8 +37,10 @@ export type ApplyEventResult =
 const pendingApprovals = (events: readonly SessionEvent[]) => {
   const pending = new Map<string, SessionEvent>();
   for (const event of events) {
-    if (event.type === 'permission.requested') pending.set(event.payload.permissionId, event);
-    if (event.type === 'permission.resolved') pending.delete(event.payload.permissionId);
+    if (event.type === 'permission.requested')
+      pending.set(event.payload.permissionId, event);
+    if (event.type === 'permission.resolved')
+      pending.delete(event.payload.permissionId);
   }
   return [...pending.values()];
 };
@@ -47,12 +49,18 @@ const sessionsAfter = (sessions: readonly Session[], event: SessionEvent) => {
   if (event.type !== 'session.status') return [...sessions];
   return sessions.map((session) =>
     session.id === event.sessionId
-      ? { ...session, lifecycleState: event.payload.to, updatedAt: event.occurredAt }
+      ? {
+          ...session,
+          lifecycleState: event.payload.to,
+          updatedAt: event.occurredAt,
+        }
       : session,
   );
 };
 
-export const createProjection = (snapshot: SessionSnapshot): MeshProjection => ({
+export const createProjection = (
+  snapshot: SessionSnapshot,
+): MeshProjection => ({
   projects: snapshot.projects,
   workspaces: snapshot.workspaces,
   sessions: snapshot.sessions,
@@ -119,6 +127,9 @@ export const diagnosticNotification = (message: string): Notification => ({
   message,
 });
 
-export type PendingApproval = Extract<SessionEvent, { type: 'permission.requested' }> & {
+export type PendingApproval = Extract<
+  SessionEvent,
+  { type: 'permission.requested' }
+> & {
   payload: PermissionRequest;
 };

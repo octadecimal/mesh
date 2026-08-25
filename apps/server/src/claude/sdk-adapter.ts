@@ -21,7 +21,9 @@ import {
 
 class AsyncPromptQueue implements AsyncIterable<SDKUserMessage> {
   private readonly values: SDKUserMessage[] = [];
-  private readonly waiters: Array<(result: IteratorResult<SDKUserMessage>) => void> = [];
+  private readonly waiters: Array<
+    (result: IteratorResult<SDKUserMessage>) => void
+  > = [];
   private ended = false;
 
   push(prompt: string): void {
@@ -39,7 +41,8 @@ class AsyncPromptQueue implements AsyncIterable<SDKUserMessage> {
   close(): void {
     if (this.ended) return;
     this.ended = true;
-    for (const waiter of this.waiters.splice(0)) waiter({ done: true, value: undefined });
+    for (const waiter of this.waiters.splice(0))
+      waiter({ done: true, value: undefined });
   }
 
   [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
@@ -48,7 +51,9 @@ class AsyncPromptQueue implements AsyncIterable<SDKUserMessage> {
         const value = this.values.shift();
         if (value) return { done: false, value };
         if (this.ended) return { done: true, value: undefined };
-        return new Promise<IteratorResult<SDKUserMessage>>((resolve) => this.waiters.push(resolve));
+        return new Promise<IteratorResult<SDKUserMessage>>((resolve) =>
+          this.waiters.push(resolve),
+        );
       },
     };
   }
@@ -59,25 +64,45 @@ const permissionResult = (
   input: Record<string, unknown>,
 ): PermissionResult => {
   if (decision === 'approve') return { behavior: 'allow', updatedInput: input };
-  return { behavior: 'deny', message: 'Denied by Mesh session permission policy' };
+  return {
+    behavior: 'deny',
+    message: 'Denied by Mesh session permission policy',
+  };
 };
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
-  typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+  typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
 
 const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
   if (message.type === 'system' && message.subtype === 'init') {
-    return [{ kind: 'started', sessionId: message.session_id, apiKeySource: message.apiKeySource }];
+    return [
+      {
+        kind: 'started',
+        sessionId: message.session_id,
+        apiKeySource: message.apiKeySource,
+      },
+    ];
   }
 
   if (message.type === 'assistant') {
     const events: SdkStreamEvent[] = [];
     if (message.error) {
-      const limit = message.error === 'rate_limit' || message.error === 'billing_error';
+      const limit =
+        message.error === 'rate_limit' || message.error === 'billing_error';
       events.push(
         limit
-          ? { kind: 'limit', capability: message.error, message: `Claude ${message.error}` }
-          : { kind: 'error', code: message.error, message: `Claude ${message.error}` },
+          ? {
+              kind: 'limit',
+              capability: message.error,
+              message: `Claude ${message.error}`,
+            }
+          : {
+              kind: 'error',
+              code: message.error,
+              message: `Claude ${message.error}`,
+            },
       );
     }
     for (const block of message.message.content) {
@@ -105,20 +130,28 @@ const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
   if (message.type === 'user' && Array.isArray(message.message.content)) {
     return message.message.content.flatMap((block): SdkStreamEvent[] => {
       const value = asRecord(block);
-      if (!value || value.type !== 'tool_result' || typeof value.tool_use_id !== 'string') return [];
-      return [{
-        kind: 'tool_completed',
-        toolCallId: value.tool_use_id,
-        output: 'content' in value ? value.content : message.tool_use_result,
-        isError: value.is_error === true,
-      }];
+      if (
+        !value ||
+        value.type !== 'tool_result' ||
+        typeof value.tool_use_id !== 'string'
+      )
+        return [];
+      return [
+        {
+          kind: 'tool_completed',
+          toolCallId: value.tool_use_id,
+          output: 'content' in value ? value.content : message.tool_use_result,
+          isError: value.is_error === true,
+        },
+      ];
     });
   }
 
   if (message.type === 'stream_event') {
     const event = asRecord(message.event);
     const delta = event ? asRecord(event.delta) : undefined;
-    return event?.type === 'content_block_delta' && delta?.type === 'text_delta' &&
+    return event?.type === 'content_block_delta' &&
+      delta?.type === 'text_delta' &&
       typeof delta.text === 'string'
       ? [{ kind: 'assistant_delta', text: delta.text }]
       : [];
@@ -127,29 +160,42 @@ const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
   if (message.type === 'rate_limit_event') {
     const info = message.rate_limit_info;
     if (info.status === 'allowed') return [];
-    const reset = info.resetsAt ? `; resets at ${new Date(info.resetsAt).toISOString()}` : '';
-    return [{
-      kind: 'limit',
-      capability: info.rateLimitType ?? 'subscription',
-      message: `Claude subscription limit ${info.status}${reset}`,
-    }];
+    const reset = info.resetsAt
+      ? `; resets at ${new Date(info.resetsAt).toISOString()}`
+      : '';
+    return [
+      {
+        kind: 'limit',
+        capability: info.rateLimitType ?? 'subscription',
+        message: `Claude subscription limit ${info.status}${reset}`,
+      },
+    ];
   }
 
   if (message.type === 'result') {
     if (message.subtype === 'success') return [{ kind: 'completed' }];
-    if (message.subtype === 'error_max_turns' || message.subtype === 'error_max_budget_usd') {
-      return [{
-        kind: 'limit',
-        capability: message.subtype,
-        message: message.errors.join('; ') || message.subtype,
-      }, { kind: 'completed' }];
+    if (
+      message.subtype === 'error_max_turns' ||
+      message.subtype === 'error_max_budget_usd'
+    ) {
+      return [
+        {
+          kind: 'limit',
+          capability: message.subtype,
+          message: message.errors.join('; ') || message.subtype,
+        },
+        { kind: 'completed' },
+      ];
     }
-    return [{
-      kind: 'error',
-      code: message.subtype,
-      message: message.errors.join('; ') || message.subtype,
-      details: { terminalReason: message.terminal_reason },
-    }, { kind: 'completed' }];
+    return [
+      {
+        kind: 'error',
+        code: message.subtype,
+        message: message.errors.join('; ') || message.subtype,
+        details: { terminalReason: message.terminal_reason },
+      },
+      { kind: 'completed' },
+    ];
   }
 
   return [];
@@ -217,7 +263,10 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
         ...(canUseTool ? { canUseTool } : {}),
       },
     });
-    if (typeof sdkQuery.interrupt !== 'function' || typeof sdkQuery.close !== 'function') {
+    if (
+      typeof sdkQuery.interrupt !== 'function' ||
+      typeof sdkQuery.close !== 'function'
+    ) {
       sdkQuery.close?.();
       throw new UnsupportedSdkCapabilityError('streaming_control');
     }

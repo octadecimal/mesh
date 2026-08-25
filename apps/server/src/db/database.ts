@@ -1,4 +1,6 @@
-import BetterSqlite3, { type Database as BetterSqliteDatabase } from 'better-sqlite3';
+import BetterSqlite3, {
+  type Database as BetterSqliteDatabase,
+} from 'better-sqlite3';
 
 export type Database = BetterSqliteDatabase;
 

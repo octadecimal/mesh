@@ -20,28 +20,34 @@ const seed = (
   lifecycleState: Session['lifecycleState'] = 'idle',
   permissionMode: Session['permissionMode'] = 'interactive',
 ) => {
-  repos.projects.create(projectSchema.parse({
-    id: 'p1',
-    displayName: 'Platform',
-    repositoryPath: 'C:/code/platform',
-    discoveredAt: timestamp,
-  }));
-  repos.workspaces.create(workspaceSchema.parse({
-    id: 'w1',
-    projectId: 'p1',
-    type: 'shared',
-    path: 'C:/code/platform',
-  }));
-  repos.sessions.create(sessionSchema.parse({
-    id: 's1',
-    projectId: 'p1',
-    workspaceId: 'w1',
-    title: 'Runtime',
-    permissionMode,
-    lifecycleState,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-  }));
+  repos.projects.create(
+    projectSchema.parse({
+      id: 'p1',
+      displayName: 'Platform',
+      repositoryPath: 'C:/code/platform',
+      discoveredAt: timestamp,
+    }),
+  );
+  repos.workspaces.create(
+    workspaceSchema.parse({
+      id: 'w1',
+      projectId: 'p1',
+      type: 'shared',
+      path: 'C:/code/platform',
+    }),
+  );
+  repos.sessions.create(
+    sessionSchema.parse({
+      id: 's1',
+      projectId: 'p1',
+      workspaceId: 'w1',
+      title: 'Runtime',
+      permissionMode,
+      lifecycleState,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }),
+  );
 };
 
 const setup = (options?: {
@@ -54,7 +60,11 @@ const setup = (options?: {
   const driverSession = new FakeDriverSession('claude-resume-1');
   const create = vi.fn(async () => driverSession);
   const resume = vi.fn(async () => driverSession);
-  const driver: ClaudeSessionDriver = { discover: async () => [], create, resume };
+  const driver: ClaudeSessionDriver = {
+    discover: async () => [],
+    create,
+    resume,
+  };
   const publisher = new EventPublisher();
   const registry = new SessionRegistry({
     database: repos.database,
@@ -83,7 +93,9 @@ describe('session runtime', () => {
     disposers.push(repos.dispose);
     const observedPersisted: boolean[] = [];
     const unsubscribe = publisher.subscribe('s1', (event) => {
-      observedPersisted.push(repos.events.after('s1', 0).some(({ id }) => id === event.id));
+      observedPersisted.push(
+        repos.events.after('s1', 0).some(({ id }) => id === event.id),
+      );
     });
 
     await registry.create('s1');
@@ -94,18 +106,36 @@ describe('session runtime', () => {
     });
 
     driverSession.enqueue({ kind: 'text_completed', text: 'first' });
-    await vi.waitFor(() => expect(repos.events.after('s1', 0).some(
-      (event) => event.type === 'message.assistant' && event.payload.text === 'first',
-    )).toBe(true));
+    await vi.waitFor(() =>
+      expect(
+        repos.events
+          .after('s1', 0)
+          .some(
+            (event) =>
+              event.type === 'message.assistant' &&
+              event.payload.text === 'first',
+          ),
+      ).toBe(true),
+    );
     expect(observedPersisted.every(Boolean)).toBe(true);
 
     unsubscribe();
     driverSession.enqueue({ kind: 'text_completed', text: 'after disconnect' });
-    await vi.waitFor(() => expect(repos.events.after('s1', 0).some(
-      (event) => event.type === 'message.assistant' && event.payload.text === 'after disconnect',
-    )).toBe(true));
+    await vi.waitFor(() =>
+      expect(
+        repos.events
+          .after('s1', 0)
+          .some(
+            (event) =>
+              event.type === 'message.assistant' &&
+              event.payload.text === 'after disconnect',
+          ),
+      ).toBe(true),
+    );
 
-    await expect(registry.create('s1')).rejects.toMatchObject({ code: 'invalid_session_state' });
+    await expect(registry.create('s1')).rejects.toMatchObject({
+      code: 'invalid_session_state',
+    });
     expect(create).toHaveBeenCalledOnce();
   });
 
@@ -114,21 +144,25 @@ describe('session runtime', () => {
     disposers.push(repos.dispose);
     await registry.create('s1');
     const received: Array<{ text: string; persisted: boolean }> = [];
-    publisher.subscribe('s1', () => { throw new Error('disconnected listener'); });
+    publisher.subscribe('s1', () => {
+      throw new Error('disconnected listener');
+    });
     publisher.subscribe('s1', (event) => {
       if (event.type === 'message.assistant') {
         received.push({
           text: event.payload.text,
-          persisted: repos.events.after('s1', 0).some(({ id }) => id === event.id),
+          persisted: repos.events
+            .after('s1', 0)
+            .some(({ id }) => id === event.id),
         });
       }
     });
 
     driverSession.enqueue({ kind: 'text_completed', text: 'still delivered' });
 
-    await vi.waitFor(() => expect(received).toEqual([
-      { text: 'still delivered', persisted: true },
-    ]));
+    await vi.waitFor(() =>
+      expect(received).toEqual([{ text: 'still delivered', persisted: true }]),
+    );
     expect(registry.auditStatus).toBe('available');
     expect(driverSession.interrupted).toBe(false);
     await registry.sendPrompt('s1', 'continue');
@@ -146,9 +180,13 @@ describe('session runtime', () => {
     driverSession.enqueue(event);
     driverSession.enqueue(event);
 
-    await vi.waitFor(() => expect(repos.events.after('s1', 0).filter(
-      (stored) => stored.type === 'message.assistant',
-    )).toHaveLength(1));
+    await vi.waitFor(() =>
+      expect(
+        repos.events
+          .after('s1', 0)
+          .filter((stored) => stored.type === 'message.assistant'),
+      ).toHaveLength(1),
+    );
     const events = repos.events.after('s1', 0);
     expect(events.map(({ sequence }) => sequence)).toEqual(
       Array.from({ length: events.length }, (_, index) => index + 1),
@@ -167,23 +205,37 @@ describe('session runtime', () => {
       name: 'Write',
       input: { path: 'file.txt' },
     });
-    await vi.waitFor(() => expect(repos.sessions.get('s1')?.lifecycleState).toBe('waiting_for_approval'));
+    await vi.waitFor(() =>
+      expect(repos.sessions.get('s1')?.lifecycleState).toBe(
+        'waiting_for_approval',
+      ),
+    );
 
-    await expect(registry.sendPrompt('s1', 'duplicate side effect')).rejects.toMatchObject({
+    await expect(
+      registry.sendPrompt('s1', 'duplicate side effect'),
+    ).rejects.toMatchObject({
       code: 'invalid_session_state',
     });
     expect(driverSession.prompts).toEqual([]);
   });
 
   it('persists a safe-auto permission resolution before approving it in the driver', async () => {
-    const { repos, driverSession, registry } = setup({ permissionMode: 'safe_auto' });
+    const { repos, driverSession, registry } = setup({
+      permissionMode: 'safe_auto',
+    });
     disposers.push(repos.dispose);
     const auditedBeforeDecision: boolean[] = [];
     const originalResolve = driverSession.resolvePermission.bind(driverSession);
     driverSession.resolvePermission = async (requestId, decision) => {
-      auditedBeforeDecision.push(repos.events.after('s1', 0).some(
-        (event) => event.type === 'permission.resolved' && event.payload.permissionId === requestId,
-      ));
+      auditedBeforeDecision.push(
+        repos.events
+          .after('s1', 0)
+          .some(
+            (event) =>
+              event.type === 'permission.resolved' &&
+              event.payload.permissionId === requestId,
+          ),
+      );
       await originalResolve(requestId, decision);
     };
     await registry.create('s1');
@@ -195,9 +247,11 @@ describe('session runtime', () => {
       input: { path: 'README.md' },
     });
 
-    await vi.waitFor(() => expect(driverSession.permissionDecisions).toEqual([
-      { requestId: 'permission-safe', decision: 'approve' },
-    ]));
+    await vi.waitFor(() =>
+      expect(driverSession.permissionDecisions).toEqual([
+        { requestId: 'permission-safe', decision: 'approve' },
+      ]),
+    );
     expect(auditedBeforeDecision).toEqual([true]);
     expect(repos.sessions.get('s1')?.lifecycleState).toBe('running');
   });
@@ -214,10 +268,16 @@ describe('session runtime', () => {
 
     driverSession.enqueue({ kind: 'text_completed', text: 'cannot audit' });
 
-    await vi.waitFor(() => expect(registry.auditStatus).toBe('audit_unavailable'));
+    await vi.waitFor(() =>
+      expect(registry.auditStatus).toBe('audit_unavailable'),
+    );
     expect(driverSession.interrupted).toBe(true);
-    await expect(registry.sendPrompt('s1', 'blocked')).rejects.toMatchObject({ code: 'audit_unavailable' });
-    await expect(registry.resolvePermission('s1', 'permission-1', 'approve')).rejects.toMatchObject({
+    await expect(registry.sendPrompt('s1', 'blocked')).rejects.toMatchObject({
+      code: 'audit_unavailable',
+    });
+    await expect(
+      registry.resolvePermission('s1', 'permission-1', 'approve'),
+    ).rejects.toMatchObject({
       code: 'audit_unavailable',
     });
   });
@@ -227,26 +287,40 @@ describe('session runtime', () => {
     disposers.push(repos.dispose);
     await registry.create('s1');
     driverSession.enqueue({ kind: 'text_completed', text: 'before crash' });
-    await vi.waitFor(() => expect(repos.events.after('s1', 0).some(
-      (event) => event.type === 'message.assistant',
-    )).toBe(true));
+    await vi.waitFor(() =>
+      expect(
+        repos.events
+          .after('s1', 0)
+          .some((event) => event.type === 'message.assistant'),
+      ).toBe(true),
+    );
 
     driverSession.crash(new Error('driver crashed'));
 
-    await vi.waitFor(() => expect(repos.sessions.get('s1')).toMatchObject({
-      lifecycleState: 'interrupted',
-      claudeResumeId: 'claude-resume-1',
-    }));
-    expect(repos.events.after('s1', 0).some(
-      (event) => event.type === 'session.error' && event.payload.message === 'driver crashed',
-    )).toBe(true);
+    await vi.waitFor(() =>
+      expect(repos.sessions.get('s1')).toMatchObject({
+        lifecycleState: 'interrupted',
+        claudeResumeId: 'claude-resume-1',
+      }),
+    );
+    expect(
+      repos.events
+        .after('s1', 0)
+        .some(
+          (event) =>
+            event.type === 'session.error' &&
+            event.payload.message === 'driver crashed',
+        ),
+    ).toBe(true);
   });
 
   it('bounds shutdown, interrupts and closes every live session', async () => {
     let closed = false;
     const { repos, driverSession, registry } = setup({
       shutdownTimeoutMs: 10,
-      closeDatabase: () => { closed = true; },
+      closeDatabase: () => {
+        closed = true;
+      },
     });
     disposers.push(repos.dispose);
     await registry.create('s1');
@@ -263,14 +337,18 @@ describe('session runtime', () => {
     let closed = false;
     const { repos, driverSession, registry } = setup({
       shutdownTimeoutMs: 10,
-      closeDatabase: () => { closed = true; },
+      closeDatabase: () => {
+        closed = true;
+      },
     });
     disposers.push(repos.dispose);
     await registry.create('s1');
     driverSession.close = () => new Promise<void>(() => undefined);
 
     let resolved = false;
-    const shutdown = registry.shutdown().then(() => { resolved = true; });
+    const shutdown = registry.shutdown().then(() => {
+      resolved = true;
+    });
     await vi.advanceTimersByTimeAsync(10);
     await Promise.resolve();
 

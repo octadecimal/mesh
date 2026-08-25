@@ -4,15 +4,20 @@ import { normalizeDriverEvent } from './normalize-event.js';
 
 describe('normalizeDriverEvent', () => {
   it('turns a text delta into an assistant message event draft', () => {
-    expect(normalizeDriverEvent({ kind: 'text_delta', text: 'hello' })).toEqual({
-      kind: 'event',
-      event: { type: 'message.assistant', payload: { text: 'hello' } },
-    });
+    expect(normalizeDriverEvent({ kind: 'text_delta', text: 'hello' })).toEqual(
+      {
+        kind: 'event',
+        event: { type: 'message.assistant', payload: { text: 'hello' } },
+      },
+    );
   });
 
   it('quarantines an unsupported driver event without inventing a client event', () => {
     expect(
-      normalizeDriverEvent({ kind: 'future-sdk-kind', payload: { secret: false } }),
+      normalizeDriverEvent({
+        kind: 'future-sdk-kind',
+        payload: { secret: false },
+      }),
     ).toEqual({
       kind: 'unsupported',
       error: {
@@ -35,7 +40,13 @@ describe('normalizeDriverEvent', () => {
   });
 
   it('quarantines status events outside the lifecycle contract', () => {
-    expect(normalizeDriverEvent({ kind: 'status', from: 'running', to: 'future-state' })).toEqual({
+    expect(
+      normalizeDriverEvent({
+        kind: 'status',
+        from: 'running',
+        to: 'future-state',
+      }),
+    ).toEqual({
       kind: 'unsupported',
       error: {
         code: 'unsupported_claude_capability',

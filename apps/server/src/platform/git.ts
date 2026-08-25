@@ -57,7 +57,9 @@ export class GitAdapter {
     private readonly pathOptions: ResolveWorkspacePathOptions,
   ) {}
 
-  async createWorktree(request: CreateWorktreeRequest): Promise<{ created: true }> {
+  async createWorktree(
+    request: CreateWorktreeRequest,
+  ): Promise<{ created: true }> {
     const repositoryPath = await this.resolve(request.repositoryPath);
     const worktreePath = await this.resolve(request.worktreePath, true);
     const result = await this.processRunner.run(
@@ -80,7 +82,9 @@ export class GitAdapter {
     return { created: true };
   }
 
-  async inspectWorktree(request: InspectWorktreeRequest): Promise<WorktreeInspection> {
+  async inspectWorktree(
+    request: InspectWorktreeRequest,
+  ): Promise<WorktreeInspection> {
     let worktreePath: AbsolutePath;
     try {
       worktreePath = await this.resolve(request.worktreePath);
@@ -95,14 +99,21 @@ export class GitAdapter {
     if (result.exitCode !== 0) {
       return { clean: false, reason: 'missing' };
     }
-    return result.stdout.length === 0 ? { clean: true } : { clean: false, reason: 'dirty' };
+    return result.stdout.length === 0
+      ? { clean: true }
+      : { clean: false, reason: 'dirty' };
   }
 
-  async removeOwnedWorktree(request: RemoveOwnedWorktreeRequest): Promise<WorktreeRemovalResult> {
+  async removeOwnedWorktree(
+    request: RemoveOwnedWorktreeRequest,
+  ): Promise<WorktreeRemovalResult> {
     if (!request.confirmed) {
       return { removed: false, reason: 'ambiguous' };
     }
-    if (request.workspace.type !== 'worktree' || request.workspace.owner !== meshOwner) {
+    if (
+      request.workspace.type !== 'worktree' ||
+      request.workspace.owner !== meshOwner
+    ) {
       return { removed: false, reason: 'not_owned' };
     }
     if (
@@ -152,7 +163,13 @@ export class GitAdapter {
       : { removed: false, reason: 'ambiguous' };
   }
 
-  private resolve(path: string, allowMissingLeaf = false): Promise<AbsolutePath> {
-    return resolveWorkspacePath(path, { ...this.pathOptions, allowMissingLeaf });
+  private resolve(
+    path: string,
+    allowMissingLeaf = false,
+  ): Promise<AbsolutePath> {
+    return resolveWorkspacePath(path, {
+      ...this.pathOptions,
+      allowMissingLeaf,
+    });
   }
 }
