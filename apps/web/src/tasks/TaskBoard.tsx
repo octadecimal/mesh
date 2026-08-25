@@ -107,13 +107,21 @@ export function TaskBoard({
   const [moveErrors, setMoveErrors] = useState<Record<string, string>>({});
   const [drawerTaskId, setDrawerTaskId] = useState<string>();
   const [creatingTask, setCreatingTask] = useState(false);
+  const [drawerProjectId, setDrawerProjectId] = useState<string>();
   const moveSequence = useRef(0);
   const activeMoveIds = useRef<Record<string, number>>({});
   const columns = selectBoardTasks(projection, project.id);
   const readOnly = Boolean(project.archivedAt);
-  const drawerTask = drawerTaskId
+  const selectedDrawerTask = drawerTaskId
     ? projection.tasksById[drawerTaskId]
     : undefined;
+  const drawerTask =
+    drawerProjectId === project.id &&
+    selectedDrawerTask?.projectId === project.id
+      ? selectedDrawerTask
+      : undefined;
+  const creatingTaskForProject =
+    creatingTask && drawerProjectId === project.id;
   const terminalTasks = useMemo(() => {
     const tasks = Object.values(projection.tasksById).filter(
       (task) => task.projectId === project.id,
@@ -161,6 +169,12 @@ export function TaskBoard({
       });
     }
   }, [pendingMoves, projection.tasksById]);
+
+  useEffect(() => {
+    setCreatingTask(false);
+    setDrawerTaskId(undefined);
+    setDrawerProjectId(undefined);
+  }, [project.id]);
 
   const submitMove = (
     task: Task,
@@ -262,6 +276,7 @@ export function TaskBoard({
     const selectTask = (taskId: string) => {
       setCreatingTask(false);
       setDrawerTaskId(taskId);
+      setDrawerProjectId(project.id);
       onSelectTask?.(taskId);
     };
     return (
@@ -356,6 +371,7 @@ export function TaskBoard({
                   onClick={() => {
                     setDrawerTaskId(undefined);
                     setCreatingTask(true);
+                    setDrawerProjectId(project.id);
                   }}
                 >
                   Add task
@@ -422,9 +438,9 @@ export function TaskBoard({
           </section>
         )}
       </div>
-      {creatingTask || drawerTask ? (
+      {creatingTaskForProject || drawerTask ? (
         <TaskDrawer
-          key={creatingTask ? 'create' : drawerTask?.id}
+          key={creatingTaskForProject ? 'create' : drawerTask?.id}
           open
           project={project}
           task={drawerTask}
@@ -442,6 +458,7 @@ export function TaskBoard({
             if (open) return;
             setCreatingTask(false);
             setDrawerTaskId(undefined);
+            setDrawerProjectId(undefined);
           }}
         />
       ) : null}

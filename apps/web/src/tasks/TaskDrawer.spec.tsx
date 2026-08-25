@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   projectSchema,
@@ -72,7 +72,11 @@ describe('TaskDrawer', () => {
     const user = userEvent.setup();
     const serverTask = taskSchema.parse({
       ...task,
+      title: 'Server title',
       description: 'Server description',
+      acceptanceCriteria: ['Server criterion'],
+      priority: 'urgent',
+      labels: ['server'],
       revision: 2,
       updatedAt: '2026-08-25T01:00:00.000Z',
     });
@@ -86,13 +90,26 @@ describe('TaskDrawer', () => {
       .mockResolvedValueOnce(undefined);
     renderDrawer({ onCommand });
 
+    await user.clear(screen.getByLabelText('Task title'));
+    await user.type(screen.getByLabelText('Task title'), 'Local title');
     await user.clear(screen.getByLabelText('Description'));
     await user.type(screen.getByLabelText('Description'), 'My local draft');
+    await user.clear(screen.getByLabelText('Acceptance criteria'));
+    await user.type(screen.getByLabelText('Acceptance criteria'), 'Local criterion');
+    await user.selectOptions(screen.getByLabelText('Priority'), 'high');
+    await user.clear(screen.getByLabelText('Labels'));
+    await user.type(screen.getByLabelText('Labels'), 'local');
     await user.click(screen.getByRole('button', { name: 'Save task' }));
 
     const conflict = await screen.findByRole('alert');
     expect(conflict).toHaveTextContent('Server version');
+    expect(conflict).toHaveTextContent('Draft');
+    expect(conflict).toHaveTextContent('Local title');
+    expect(conflict).toHaveTextContent('Server title');
     expect(conflict).toHaveTextContent('Server description');
+    expect(conflict).toHaveTextContent('Server criterion');
+    expect(conflict).toHaveTextContent('Urgent');
+    expect(conflict).toHaveTextContent('server');
     expect(screen.getByLabelText('Description')).toHaveValue('My local draft');
     expect(onCommand).toHaveBeenCalledTimes(1);
 
@@ -106,6 +123,31 @@ describe('TaskDrawer', () => {
         payload: expect.objectContaining({ expectedRevision: 2 }),
       }),
     );
+  });
+
+  it('does not turn a non-edit revision conflict into an edit retry', async () => {
+    const user = userEvent.setup();
+    const serverTask = taskSchema.parse({ ...task, revision: 2 });
+    const onCommand = vi.fn().mockRejectedValue({
+      code: 'task_revision_conflict',
+      message: 'Task changed',
+      details: { task: serverTask },
+    });
+    renderDrawer({ onCommand });
+
+    await user.click(screen.getByRole('button', { name: 'Block task' }));
+    await user.type(screen.getByLabelText('Action reason'), 'Waiting');
+    await user.click(screen.getByRole('button', { name: 'Confirm block' }));
+
+    const conflict = await screen.findByRole('alert');
+    expect(conflict).toHaveTextContent('Block task conflicted');
+    expect(conflict).toHaveTextContent('re-invoke the action after resync');
+    expect(
+      screen.queryByRole('button', { name: 'Retry with server revision' }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Confirm block' }),
+    ).toBeNull();
   });
 
   it('explains missing readiness fields and requires reasons for audited actions', async () => {
@@ -219,6 +261,114 @@ describe('TaskDrawer', () => {
       },
     });
     expect(screen.getByText('Ready')).toBeDefined();
+  });
+
+  it('keeps launch pending through HTTP success until an authoritative attempt arrives', async () => {
+    const user = userEvent.setup();
+    const command = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(command.promise);
+    const readyTask = taskSchema.parse({
+      ...task,
+      lifecycleState: 'ready',
+      blocked: null,
+    });
+    const rendered = renderDrawer({ task: readyTask, onCommand });
+
+    await user.selectOptions(
+      screen.getByLabelText('Permission mode'),
+      'interactive',
+    );
+    await user.click(screen.getByRole('button', { name: 'Launch attempt' }));
+    expect(screen.getByRole('button', { name: 'Launch attempt' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'waiting for project update',
+    );
+
+    await act(async () => command.resolve(undefined));
+
+    expect(screen.getByRole('button', { name: 'Launch attempt' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'waiting for project update',
+    );
+
+    const authoritativeAttempt = taskAttemptSchema.parse({
+      id: 'attempt-3',
+      taskId: task.id,
+      sessionId: 'session-new',
+      ordinal: 3,
+      source: 'launched',
+      actor,
+      createdAt: timestamp,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+    });
+    rendered.rerender(
+      drawerElement({
+        task: readyTask,
+        onCommand,
+        attemptRows: [
+          ...timelineAttempts(),
+          { attempt: authoritativeAttempt, session: undefined },
+        ],
+      }),
+    );
+
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Launch attempt' })).toBeEnabled();
+  });
+
+  it('ignores an old launch rejection after a newer launch starts', async () => {
+    const user = userEvent.setup();
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const onCommand = vi
+      .fn()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const readyTask = taskSchema.parse({
+      ...task,
+      lifecycleState: 'ready',
+      blocked: null,
+    });
+    const rendered = renderDrawer({ task: readyTask, onCommand });
+    await user.selectOptions(
+      screen.getByLabelText('Permission mode'),
+      'interactive',
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Launch attempt' }));
+    const authoritativeAttempt = taskAttemptSchema.parse({
+      id: 'attempt-3',
+      taskId: task.id,
+      sessionId: 'session-new',
+      ordinal: 3,
+      source: 'launched',
+      actor,
+      createdAt: timestamp,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+    });
+    rendered.rerender(
+      drawerElement({
+        task: readyTask,
+        onCommand,
+        attemptRows: [
+          ...timelineAttempts(),
+          { attempt: authoritativeAttempt, session: undefined },
+        ],
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Launch attempt' }));
+
+    await act(async () => first.reject(new Error('Old launch failed')));
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'waiting for project update',
+    );
+    expect(screen.getByRole('button', { name: 'Launch attempt' })).toBeDisabled();
+    await act(async () => second.resolve(undefined));
   });
 
   it('links only same-project sessions and confirms unlink with a reason', async () => {
@@ -376,30 +526,30 @@ const transitions = [
   }),
 ];
 
-const renderDrawer = (
-  options: {
-    task?: Task;
-    onCommand?: (command: MutatingCommand) => Promise<unknown> | void;
-    onOpenSession?: (sessionId: string) => void;
-    withRepair?: boolean;
-  } = {},
-) => {
+const timelineAttempts = () =>
+  attempts.map((attempt) => ({
+    attempt,
+    session: sessions.find(({ id }) => id === attempt.sessionId),
+  }));
+
+type DrawerOptions = {
+  task?: Task;
+  onCommand?: (command: MutatingCommand) => Promise<unknown> | void;
+  onOpenSession?: (sessionId: string) => void;
+  withRepair?: boolean;
+  attemptRows?: ReturnType<typeof timelineAttempts>;
+};
+
+const drawerElement = (options: DrawerOptions = {}) => {
   const selectedTask = 'task' in options ? options.task : task;
   const onCommand = options.onCommand ?? vi.fn().mockResolvedValue(undefined);
   const onOpenSession = options.onOpenSession ?? vi.fn();
-  return render(
+  return (
     <TaskDrawer
       open
       project={project}
       task={selectedTask}
-      attempts={
-        selectedTask
-          ? attempts.map((attempt) => ({
-              attempt,
-              session: sessions.find(({ id }) => id === attempt.sessionId),
-            }))
-          : []
-      }
+      attempts={selectedTask ? (options.attemptRows ?? timelineAttempts()) : []}
       transitions={selectedTask ? transitions : []}
       repairs={
         selectedTask && options.withRepair
@@ -417,6 +567,19 @@ const renderDrawer = (
       onOpenChange={() => undefined}
       onCommand={onCommand}
       onOpenSession={onOpenSession}
-    />,
+    />
   );
+};
+
+const renderDrawer = (options: DrawerOptions = {}) =>
+  render(drawerElement(options));
+
+const deferred = <Value,>() => {
+  let resolve!: (value: Value | PromiseLike<Value>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 };

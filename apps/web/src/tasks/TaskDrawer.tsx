@@ -12,7 +12,7 @@ import {
   type TaskPriority,
   type TaskTransition,
 } from '@mesh-session-platform/contracts';
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 
 import {
   WorkspaceFields,
@@ -35,6 +35,20 @@ type AuditedAction =
   | { kind: 'unblock' }
   | { kind: 'transition'; nextState: TaskLifecycleState }
   | { kind: 'unlink'; attempt: TaskAttempt };
+
+type CommandType = MutatingCommand['type'];
+
+type ConflictState = {
+  task: Task;
+  operation: CommandType;
+};
+
+type LaunchPending = {
+  id: number;
+  taskRevision: number;
+  lifecycleState: TaskLifecycleState;
+  attemptProjection: string;
+};
 
 const operator = taskActorSchema.parse({
   type: 'human',
@@ -118,6 +132,19 @@ const workspaceFor = (project: Project): WorkspaceDraft => ({
   startPoint: 'HEAD',
 });
 
+const conflictOperationLabels: Partial<Record<CommandType, string>> = {
+  'task.block': 'Block task',
+  'task.unblock': 'Unblock task',
+  'task.transition': 'Task transition',
+  'task.attempt.link': 'Link session',
+  'task.attempt.unlink': 'Unlink attempt',
+  'task.attempt.launch': 'Launch attempt',
+};
+
+const displayValue = (value: string) => value || 'Empty';
+const displayPriority = (priority: TaskPriority) =>
+  `${priority.charAt(0).toUpperCase()}${priority.slice(1)}`;
+
 const failureDetails = (caught: unknown) =>
   caught && typeof caught === 'object'
     ? (caught as {
@@ -153,7 +180,10 @@ export function TaskDrawer({
   const [draft, setDraft] = useState(() => draftFor(task));
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
-  const [conflictTask, setConflictTask] = useState<Task>();
+  const [conflict, setConflict] = useState<ConflictState>();
+  const [launchPending, setLaunchPending] = useState<LaunchPending>();
+  const launchRequestId = useRef(0);
+  const activeLaunchRequestId = useRef<number | undefined>(undefined);
   const [action, setAction] = useState<AuditedAction>();
   const [reason, setReason] = useState('');
   const [confirmed, setConfirmed] = useState(false);
@@ -168,6 +198,13 @@ export function TaskDrawer({
     ? readinessProblems(draftFor(task))
     : missingReadiness;
   const taskRepairs = repairs.filter((repair) => repair.taskId === task?.id);
+  const attemptProjection = attempts
+    .map(
+      ({ attempt }) =>
+        `${attempt.id}:${attempt.sessionId}:${attempt.unlinkedAt ?? ''}`,
+    )
+    .sort()
+    .join('|');
   const linkChoices = useMemo(() => {
     const currentSessionIds = new Set(
       attempts
@@ -183,7 +220,9 @@ export function TaskDrawer({
 
   useEffect(() => {
     setDraft(draftFor(task));
-    setConflictTask(undefined);
+    setConflict(undefined);
+    setLaunchPending(undefined);
+    activeLaunchRequestId.current = undefined;
     setAction(undefined);
     setReason('');
     setConfirmed(false);
@@ -193,6 +232,47 @@ export function TaskDrawer({
   useEffect(() => {
     setWorkspace(workspaceFor(project));
   }, [project.id, project.repositoryPath]);
+
+  useEffect(() => {
+    if (
+      !conflict ||
+      conflict.operation === 'task.edit' ||
+      !task ||
+      task.revision < conflict.task.revision
+    )
+      return;
+    setConflict(undefined);
+  }, [conflict, task]);
+
+  useEffect(() => {
+    if (
+      !launchPending ||
+      !task ||
+      (task.revision <= launchPending.taskRevision &&
+        task.lifecycleState === launchPending.lifecycleState &&
+        attemptProjection === launchPending.attemptProjection)
+    )
+      return;
+    if (activeLaunchRequestId.current === launchPending.id)
+      activeLaunchRequestId.current = undefined;
+    setLaunchPending((current) =>
+      current?.id === launchPending.id ? undefined : current,
+    );
+  }, [attemptProjection, launchPending, task]);
+
+  const handleCommandFailure = (caught: unknown, operation: CommandType) => {
+    const failure = failureDetails(caught);
+    if (failure?.code === 'task_revision_conflict' && failure.details?.task) {
+      setConflict({ task: failure.details.task, operation });
+      if (operation !== 'task.edit') {
+        setAction(undefined);
+        setReason('');
+        setConfirmed(false);
+      }
+    } else {
+      setError(failure?.message ?? 'The task command failed.');
+    }
+  };
 
   const execute = async (
     command: MutatingCommand,
@@ -211,12 +291,7 @@ export function TaskDrawer({
       if (options.close) onOpenChange?.(false);
       return true;
     } catch (caught) {
-      const failure = failureDetails(caught);
-      if (failure?.code === 'task_revision_conflict' && failure.details?.task) {
-        setConflictTask(failure.details.task);
-      } else {
-        setError(failure?.message ?? 'The task command failed.');
-      }
+      handleCommandFailure(caught, command.type);
       return false;
     } finally {
       setPending(false);
@@ -240,7 +315,11 @@ export function TaskDrawer({
       );
       return;
     }
-    void saveTask(conflictTask?.revision ?? task.revision);
+    void saveTask(
+      conflict?.operation === 'task.edit'
+        ? conflict.task.revision
+        : task.revision,
+    );
   };
 
   const saveTask = (expectedRevision: number) => {
@@ -259,7 +338,7 @@ export function TaskDrawer({
         },
         actor: operator,
       },
-    }).then((saved) => saved && setConflictTask(undefined));
+    }).then((saved) => saved && setConflict(undefined));
   };
 
   const transition = (nextState: TaskLifecycleState) => {
@@ -321,7 +400,12 @@ export function TaskDrawer({
   };
 
   const launch = () => {
-    if (!task || !permissionMode || canonicalMissingReadiness.length > 0)
+    if (
+      !task ||
+      !permissionMode ||
+      canonicalMissingReadiness.length > 0 ||
+      launchPending
+    )
       return;
     const launchWorkspace =
       workspace.type === 'shared'
@@ -333,7 +417,7 @@ export function TaskDrawer({
             branch: workspace.branch.trim(),
             startPoint: workspace.startPoint.trim(),
           };
-    void execute({
+    const command: MutatingCommand = {
       type: 'task.attempt.launch',
       payload: {
         taskId: task.id,
@@ -343,8 +427,33 @@ export function TaskDrawer({
         workspace: launchWorkspace,
         actor: operator,
       },
+    };
+    const id = ++launchRequestId.current;
+    activeLaunchRequestId.current = id;
+    setLaunchPending({
+      id,
+      taskRevision: task.revision,
+      lifecycleState: task.lifecycleState,
+      attemptProjection,
     });
+    setError(undefined);
+    Promise.resolve()
+      .then(() => onCommand(command))
+      .catch((caught) => {
+        if (activeLaunchRequestId.current !== id) return;
+        activeLaunchRequestId.current = undefined;
+        setLaunchPending((current) =>
+          current?.id === id ? undefined : current,
+        );
+        handleCommandFailure(caught, command.type);
+      });
   };
+
+  const awaitingConflictResync = Boolean(
+    conflict &&
+      conflict.operation !== 'task.edit' &&
+      (!task || task.revision < conflict.task.revision),
+  );
 
   const canLaunch =
     !readOnly &&
@@ -399,21 +508,65 @@ export function TaskDrawer({
                 {error}
               </p>
             ) : null}
-            {conflictTask ? (
+            {conflict?.operation === 'task.edit' ? (
               <div className="notice notice-warning task-conflict" role="alert">
                 <strong>
-                  Server version (revision {conflictTask.revision})
+                  Edit conflict — Server version (revision{' '}
+                  {conflict.task.revision})
                 </strong>
-                <p>{conflictTask.description || 'No server description.'}</p>
-                <p>Your local draft is preserved. Review it before retrying.</p>
+                <p>
+                  Your draft is preserved. Compare every editable field before
+                  retrying.
+                </p>
+                {[
+                  ['Title', draft.title, conflict.task.title],
+                  ['Description', draft.description, conflict.task.description],
+                  [
+                    'Acceptance criteria',
+                    draft.acceptanceCriteria,
+                    conflict.task.acceptanceCriteria.join('\n'),
+                  ],
+                  [
+                    'Priority',
+                    displayPriority(draft.priority),
+                    displayPriority(conflict.task.priority),
+                  ],
+                  [
+                    'Labels',
+                    draft.labels,
+                    conflict.task.labels.join(', '),
+                  ],
+                ].map(([label, draftValue, serverValue]) => (
+                  <div className="task-conflict-field" key={label}>
+                    <strong>{label}</strong>
+                    <p>
+                      <span>Draft</span> {displayValue(draftValue)}
+                    </p>
+                    <p>
+                      <span>Server</span> {displayValue(serverValue)}
+                    </p>
+                  </div>
+                ))}
                 <button
                   className="button button-secondary"
                   type="button"
                   disabled={pending || readOnly}
-                  onClick={() => void saveTask(conflictTask.revision)}
+                  onClick={() => void saveTask(conflict.task.revision)}
                 >
                   Retry with server revision
                 </button>
+              </div>
+            ) : null}
+            {conflict && conflict.operation !== 'task.edit' ? (
+              <div className="notice notice-warning task-conflict" role="alert">
+                <strong>
+                  {conflictOperationLabels[conflict.operation] ?? 'Task action'}{' '}
+                  conflicted
+                </strong>
+                <p>
+                  The server is at revision {conflict.task.revision}. Wait for
+                  project resync, then re-invoke the action after resync.
+                </p>
               </div>
             ) : null}
 
@@ -543,6 +696,7 @@ export function TaskDrawer({
                           disabled={
                             readOnly ||
                             pending ||
+                            awaitingConflictResync ||
                             (nextState === 'ready' &&
                               canonicalMissingReadiness.length > 0) ||
                             (nextState === 'in_progress' &&
@@ -560,7 +714,7 @@ export function TaskDrawer({
                     <button
                       className="button button-ghost"
                       type="button"
-                      disabled={readOnly || pending}
+                      disabled={readOnly || pending || awaitingConflictResync}
                       onClick={() => {
                         setAction({ kind: task.blocked ? 'unblock' : 'block' });
                         setReason('');
@@ -624,6 +778,7 @@ export function TaskDrawer({
                         type="button"
                         disabled={
                           pending ||
+                          awaitingConflictResync ||
                           !reason.trim() ||
                           (action.kind === 'unlink' && !confirmed)
                         }
@@ -677,11 +832,21 @@ export function TaskDrawer({
                   <button
                     className="button button-primary"
                     type="button"
-                    disabled={!canLaunch || pending}
+                    disabled={
+                      !canLaunch ||
+                      pending ||
+                      Boolean(launchPending) ||
+                      awaitingConflictResync
+                    }
                     onClick={launch}
                   >
                     Launch attempt
                   </button>
+                  {launchPending ? (
+                    <p className="task-pending" role="status">
+                      Launch pending — waiting for project update.
+                    </p>
+                  ) : null}
                 </section>
 
                 <section
@@ -713,7 +878,12 @@ export function TaskDrawer({
                     <button
                       className="button button-secondary"
                       type="button"
-                      disabled={readOnly || pending || !sessionToLink}
+                      disabled={
+                        readOnly ||
+                        pending ||
+                        awaitingConflictResync ||
+                        !sessionToLink
+                      }
                       onClick={() =>
                         sessionToLink &&
                         void execute({

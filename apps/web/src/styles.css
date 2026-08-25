@@ -652,6 +652,24 @@ textarea:focus-visible {
 .task-conflict p {
   margin: 0.45rem 0;
 }
+.task-conflict-field {
+  margin: 0.55rem 0;
+  border-left: 2px solid #d97706;
+  padding-left: 0.55rem;
+}
+.task-conflict-field > strong {
+  font-size: 0.7rem;
+}
+.task-conflict-field p {
+  white-space: pre-wrap;
+}
+.task-conflict-field span {
+  display: inline-block;
+  min-width: 3.2rem;
+  color: var(--muted);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+}
 .sidebar-brand {
   margin-bottom: 1.15rem;
 }

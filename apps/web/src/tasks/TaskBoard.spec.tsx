@@ -104,6 +104,30 @@ describe('TaskBoard', () => {
     expect(screen.getByRole('dialog', { name: 'Create task' })).toBeDefined();
   });
 
+  it('closes an old project drawer before rendering controls for a new project', async () => {
+    const user = userEvent.setup();
+    const projection = boardProjection();
+    const rendered = render(
+      <TaskBoard
+        project={project}
+        projection={projection}
+        onCommand={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+    await user.click(screen.getByRole('button', { name: 'Open First task' }));
+    expect(screen.getByRole('dialog', { name: 'First task' })).toBeDefined();
+
+    rendered.rerender(
+      <TaskBoard
+        project={otherProject}
+        projection={projection}
+        onCommand={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
   it('keeps archived project cards read-only', () => {
     renderBoard({ archived: true });
 
@@ -421,6 +445,13 @@ const project = projectSchema.parse({
   discoveredAt: timestamp,
   createdAt: timestamp,
   updatedAt: timestamp,
+});
+const otherProject = projectSchema.parse({
+  ...project,
+  id: 'project-2',
+  displayName: 'Other',
+  repositoryPath: 'C:\\other',
+  repositoryIdentity: 'other',
 });
 
 const task = (overrides: Record<string, unknown> = {}) =>
