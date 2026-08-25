@@ -101,6 +101,28 @@ describe('repositories', () => {
     ]);
   });
 
+  it('persists additive project metadata for new project records', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+
+    repos.projects.create(project());
+
+    expect(
+      repos.database
+        .prepare(
+          `SELECT repository_identity, revision, created_at, updated_at, archived_at
+           FROM projects WHERE id = ?`,
+        )
+        .get('p1'),
+    ).toEqual({
+      repository_identity: 'C:/code/platform',
+      revision: 1,
+      created_at: '2026-08-24T00:00:00.000Z',
+      updated_at: '2026-08-24T00:00:00.000Z',
+      archived_at: null,
+    });
+  });
+
   it('omits archived sessions unless requested', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);

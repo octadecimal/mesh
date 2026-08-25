@@ -340,6 +340,19 @@ describe('migrate', () => {
       );
     database
       .prepare(
+        `INSERT INTO projects (
+          id, display_name, repository_path, discovered_at, discovery_metadata_json
+        ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'project-same-path',
+        'Same path project',
+        repositoryPath,
+        discoveredAt,
+        '{"source":"discovery"}',
+      );
+    database
+      .prepare(
         `INSERT INTO workspaces (
           id, project_id, type, path, git_branch, git_worktree_path, owner, cleanup_state
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -403,6 +416,16 @@ describe('migrate', () => {
       updated_at: discoveredAt,
       archived_at: null,
     });
+    expect(
+      database
+        .prepare(
+          'SELECT id, repository_identity FROM projects WHERE repository_path = ? ORDER BY id',
+        )
+        .all(repositoryPath),
+    ).toEqual([
+      { id: 'project-existing', repository_identity: repositoryPath },
+      { id: 'project-same-path', repository_identity: repositoryPath },
+    ]);
     expect(
       database
         .prepare('SELECT id, project_id FROM workspaces WHERE id = ?')

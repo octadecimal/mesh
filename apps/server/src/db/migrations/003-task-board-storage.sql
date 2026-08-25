@@ -11,7 +11,7 @@ SET
   created_at = discovered_at,
   updated_at = discovered_at;
 
-CREATE UNIQUE INDEX projects_repository_identity
+CREATE INDEX projects_repository_identity
   ON projects(repository_identity);
 
 CREATE TABLE tasks (
