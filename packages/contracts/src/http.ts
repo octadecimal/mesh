@@ -52,12 +52,36 @@ export const projectSnapshotSchema = z.object({
   cursor: z.number().int().nonnegative(),
 });
 
-export const projectHistorySchema = z.object({
-  protocolVersion: protocolVersionSchema,
-  projectId: idSchema,
-  events: z.array(projectEventSchema),
-  cursor: z.number().int().nonnegative(),
-});
+export const projectHistorySchema = z
+  .object({
+    protocolVersion: protocolVersionSchema,
+    projectId: idSchema,
+    events: z.array(projectEventSchema),
+    cursor: z.number().int().nonnegative(),
+  })
+  .superRefine(({ projectId, events }, context) => {
+    let previousSequence = -1;
+
+    for (const [index, event] of events.entries()) {
+      if (event.projectId !== projectId) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'Project history events must belong to the requested project.',
+          path: ['events', index, 'projectId'],
+        });
+      }
+      if (event.sequence <= previousSequence) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'Project history event sequences must be strictly increasing.',
+          path: ['events', index, 'sequence'],
+        });
+      }
+      previousSequence = event.sequence;
+    }
+  });
 
 export type SessionSnapshot = z.infer<typeof sessionSnapshotSchema>;
 export type SessionHistory = z.infer<typeof sessionHistorySchema>;

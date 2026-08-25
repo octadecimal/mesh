@@ -290,6 +290,22 @@ describe('session platform contracts', () => {
         cursor: 1,
       }).cursor,
     ).toBe(1);
+    expect(() =>
+      projectHistorySchema.parse({
+        protocolVersion: 1,
+        projectId: 'project-2',
+        events: [event],
+        cursor: 1,
+      }),
+    ).toThrow();
+    expect(() =>
+      projectHistorySchema.parse({
+        protocolVersion: 1,
+        projectId: 'project-1',
+        events: [{ ...event, id: 'project-event-2', sequence: 2 }, event],
+        cursor: 2,
+      }),
+    ).toThrow();
     expect(
       serverMessageSchema.parse({
         protocolVersion: 1,
