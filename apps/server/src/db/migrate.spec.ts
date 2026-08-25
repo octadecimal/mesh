@@ -24,6 +24,7 @@ const runProductionBuild = (
   outputPath: string,
 ): void => {
   const buildEnvironment = { ...process.env };
+  delete buildEnvironment.NX_INVOCATION_ROOT_PID;
   delete buildEnvironment.NX_TASK_HASH;
   delete buildEnvironment.NX_TASK_TARGET_CONFIGURATION;
   delete buildEnvironment.NX_TASK_TARGET_PROJECT;
