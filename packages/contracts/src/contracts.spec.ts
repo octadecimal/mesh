@@ -187,7 +187,12 @@ describe('session platform contracts', () => {
       },
       {
         type: 'task.unblock',
-        payload: { taskId: 'task-1', expectedRevision: 2, actor },
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 2,
+          reason: 'Dependency delivered',
+          actor,
+        },
       },
       {
         type: 'task.attempt.launch',
@@ -231,6 +236,28 @@ describe('session platform contracts', () => {
         }).command.type,
       ).toBe(command.type);
     }
+  });
+
+  it('requires a non-empty reason when unblocking a task', () => {
+    const envelope = (reason: string | undefined) => ({
+      protocolVersion: 1,
+      idempotencyKey: 'unblock-command-1',
+      command: {
+        type: 'task.unblock' as const,
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 2,
+          reason,
+          actor,
+        },
+      },
+    });
+
+    expect(commandEnvelopeSchema.parse(envelope('Dependency delivered'))).toMatchObject({
+      command: { payload: { reason: 'Dependency delivered' } },
+    });
+    expect(() => commandEnvelopeSchema.parse(envelope(undefined))).toThrow();
+    expect(() => commandEnvelopeSchema.parse(envelope('  '))).toThrow();
   });
 
   it('parses ordered project events, snapshots, history, and project realtime messages', () => {

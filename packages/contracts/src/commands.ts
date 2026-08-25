@@ -161,6 +161,7 @@ export const taskCommandSchema = z.discriminatedUnion('type', [
     payload: z.object({
       taskId: idSchema,
       expectedRevision: expectedRevisionSchema,
+      reason: z.string().trim().min(1),
       actor: taskActorSchema,
     }),
   }),
