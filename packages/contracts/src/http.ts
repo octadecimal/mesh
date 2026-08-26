@@ -18,6 +18,11 @@ import {
   developerExecutionCycleSchema,
   developerReviewFeedbackSchema,
 } from './developer-execution.js';
+import {
+  qaExecutionCycleSchema,
+  qaReportSchema,
+  reviewAutomationActionSchema,
+} from './qa-execution.js';
 import { sessionEventSchema } from './events.js';
 import { projectEventSchema } from './project-events.js';
 import { protocolVersionSchema } from './protocol.js';
@@ -61,6 +66,9 @@ export const projectSnapshotSchema = z.object({
     .default([]),
   developerBlockerReports: z.array(developerBlockerReportSchema).default([]),
   developerReviewFeedback: z.array(developerReviewFeedbackSchema).default([]),
+  qaCycles: z.array(qaExecutionCycleSchema).default([]),
+  qaReports: z.array(qaReportSchema).default([]),
+  reviewAutomationActions: z.array(reviewAutomationActionSchema).default([]),
   cursor: z.number().int().nonnegative(),
 });
 

@@ -16,6 +16,12 @@ import {
   developerExecutionCycleSchema,
   developerReviewFeedbackSchema,
 } from './developer-execution.js';
+import {
+  qaExecutionCycleSchema,
+  qaReportSchema,
+  reviewAutomationActionSchema,
+  reviewAutomationStateSchema,
+} from './qa-execution.js';
 import { protocolVersionSchema } from './protocol.js';
 
 const projectEvent = <Type extends string, Payload extends z.ZodType>(
@@ -63,6 +69,70 @@ export const taskAttemptRepairDetectedEventSchema = projectEvent(
 export const projectDeveloperInstructionsChangedEventSchema = projectEvent(
   'project.developer_instructions_changed',
   z.object({ project: projectSchema }),
+);
+export const projectQaConfigurationChangedEventSchema = projectEvent(
+  'project.qa_configuration_changed',
+  z.object({ project: projectSchema }),
+);
+const taskQaExecutionChangedPayloadSchema = z
+  .object({
+    task: taskSchema,
+    attempt: taskAttemptSchema,
+    cycle: qaExecutionCycleSchema,
+    report: qaReportSchema.nullable(),
+  })
+  .superRefine(({ cycle, report }, context) => {
+    if (report === null) return;
+
+    if (report.cycleId !== cycle.id) {
+      context.addIssue({
+        code: 'custom',
+        message: 'QA reports must belong to their QA cycle.',
+        path: ['report', 'cycleId'],
+      });
+    }
+    const expectedCriterionIds = new Set(
+      cycle.taskSnapshot.acceptanceCriteria.map(({ id }) => id),
+    );
+    const reportedCriterionIds = new Set<string>();
+    for (const [index, result] of report.criterionResults.entries()) {
+      if (!expectedCriterionIds.has(result.criterionId)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'QA reports may only reference snapshotted criteria.',
+          path: ['report', 'criterionResults', index, 'criterionId'],
+        });
+      }
+      if (reportedCriterionIds.has(result.criterionId)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'QA reports must include each criterion only once.',
+          path: ['report', 'criterionResults', index, 'criterionId'],
+        });
+      }
+      reportedCriterionIds.add(result.criterionId);
+    }
+    for (const criterionId of expectedCriterionIds) {
+      if (!reportedCriterionIds.has(criterionId)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'QA reports must cover every snapshotted criterion.',
+          path: ['report', 'criterionResults'],
+        });
+      }
+    }
+  });
+export const taskQaExecutionChangedEventSchema = projectEvent(
+  'task.qa_execution_changed',
+  taskQaExecutionChangedPayloadSchema,
+);
+export const taskReviewAutomationChangedEventSchema = projectEvent(
+  'task.review_automation_changed',
+  z.object({
+    task: taskSchema,
+    automation: reviewAutomationStateSchema,
+    action: reviewAutomationActionSchema.nullable(),
+  }),
 );
 const taskDeveloperExecutionChangedPayloadSchema = z
   .object({
@@ -127,7 +197,10 @@ export const projectEventSchema = z.discriminatedUnion('type', [
   taskAttemptChangedEventSchema,
   taskAttemptRepairDetectedEventSchema,
   projectDeveloperInstructionsChangedEventSchema,
+  projectQaConfigurationChangedEventSchema,
   taskDeveloperExecutionChangedEventSchema,
+  taskQaExecutionChangedEventSchema,
+  taskReviewAutomationChangedEventSchema,
 ]);
 
 export type ProjectEvent = z.infer<typeof projectEventSchema>;

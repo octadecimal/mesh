@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+import {
+  qaConfigurationSchema,
+  qaExecutionCycleSchema,
+  reviewAutomationStateSchema,
+} from './qa-execution.js';
+
 export const idSchema = z.string().trim().min(1).brand<'Id'>();
 export const isoTimestampSchema = z.string().datetime({ offset: true });
 
@@ -47,6 +53,7 @@ export const projectSchema = z
     updatedAt: isoTimestampSchema.optional(),
     archivedAt: isoTimestampSchema.nullable().default(null),
     developerInstructions: developerInstructionsSchema.optional(),
+    qaConfiguration: qaConfigurationSchema.optional(),
   })
   .transform((project) => ({
     ...project,
@@ -55,6 +62,18 @@ export const projectSchema = z
     updatedAt: project.updatedAt ?? project.discoveredAt,
     developerInstructions: project.developerInstructions ?? {
       content: '',
+      revision: 1,
+      updatedAt: project.updatedAt ?? project.discoveredAt,
+      updatedBy: null,
+    },
+    qaConfiguration: project.qaConfiguration ?? {
+      instructions: {
+        content: '',
+        revision: 1,
+        updatedAt: project.updatedAt ?? project.discoveredAt,
+        updatedBy: null,
+      },
+      reviewPolicy: 'manual',
       revision: 1,
       updatedAt: project.updatedAt ?? project.discoveredAt,
       updatedBy: null,
@@ -76,7 +95,7 @@ export const blockedConditionSchema = z.object({
   blockedAt: isoTimestampSchema,
 });
 
-export const taskSchema = z.object({
+const taskSchemaBase = z.object({
   id: idSchema,
   projectId: idSchema,
   title: z.string().trim().min(1),
@@ -91,10 +110,29 @@ export const taskSchema = z.object({
   revision: z.number().int().positive(),
   createdAt: isoTimestampSchema,
   updatedAt: isoTimestampSchema,
+  reviewAutomation: reviewAutomationStateSchema.optional(),
 });
 
+type TaskSchemaOutput = Omit<
+  z.output<typeof taskSchemaBase>,
+  'reviewAutomation'
+> & {
+  reviewAutomation?: z.output<typeof reviewAutomationStateSchema>;
+};
+
+export const taskSchema = taskSchemaBase.transform((task) => ({
+  ...task,
+  reviewAutomation: task.reviewAutomation ?? {
+    status: 'disabled' as const,
+    generation: 0,
+    rejectionCount: 0,
+    pauseReason: null,
+    updatedAt: task.updatedAt,
+  },
+})) as z.ZodType<TaskSchemaOutput, z.input<typeof taskSchemaBase>>;
+
 export const taskAttemptSourceSchema = z.enum(['launched', 'linked']);
-export const taskAttemptSchema = z.object({
+const taskAttemptSchemaBase = z.object({
   id: idSchema,
   taskId: idSchema,
   sessionId: idSchema,
@@ -106,7 +144,20 @@ export const taskAttemptSchema = z.object({
   unlinkedBy: taskActorSchema.nullable(),
   unlinkReason: z.string().trim().min(1).nullable(),
   role: z.literal('developer').nullable().default(null),
+  qaCycles: z.array(qaExecutionCycleSchema).default([]),
 });
+
+type TaskAttemptSchemaOutput = Omit<
+  z.output<typeof taskAttemptSchemaBase>,
+  'qaCycles'
+> & {
+  qaCycles?: Array<z.output<typeof qaExecutionCycleSchema>>;
+};
+
+export const taskAttemptSchema = taskAttemptSchemaBase as z.ZodType<
+  TaskAttemptSchemaOutput,
+  z.input<typeof taskAttemptSchemaBase>
+>;
 
 export const taskTransitionSchema = z.object({
   id: idSchema,

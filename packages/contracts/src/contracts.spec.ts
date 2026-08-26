@@ -12,6 +12,8 @@ import {
   projectHistorySchema,
   projectSchema,
   projectSnapshotSchema,
+  qaReportSchema,
+  reviewPolicySchema,
   serverMessageSchema,
   sessionDiagnosticsSchema,
   sessionEventSchema,
@@ -1035,6 +1037,173 @@ describe('session platform contracts', () => {
       protocolVersion: 1,
       type: 'assistant.delta',
       payload: { sessionId: 's1', text: 'Hello' },
+    });
+  });
+
+  describe('QA execution contracts', () => {
+    const qaNow = '2026-08-26T00:00:00.000Z';
+    const qaActor = { type: 'human' as const, id: 'human-1' };
+    const milestone3Project = {
+      id: 'project-1',
+      displayName: 'Mesh',
+      repositoryPath: 'C:/code/mesh',
+      discoveredAt: qaNow,
+      updatedAt: qaNow,
+    };
+    const milestone3Attempt = {
+      id: 'attempt-1',
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      ordinal: 1,
+      source: 'launched' as const,
+      actor: qaActor,
+      createdAt: qaNow,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+      role: 'developer' as const,
+    };
+    const report = {
+      id: 'qa-report-1',
+      cycleId: 'qa-cycle-1',
+      disposition: 'verified' as const,
+      criterionResults: [
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'corepack pnpm nx test contracts',
+        },
+      ],
+      verificationCommands: [
+        { command: 'corepack pnpm nx test contracts', outcome: 'passed' },
+      ],
+      limitations: [],
+      residualRisks: [],
+      workspaceBefore: 'Clean worktree.',
+      workspaceAfter: 'Clean worktree.',
+      createdAt: qaNow,
+    };
+
+    it.each(['manual', 'autonomous_review'] as const)(
+      'parses the %s review policy',
+      (reviewPolicy) => {
+        expect(reviewPolicySchema.parse(reviewPolicy)).toBe(reviewPolicy);
+      },
+    );
+
+    it('requires exactly one QA result per snapshotted criterion at the event boundary', () => {
+      const task = {
+        id: 'task-1',
+        projectId: 'project-1',
+        title: 'Verify contracts',
+        description: 'Add QA contracts.',
+        acceptanceCriteria: ['Contracts compile.', 'Tests pass.'],
+        priority: 'normal' as const,
+        rank: 'm',
+        lifecycleState: 'review' as const,
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 3,
+        createdAt: qaNow,
+        updatedAt: qaNow,
+      };
+      const cycle = {
+        id: 'qa-cycle-1',
+        taskId: 'task-1',
+        attemptId: 'attempt-1',
+        sessionId: 'qa-session-1',
+        ordinal: 1,
+        authorizedBy: qaActor,
+        authorizationCommandId: 'qa-launch-1',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 3,
+          title: 'Verify contracts',
+          description: 'Add QA contracts.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Contracts compile.' },
+            { id: 'criterion-2', text: 'Tests pass.' },
+          ],
+        },
+        developerCompletionReportId: 'completion-report-1',
+        workspaceId: 'workspace-1',
+        reviewPolicy: 'manual' as const,
+        reviewPolicyRevision: 1,
+        automationGeneration: 0,
+        rejectionOrdinal: 0,
+        startedAt: qaNow,
+        endedAt: qaNow,
+        terminalDisposition: 'verified' as const,
+        reportId: 'qa-report-1',
+        terminalCommandId: 'qa-verdict-1',
+        terminalEventId: 'project-event-1',
+      };
+      const event = {
+        protocolVersion: 1,
+        id: 'project-event-1',
+        projectId: 'project-1',
+        sequence: 1,
+        occurredAt: qaNow,
+        type: 'task.qa_execution_changed' as const,
+        payload: {
+          task,
+          attempt: milestone3Attempt,
+          cycle,
+          report: {
+            ...report,
+            criterionResults: [
+              report.criterionResults[0],
+              {
+                criterionId: 'criterion-2',
+                status: 'passed' as const,
+                evidence: 'corepack pnpm nx test contracts',
+              },
+            ],
+          },
+        },
+      };
+
+      expect(projectEventSchema.parse(event)).toMatchObject(event);
+      expect(() =>
+        projectEventSchema.parse({
+          ...event,
+          payload: {
+            ...event.payload,
+            report: { ...report, criterionResults: report.criterionResults },
+          },
+        }),
+      ).toThrow();
+    });
+
+    it('rejects verified reports with failed or skipped criteria', () => {
+      for (const status of ['failed', 'skipped'] as const) {
+        expect(() =>
+          qaReportSchema.parse({
+            ...report,
+            criterionResults: [
+              { criterionId: 'criterion-1', status, evidence: 'test failed' },
+            ],
+          }),
+        ).toThrow();
+      }
+    });
+
+    it('decodes Milestone 3 projects and attempts with QA defaults', () => {
+      expect(projectSchema.parse(milestone3Project).qaConfiguration).toEqual({
+        instructions: {
+          content: '',
+          revision: 1,
+          updatedAt: milestone3Project.updatedAt,
+          updatedBy: null,
+        },
+        reviewPolicy: 'manual',
+        revision: 1,
+        updatedAt: milestone3Project.updatedAt,
+        updatedBy: null,
+      });
+      expect(taskAttemptSchema.parse(milestone3Attempt).qaCycles).toEqual([]);
     });
   });
 });
