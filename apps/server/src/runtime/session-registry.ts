@@ -26,9 +26,18 @@ interface SessionRegistryDependencies {
   closeDatabase?: () => void;
 }
 
+type PendingAttachCancellation = 'audit' | 'interrupt' | 'shutdown';
+
+type PendingAttach = {
+  cancellation?: PendingAttachCancellation;
+  settled: Promise<void>;
+  resolveSettled(): void;
+};
+
 export class SessionRegistry {
   readonly publisher: EventPublisher;
   private readonly runtimes = new Map<string, SessionRuntime>();
+  private readonly pendingAttaches = new Map<string, PendingAttach>();
   private unavailable = false;
   private shuttingDown = false;
 
@@ -69,6 +78,11 @@ export class SessionRegistry {
 
   async interrupt(sessionId: string): Promise<void> {
     this.assertWritable();
+    const pending = this.pendingAttaches.get(sessionId);
+    if (pending) {
+      this.cancelPendingAttach(sessionId, pending, 'interrupt');
+      return;
+    }
     this.invalidateDeveloperCapability(sessionId);
     await this.requireRuntime(sessionId).interrupt();
   }
@@ -85,6 +99,10 @@ export class SessionRegistry {
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+    const pendingEntries = [...this.pendingAttaches.entries()];
+    for (const [sessionId, pending] of pendingEntries) {
+      this.cancelPendingAttach(sessionId, pending, 'shutdown');
+    }
     const runtimeEntries = [...this.runtimes.entries()];
     for (const [sessionId] of runtimeEntries) {
       this.invalidateDeveloperCapability(sessionId);
@@ -109,7 +127,12 @@ export class SessionRegistry {
     const interruptions = runtimes.map((runtime) =>
       runtime.interrupt().catch(() => undefined),
     );
-    await waitWithinDeadline(Promise.allSettled(interruptions));
+    await waitWithinDeadline(
+      Promise.allSettled([
+        ...interruptions,
+        ...pendingEntries.map(([, pending]) => pending.settled),
+      ]),
+    );
     const closures = runtimes.map((runtime) =>
       runtime.forceClose().catch(() => undefined),
     );
@@ -126,7 +149,7 @@ export class SessionRegistry {
     developer?: DeveloperRuntimeConfiguration,
   ): Promise<void> {
     this.assertWritable();
-    if (this.runtimes.has(sessionId)) {
+    if (this.runtimes.has(sessionId) || this.pendingAttaches.has(sessionId)) {
       const state =
         this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
       throw { code: 'invalid_session_state', from: state, trigger: mode };
@@ -151,14 +174,24 @@ export class SessionRegistry {
       };
     }
 
+    let resolveSettled!: () => void;
+    const pending: PendingAttach = {
+      settled: new Promise<void>((resolve) => {
+        resolveSettled = resolve;
+      }),
+      resolveSettled: () => resolveSettled(),
+    };
+    this.pendingAttaches.set(sessionId, pending);
     const runtimeRef: { current?: SessionRuntime } = {};
+    let stopped = false;
     const onStopped = () => {
-      this.invalidateDeveloperCapability(sessionId);
-      if (
-        runtimeRef.current &&
-        this.runtimes.get(sessionId) === runtimeRef.current
-      )
+      if (stopped) return;
+      stopped = true;
+      const runtime = runtimeRef.current;
+      if (runtime && this.runtimes.get(sessionId) === runtime) {
         this.runtimes.delete(sessionId);
+        this.invalidateDeveloperCapability(sessionId);
+      }
     };
     let placeholder: DriverSession | undefined;
     try {
@@ -175,6 +208,7 @@ export class SessionRegistry {
             permissionMode: session.permissionMode,
             developer,
           }));
+      this.assertPendingAttachCurrent(sessionId, pending);
       const runtime = new SessionRuntime({
         session,
         driverSession: placeholder,
@@ -186,6 +220,7 @@ export class SessionRegistry {
       });
       runtimeRef.current = runtime;
       this.runtimes.set(sessionId, runtime);
+      this.pendingAttaches.delete(sessionId);
       runtime.persistTransition({
         type: mode === 'create' ? 'start' : 'resume',
       });
@@ -196,12 +231,43 @@ export class SessionRegistry {
       );
       runtime.startConsuming();
     } catch (error) {
-      this.runtimes.delete(sessionId);
-      this.invalidateDeveloperCapability(sessionId);
+      const runtime = runtimeRef.current;
+      if (runtime && this.runtimes.get(sessionId) === runtime) {
+        this.runtimes.delete(sessionId);
+        this.invalidateDeveloperCapability(sessionId);
+      } else if (
+        this.pendingAttaches.get(sessionId) === pending &&
+        !pending.cancellation
+      ) {
+        this.invalidateDeveloperCapability(sessionId);
+      }
       await placeholder?.interrupt().catch(() => undefined);
       await placeholder?.close().catch(() => undefined);
       throw error;
+    } finally {
+      if (this.pendingAttaches.get(sessionId) === pending) {
+        this.pendingAttaches.delete(sessionId);
+      }
+      pending.resolveSettled();
     }
+  }
+
+  private assertPendingAttachCurrent(
+    sessionId: string,
+    pending: PendingAttach,
+  ): void {
+    this.assertWritable();
+    if (
+      this.pendingAttaches.get(sessionId) === pending &&
+      !pending.cancellation
+    ) {
+      return;
+    }
+    throw {
+      code: 'invalid_session_state',
+      from: 'interrupting',
+      trigger: pending.cancellation ?? 'driver_required',
+    };
   }
 
   private assertWritable(): void {
@@ -230,10 +296,28 @@ export class SessionRegistry {
   private tripAuditBarrier(_error: unknown): void {
     if (this.unavailable) return;
     this.unavailable = true;
+    for (const [sessionId, pending] of this.pendingAttaches) {
+      this.cancelPendingAttach(sessionId, pending, 'audit');
+    }
     for (const [sessionId, runtime] of this.runtimes) {
       this.invalidateDeveloperCapability(sessionId);
       runtime.emergencyInterrupt();
     }
+  }
+
+  private cancelPendingAttach(
+    sessionId: string,
+    pending: PendingAttach,
+    cancellation: PendingAttachCancellation,
+  ): void {
+    if (
+      this.pendingAttaches.get(sessionId) !== pending ||
+      pending.cancellation
+    ) {
+      return;
+    }
+    pending.cancellation = cancellation;
+    this.invalidateDeveloperCapability(sessionId);
   }
 
   private invalidateDeveloperCapability(sessionId: string): void {

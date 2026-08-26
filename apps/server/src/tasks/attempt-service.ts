@@ -244,11 +244,14 @@ export class AttemptService {
     return this.launchAttempt(input, true);
   }
 
-  private launchAttempt(
+  private async launchAttempt(
     input: AttemptLaunchInput,
     developer: boolean,
   ): Promise<AttemptMutationResult> {
-    return this.dependencies.commands.executeOnce(input.commandId, async () => {
+    let completedLaunch:
+      | { sessionId: string; developerCycleId?: string }
+      | undefined;
+    const executeLaunch = async () => {
       this.assertBillingSafe();
       const actor = taskActorSchema.parse(input.actor);
       const task = this.requireLaunchableTask(
@@ -417,13 +420,18 @@ export class AttemptService {
             actor,
           });
           this.dependencies.registry.publisher.publishProject(transition.event);
-          return {
+          const result = {
             task: transition.task,
             attempt: prepared.attempt,
             event: transition.event,
             session: this.dependencies.sessions.get(prepared.session.id),
             ...(prepared.cycle ? { cycle: prepared.cycle } : {}),
           };
+          completedLaunch = {
+            sessionId: prepared.session.id,
+            ...(prepared.cycle ? { developerCycleId: prepared.cycle.id } : {}),
+          };
+          return result;
         } catch (error) {
           if (prepared.cycle) {
             this.dependencies.capabilities.invalidateCycle(prepared.cycle.id);
@@ -451,6 +459,39 @@ export class AttemptService {
       } finally {
         this.releaseLaunch(task.id, input.commandId);
       }
+    };
+    try {
+      return await this.dependencies.commands.executeOnce(
+        input.commandId,
+        executeLaunch,
+      );
+    } catch (error) {
+      if (completedLaunch) {
+        await this.cleanupCommandCompletionFailure(completedLaunch, error);
+      }
+      throw error;
+    }
+  }
+
+  private async cleanupCommandCompletionFailure(
+    launch: { sessionId: string; developerCycleId?: string },
+    error: unknown,
+  ): Promise<void> {
+    if (launch.developerCycleId) {
+      this.dependencies.capabilities.invalidateCycle(launch.developerCycleId);
+    }
+    let cleanup: 'interrupted' | 'unknown' = 'interrupted';
+    try {
+      await this.dependencies.registry.interrupt(launch.sessionId);
+    } catch {
+      cleanup = 'unknown';
+    }
+    this.recordDiagnostic(launch.sessionId, {
+      kind: 'task_attempt_launch',
+      stage: 'command_completion',
+      cleanup,
+      reconciliationRequired: true,
+      error: errorDetails(error),
     });
   }
 

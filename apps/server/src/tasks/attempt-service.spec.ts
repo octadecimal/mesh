@@ -475,6 +475,43 @@ describe('AttemptService', () => {
     );
   });
 
+  it('interrupts and invalidates a Developer when command completion cannot persist', async () => {
+    const { capabilities, directory, driver, repositories, service } = setup({
+      repositories: { failCommandCompleteFor: 'developer-launch-1' },
+    });
+    seedTask(repositories);
+    let issuedToken = '';
+    const issue = capabilities.issue.bind(capabilities);
+    vi.spyOn(capabilities, 'issue').mockImplementation((binding) => {
+      issuedToken = issue(binding);
+      return issuedToken;
+    });
+
+    await expect(
+      service.launchDeveloper(developerLaunchInput(directory)),
+    ).rejects.toThrow('command complete failed');
+
+    expect(
+      (driver as FakeClaudeSessionDriver).createdSessions[0]?.interrupted,
+    ).toBe(true);
+    expect(repositories.tasks.get('task-1')).toMatchObject({
+      lifecycleState: 'in_progress',
+      revision: 2,
+    });
+    expect(repositories.developerExecutions.listByTask('task-1')).toEqual([
+      expect.objectContaining({ ordinal: 1, terminalDisposition: null }),
+    ]);
+    expect(() => capabilities.resolve(issuedToken)).toThrowError(
+      expect.objectContaining({ code: 'developer_capability_invalid' }),
+    );
+    await expect(
+      service.launchDeveloper(developerLaunchInput(directory)),
+    ).rejects.toMatchObject({
+      code: 'command_reconciliation_required',
+      state: 'pending',
+    });
+  });
+
   it('durably admits only one concurrent launch for a task revision', async () => {
     const { directory, repositories, service } = setup();
     seedTask(repositories);

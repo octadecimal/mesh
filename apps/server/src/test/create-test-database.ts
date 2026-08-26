@@ -21,6 +21,7 @@ export const createTestRepositories = (options?: {
   failDiagnosticInsert?: boolean;
   failProjectEventInsert?: boolean;
   failTaskTransitionInsert?: boolean;
+  failCommandCompleteFor?: string;
 }) => {
   const directory = mkdtempSync(join(tmpdir(), 'mesh-session-platform-'));
   const path = join(directory, 'test.sqlite');
@@ -53,6 +54,18 @@ export const createTestRepositories = (options?: {
       BEFORE INSERT ON task_transitions
       BEGIN
         SELECT RAISE(FAIL, 'task transition insert failed');
+      END;
+    `);
+  }
+
+  if (options?.failCommandCompleteFor) {
+    const idempotencyKey = options.failCommandCompleteFor.replace(/'/g, "''");
+    database.exec(`
+      CREATE TRIGGER fail_command_complete_update
+      BEFORE UPDATE OF state ON processed_commands
+      WHEN NEW.state = 'completed' AND OLD.idempotency_key = '${idempotencyKey}'
+      BEGIN
+        SELECT RAISE(FAIL, 'command complete failed');
       END;
     `);
   }
