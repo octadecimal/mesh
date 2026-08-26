@@ -26,7 +26,10 @@ export class DeveloperCapabilityRegistry {
     DeveloperCapabilityToken,
     DeveloperCapabilityBinding
   >();
-  private readonly tokensByCycle = new Map<string, Set<DeveloperCapabilityToken>>();
+  private readonly tokensByCycle = new Map<
+    string,
+    Set<DeveloperCapabilityToken>
+  >();
   private readonly tokensBySession = new Map<
     string,
     Set<DeveloperCapabilityToken>

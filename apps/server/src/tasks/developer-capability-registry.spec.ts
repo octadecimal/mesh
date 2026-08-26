@@ -52,8 +52,12 @@ describe('DeveloperCapabilityRegistry', () => {
 
     registry.invalidateCycle(binding.cycleId);
 
-    expect(() => registry.resolve(first)).toThrow(DeveloperCapabilityInvalidError);
-    expect(() => registry.resolve(second)).toThrow(DeveloperCapabilityInvalidError);
+    expect(() => registry.resolve(first)).toThrow(
+      DeveloperCapabilityInvalidError,
+    );
+    expect(() => registry.resolve(second)).toThrow(
+      DeveloperCapabilityInvalidError,
+    );
     expect(registry.resolve(unrelated)).toEqual(otherBinding);
   });
 
@@ -65,8 +69,12 @@ describe('DeveloperCapabilityRegistry', () => {
 
     registry.invalidateSession(binding.sessionId);
 
-    expect(() => registry.resolve(first)).toThrow(DeveloperCapabilityInvalidError);
-    expect(() => registry.resolve(second)).toThrow(DeveloperCapabilityInvalidError);
+    expect(() => registry.resolve(first)).toThrow(
+      DeveloperCapabilityInvalidError,
+    );
+    expect(() => registry.resolve(second)).toThrow(
+      DeveloperCapabilityInvalidError,
+    );
     expect(registry.resolve(unrelated)).toEqual(otherBinding);
   });
 
@@ -75,7 +83,9 @@ describe('DeveloperCapabilityRegistry', () => {
     const token = registry.issue(binding);
     const restarted = new DeveloperCapabilityRegistry();
 
-    expect(() => restarted.resolve(token)).toThrow(DeveloperCapabilityInvalidError);
+    expect(() => restarted.resolve(token)).toThrow(
+      DeveloperCapabilityInvalidError,
+    );
   });
 
   it('uses one indistinguishable error for invalid, expired, and mismatched tokens', () => {
@@ -89,7 +99,9 @@ describe('DeveloperCapabilityRegistry', () => {
       captureError(() => registry.resolve(expired + 'mismatch')),
     ];
 
-    expect(errors.every((error) => error instanceof DeveloperCapabilityInvalidError)).toBe(true);
+    expect(
+      errors.every((error) => error instanceof DeveloperCapabilityInvalidError),
+    ).toBe(true);
     expect(
       new Set(
         errors.map(
@@ -106,7 +118,9 @@ describe('DeveloperCapabilityRegistry', () => {
 
     registry.clear();
 
-    expect(() => registry.resolve(token)).toThrow(DeveloperCapabilityInvalidError);
+    expect(() => registry.resolve(token)).toThrow(
+      DeveloperCapabilityInvalidError,
+    );
   });
 });
 

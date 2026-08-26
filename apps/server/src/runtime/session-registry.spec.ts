@@ -54,7 +54,9 @@ class ControlledDriverSession implements DriverSession {
     this.prompts.push(prompt);
   }
 
-  async resolvePermission(): Promise<void> {}
+  async resolvePermission(): Promise<void> {
+    return;
+  }
 
   async interrupt(): Promise<void> {
     this.interrupted = true;
