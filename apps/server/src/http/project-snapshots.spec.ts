@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   attemptRepairSchema,
+  idSchema,
   projectSchema,
   taskSchema,
 } from '@mesh-session-platform/contracts';
@@ -89,6 +90,30 @@ const boundProxy = <Target extends object>(
 };
 
 describe('project snapshot read consistency', () => {
+  it('projects the current developer instructions through the project contract', () => {
+    const fixture = seed();
+    const updated = fixture.repositories.projects.updateDeveloperInstructions(
+      fixture.project.id,
+      fixture.project.revision,
+      {
+        content: 'Run the focused server test before handoff.',
+        updatedAt: '2026-08-24T00:01:00.000Z',
+        updatedBy: { type: 'human', id: idSchema.parse('operator') },
+      },
+    );
+    if (!updated) throw new Error('Expected developer instructions to update');
+
+    expect(
+      buildProjectSnapshot(fixture.repositories, fixture.project.id).project
+        .developerInstructions,
+    ).toEqual({
+      content: 'Run the focused server test before handoff.',
+      revision: 2,
+      updatedAt: '2026-08-24T00:01:00.000Z',
+      updatedBy: { type: 'human', id: 'operator' },
+    });
+  });
+
   it('returns repair records in snapshots and durable project history', () => {
     const fixture = seed();
     const repair = attemptRepairSchema.parse({

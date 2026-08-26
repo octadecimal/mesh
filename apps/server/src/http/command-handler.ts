@@ -11,6 +11,7 @@ import {
   sessionSchema,
   workspaceSchema,
   type Command,
+  type ProjectEvent,
   type Session,
 } from '@mesh-session-platform/contracts';
 
@@ -285,7 +286,7 @@ const updateProject = (
     );
     if (!updated)
       throw new CommandError(
-        'task_revision_conflict',
+        'project_revision_conflict',
         `Project '${project.id}' has changed`,
         { project: dependencies.projects.get(project.id) },
       );
@@ -305,6 +306,61 @@ const updateProject = (
       dependencies.database.exec('ROLLBACK');
     throw error;
   }
+};
+
+type DeveloperInstructionUpdateCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'project.developer_instructions.update' }
+>;
+
+const executeDeveloperInstructionUpdate = (
+  command: DeveloperInstructionUpdateCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): CommandResponse => {
+  const existing =
+    dependencies.commands.getExisting<CommandResponse>(idempotencyKey);
+  if (existing.found) return existing.response;
+
+  let event: ProjectEvent | undefined;
+  const commandResponse =
+    dependencies.commands.executeOnceInImmediateTransaction(
+      idempotencyKey,
+      () => {
+        const project = requireActiveProject(
+          dependencies,
+          command.payload.projectId,
+        );
+        const now = (dependencies.now ?? (() => new Date().toISOString()))();
+        const updated = dependencies.projects.updateDeveloperInstructions(
+          project.id,
+          command.payload.expectedRevision,
+          {
+            content: command.payload.content,
+            updatedAt: now,
+            updatedBy: command.payload.actor,
+          },
+        );
+        if (!updated) {
+          throw new CommandError(
+            'project_revision_conflict',
+            `Project '${project.id}' has changed`,
+            { project: dependencies.projects.get(project.id) },
+          );
+        }
+        event = dependencies.projectEvents.appendInTransaction(project.id, {
+          protocolVersion: 1,
+          id: (dependencies.createId ?? randomUUID)(),
+          projectId: project.id,
+          occurredAt: now,
+          type: 'project.developer_instructions_changed',
+          payload: { project: updated },
+        });
+        return response(command.type, updated);
+      },
+    );
+  if (event) dependencies.registry.publisher.publishProject(event);
+  return commandResponse;
 };
 
 const assertMilestoneTwoHumanActor = (
@@ -368,7 +424,7 @@ const reconcileLegacyProjectIdentities = async (
     );
     if (!reconciled) {
       throw new CommandError(
-        'task_revision_conflict',
+        'project_revision_conflict',
         `Project '${project.id}' changed while reconciling its repository identity`,
         { project: dependencies.projects.get(project.id) },
       );
@@ -865,6 +921,13 @@ export const executeCommand = async (
 ): Promise<CommandResponse> => {
   const command = commandSchema.parse(input);
   if ('idempotencyKey' in command) {
+    if (command.command.type === 'project.developer_instructions.update') {
+      return executeDeveloperInstructionUpdate(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
     if (
       [
         'task.create',

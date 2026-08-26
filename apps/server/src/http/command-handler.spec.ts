@@ -151,6 +151,177 @@ describe('executeCommand', () => {
     },
   );
 
+  it.each(['system', 'agent'] as const)(
+    'rejects %s actors from updating developer instructions',
+    async (actorType) => {
+      const { directory } = await createRepository();
+      const { repositories, dependencies } = commandDependencies(directory);
+      repositories.projects.create(
+        projectSchema.parse({
+          id: 'p1',
+          displayName: 'Project',
+          repositoryPath: directory,
+          repositoryIdentity: 'repository-p1',
+          discoveredAt: now,
+          discoveryMetadata: {},
+        }),
+      );
+
+      const error = await executeCommand(
+        projectCommand(`instructions-${actorType}`, {
+          type: 'project.developer_instructions.update',
+          payload: {
+            projectId: 'p1',
+            expectedRevision: 1,
+            content: 'Do not mutate this project.',
+            actor: { type: actorType, id: `${actorType}-1` },
+          },
+        }),
+        dependencies,
+      ).catch((caught: unknown) => caught);
+
+      expect(toHttpError(error)).toMatchObject({
+        statusCode: 400,
+        body: { error: { code: 'invalid_command' } },
+      });
+      expect(
+        repositories.projects.get('p1')?.developerInstructions.content,
+      ).toBe('');
+    },
+  );
+
+  it('updates developer instructions atomically before publishing and reuses the original response', async () => {
+    const { directory } = await createRepository();
+    const ids = ['instructions-event'];
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => ids.shift() ?? 'unexpected-id',
+    );
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const publishedAfterPersistence: boolean[] = [];
+    dependencies.registry.publisher.subscribeProject('p1', (event) => {
+      publishedAfterPersistence.push(
+        repositories.projectEvents
+          .after('p1', 0)
+          .some(({ id }) => id === event.id),
+      );
+    });
+    const command = projectCommand('instructions-update', {
+      type: 'project.developer_instructions.update',
+      payload: {
+        projectId: 'p1',
+        expectedRevision: 1,
+        content: 'Run the narrowest relevant checks.',
+        actor: { type: 'human', id: 'operator' },
+      },
+    });
+
+    const first = await executeCommand(command, dependencies);
+    const duplicate = await executeCommand(command, dependencies);
+
+    expect(duplicate).toEqual(first);
+    expect(first).toMatchObject({
+      commandType: 'project.developer_instructions.update',
+      result: {
+        id: 'p1',
+        revision: 2,
+        developerInstructions: {
+          content: 'Run the narrowest relevant checks.',
+          revision: 2,
+          updatedAt: now,
+          updatedBy: { type: 'human', id: 'operator' },
+        },
+      },
+    });
+    expect(repositories.projectEvents.after('p1', 0)).toEqual([
+      expect.objectContaining({
+        id: 'instructions-event',
+        type: 'project.developer_instructions_changed',
+      }),
+    ]);
+    expect(publishedAfterPersistence).toEqual([true]);
+  });
+
+  it('returns the current project for a stale developer-instruction revision', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+
+    const error = await executeCommand(
+      projectCommand('instructions-stale', {
+        type: 'project.developer_instructions.update',
+        payload: {
+          projectId: 'p1',
+          expectedRevision: 2,
+          content: 'Stale content.',
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(toHttpError(error)).toMatchObject({
+      statusCode: 409,
+      body: {
+        error: {
+          code: 'project_revision_conflict',
+          details: {
+            project: expect.objectContaining({ id: 'p1', revision: 1 }),
+          },
+        },
+      },
+    });
+  });
+
+  it('rejects developer-instruction updates for archived projects', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+        archivedAt: now,
+      }),
+    );
+
+    await expect(
+      executeCommand(
+        projectCommand('instructions-archived', {
+          type: 'project.developer_instructions.update',
+          payload: {
+            projectId: 'p1',
+            expectedRevision: 1,
+            content: 'Cannot update archived projects.',
+            actor: { type: 'human', id: 'operator' },
+          },
+        }),
+        dependencies,
+      ),
+    ).rejects.toMatchObject({ code: 'project_archived' });
+  });
+
   it('imports a Git repository once and reports the existing project for a duplicate identity', async () => {
     const { directory, repositoryPath } = await createRepository();
     const { repositories, dependencies } = commandDependencies(directory);
