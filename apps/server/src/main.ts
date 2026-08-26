@@ -216,8 +216,11 @@ export const startServer = async (
       tasks,
       attempts,
       sessions,
+      workspaces,
       diagnostics,
       developerExecutions,
+      qaExecutions,
+      qaCapabilities,
       projectEvents,
     });
     for (const repair of result.repairs) {
@@ -342,8 +345,11 @@ export const startServer = async (
     tasks,
     attempts,
     sessions,
+    workspaces,
     diagnostics,
     developerExecutions,
+    qaExecutions,
+    qaCapabilities,
     projectEvents,
   });
   runtimeRepairs.push(...reconciliation.repairs);

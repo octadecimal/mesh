@@ -5,6 +5,7 @@ import { join, relative, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   projectSchema,
+  qaExecutionCycleSchema,
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
@@ -17,6 +18,7 @@ import { FakeClaudeSessionDriver } from './claude/fake-driver.js';
 import { migrate } from './db/migrate.js';
 import { openDatabase } from './db/database.js';
 import { ProjectRepository } from './repositories/project-repository.js';
+import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
 import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
 import { TaskRepository } from './repositories/task-repository.js';
@@ -324,6 +326,180 @@ describe('production composition', () => {
       ).toEqual({ count: 1 });
     } finally {
       recovered.close();
+    }
+  });
+
+  it('reconciles active QA from durable state without starting or resuming a driver', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-main-qa-recovery-'));
+    directories.push(directory);
+    const databasePath = join(directory, 'mesh.sqlite');
+    const database = openDatabase(databasePath);
+    migrate(database);
+    const projects = new ProjectRepository(database);
+    const tasks = new TaskRepository(database);
+    const attempts = new TaskAttemptRepository(database);
+    const workspaces = new WorkspaceRepository(database);
+    const sessions = new SessionRepository(database);
+    const qaExecutions = new QaExecutionRepository(database);
+    const actor = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
+    projects.create(
+      projectSchema.parse({
+        id: 'project-qa-main',
+        displayName: 'QA recovery project',
+        repositoryPath: directory,
+        repositoryIdentity: directory,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    tasks.create(
+      taskSchema.parse({
+        id: 'task-qa-main',
+        projectId: 'project-qa-main',
+        title: 'Reconcile QA',
+        description: 'Do not replay outcome-unknown verification.',
+        acceptanceCriteria: ['QA restart is explicit.'],
+        priority: 'normal',
+        rank: 'm',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 1,
+          rejectionCount: 0,
+          pauseReason: null,
+          updatedAt: now,
+        },
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-qa-main',
+        projectId: 'project-qa-main',
+        type: 'worktree',
+        path: join(directory, 'attempt'),
+        gitBranch: 'attempt-main',
+        gitWorktreePath: join(directory, 'attempt'),
+        owner: 'mesh',
+        cleanupState: 'active',
+      }),
+    );
+    sessions.create(
+      sessionSchema.parse({
+        id: 'developer-session-main',
+        projectId: 'project-qa-main',
+        workspaceId: 'workspace-qa-main',
+        title: 'Developer attempt',
+        permissionMode: 'interactive',
+        lifecycleState: 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    attempts.create(
+      taskAttemptSchema.parse({
+        id: 'attempt-qa-main',
+        taskId: 'task-qa-main',
+        sessionId: 'developer-session-main',
+        ordinal: 1,
+        source: 'launched',
+        actor,
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+      }),
+    );
+    sessions.create(
+      sessionSchema.parse({
+        id: 'qa-session-main',
+        projectId: 'project-qa-main',
+        workspaceId: 'workspace-qa-main',
+        title: 'QA verification',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'qa-cycle-main',
+        taskId: 'task-qa-main',
+        attemptId: 'attempt-qa-main',
+        sessionId: 'qa-session-main',
+        ordinal: 1,
+        authorizedBy: actor,
+        authorizationCommandId: 'start-qa-main',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Reconcile QA',
+          description: 'Do not replay outcome-unknown verification.',
+          acceptanceCriteria: [
+            { id: 'criterion-main', text: 'QA restart is explicit.' },
+          ],
+        },
+        developerCompletionReportId: 'completion-main',
+        workspaceId: 'workspace-qa-main',
+        reviewPolicy: 'autonomous_review',
+        reviewPolicyRevision: 1,
+        automationGeneration: 1,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    database.close();
+
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: {
+        NODE_ENV: 'test',
+        MESH_PORT: '0',
+        MESH_DATA_DIR: directory,
+        MESH_DATABASE_PATH: 'mesh.sqlite',
+        MESH_WORKSPACE_ROOT: directory,
+      },
+      test: { driver, webRoot: directory },
+    });
+    try {
+      expect(driver.createdRequests).toEqual([]);
+      expect(driver.resumedRequests).toEqual([]);
+      const response = await running.app.inject({
+        method: 'GET',
+        url: '/api/projects/project-qa-main/snapshot',
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        tasks: [
+          {
+            id: 'task-qa-main',
+            lifecycleState: 'review',
+            reviewAutomation: { status: 'paused' },
+          },
+        ],
+        repairs: [
+          {
+            taskId: 'task-qa-main',
+            attemptId: 'attempt-qa-main',
+            sessionId: 'qa-session-main',
+            reason: 'qa_cycle_without_trustworthy_outcome',
+          },
+        ],
+      });
+    } finally {
+      await running.close();
     }
   });
 });

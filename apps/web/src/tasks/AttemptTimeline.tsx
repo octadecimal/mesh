@@ -13,6 +13,12 @@ const repairMessage: Record<AttemptRepair['reason'], string> = {
     'Attempt repair needed: the task is in progress without a live session.',
   developer_cycle_without_live_session:
     'Attempt repair needed: the Developer cycle is in progress without a live session.',
+  qa_cycle_without_trustworthy_outcome:
+    'QA repair needed: the cycle has no trustworthy durable outcome.',
+  qa_session_workspace_mismatch:
+    'QA repair needed: the session is not bound to its assigned Developer workspace.',
+  review_automation_action_incomplete:
+    'Review repair needed: an automatic action has an unknown outcome.',
 };
 
 const statusLabel = (state: Session['lifecycleState']) => {

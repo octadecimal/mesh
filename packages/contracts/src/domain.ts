@@ -178,6 +178,9 @@ export const attemptRepairSchema = z.object({
     'task_in_progress_without_live_session',
     'developer_cycle_without_live_session',
     'startup_outcome_unknown',
+    'qa_cycle_without_trustworthy_outcome',
+    'qa_session_workspace_mismatch',
+    'review_automation_action_incomplete',
   ]),
 });
 
