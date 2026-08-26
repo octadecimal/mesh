@@ -87,6 +87,13 @@ export class SessionRegistry {
     await this.requireRuntime(sessionId).interrupt();
   }
 
+  async emergencyClose(sessionId: string): Promise<void> {
+    const runtime = this.runtimes.get(sessionId);
+    if (!runtime) return;
+    runtime.emergencyInterrupt();
+    await runtime.forceClose();
+  }
+
   async resolvePermission(
     sessionId: string,
     requestId: string,

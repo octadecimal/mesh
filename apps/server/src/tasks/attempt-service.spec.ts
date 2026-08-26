@@ -872,8 +872,7 @@ describe('AttemptService', () => {
     if (!session) throw new Error('Expected a launched Developer session');
 
     await (driver as FakeClaudeSessionDriver).submitForReview(0, {
-      id: idSchema.parse('developer-review-command'),
-      cycleId: cycle.id,
+      idempotencyKey: idSchema.parse('developer-review-command'),
       summary: 'Launch composition is complete.',
       criterionResults: [
         {
@@ -896,7 +895,6 @@ describe('AttemptService', () => {
         commitsCreated: true,
       },
       reviewerNotes: null,
-      createdAt: now,
     });
 
     expect(repositories.tasks.get('task-1')).toMatchObject({
@@ -905,7 +903,9 @@ describe('AttemptService', () => {
     });
     expect(repositories.developerExecutions.getCycle(cycle.id)).toMatchObject({
       terminalDisposition: 'submitted_for_review',
-      terminalCommandId: 'developer-review-command',
+      terminalCommandId: expect.stringContaining(
+        `${cycle.id}-developer-review-command-`,
+      ),
     });
     expect(
       (driver as FakeClaudeSessionDriver).createdSessions[0]?.interrupted,

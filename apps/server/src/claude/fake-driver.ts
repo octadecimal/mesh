@@ -1,6 +1,6 @@
 import type {
-  DeveloperBlockerReport,
-  DeveloperCompletionReport,
+  DeveloperBlockerReportInput,
+  DeveloperCompletionReportInput,
 } from '@mesh-session-platform/contracts';
 
 import type {
@@ -152,14 +152,14 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
 
   async submitForReview(
     index: number,
-    report: DeveloperCompletionReport,
+    report: DeveloperCompletionReportInput,
   ): Promise<void> {
     await this.developerConfiguration(index).controls.submitForReview(report);
   }
 
   async markBlocked(
     index: number,
-    report: DeveloperBlockerReport,
+    report: DeveloperBlockerReportInput,
   ): Promise<void> {
     await this.developerConfiguration(index).controls.markBlocked(report);
   }

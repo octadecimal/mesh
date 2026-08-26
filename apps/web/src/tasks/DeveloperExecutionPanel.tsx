@@ -167,15 +167,24 @@ export function DeveloperExecutionPanel({
     (repair) => repair.reason === 'developer_cycle_without_live_session',
   );
   const controlsDisabled = readOnly || !connected || Boolean(pending);
-  const latestCycle = orderedCycles[orderedCycles.length - 1];
+  const latestReviewCycle = [...orderedCycles]
+    .reverse()
+    .find(
+      (cycle) =>
+        cycle.terminalDisposition === 'submitted_for_review' &&
+        completionByCycleId.has(cycle.id),
+    );
+  const latestBlockerCycle = [...orderedCycles]
+    .reverse()
+    .find(
+      (cycle) =>
+        cycle.terminalDisposition === 'blocked' &&
+        blockerByCycleId.has(cycle.id),
+    );
   const hasDeveloperReview = Boolean(
-    latestCycle?.terminalDisposition === 'submitted_for_review' &&
-      completionByCycleId.has(latestCycle.id),
+    task.lifecycleState === 'review' && latestReviewCycle,
   );
-  const hasDeveloperBlocker = Boolean(
-    latestCycle?.terminalDisposition === 'blocked' &&
-      blockerByCycleId.has(latestCycle.id),
-  );
+  const hasDeveloperBlocker = Boolean(task.blocked && latestBlockerCycle);
 
   useEffect(() => {
     setWorkspace(workspaceFor(project));
@@ -556,9 +565,11 @@ export function DeveloperExecutionPanel({
                         <span>{statusLabel(cycle.mode)}</span>
                       </div>
                       <span className="task-state">
-                        {cycle.terminalDisposition
-                          ? statusLabel(cycle.terminalDisposition)
-                          : 'Active'}
+                        {cycle.endedAt === null
+                          ? 'Active'
+                          : cycle.terminalDisposition
+                            ? statusLabel(cycle.terminalDisposition)
+                            : 'Ended'}
                       </span>
                     </header>
                     <dl className="developer-cycle-metadata">

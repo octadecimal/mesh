@@ -3,8 +3,8 @@ import {
   projectSchema,
   sessionSchema,
   workspaceSchema,
-  type DeveloperBlockerReport,
-  type DeveloperCompletionReport,
+  type DeveloperBlockerReportInput,
+  type DeveloperCompletionReportInput,
 } from '@mesh-session-platform/contracts';
 
 import type {
@@ -123,8 +123,9 @@ describe('SessionRegistry Developer attachment', () => {
   const developer = (): DeveloperRuntimeConfiguration => ({
     initialPrompt: 'Execute the assigned Developer cycle.',
     controls: {
-      submitForReview: async (_report: DeveloperCompletionReport) => undefined,
-      markBlocked: async (_report: DeveloperBlockerReport) => undefined,
+      submitForReview: async (_report: DeveloperCompletionReportInput) =>
+        undefined,
+      markBlocked: async (_report: DeveloperBlockerReportInput) => undefined,
     },
   });
 

@@ -1,6 +1,7 @@
 import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
+  idSchema,
 } from '@mesh-session-platform/contracts';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -91,16 +92,46 @@ describe('FakeClaudeSessionDriver', () => {
       claudeResumeId: 'resume-developer',
       developer,
     });
-    await driver.submitForReview(0, completionReport);
-    await driver.markBlocked(1, blockerReport);
+    const {
+      id: completionId,
+      cycleId: completionCycle,
+      createdAt: completionAt,
+      ...completionEvidence
+    } = completionReport;
+    const {
+      id: blockerId,
+      cycleId: blockerCycle,
+      createdAt: blockerAt,
+      ...blockerEvidence
+    } = blockerReport;
+    void completionId;
+    void completionCycle;
+    void completionAt;
+    void blockerId;
+    void blockerCycle;
+    void blockerAt;
+    await driver.submitForReview(0, {
+      idempotencyKey: idSchema.parse('submit-1'),
+      ...completionEvidence,
+    });
+    await driver.markBlocked(1, {
+      idempotencyKey: idSchema.parse('blocked-1'),
+      ...blockerEvidence,
+    });
 
     expect(driver.createdRequests[0]?.developer).toBe(developer);
     expect(driver.resumedRequests[0]?.developer).toBe(developer);
     expect(created.prompts).toEqual(['Execute the assigned task.']);
     expect(resumed.prompts).toEqual(['Execute the assigned task.']);
     expect(submitForReview).toHaveBeenCalledOnce();
-    expect(submitForReview).toHaveBeenCalledWith(completionReport);
+    expect(submitForReview).toHaveBeenCalledWith({
+      idempotencyKey: 'submit-1',
+      ...completionEvidence,
+    });
     expect(markBlocked).toHaveBeenCalledOnce();
-    expect(markBlocked).toHaveBeenCalledWith(blockerReport);
+    expect(markBlocked).toHaveBeenCalledWith({
+      idempotencyKey: 'blocked-1',
+      ...blockerEvidence,
+    });
   });
 });

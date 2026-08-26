@@ -1,6 +1,6 @@
 import type {
-  DeveloperBlockerReport,
-  DeveloperCompletionReport,
+  DeveloperBlockerReportInput,
+  DeveloperCompletionReportInput,
   LifecycleState,
   PermissionMode,
 } from '@mesh-session-platform/contracts';
@@ -15,8 +15,8 @@ export interface DiscoveredClaudeSession {
 }
 
 export interface DeveloperRuntimeControls {
-  submitForReview(report: DeveloperCompletionReport): Promise<void>;
-  markBlocked(report: DeveloperBlockerReport): Promise<void>;
+  submitForReview(report: DeveloperCompletionReportInput): Promise<void>;
+  markBlocked(report: DeveloperBlockerReportInput): Promise<void>;
 }
 
 export interface DeveloperRuntimeConfiguration {

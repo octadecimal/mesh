@@ -2,8 +2,8 @@ import type { Page } from '@playwright/test';
 import {
   idSchema,
   projectSnapshotSchema,
-  type DeveloperBlockerReport,
-  type DeveloperCompletionReport,
+  type DeveloperBlockerReportInput,
+  type DeveloperCompletionReportInput,
   type DeveloperExecutionCycle,
   type MutatingCommand,
   type ProjectSnapshot,
@@ -293,9 +293,8 @@ const completionReport = (
     output: string;
     createdAt: string;
   },
-): DeveloperCompletionReport => ({
-  id: idSchema.parse(input.id),
-  cycleId: cycle.id,
+): DeveloperCompletionReportInput => ({
+  idempotencyKey: idSchema.parse(input.id),
   summary: input.summary,
   criterionResults: cycle.taskSnapshot.acceptanceCriteria.map((criterion) => ({
     criterionId: criterion.id,
@@ -316,20 +315,17 @@ const completionReport = (
     commitsCreated: true,
   },
   reviewerNotes: null,
-  createdAt: input.createdAt,
 });
 
 const blockerReport = (
   cycle: DeveloperExecutionCycle,
-): DeveloperBlockerReport => ({
-  id: idSchema.parse('developer-blocker-report-1'),
-  cycleId: cycle.id,
+): DeveloperBlockerReportInput => ({
+  idempotencyKey: idSchema.parse('developer-blocker-report-1'),
   reason: 'Required fixture is unavailable',
   evidence: 'The deterministic dependency probe returned no fixture.',
   attemptedWork: 'Checked the repository and reran the focused probe.',
   suggestedHumanAction: 'Provide the missing fixture before retrying.',
   preserveWorkspace: true,
-  createdAt: '2026-08-26T02:00:00.000Z',
 });
 
 test('keeps the empty cockpit usable at a narrow viewport', async ({

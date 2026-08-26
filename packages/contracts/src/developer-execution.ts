@@ -110,6 +110,17 @@ export const developerBlockerReportSchema = z.object({
   createdAt: isoTimestampSchema,
 });
 
+export const developerCompletionReportInputSchema =
+  developerCompletionReportSchema
+    .omit({ id: true, cycleId: true, createdAt: true })
+    .extend({
+      idempotencyKey: idSchema,
+    });
+
+export const developerBlockerReportInputSchema = developerBlockerReportSchema
+  .omit({ id: true, cycleId: true, createdAt: true })
+  .extend({ idempotencyKey: idSchema });
+
 const humanTaskActorSchema = taskActorSchema.extend({
   type: z.literal('human'),
 });
@@ -143,4 +154,10 @@ export type DeveloperBlockerReport = z.infer<
 >;
 export type DeveloperReviewFeedback = z.infer<
   typeof developerReviewFeedbackSchema
+>;
+export type DeveloperCompletionReportInput = z.infer<
+  typeof developerCompletionReportInputSchema
+>;
+export type DeveloperBlockerReportInput = z.infer<
+  typeof developerBlockerReportInputSchema
 >;

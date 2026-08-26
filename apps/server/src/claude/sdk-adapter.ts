@@ -12,8 +12,8 @@ import {
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
-  developerBlockerReportSchema,
-  developerCompletionReportSchema,
+  developerBlockerReportInputSchema,
+  developerCompletionReportInputSchema,
 } from '@mesh-session-platform/contracts';
 
 import type { DeveloperRuntimeControls } from './driver.js';
@@ -135,9 +135,9 @@ const createDeveloperMcpServer = (controls: DeveloperRuntimeControls) =>
       tool(
         'submit_for_review',
         'Submit completed work and evidence for human review.',
-        developerCompletionReportSchema.shape,
+        developerCompletionReportInputSchema.shape,
         async (input) => {
-          const parsed = developerCompletionReportSchema.safeParse(input);
+          const parsed = developerCompletionReportInputSchema.safeParse(input);
           if (!parsed.success) return developerControlFailure('invalid_input');
           try {
             await controls.submitForReview(parsed.data);
@@ -150,9 +150,9 @@ const createDeveloperMcpServer = (controls: DeveloperRuntimeControls) =>
       tool(
         'mark_blocked',
         'Report why work cannot safely continue and request human action.',
-        developerBlockerReportSchema.shape,
+        developerBlockerReportInputSchema.shape,
         async (input) => {
-          const parsed = developerBlockerReportSchema.safeParse(input);
+          const parsed = developerBlockerReportInputSchema.safeParse(input);
           if (!parsed.success) return developerControlFailure('invalid_input');
           try {
             await controls.markBlocked(parsed.data);

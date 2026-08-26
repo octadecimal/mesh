@@ -2,7 +2,9 @@ import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
   type DeveloperBlockerReport,
+  type DeveloperBlockerReportInput,
   type DeveloperCompletionReport,
+  type DeveloperCompletionReportInput,
 } from '@mesh-session-platform/contracts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -109,16 +111,28 @@ describe('createClaudeSdkFacade', () => {
     ).toEqual(['mesh_developer']);
   });
 
-  it('invokes valid Developer control closures once with no capability in the schema or result', async () => {
+  it('invokes Developer controls from model-visible evidence and an idempotency key', async () => {
     const capability = 'secret-capability-value';
-    const completion = completionReport();
-    const blocker = blockerReport();
+    const {
+      id: _completionId,
+      cycleId: _completionCycle,
+      createdAt: _completionAt,
+      ...completion
+    } = completionReport();
+    const {
+      id: _blockerId,
+      cycleId: _blockerCycle,
+      createdAt: _blockerAt,
+      ...blocker
+    } = blockerReport();
+    const completionInput = { idempotencyKey: 'submit-1', ...completion };
+    const blockerInput = { idempotencyKey: 'blocked-1', ...blocker };
     const controls = {
-      submitForReview: vi.fn(async (report: DeveloperCompletionReport) => {
+      submitForReview: vi.fn(async (report: DeveloperCompletionReportInput) => {
         void report;
         void capability;
       }),
-      markBlocked: vi.fn(async (report: DeveloperBlockerReport) => {
+      markBlocked: vi.fn(async (report: DeveloperBlockerReportInput) => {
         void report;
         void capability;
       }),
@@ -128,13 +142,14 @@ describe('createClaudeSdkFacade', () => {
     });
     const tools = developerTools();
 
-    const submitResult = await tools.submit_for_review?.handler(completion);
-    const blockResult = await tools.mark_blocked?.handler(blocker);
+    const submitResult =
+      await tools.submit_for_review?.handler(completionInput);
+    const blockResult = await tools.mark_blocked?.handler(blockerInput);
 
     expect(controls.submitForReview).toHaveBeenCalledOnce();
-    expect(controls.submitForReview).toHaveBeenCalledWith(completion);
+    expect(controls.submitForReview).toHaveBeenCalledWith(completionInput);
     expect(controls.markBlocked).toHaveBeenCalledOnce();
-    expect(controls.markBlocked).toHaveBeenCalledWith(blocker);
+    expect(controls.markBlocked).toHaveBeenCalledWith(blockerInput);
     expect(submitResult).toMatchObject({
       content: [{ type: 'text', text: '{"status":"submitted_for_review"}' }],
     });
@@ -142,6 +157,8 @@ describe('createClaudeSdkFacade', () => {
       content: [{ type: 'text', text: '{"status":"blocked"}' }],
     });
     expect(JSON.stringify(tools)).not.toContain('capability');
+    expect(JSON.stringify(tools)).not.toContain('cycleId');
+    expect(JSON.stringify(tools)).not.toContain('createdAt');
     expect(JSON.stringify([submitResult, blockResult])).not.toContain(
       capability,
     );
@@ -166,7 +183,7 @@ describe('createClaudeSdkFacade', () => {
 
     const invalidCompletion = await tools.submit_for_review?.handler({});
     const invalidBlocker = await tools.mark_blocked?.handler({});
-    const failed = await tools.mark_blocked?.handler(blockerReport());
+    const failed = await tools.mark_blocked?.handler(blockerInput());
 
     expect(invalidCompletion).toMatchObject({ isError: true });
     expect(invalidBlocker).toMatchObject({ isError: true });
@@ -193,8 +210,7 @@ describe('createClaudeSdkFacade', () => {
       developer: { initialPrompt: 'Execute.', controls },
     });
 
-    const failed =
-      await developerTools().mark_blocked?.handler(blockerReport());
+    const failed = await developerTools().mark_blocked?.handler(blockerInput());
 
     expect(failed).toEqual({
       content: [
@@ -248,3 +264,11 @@ const blockerReport = (): DeveloperBlockerReport =>
     preserveWorkspace: true,
     createdAt: '2026-08-25T12:00:00.000Z',
   });
+
+const blockerInput = () => {
+  const { id, cycleId, createdAt, ...report } = blockerReport();
+  void id;
+  void cycleId;
+  void createdAt;
+  return { idempotencyKey: 'blocked-command', ...report };
+};

@@ -335,6 +335,11 @@ describe('project projection', () => {
       cycleId: otherCycle.id,
       taskId: otherTask.id,
     };
+    const laterOtherFeedback = {
+      ...otherFeedback,
+      id: 'feedback-3',
+      feedback: 'One more revision.',
+    };
     const withBothProjects = replaceProjectSnapshot(
       replaceProjectSnapshot(createProjection(snapshot()), projectSnapshot()),
       projectSnapshot({
@@ -346,7 +351,7 @@ describe('project projection', () => {
         developerCycles: [otherCycle],
         developerCompletionReports: [otherCompletion],
         developerBlockerReports: [otherBlocker],
-        developerReviewFeedback: [otherFeedback],
+        developerReviewFeedback: [otherFeedback, laterOtherFeedback],
       }),
     );
     const freshCycle = { ...developerCycle, id: 'cycle-fresh' };
@@ -374,9 +379,12 @@ describe('project projection', () => {
     expect(next.developerBlockerReportsByCycleId[otherCycle.id]).toEqual(
       otherBlocker,
     );
-    expect(next.developerReviewFeedbackByCycleId[otherCycle.id]).toEqual(
+    expect(next.developerReviewFeedbackByCycleId[otherFeedback.id]).toEqual(
       otherFeedback,
     );
+    expect(
+      next.developerReviewFeedbackByCycleId[laterOtherFeedback.id],
+    ).toEqual(laterOtherFeedback);
   });
 
   it('replaces only one project snapshot while retaining session projection data', () => {
@@ -509,7 +517,7 @@ describe('project projection', () => {
       applied.state.developerBlockerReportsByCycleId[developerCycle.id],
     ).toEqual(blockerReport);
     expect(
-      applied.state.developerReviewFeedbackByCycleId[developerCycle.id],
+      applied.state.developerReviewFeedbackByCycleId[reviewFeedback.id],
     ).toEqual(reviewFeedback);
     expect(applied.state.tasksById[task().id].lifecycleState).toBe('review');
     expect(applyProjectEvent(applied.state, developerChanged)).toEqual({

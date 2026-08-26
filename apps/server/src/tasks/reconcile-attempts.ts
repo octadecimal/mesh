@@ -112,6 +112,7 @@ const isRecordedRepairEvent = (
 
 const repairFor = (
   taskState: string,
+  intentionallyDeveloperBlocked: boolean,
   attempts: Array<{
     attempt: TaskAttempt;
     sessionState: string;
@@ -124,6 +125,7 @@ const repairFor = (
 
   if (
     taskState === 'in_progress' &&
+    !intentionallyDeveloperBlocked &&
     attempts.length > 0 &&
     !attempts.some(({ sessionState }) => liveSessionStates.has(sessionState))
   ) {
@@ -250,7 +252,22 @@ export const reconcileTaskAttempts = (
         task.id,
         taskAttempts,
       );
-      const taskRepair = repairFor(task.lifecycleState, attempts);
+      const intentionallyDeveloperBlocked = Boolean(
+        task.blocked &&
+          dependencies.developerExecutions
+            .listByTask(task.id)
+            .some(
+              (cycle) =>
+                cycle.endedAt !== null &&
+                cycle.terminalDisposition === 'blocked' &&
+                cycle.blockerReportId !== null,
+            ),
+      );
+      const taskRepair = repairFor(
+        task.lifecycleState,
+        intentionallyDeveloperBlocked,
+        attempts,
+      );
       const taskRepairs =
         developerRepairs.length > 0
           ? developerRepairs

@@ -1,6 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
   developerExecutionCycleSchema,
   developerReviewFeedbackSchema,
   rawDiagnosticSchema,
@@ -84,6 +86,7 @@ type Registry = {
     developer?: DeveloperRuntimeConfiguration,
   ): Promise<void>;
   interrupt(sessionId: string): Promise<void>;
+  emergencyClose?(sessionId: string): Promise<void>;
   publisher: Pick<EventPublisher, 'publishProject'>;
 };
 
@@ -365,24 +368,44 @@ export class DeveloperReworkService {
       }),
       controls: {
         submitForReview: async (report) => {
+          const { idempotencyKey, ...evidence } = report;
+          const fingerprint = createHash('sha256')
+            .update(JSON.stringify(evidence))
+            .digest('hex');
+          const commandId = `${cycle.id}-${idempotencyKey}-${fingerprint}`;
           this.dependencies.developerExecutionService.submitForReview({
-            commandId: report.id,
+            commandId,
             capability,
             expectedRevision,
-            report,
+            report: developerCompletionReportSchema.parse({
+              id: commandId,
+              cycleId: cycle.id,
+              ...evidence,
+              createdAt: new Date().toISOString(),
+            }),
             actor: agentActor,
           });
-          await this.dependencies.registry.interrupt(attempt.sessionId);
+          await this.closeTerminalRuntime(attempt.sessionId, cycle.id);
         },
         markBlocked: async (report) => {
+          const { idempotencyKey, ...evidence } = report;
+          const fingerprint = createHash('sha256')
+            .update(JSON.stringify(evidence))
+            .digest('hex');
+          const commandId = `${cycle.id}-${idempotencyKey}-${fingerprint}`;
           this.dependencies.developerExecutionService.markBlocked({
-            commandId: report.id,
+            commandId,
             capability,
             expectedRevision,
-            report,
+            report: developerBlockerReportSchema.parse({
+              id: commandId,
+              cycleId: cycle.id,
+              ...evidence,
+              createdAt: new Date().toISOString(),
+            }),
             actor: agentActor,
           });
-          await this.dependencies.registry.interrupt(attempt.sessionId);
+          await this.closeTerminalRuntime(attempt.sessionId, cycle.id);
         },
       },
     };
@@ -724,6 +747,32 @@ export class DeveloperReworkService {
       return true;
     } catch {
       return false;
+    }
+  }
+
+  private async closeTerminalRuntime(
+    sessionId: string,
+    cycleId: string,
+  ): Promise<void> {
+    try {
+      await this.dependencies.registry.interrupt(sessionId);
+    } catch (error) {
+      this.recordDiagnostic(sessionId, {
+        kind: 'developer_terminal_cleanup',
+        cycleId,
+        outcome: 'interrupt_failed',
+        error: errorDetails(error),
+      });
+      await this.dependencies.registry
+        .emergencyClose?.(sessionId)
+        .catch((cleanupError: unknown) => {
+          this.recordDiagnostic(sessionId, {
+            kind: 'developer_terminal_cleanup',
+            cycleId,
+            outcome: 'emergency_close_failed',
+            error: errorDetails(cleanupError),
+          });
+        });
     }
   }
 }

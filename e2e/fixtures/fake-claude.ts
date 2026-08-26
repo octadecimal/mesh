@@ -9,8 +9,8 @@ import BetterSqlite3 from 'better-sqlite3';
 import { expect, test as base } from '@playwright/test';
 import {
   sessionSnapshotSchema,
-  type DeveloperBlockerReport,
-  type DeveloperCompletionReport,
+  type DeveloperBlockerReportInput,
+  type DeveloperCompletionReportInput,
   type MutatingCommand,
   type SessionSnapshot,
 } from '@mesh-session-platform/contracts';
@@ -41,9 +41,12 @@ type FakeClaudeSessionDriverControl = {
   }>;
   submitForReview(
     index: number,
-    report: DeveloperCompletionReport,
+    report: DeveloperCompletionReportInput,
   ): Promise<void>;
-  markBlocked(index: number, report: DeveloperBlockerReport): Promise<void>;
+  markBlocked(
+    index: number,
+    report: DeveloperBlockerReportInput,
+  ): Promise<void>;
 };
 
 type RunningServer = {

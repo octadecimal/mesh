@@ -283,7 +283,7 @@ export const replaceProjectSnapshot = (
   ) as Record<string, DeveloperBlockerReport>;
   const developerReviewFeedbackByCycleId = Object.fromEntries(
     Object.entries(state.developerReviewFeedbackByCycleId).filter(
-      ([cycleId]) => !replacedCycleIds.has(cycleId),
+      ([, feedback]) => !replacedCycleIds.has(feedback.cycleId),
     ),
   ) as Record<string, DeveloperReviewFeedback>;
   const transitionsByTaskId = Object.fromEntries(
@@ -323,7 +323,7 @@ export const replaceProjectSnapshot = (
     },
     developerReviewFeedbackByCycleId: {
       ...developerReviewFeedbackByCycleId,
-      ...byCycleId(developerReviewFeedback),
+      ...byId(developerReviewFeedback),
     },
     projectCursors: {
       ...state.projectCursors,
@@ -460,8 +460,7 @@ export const applyProjectEvent = (
       developerReviewFeedbackByCycleId: event.payload.reviewFeedback
         ? {
             ...next.developerReviewFeedbackByCycleId,
-            [event.payload.reviewFeedback.cycleId]:
-              event.payload.reviewFeedback,
+            [event.payload.reviewFeedback.id]: event.payload.reviewFeedback,
           }
         : next.developerReviewFeedbackByCycleId,
     };
