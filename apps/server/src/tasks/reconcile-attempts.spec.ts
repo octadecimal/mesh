@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   developerExecutionCycleSchema,
+  idSchema,
+  developerBlockerReportSchema,
   projectSchema,
   rawDiagnosticSchema,
   sessionSchema,
@@ -36,6 +38,7 @@ describe('reconcileTaskAttempts', () => {
     cleanupState?: 'active' | 'pending';
     source?: TaskAttemptSource;
     repositories?: Parameters<typeof createTestRepositories>[0];
+    blocked?: boolean;
   }) => {
     const repositories = createTestRepositories(options.repositories);
     disposals.push(repositories.dispose);
@@ -61,7 +64,9 @@ describe('reconcileTaskAttempts', () => {
         lifecycleState: options.taskState,
         labels: [],
         notes: '',
-        blocked: null,
+        blocked: options.blocked
+          ? { reason: 'Waiting for input', actor, blockedAt: now }
+          : null,
         revision: 1,
         createdAt: now,
         updatedAt: now,
@@ -342,6 +347,64 @@ describe('reconcileTaskAttempts', () => {
             payload.kind === 'attempt_repair',
         ),
     ).toHaveLength(1);
+  });
+
+  it('does not flag a normal terminal Developer blocker as an orphaned task', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'interrupted',
+      blocked: true,
+    });
+    const active = repositories.developerExecutions.createCycle(
+      developerExecutionCycleSchema.parse({
+        id: 'cycle-blocked',
+        attemptId: 'attempt-1',
+        ordinal: 1,
+        mode: 'new',
+        authorizedBy: actor,
+        authorizationCommandId: 'launch-blocked',
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Recover attempt state',
+          description: 'Keep task outcomes under human control.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Restart state is explicit.' },
+          ],
+        },
+        workspaceId: 'workspace-1',
+        permissionMode: 'interactive',
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        completionReportId: null,
+        blockerReportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    const blocker = developerBlockerReportSchema.parse({
+      id: 'blocker-1',
+      cycleId: active.id,
+      reason: 'Waiting for input',
+      evidence: 'Dependency is unavailable.',
+      attemptedWork: 'Checked local inputs.',
+      suggestedHumanAction: 'Provide the dependency.',
+      preserveWorkspace: true,
+      createdAt: now,
+    });
+    repositories.developerExecutions.appendBlockerReport(blocker);
+    repositories.developerExecutions.closeCycle(active.id, {
+      endedAt: now,
+      terminalDisposition: 'blocked',
+      completionReportId: null,
+      blockerReportId: blocker.id,
+      terminalCommandId: idSchema.parse('block-command'),
+      terminalEventId: idSchema.parse('block-event'),
+    });
+
+    expect(reconcile(repositories)).toEqual({ repairs: [], events: [] });
   });
 
   it('records every orphan Developer cycle once when a task has multiple attempts', () => {

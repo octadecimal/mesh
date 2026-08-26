@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { dirname } from 'node:path';
 
 import type { FastifyInstance } from 'fastify';
+import type { AttemptRepair } from '@mesh-session-platform/contracts';
 
 import { buildApp, createOriginPolicy } from './app.js';
 import { createClaudeSdkFacade } from './claude/sdk-adapter.js';
@@ -194,6 +195,34 @@ export const startServer = async (
     environment,
   );
   const capabilities = new DeveloperCapabilityRegistry();
+  const runtimeRepairs: AttemptRepair[] = [];
+  const reconcileStoppedRuntime = (activeRegistry: SessionRegistry) => {
+    const result = reconcileTaskAttempts({
+      database,
+      projects,
+      tasks,
+      attempts,
+      sessions,
+      diagnostics,
+      developerExecutions,
+      projectEvents,
+    });
+    for (const repair of result.repairs) {
+      if (
+        !runtimeRepairs.some(
+          (current) =>
+            current.taskId === repair.taskId &&
+            current.attemptId === repair.attemptId &&
+            current.sessionId === repair.sessionId &&
+            current.reason === repair.reason,
+        )
+      ) {
+        runtimeRepairs.push(repair);
+      }
+    }
+    for (const event of result.events)
+      activeRegistry.publisher.publishProject(event);
+  };
   const registry = new SessionRegistry({
     database,
     sessions,
@@ -203,6 +232,7 @@ export const startServer = async (
     driver,
     invalidateDeveloperCapability: (sessionId) =>
       capabilities.invalidateSession(sessionId),
+    onRuntimeStopped: () => reconcileStoppedRuntime(registry),
   });
   const developerExecutionService = new DeveloperExecutionService({
     projects,
@@ -262,6 +292,7 @@ export const startServer = async (
     developerExecutions,
     projectEvents,
   });
+  runtimeRepairs.push(...reconciliation.repairs);
   reconcileTaskAttemptLaunchReservations(database);
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
@@ -275,7 +306,7 @@ export const startServer = async (
     transitions,
     projectEvents,
     developerExecutions,
-    repairs: reconciliation.repairs,
+    repairs: runtimeRepairs,
     workspaces,
     sessions,
     diagnostics,

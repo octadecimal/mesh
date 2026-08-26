@@ -22,6 +22,7 @@ interface SessionRegistryDependencies {
   driver: ClaudeSessionDriver;
   publisher?: EventPublisher;
   invalidateDeveloperCapability?: (sessionId: string) => void;
+  onRuntimeStopped?: (sessionId: string) => void;
   shutdownTimeoutMs?: number;
   closeDatabase?: () => void;
 }
@@ -198,6 +199,11 @@ export class SessionRegistry {
       if (runtime && this.runtimes.get(sessionId) === runtime) {
         this.runtimes.delete(sessionId);
         this.invalidateDeveloperCapability(sessionId);
+        try {
+          this.dependencies.onRuntimeStopped?.(sessionId);
+        } catch (error) {
+          this.tripAuditBarrier(error);
+        }
       }
     };
     let placeholder: DriverSession | undefined;

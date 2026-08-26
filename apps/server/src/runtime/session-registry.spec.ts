@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   projectSchema,
   sessionSchema,
@@ -187,6 +187,28 @@ describe('SessionRegistry Developer attachment', () => {
 
     expect(invalidated).toContain('interrupted-session');
     expect(invalidated).toContain('shutdown-session');
+  });
+
+  it('notifies reconciliation when a runtime stops after an unexpected crash', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const stopped: string[] = [];
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      onRuntimeStopped: (sessionId) => stopped.push(sessionId),
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'crashed-developer');
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    await registry.create('crashed-developer', developer());
+
+    driver.createdSessions[0]?.crash(new Error('unexpected stop'));
+
+    await vi.waitFor(() => expect(stopped).toEqual(['crashed-developer']));
   });
 
   it('invalidates capabilities and interrupts the driver when attach audit fails', async () => {

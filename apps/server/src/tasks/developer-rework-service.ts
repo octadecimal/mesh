@@ -438,7 +438,9 @@ export class DeveloperReworkService {
   }
 
   closeFailed(
-    prepared: PreparedDeveloperRecovery,
+    prepared: Omit<PreparedDeveloperRecovery, 'feedback'> & {
+      feedback?: DeveloperReviewFeedback;
+    },
     stage: 'startup' | 'resume' | 'task_transition' | 'command_completion',
     error: unknown,
     cleanup?: 'interrupted' | 'unknown',
@@ -479,7 +481,7 @@ export class DeveloperReworkService {
             cycle,
             completionReport: null,
             blockerReport: null,
-            reviewFeedback: prepared.feedback,
+            reviewFeedback: prepared.feedback ?? null,
           },
         },
       );

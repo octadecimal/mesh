@@ -49,6 +49,8 @@ describe('AttemptService', () => {
     driver?: ClaudeSessionDriver;
     git?: Pick<GitAdapter, 'createWorktree'>;
     interrupt?: (sessionId: string) => Promise<void>;
+    terminalInterrupt?: (sessionId: string) => Promise<void>;
+    emergencyClose?: (sessionId: string) => Promise<void>;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-attempt-service-'));
     const repositories = createTestRepositories(options?.repositories);
@@ -81,7 +83,17 @@ describe('AttemptService', () => {
       taskService,
       capabilities,
       developerExecutionService,
-      registry,
+      registry: {
+        resume: (sessionId, configuration, developer) =>
+          registry.resume(sessionId, configuration, developer),
+        interrupt:
+          options?.terminalInterrupt ??
+          ((sessionId) => registry.interrupt(sessionId)),
+        emergencyClose:
+          options?.emergencyClose ??
+          ((sessionId) => registry.emergencyClose(sessionId)),
+        publisher: registry.publisher,
+      },
       now: () => now,
       createId,
     });
@@ -853,7 +865,11 @@ describe('AttemptService', () => {
       'developer',
     );
     expect(repositories.developerExecutions.listByTask('task-1')).toEqual([
-      expect.objectContaining({ ordinal: 1, terminalDisposition: null }),
+      expect.objectContaining({
+        ordinal: 1,
+        endedAt: now,
+        terminalDisposition: null,
+      }),
     ]);
     expect(() => capabilities.resolve(issuedToken)).toThrowError(
       expect.objectContaining({ code: 'developer_capability_invalid' }),
@@ -912,6 +928,145 @@ describe('AttemptService', () => {
     ).toBe(true);
     expect(repositories.sessions.get(session.id)?.lifecycleState).toBe(
       'interrupted',
+    );
+  });
+
+  it('keeps submit-for-review durable when runtime interruption fails', async () => {
+    const emergencyClose = vi.fn(async () => undefined);
+    const { directory, driver, repositories, service } = setup({
+      terminalInterrupt: async () => {
+        throw new Error('interrupt failed');
+      },
+      emergencyClose,
+    });
+    seedTask(repositories);
+    const launched = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+    const cycle = launched.cycle;
+    const session = launched.session;
+    if (!cycle || !session) throw new Error('Expected Developer launch');
+
+    await (driver as FakeClaudeSessionDriver).submitForReview(0, {
+      idempotencyKey: idSchema.parse('review-cleanup-failure'),
+      summary: 'Work is complete.',
+      criterionResults: [
+        {
+          criterionId: idSchema.parse('criterion-1'),
+          status: 'met',
+          evidence: 'Focused verification passed.',
+        },
+      ],
+      verification: [],
+      limitations: '',
+      workspaceState: {
+        summary: 'Work preserved.',
+        hasUncommittedChanges: false,
+        commitsCreated: true,
+      },
+      reviewerNotes: null,
+    });
+
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe('review');
+    expect(emergencyClose).toHaveBeenCalledWith(session.id);
+    expect(repositories.diagnostics.list(session.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            kind: 'developer_terminal_cleanup',
+            cycleId: cycle.id,
+            outcome: 'interrupt_failed',
+          }),
+        }),
+      ]),
+    );
+  });
+
+  it('replays only an exact cycle-scoped Developer outcome', async () => {
+    const { directory, driver, repositories, service } = setup();
+    seedTask(repositories);
+    const launched = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+    const cycle = launched.cycle;
+    if (!cycle) throw new Error('Expected Developer cycle');
+    const report = {
+      idempotencyKey: idSchema.parse('stable-review-key'),
+      summary: 'Work is complete.',
+      criterionResults: [
+        {
+          criterionId: idSchema.parse('criterion-1'),
+          status: 'met' as const,
+          evidence: 'Focused verification passed.',
+        },
+      ],
+      verification: [],
+      limitations: '',
+      workspaceState: {
+        summary: 'Work preserved.',
+        hasUncommittedChanges: false,
+        commitsCreated: true,
+      },
+      reviewerNotes: null,
+    };
+
+    await (driver as FakeClaudeSessionDriver).submitForReview(0, report);
+    await (driver as FakeClaudeSessionDriver).submitForReview(0, report);
+    await expect(
+      (driver as FakeClaudeSessionDriver).submitForReview(0, {
+        ...report,
+        summary: 'Changed payload under the same model key.',
+      }),
+    ).rejects.toMatchObject({ code: 'developer_capability_invalid' });
+
+    expect(
+      repositories.developerExecutions.listCompletionReportsByTask('task-1'),
+    ).toHaveLength(1);
+    expect(
+      repositories.developerExecutions.getCycle(cycle.id)?.terminalCommandId,
+    ).toContain(`${cycle.id}-stable-review-key-`);
+  });
+
+  it('keeps mark-blocked durable when runtime interruption fails', async () => {
+    const emergencyClose = vi.fn(async () => undefined);
+    const { directory, driver, repositories, service } = setup({
+      terminalInterrupt: async () => {
+        throw new Error('interrupt failed');
+      },
+      emergencyClose,
+    });
+    seedTask(repositories);
+    const launched = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+    const cycle = launched.cycle;
+    const session = launched.session;
+    if (!cycle || !session) throw new Error('Expected Developer launch');
+
+    await (driver as FakeClaudeSessionDriver).markBlocked(0, {
+      idempotencyKey: idSchema.parse('block-cleanup-failure'),
+      reason: 'A dependency is missing.',
+      evidence: 'The dependency probe failed.',
+      attemptedWork: 'Checked the local workspace.',
+      suggestedHumanAction: 'Provide the dependency.',
+      preserveWorkspace: true,
+    });
+
+    expect(repositories.tasks.get('task-1')).toMatchObject({
+      lifecycleState: 'in_progress',
+      blocked: { reason: 'A dependency is missing.' },
+    });
+    expect(emergencyClose).toHaveBeenCalledWith(session.id);
+    expect(repositories.diagnostics.list(session.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            kind: 'developer_terminal_cleanup',
+            cycleId: cycle.id,
+            outcome: 'interrupt_failed',
+          }),
+        }),
+      ]),
     );
   });
 

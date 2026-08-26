@@ -416,14 +416,14 @@ export class AttemptService {
           if (developerCycle) {
             this.dependencies.capabilities.invalidateCycle(developerCycle.id);
           }
-          if (recovery && prepared.cycle && prepared.feedback) {
+          if (prepared.cycle) {
             this.dependencies.developerReworkService.closeFailed(
               {
                 task,
                 attempt: prepared.attempt,
                 cycle: prepared.cycle,
-                feedback: prepared.feedback,
                 event: prepared.event,
+                ...(prepared.feedback ? { feedback: prepared.feedback } : {}),
               },
               'startup',
               error,
