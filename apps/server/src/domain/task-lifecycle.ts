@@ -16,6 +16,7 @@ export type AuthorizeTaskTransitionInput = {
   actor: TaskActor;
   reason?: string;
   blocked?: boolean;
+  operation?: 'developer_submit_review' | 'developer_mark_blocked';
 };
 
 export class TaskReadinessError extends Error {
@@ -118,7 +119,7 @@ const requiresReason = ({
 export const authorizeTaskTransition = (
   input: AuthorizeTaskTransitionInput,
 ): void => {
-  const { task, nextState, actor, reason, blocked } = input;
+  const { task, nextState, actor, reason, blocked, operation } = input;
   const changesBlockedState =
     blocked !== undefined && blocked !== Boolean(task.blocked);
   const permittedStateChange = allowedTaskTransitions(task).includes(nextState);
@@ -130,9 +131,23 @@ export const authorizeTaskTransition = (
     throw new TaskTransitionInvalidError(task.lifecycleState, nextState);
   }
 
+  const developerSubmission =
+    actor.type === 'agent' &&
+    operation === 'developer_submit_review' &&
+    task.lifecycleState === 'in_progress' &&
+    nextState === 'review' &&
+    blocked === undefined;
+  const developerBlock =
+    actor.type === 'agent' &&
+    operation === 'developer_mark_blocked' &&
+    task.lifecycleState === 'in_progress' &&
+    nextState === 'in_progress' &&
+    blocked === true;
+  const developerOperation = operation !== undefined;
+
   if (
-    (nextState === 'review' || nextState === 'done') &&
-    actor.type !== 'human'
+    (developerOperation && !developerSubmission && !developerBlock) ||
+    (actor.type !== 'human' && !developerSubmission && !developerBlock)
   ) {
     throw new TaskTransitionUnauthorizedError(nextState, actor);
   }

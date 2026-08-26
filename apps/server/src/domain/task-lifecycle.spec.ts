@@ -178,4 +178,58 @@ describe('task lifecycle policy', () => {
       }),
     ).toThrow(TaskTransitionUnauthorizedError);
   });
+
+  it('permits a bound Developer policy only to submit its current work for review or block it', () => {
+    expect(
+      authorizeTaskTransition({
+        task: taskIn('in_progress'),
+        nextState: 'review',
+        actor: agent,
+        operation: 'developer_submit_review',
+      }),
+    ).toBeUndefined();
+    expect(
+      authorizeTaskTransition({
+        task: taskIn('in_progress'),
+        nextState: 'in_progress',
+        actor: agent,
+        blocked: true,
+        reason: 'Blocked on an external dependency',
+        operation: 'developer_mark_blocked',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('does not grant Developer policy authority to complete, unblock, or make unrelated transitions', () => {
+    for (const request of [
+      {
+        task: taskIn('review'),
+        nextState: 'done' as const,
+        operation: 'developer_submit_review' as const,
+      },
+      {
+        task: taskIn('in_progress'),
+        nextState: 'ready' as const,
+        operation: 'developer_submit_review' as const,
+      },
+      {
+        task: taskIn('in_progress'),
+        nextState: 'ready' as const,
+        reason: 'Only a human may return work to ready',
+      },
+      {
+        task: taskIn('in_progress', {
+          blocked: { reason: 'Blocked', actor: human, blockedAt: timestamp },
+        }),
+        nextState: 'in_progress' as const,
+        blocked: false,
+        reason: 'Unblock',
+        operation: 'developer_mark_blocked' as const,
+      },
+    ]) {
+      expect(() =>
+        authorizeTaskTransition({ ...request, actor: agent }),
+      ).toThrow(TaskTransitionUnauthorizedError);
+    }
+  });
 });
