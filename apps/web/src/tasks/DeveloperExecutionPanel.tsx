@@ -30,7 +30,6 @@ type PendingAction = {
   sourceRevision: number;
   sourceCycleCount: number;
   sourceFeedbackCount: number;
-  commandSettled: boolean;
 };
 
 const operator = taskActorSchema.parse({
@@ -146,7 +145,8 @@ export function DeveloperExecutionPanel({
   const [unblockPath, setUnblockPath] = useState<RecoveryPath>('');
   const [pending, setPending] = useState<PendingAction>();
   const [error, setError] = useState<string>();
-  const requestId = useRef(0);
+  const requestSequence = useRef(0);
+  const activeRequest = useRef<PendingAction | undefined>(undefined);
   const orderedCycles = useMemo(
     () => cycleOrder(attempts, cycles),
     [attempts, cycles],
@@ -182,7 +182,7 @@ export function DeveloperExecutionPanel({
   }, [project.id, project.repositoryPath]);
 
   useEffect(() => {
-    requestId.current += 1;
+    activeRequest.current = undefined;
     setPending(undefined);
     setError(undefined);
     setRejectionFeedback('');
@@ -192,33 +192,45 @@ export function DeveloperExecutionPanel({
   }, [task.id]);
 
   useEffect(() => {
-    if (!pending?.commandSettled || task.revision <= pending.sourceRevision)
-      return;
-    const cycleAdded = cycles.length > pending.sourceCycleCount;
-    const feedbackAdded = feedback.length > pending.sourceFeedbackCount;
+    const request = activeRequest.current;
+    if (!request || task.revision <= request.sourceRevision) return;
+    const cycleAdded = cycles.length > request.sourceCycleCount;
+    const feedbackAdded = feedback.length > request.sourceFeedbackCount;
     const durableOutcome =
-      (pending.kind === 'launch' &&
+      (request.kind === 'launch' &&
         task.lifecycleState !== 'ready' &&
         cycleAdded) ||
-      (pending.kind === 'accept' && task.lifecycleState === 'done') ||
-      ((pending.kind === 'reject' || pending.kind === 'unblock') &&
+      (request.kind === 'accept' && task.lifecycleState === 'done') ||
+      ((request.kind === 'reject' || request.kind === 'unblock') &&
         !task.blocked &&
         cycleAdded &&
         feedbackAdded);
-    if (durableOutcome) setPending(undefined);
-  }, [cycles.length, feedback.length, pending, task]);
+    if (!durableOutcome) return;
+    activeRequest.current = undefined;
+    if (request.kind === 'reject') {
+      setRejectionFeedback('');
+      setRejectionPath('');
+    }
+    if (request.kind === 'unblock') {
+      setUnblockFeedback('');
+      setUnblockPath('');
+    }
+    setPending((current) => (current?.id === request.id ? undefined : current));
+    setError(undefined);
+  }, [cycles.length, feedback.length, task]);
 
   const execute = (kind: ActionKind, command: MutatingCommand) => {
     if (controlsDisabled) return;
-    const id = ++requestId.current;
-    setPending({
+    const id = ++requestSequence.current;
+    const request = {
       id,
       kind,
       sourceRevision: task.revision,
       sourceCycleCount: cycles.length,
       sourceFeedbackCount: feedback.length,
-      commandSettled: false,
-    });
+    };
+    activeRequest.current = request;
+    setPending(request);
     setError(undefined);
     let result: Promise<unknown>;
     try {
@@ -226,18 +238,11 @@ export function DeveloperExecutionPanel({
     } catch (caught) {
       result = Promise.reject(caught);
     }
-    void result
-      .then(() => {
-        if (requestId.current !== id) return;
-        setPending((current) =>
-          current?.id === id ? { ...current, commandSettled: true } : current,
-        );
-      })
-      .catch((caught: unknown) => {
-        if (requestId.current !== id) return;
-        setPending((current) => (current?.id === id ? undefined : current));
-        setError(failureMessage(caught));
-      });
+    void result.catch((caught: unknown) => {
+      if (activeRequest.current?.id !== id) return;
+      setPending((current) => (current?.id === id ? undefined : current));
+      setError(failureMessage(caught));
+    });
   };
 
   const launch = () => {

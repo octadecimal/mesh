@@ -490,7 +490,7 @@ function ConnectedApp({
               </div>
             </div>
           </section>
-        ) : view === 'board' && activeProject ? (
+        ) : view === 'board' && activeProject && !projectLoadTargetId ? (
           <section
             className={`project-board-boundary${
               activeProject.archivedAt ? ' project-board-read-only' : ''

@@ -347,6 +347,82 @@ describe('DeveloperExecutionPanel', () => {
     );
   });
 
+  it('retires a pending request when its durable outcome arrives before a transport rejection', async () => {
+    const user = userEvent.setup();
+    const accepted = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(accepted.promise);
+    const rendered = renderPanel({
+      task: taskFor({ lifecycleState: 'review', revision: 3 }),
+      attempts: [developerAttempt],
+      cycles: [completionCycle],
+      completionReports: [completionReport],
+      onCommand,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Accept as done' }));
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'waiting for project update',
+    );
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({ lifecycleState: 'done', revision: 4 }),
+        attempts: [developerAttempt],
+        cycles: [completionCycle],
+        completionReports: [completionReport],
+        onCommand,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+
+    await act(async () =>
+      accepted.reject({
+        code: 'command_failed',
+        message: 'The transport closed after the event was delivered.',
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(screen.getByText('Implemented the workflow.')).toBeDefined();
+  });
+
+  it('reconciles a durable outcome that projects after the transport rejection renders', async () => {
+    const user = userEvent.setup();
+    const accepted = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(accepted.promise);
+    const rendered = renderPanel({
+      task: taskFor({ lifecycleState: 'review', revision: 3 }),
+      attempts: [developerAttempt],
+      cycles: [completionCycle],
+      completionReports: [completionReport],
+      onCommand,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Accept as done' }));
+    await act(async () =>
+      accepted.reject({
+        code: 'command_failed',
+        message: 'The transport closed before React projected the event.',
+      }),
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The transport closed before React projected the event.',
+    );
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({ lifecycleState: 'done', revision: 4 }),
+        attempts: [developerAttempt],
+        cycles: [completionCycle],
+        completionReports: [completionReport],
+        onCommand,
+      }),
+    );
+
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByText('Implemented the workflow.')).toBeDefined();
+  });
+
   it('keeps an action pending until durable projection and retains canonical state on typed failure', async () => {
     const user = userEvent.setup();
     const accepted = deferred<unknown>();
@@ -404,10 +480,194 @@ describe('DeveloperExecutionPanel', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'The Developer attempt can no longer be resumed.',
     );
+    expect(screen.getByLabelText('Rejection feedback')).toHaveValue(
+      'Try again.',
+    );
+    expect(
+      screen.getByLabelText('Resume the same Developer attempt'),
+    ).toBeChecked();
     expect(screen.getByText('Implemented the workflow.')).toBeDefined();
     expect(
       screen.getByRole('button', { name: 'Accept as done' }),
     ).toBeEnabled();
+  });
+
+  it('clears successful rejection feedback and path before the same task next review cycle', async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    const nextReviewCycle = cycle({
+      id: 'cycle-3',
+      ordinal: 2,
+      mode: 'resume',
+      startedAt: third,
+      endedAt: third,
+      completionReportId: 'completion-2',
+      terminalCommandId: 'command-submit-2',
+      terminalEventId: 'event-submit-2',
+    });
+    const nextCompletionReport = developerCompletionReportSchema.parse({
+      ...completionReport,
+      id: 'completion-2',
+      cycleId: nextReviewCycle.id,
+      createdAt: third,
+    });
+    const projectedFeedback = developerReviewFeedbackSchema.parse({
+      ...reviewFeedback,
+      id: 'feedback-2',
+      feedback: 'Add the missing keyboard test.',
+      commandId: 'command-reject-2',
+      createdAt: third,
+    });
+    const rendered = renderPanel({
+      task: taskFor({ lifecycleState: 'review', revision: 3 }),
+      attempts: [developerAttempt],
+      cycles: [completionCycle],
+      completionReports: [completionReport],
+      onCommand,
+    });
+
+    await user.type(
+      screen.getByLabelText('Rejection feedback'),
+      'Add the missing keyboard test.',
+    );
+    await user.click(
+      screen.getByLabelText('Resume the same Developer attempt'),
+    );
+    await user.click(screen.getByRole('button', { name: 'Reject submission' }));
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({ lifecycleState: 'review', revision: 4 }),
+        attempts: [developerAttempt],
+        cycles: [completionCycle, nextReviewCycle],
+        completionReports: [completionReport, nextCompletionReport],
+        feedback: [projectedFeedback],
+        onCommand,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+
+    expect(screen.getByLabelText('Rejection feedback')).toHaveValue('');
+    expect(
+      screen.getByLabelText('Resume the same Developer attempt'),
+    ).not.toBeChecked();
+    expect(
+      screen.getByLabelText('Start a new Developer attempt'),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole('button', { name: 'Reject submission' }),
+    ).toBeDisabled();
+  });
+
+  it('clears successful unblock feedback and path before the same task is blocked again', async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    const resumedCycle = cycle({
+      id: 'cycle-3',
+      attemptId: secondAttempt.attempt.id,
+      ordinal: 2,
+      mode: 'resume',
+      startedAt: third,
+      endedAt: null,
+      terminalDisposition: null,
+      completionReportId: null,
+      blockerReportId: null,
+      terminalCommandId: null,
+      terminalEventId: null,
+    });
+    const reblockedCycle = cycle({
+      id: 'cycle-4',
+      attemptId: secondAttempt.attempt.id,
+      ordinal: 3,
+      mode: 'resume',
+      workspaceId: 'workspace-2',
+      startedAt: fourth,
+      endedAt: fourth,
+      terminalDisposition: 'blocked',
+      completionReportId: null,
+      blockerReportId: 'blocker-2',
+      terminalCommandId: 'command-block-2',
+      terminalEventId: 'event-block-2',
+    });
+    const projectedFeedback = developerReviewFeedbackSchema.parse({
+      ...reviewFeedback,
+      id: 'feedback-unblock',
+      cycleId: blockedCycle.id,
+      kind: 'unblock',
+      feedback: 'Use the stable payload.',
+      commandId: 'command-unblock',
+      createdAt: third,
+    });
+    const nextBlockerReport = developerBlockerReportSchema.parse({
+      ...blockerReport,
+      id: 'blocker-2',
+      cycleId: reblockedCycle.id,
+      createdAt: fourth,
+    });
+    const rendered = renderPanel({
+      task: taskFor({
+        lifecycleState: 'in_progress',
+        revision: 5,
+        blocked: {
+          reason: blockerReport.reason,
+          actor: developerActor,
+          blockedAt: later,
+        },
+      }),
+      attempts: [secondAttempt],
+      cycles: [blockedCycle],
+      blockerReports: [blockerReport],
+      onCommand,
+    });
+
+    await user.type(
+      screen.getByLabelText('Unblock reason'),
+      'Use the stable payload.',
+    );
+    await user.click(screen.getByLabelText('Resume the blocked attempt'));
+    await user.click(screen.getByRole('button', { name: 'Unblock Developer' }));
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({ lifecycleState: 'in_progress', revision: 6 }),
+        attempts: [secondAttempt],
+        cycles: [blockedCycle, resumedCycle],
+        blockerReports: [blockerReport],
+        feedback: [projectedFeedback],
+        onCommand,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({
+          lifecycleState: 'in_progress',
+          revision: 7,
+          blocked: {
+            reason: nextBlockerReport.reason,
+            actor: developerActor,
+            blockedAt: fourth,
+          },
+        }),
+        attempts: [secondAttempt],
+        cycles: [blockedCycle, resumedCycle, reblockedCycle],
+        blockerReports: [blockerReport, nextBlockerReport],
+        feedback: [projectedFeedback],
+        onCommand,
+      }),
+    );
+
+    expect(screen.getByLabelText('Unblock reason')).toHaveValue('');
+    expect(
+      screen.getByLabelText('Resume the blocked attempt'),
+    ).not.toBeChecked();
+    expect(
+      screen.getByLabelText('Start a new attempt after unblock'),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole('button', { name: 'Unblock Developer' }),
+    ).toBeDisabled();
   });
 
   it('surfaces Developer repair warnings without hiding execution history', () => {
@@ -434,6 +694,8 @@ describe('DeveloperExecutionPanel', () => {
 
 const timestamp = '2026-08-25T00:00:00.000Z';
 const later = '2026-08-25T01:00:00.000Z';
+const third = '2026-08-25T02:00:00.000Z';
+const fourth = '2026-08-25T03:00:00.000Z';
 const actor = taskActorSchema.parse({
   type: 'human',
   id: 'operator',

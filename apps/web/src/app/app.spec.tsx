@@ -546,14 +546,14 @@ describe('App', () => {
     expect(screen.getByRole('region', { name: 'Other board' })).toBeDefined();
   });
 
-  it('keeps the current board visible until a switched project snapshot resolves', async () => {
+  it('hides project A task controls while the selected project B snapshot is in flight', async () => {
     const user = userEvent.setup();
     const store = createMeshStore(crossProjectSnapshot);
     const api = createApi();
     const nextProject = deferred<{
       protocolVersion: 1;
       project: typeof projectB;
-      tasks: [];
+      tasks: (typeof boardTask)[];
       attempts: [];
       transitions: [];
       repairs: [];
@@ -563,7 +563,7 @@ describe('App', () => {
       .mockResolvedValueOnce({
         protocolVersion: 1,
         project,
-        tasks: [],
+        tasks: [boardTask],
         attempts: [],
         transitions: [],
         repairs: [],
@@ -576,12 +576,19 @@ describe('App', () => {
     expect(
       await screen.findByRole('region', { name: 'Mesh board' }),
     ).toBeDefined();
+    expect(
+      screen.getByRole('combobox', { name: 'Move Board task to' }),
+    ).toBeEnabled();
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
 
+    expect(screen.getByLabelText('Selected project')).toHaveValue('p2');
     expect(screen.getByRole('status')).toHaveTextContent(
       'Loading Other project…',
     );
-    expect(screen.getByRole('region', { name: 'Mesh board' })).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'Mesh board' })).toBeNull();
+    expect(
+      screen.queryByRole('combobox', { name: 'Move Board task to' }),
+    ).toBeNull();
     expect(screen.queryByRole('region', { name: 'Other board' })).toBeNull();
 
     nextProject.resolve({
