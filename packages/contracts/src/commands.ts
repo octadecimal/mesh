@@ -8,6 +8,10 @@ import {
   taskLifecycleStateSchema,
   taskPrioritySchema,
 } from './domain.js';
+import {
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+} from './developer-execution.js';
 import { protocolVersionSchema } from './protocol.js';
 
 export const discoveryCommandSchema = z.discriminatedUnion('type', [
@@ -68,6 +72,10 @@ const sessionCreatePayloadSchema = z.union([
 ]);
 
 const expectedRevisionSchema = z.number().int().positive();
+const humanActorSchema = taskActorSchema.extend({ type: z.literal('human') });
+const developerAgentActorSchema = taskActorSchema.extend({
+  type: z.literal('agent'),
+});
 const taskPatchSchema = z
   .object({
     title: z.string().trim().min(1).optional(),
@@ -111,6 +119,15 @@ export const projectCommandSchema = z.discriminatedUnion('type', [
       projectId: idSchema,
       expectedRevision: expectedRevisionSchema,
       actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.developer_instructions.update'),
+    payload: z.object({
+      projectId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      content: z.string(),
+      actor: humanActorSchema,
     }),
   }),
 ]);
@@ -203,6 +220,85 @@ export const taskCommandSchema = z.discriminatedUnion('type', [
       attemptId: idSchema,
       reason: z.string().trim().min(1),
       actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.developer.launch'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      title: z.string().trim().min(1),
+      permissionMode: permissionModeSchema,
+      workspace: sessionWorkspaceSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.developer.submit_review'),
+    payload: z.object({
+      capability: z.string().trim().min(1),
+      expectedRevision: expectedRevisionSchema,
+      report: developerCompletionReportSchema,
+      actor: developerAgentActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.developer.block'),
+    payload: z.object({
+      capability: z.string().trim().min(1),
+      expectedRevision: expectedRevisionSchema,
+      report: developerBlockerReportSchema,
+      actor: developerAgentActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.developer.accept'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.developer.reject_resume'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      feedback: z.string().trim().min(1),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.developer.reject_new'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      feedback: z.string().trim().min(1),
+      title: z.string().trim().min(1),
+      permissionMode: permissionModeSchema,
+      workspace: sessionWorkspaceSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.developer.unblock_resume'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      feedback: z.string().trim().min(1),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.developer.unblock_new'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      feedback: z.string().trim().min(1),
+      title: z.string().trim().min(1),
+      permissionMode: permissionModeSchema,
+      workspace: sessionWorkspaceSchema,
+      actor: humanActorSchema,
     }),
   }),
 ]);

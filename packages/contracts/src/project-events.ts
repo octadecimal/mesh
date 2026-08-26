@@ -10,6 +10,12 @@ import {
   taskSchema,
   taskTransitionSchema,
 } from './domain.js';
+import {
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
+  developerReviewFeedbackSchema,
+} from './developer-execution.js';
 import { protocolVersionSchema } from './protocol.js';
 
 const projectEvent = <Type extends string, Payload extends z.ZodType>(
@@ -54,6 +60,21 @@ export const taskAttemptRepairDetectedEventSchema = projectEvent(
   'task.attempt_repair_detected',
   z.object({ repair: attemptRepairSchema }),
 );
+export const projectDeveloperInstructionsChangedEventSchema = projectEvent(
+  'project.developer_instructions_changed',
+  z.object({ project: projectSchema }),
+);
+export const taskDeveloperExecutionChangedEventSchema = projectEvent(
+  'task.developer_execution_changed',
+  z.object({
+    task: taskSchema,
+    attempt: taskAttemptSchema,
+    cycle: developerExecutionCycleSchema,
+    completionReport: developerCompletionReportSchema.nullable(),
+    blockerReport: developerBlockerReportSchema.nullable(),
+    reviewFeedback: developerReviewFeedbackSchema.nullable(),
+  }),
+);
 
 export const projectEventSchema = z.discriminatedUnion('type', [
   projectChangedEventSchema,
@@ -63,6 +84,8 @@ export const projectEventSchema = z.discriminatedUnion('type', [
   taskRankChangedEventSchema,
   taskAttemptChangedEventSchema,
   taskAttemptRepairDetectedEventSchema,
+  projectDeveloperInstructionsChangedEventSchema,
+  taskDeveloperExecutionChangedEventSchema,
 ]);
 
 export type ProjectEvent = z.infer<typeof projectEventSchema>;
