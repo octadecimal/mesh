@@ -40,3 +40,43 @@ The Vitest invocation emits existing Vite configuration deprecation warnings; bo
 - `git diff --check` passed.
 - Confirmed report/cycle/task/transition/event are inside `executeOnceInImmediateTransaction` and that publication occurs after it returns.
 - Confirmed failure test proves task, cycle, transition history, and project event history remain unchanged and capability remains resolvable when event persistence fails.
+
+## Fix Round 1
+
+### Root cause and fix
+
+`developerSubmission` verified Developer actor, operation, and lifecycle state but did not verify that the task was unblocked. The generic blocked guard only covers transitions *to* `in_progress`, so a blocked `in_progress -> review` submission was authorized. The predicate now requires `!task.blocked`.
+
+### Added coverage
+
+- Lifecycle policy rejects a Developer review submission for a blocked task.
+- Execution service rejects a review outcome when the persisted task is in `review`, rather than `in_progress`.
+- Execution service rejects a review outcome when the persisted task is blocked.
+- Publisher callback observes the committed task, closed cycle, durable project event, and completion report payload before it returns.
+
+### RED
+
+```text
+corepack pnpm vitest run apps/server/src/domain/task-lifecycle.spec.ts --config apps/server/vitest.config.ts
+
+FAIL task lifecycle policy > rejects a Developer review submission while its task is blocked
+AssertionError: expected function to throw an error, but it didn't
+
+Test Files  1 failed
+Tests  1 failed | 15 passed (16)
+```
+
+### GREEN
+
+```text
+corepack pnpm vitest run apps/server/src/tasks/developer-execution-service.spec.ts apps/server/src/domain/task-lifecycle.spec.ts --config apps/server/vitest.config.ts
+
+Test Files  2 passed (2)
+Tests  25 passed (25)
+
+corepack pnpm nx typecheck server
+
+NX   Successfully ran target typecheck for project server
+```
+
+Both commands emitted the pre-existing Vite configuration deprecation warning. The Nx command also printed the environment's `pnpm` lookup warning before successfully running `tsc`.

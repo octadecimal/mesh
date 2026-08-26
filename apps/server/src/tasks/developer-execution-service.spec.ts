@@ -27,8 +27,11 @@ describe('DeveloperExecutionService', () => {
 
   afterEach(() => cleanups.splice(0).forEach((dispose) => dispose()));
 
-  const setup = (options?: Parameters<typeof createTestRepositories>[0]) => {
-    const repositories = createTestRepositories(options);
+  const setup = (options?: {
+    repositories?: Parameters<typeof createTestRepositories>[0];
+    publisher?: { publishProject: (event: unknown) => void };
+  }) => {
+    const repositories = createTestRepositories(options?.repositories);
     cleanups.push(repositories.dispose);
     repositories.projects.create(
       projectSchema.parse({
@@ -139,6 +142,7 @@ describe('DeveloperExecutionService', () => {
     const service = new DeveloperExecutionService({
       ...repositories,
       capabilities,
+      publisher: options?.publisher,
       now: () => now,
       createId: () => `generated-${++nextId}`,
     });
@@ -255,6 +259,96 @@ describe('DeveloperExecutionService', () => {
     });
   });
 
+  it('rejects a review outcome when the persisted task is not in progress', () => {
+    const { service, repositories, capability, task } = setup();
+    repositories.database
+      .prepare("UPDATE tasks SET lifecycle_state = 'review' WHERE id = ?")
+      .run(task.id);
+
+    expect(() =>
+      service.submitForReview({
+        commandId: 'command-wrong-state',
+        capability,
+        expectedRevision: 1,
+        report: completion(),
+        actor: developer,
+      }),
+    ).toThrow();
+    expect(repositories.projectEvents.after(task.projectId, 0)).toEqual([]);
+  });
+
+  it('rejects a review outcome when the persisted task is blocked', () => {
+    const { service, repositories, capability, task } = setup();
+    repositories.database
+      .prepare('UPDATE tasks SET blocked_json = ? WHERE id = ?')
+      .run(
+        JSON.stringify({
+          reason: 'Dependency unavailable.',
+          actor: developer,
+          blockedAt: now,
+        }),
+        task.id,
+      );
+
+    expect(() =>
+      service.submitForReview({
+        commandId: 'command-blocked-review',
+        capability,
+        expectedRevision: 1,
+        report: completion(),
+        actor: developer,
+      }),
+    ).toThrow();
+    expect(repositories.projectEvents.after(task.projectId, 0)).toEqual([]);
+  });
+
+  it('publishes only after the outcome is durably observable', () => {
+    let observed:
+      | {
+          task: unknown;
+          cycle: unknown;
+          events: unknown;
+          event: unknown;
+        }
+      | undefined;
+    let observedRepositories:
+      | ReturnType<typeof createTestRepositories>
+      | undefined;
+    const { service, repositories, capability, task, cycle } = setup({
+      publisher: {
+        publishProject: (event) => {
+          if (!observedRepositories)
+            throw new Error('Repositories unavailable');
+          observed = {
+            task: observedRepositories.tasks.get(task.id),
+            cycle: observedRepositories.developerExecutions.getCycle(cycle.id),
+            events: observedRepositories.projectEvents.after(task.projectId, 0),
+            event,
+          };
+        },
+      },
+    });
+    observedRepositories = repositories;
+
+    const result = service.submitForReview({
+      commandId: 'command-publish',
+      capability,
+      expectedRevision: 1,
+      report: completion(),
+      actor: developer,
+    });
+
+    expect(observed).toEqual({
+      task: result.task,
+      cycle: result.cycle,
+      events: [result.event],
+      event: result.event,
+    });
+    expect(
+      (result.event.payload as { completionReport: unknown }).completionReport,
+    ).toEqual(result.report);
+  });
+
   it('rejects mismatched actors, reports, stale attempts, wrong state, and incomplete or duplicate criterion coverage', () => {
     const { service, repositories, capability, task } = setup();
     const invalid =
@@ -357,7 +451,7 @@ describe('DeveloperExecutionService', () => {
 
   it('rolls back every durable mutation and retains capability when event persistence fails', () => {
     const { service, repositories, capabilities, capability, task, cycle } =
-      setup({ failProjectEventInsert: true });
+      setup({ repositories: { failProjectEventInsert: true } });
 
     expect(() =>
       service.submitForReview({

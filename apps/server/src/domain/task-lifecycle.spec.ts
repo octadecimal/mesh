@@ -200,6 +200,23 @@ describe('task lifecycle policy', () => {
     ).toBeUndefined();
   });
 
+  it('rejects a Developer review submission while its task is blocked', () => {
+    expect(() =>
+      authorizeTaskTransition({
+        task: taskIn('in_progress', {
+          blocked: {
+            reason: 'Waiting on a dependency',
+            actor: human,
+            blockedAt: timestamp,
+          },
+        }),
+        nextState: 'review',
+        actor: agent,
+        operation: 'developer_submit_review',
+      }),
+    ).toThrow(TaskTransitionUnauthorizedError);
+  });
+
   it('does not grant Developer policy authority to complete, unblock, or make unrelated transitions', () => {
     for (const request of [
       {

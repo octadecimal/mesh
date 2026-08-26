@@ -136,6 +136,7 @@ export const authorizeTaskTransition = (
     operation === 'developer_submit_review' &&
     task.lifecycleState === 'in_progress' &&
     nextState === 'review' &&
+    !task.blocked &&
     blocked === undefined;
   const developerBlock =
     actor.type === 'agent' &&
