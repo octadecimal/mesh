@@ -42,6 +42,13 @@ const taskAttemptLaunchRecoveryMigration = {
     'utf8',
   ),
 };
+const developerExecutionMigration = {
+  id: '007-developer-execution',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '007-developer-execution.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -50,6 +57,7 @@ const migrations = [
   projectEventStreamsMigration,
   taskAttemptSafetyMigration,
   taskAttemptLaunchRecoveryMigration,
+  developerExecutionMigration,
 ];
 
 export const migrate = (database: Database): void => {

@@ -7,6 +7,10 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
+  developerReviewFeedbackSchema,
   projectSchema,
   rawDiagnosticSchema,
   savedLayoutSchema,
@@ -169,6 +173,33 @@ describe('repositories', () => {
       ...overrides,
     });
 
+  const developerCycle = (overrides: Record<string, unknown> = {}) =>
+    developerExecutionCycleSchema.parse({
+      id: 'cycle-1',
+      attemptId: 'attempt-1',
+      ordinal: 1,
+      mode: 'new',
+      authorizedBy: actor(),
+      authorizationCommandId: 'command-1',
+      policyVersion: 'developer-policy-v1',
+      projectInstructions: { content: 'Preserve the worktree.', revision: 1 },
+      taskSnapshot: {
+        revision: 1,
+        description: 'Store board tasks in SQLite.',
+        acceptanceCriteria: [{ id: 'criterion-1', text: 'Task is persisted' }],
+      },
+      workspaceId: 'w1',
+      permissionMode: 'interactive',
+      startedAt: '2026-08-25T00:01:00.000Z',
+      endedAt: null,
+      terminalDisposition: null,
+      completionReportId: null,
+      blockerReportId: null,
+      terminalCommandId: null,
+      terminalEventId: null,
+      ...overrides,
+    });
+
   it('persists additive project metadata for new project records', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
@@ -189,6 +220,153 @@ describe('repositories', () => {
       updated_at: '2026-08-24T00:00:00.000Z',
       archived_at: null,
     });
+  });
+
+  it('stores ordered Developer cycles and treats an interrupted cycle as inactive', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    repos.tasks.create(task({ lifecycleState: 'in_progress' }));
+    repos.attempts.create(attempt());
+
+    const first = repos.developerExecutions.createCycle(developerCycle());
+    expect(repos.developerExecutions.getActiveCycleBySession('s1')).toEqual(
+      first,
+    );
+    expect(() =>
+      repos.developerExecutions.createCycle(
+        developerCycle({
+          id: 'cycle-2',
+          ordinal: 2,
+          startedAt: '2026-08-25T00:02:00.000Z',
+        }),
+      ),
+    ).toThrow();
+
+    expect(
+      repos.developerExecutions.closeCycle('cycle-1', {
+        endedAt: '2026-08-25T00:03:00.000Z',
+        terminalDisposition: null,
+        completionReportId: null,
+        blockerReportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    ).toMatchObject({
+      endedAt: '2026-08-25T00:03:00.000Z',
+      terminalDisposition: null,
+    });
+    const second = repos.developerExecutions.createCycle(
+      developerCycle({
+        id: 'cycle-2',
+        ordinal: 2,
+        startedAt: '2026-08-25T00:04:00.000Z',
+      }),
+    );
+
+    expect(repos.developerExecutions.getActiveCycleBySession('s1')).toEqual(
+      second,
+    );
+    expect(repos.developerExecutions.listByTask('task-1')).toMatchObject([
+      { id: 'cycle-1', ordinal: 1 },
+      { id: 'cycle-2', ordinal: 2 },
+    ]);
+  });
+
+  it('persists immutable Developer reports and human review feedback', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    repos.tasks.create(task({ lifecycleState: 'in_progress' }));
+    repos.attempts.create(attempt());
+    repos.developerExecutions.createCycle(developerCycle());
+
+    const completion = developerCompletionReportSchema.parse({
+      id: 'completion-1',
+      cycleId: 'cycle-1',
+      summary: 'Implementation is ready for review.',
+      criterionResults: [
+        { criterionId: 'criterion-1', status: 'met', evidence: 'Tests pass.' },
+      ],
+      verification: [{ command: 'pnpm test', outcome: 'passed', output: 'ok' }],
+      limitations: '',
+      workspaceState: {
+        summary: 'Clean.',
+        hasUncommittedChanges: false,
+        commitsCreated: true,
+      },
+      reviewerNotes: null,
+      createdAt: '2026-08-25T00:05:00.000Z',
+    });
+    const blocker = developerBlockerReportSchema.parse({
+      id: 'blocker-1',
+      cycleId: 'cycle-1',
+      reason: 'Missing approval.',
+      evidence: 'Approval has not been recorded.',
+      attemptedWork: 'Checked the approval queue.',
+      suggestedHumanAction: 'Approve the execution.',
+      preserveWorkspace: true,
+      createdAt: '2026-08-25T00:06:00.000Z',
+    });
+    const feedback = developerReviewFeedbackSchema.parse({
+      id: 'feedback-1',
+      cycleId: 'cycle-1',
+      taskId: 'task-1',
+      kind: 'rejection',
+      feedback: 'Please add an upgrade test.',
+      actor: { type: 'human', id: 'reviewer' },
+      commandId: 'command-2',
+      createdAt: '2026-08-25T00:07:00.000Z',
+    });
+
+    expect(
+      repos.developerExecutions.appendCompletionReport(completion),
+    ).toEqual(completion);
+    expect(repos.developerExecutions.appendBlockerReport(blocker)).toEqual(
+      blocker,
+    );
+    expect(repos.developerExecutions.appendFeedback(feedback)).toEqual(
+      feedback,
+    );
+    expect(() =>
+      repos.database
+        .prepare("UPDATE developer_completion_reports SET summary = 'changed'")
+        .run(),
+    ).toThrow('immutable');
+    expect(() =>
+      repos.database.prepare('DELETE FROM developer_review_feedback').run(),
+    ).toThrow('immutable');
+  });
+
+  it('updates Developer instructions only at the expected project revision', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+
+    const updated = repos.projects.updateDeveloperInstructions('p1', 1, {
+      content: 'Run focused tests before handoff.',
+      updatedAt: '2026-08-25T00:08:00.000Z',
+      updatedBy: actor(),
+    });
+
+    expect(updated).toMatchObject({
+      revision: 2,
+      developerInstructions: {
+        content: 'Run focused tests before handoff.',
+        revision: 2,
+        updatedBy: actor(),
+      },
+    });
+    expect(
+      repos.projects.updateDeveloperInstructions('p1', 1, {
+        content: 'Stale overwrite.',
+        updatedAt: '2026-08-25T00:09:00.000Z',
+        updatedBy: { type: 'human', id: 'user-1' },
+      }),
+    ).toBeUndefined();
+    expect(repos.projects.get('p1')?.developerInstructions.content).toBe(
+      'Run focused tests before handoff.',
+    );
   });
 
   it('finds projects by repository identity and guards updates by revision', () => {

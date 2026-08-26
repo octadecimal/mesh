@@ -6,6 +6,7 @@ import { migrate } from '../db/migrate.js';
 import { openDatabase } from '../db/database.js';
 import { CommandRepository } from '../repositories/command-repository.js';
 import { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
+import { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import { EventRepository } from '../repositories/event-repository.js';
 import { LayoutRepository } from '../repositories/layout-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
@@ -62,6 +63,7 @@ export const createTestRepositories = (options?: {
     projects: new ProjectRepository(database),
     tasks: new TaskRepository(database),
     attempts: new TaskAttemptRepository(database),
+    developerExecutions: new DeveloperExecutionRepository(database),
     transitions: new TaskTransitionRepository(database),
     projectEvents: new ProjectEventRepository(database),
     workspaces: new WorkspaceRepository(database),
