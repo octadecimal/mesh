@@ -372,6 +372,26 @@ export class QaExecutionRepository {
     ).map(toReport);
   }
 
+  listAutomationActionsForTasks(
+    taskIds: readonly string[],
+  ): ReviewAutomationAction[] {
+    const ids = taskIds.map((id) => idSchema.parse(id));
+    if (ids.length === 0) return [];
+    const placeholders = ids.map(() => '?').join(', ');
+    return (
+      this.database
+        .prepare(
+          `
+          SELECT *
+          FROM review_automation_actions_v2
+          WHERE task_id IN (${placeholders})
+          ORDER BY task_id, created_at, id
+        `,
+        )
+        .all(...ids) as ActionRow[]
+    ).map(toAction);
+  }
+
   insertAutomationAction(
     action: ReviewAutomationAction,
   ): ReviewAutomationAction {

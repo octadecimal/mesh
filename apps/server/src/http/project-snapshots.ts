@@ -9,6 +9,7 @@ import type { Database } from '../db/database.js';
 import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
@@ -27,6 +28,12 @@ export interface ProjectSnapshotDependencies {
     | 'listCompletionReportsByTask'
     | 'listBlockerReportsByTask'
     | 'listFeedbackByTask'
+  >;
+  qaExecutions: Pick<
+    QaExecutionRepository,
+    | 'listCyclesForAttempts'
+    | 'listReportsForAttempts'
+    | 'listAutomationActionsForTasks'
   >;
   repairs?: readonly AttemptRepair[];
 }
@@ -56,14 +63,17 @@ export const buildProjectSnapshot = (
   dependencies.database.transaction(() => {
     const project = requireProject(dependencies, projectId);
     const tasks = dependencies.tasks.listByProject(project.id);
+    const attempts = tasks.flatMap((task) =>
+      dependencies.attempts.listByTask(task.id),
+    );
+    const attemptIds = attempts.map(({ id }) => id);
+    const taskIds = tasks.map(({ id }) => id);
 
     return projectSnapshotSchema.parse({
       protocolVersion: 1,
       project,
       tasks,
-      attempts: tasks.flatMap((task) =>
-        dependencies.attempts.listByTask(task.id),
-      ),
+      attempts,
       transitions: tasks.flatMap((task) =>
         dependencies.transitions.listByTask(task.id),
       ),
@@ -82,6 +92,10 @@ export const buildProjectSnapshot = (
       developerReviewFeedback: tasks.flatMap((task) =>
         dependencies.developerExecutions.listFeedbackByTask(task.id),
       ),
+      qaCycles: dependencies.qaExecutions.listCyclesForAttempts(attemptIds),
+      qaReports: dependencies.qaExecutions.listReportsForAttempts(attemptIds),
+      reviewAutomationActions:
+        dependencies.qaExecutions.listAutomationActionsForTasks(taskIds),
       cursor: dependencies.projectEvents.latestSequence(project.id),
     });
   })();

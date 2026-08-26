@@ -368,6 +368,7 @@ export const startServer = async (
     transitions,
     projectEvents,
     developerExecutions,
+    qaExecutions,
     repairs: runtimeRepairs,
     workspaces,
     sessions,
