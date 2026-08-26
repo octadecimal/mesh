@@ -112,7 +112,11 @@ const start = async () => {
         await coordinator.refreshProject(project.id);
         socket.resubscribe();
       }
-      if (args[0].type === 'session.create') socket.resubscribe();
+      if (
+        args[0].type === 'session.create' ||
+        args[0].type === 'task.attempt.launch'
+      )
+        socket.resubscribe();
       return response;
     },
   };

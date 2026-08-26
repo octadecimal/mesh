@@ -15,6 +15,7 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import type { ClaudeSessionDriver } from '../claude/driver.js';
+import type { Database } from '../db/database.js';
 import type { GitAdapter } from '../platform/git.js';
 import {
   resolveWorkspacePath,
@@ -26,6 +27,7 @@ import type { DiagnosticRepository } from '../repositories/diagnostic-repository
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { LayoutRepository } from '../repositories/layout-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
@@ -53,8 +55,13 @@ const commandResponseSchema = z.object({
 export type CommandResponse = z.infer<typeof commandResponseSchema>;
 
 export interface CommandDependencies {
+  database: Database;
   projects: ProjectRepository;
-  attempts: Pick<TaskAttemptRepository, 'getCurrentBySession'>;
+  attempts: Pick<
+    TaskAttemptRepository,
+    'getCurrentBySession' | 'listBySession'
+  >;
+  projectEvents: ProjectEventRepository;
   workspaces: WorkspaceRepository;
   sessions: SessionRepository;
   events: EventRepository;
@@ -270,16 +277,49 @@ const updateProject = (
   >,
 ) => {
   const now = (dependencies.now ?? (() => new Date().toISOString()))();
-  const updated = dependencies.projects.update(
-    { ...project, ...patch, updatedAt: now },
-    expectedRevision,
-  );
-  if (updated) return updated;
-  throw new CommandError(
-    'task_revision_conflict',
-    `Project '${project.id}' has changed`,
-    { project: dependencies.projects.get(project.id) },
-  );
+  dependencies.database.exec('BEGIN IMMEDIATE');
+  try {
+    const updated = dependencies.projects.update(
+      { ...project, ...patch, updatedAt: now },
+      expectedRevision,
+    );
+    if (!updated)
+      throw new CommandError(
+        'task_revision_conflict',
+        `Project '${project.id}' has changed`,
+        { project: dependencies.projects.get(project.id) },
+      );
+    const event = dependencies.projectEvents.appendInTransaction(project.id, {
+      protocolVersion: 1,
+      id: (dependencies.createId ?? randomUUID)(),
+      projectId: project.id,
+      occurredAt: now,
+      type: 'project.changed',
+      payload: { project: updated },
+    });
+    dependencies.database.exec('COMMIT');
+    dependencies.registry.publisher.publishProject(event);
+    return updated;
+  } catch (error) {
+    if (dependencies.database.inTransaction)
+      dependencies.database.exec('ROLLBACK');
+    throw error;
+  }
+};
+
+const assertMilestoneTwoHumanActor = (
+  command: Extract<Command, { idempotencyKey: string }>['command'],
+) => {
+  if (
+    (command.type.startsWith('project.') || command.type.startsWith('task.')) &&
+    'actor' in command.payload &&
+    command.payload.actor.type !== 'human'
+  ) {
+    throw new CommandError(
+      'task_transition_unauthorized',
+      'Milestone 2 mutations require a human actor',
+    );
+  }
 };
 
 const hasRunningTaskAttempt = (
@@ -341,6 +381,7 @@ const executeMutation = async (
   dependencies: CommandDependencies,
   commandId?: string,
 ): Promise<CommandResponse> => {
+  assertMilestoneTwoHumanActor(command);
   switch (command.type) {
     case 'task.create':
       return response(
@@ -753,6 +794,12 @@ const executeMutation = async (
         throw new CommandError(
           'invalid_session_state',
           'A live session cannot be deleted',
+        );
+      }
+      if (dependencies.attempts.listBySession(session.id).length > 0) {
+        throw new CommandError(
+          'invalid_session_state',
+          'A session with task attempt history cannot be deleted',
         );
       }
       const workspace = requireWorkspace(dependencies, session.workspaceId);

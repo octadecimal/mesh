@@ -95,7 +95,9 @@ export function AttemptTimeline({
                         Open {session.title}
                       </button>
                     ) : null}
-                    {!unlinked && onRequestUnlink ? (
+                    {!unlinked &&
+                    attempt.source === 'linked' &&
+                    onRequestUnlink ? (
                       <button
                         className="button button-ghost"
                         type="button"

@@ -48,6 +48,7 @@ type LaunchPending = {
   taskRevision: number;
   lifecycleState: TaskLifecycleState;
   attemptProjection: string;
+  commandSettled: boolean;
 };
 
 const operator = taskActorSchema.parse({
@@ -248,6 +249,7 @@ export function TaskDrawer({
   useEffect(() => {
     if (
       !launchPending ||
+      !launchPending.commandSettled ||
       !task ||
       (task.revision <= launchPending.taskRevision &&
         task.lifecycleState === launchPending.lifecycleState &&
@@ -436,10 +438,17 @@ export function TaskDrawer({
       taskRevision: task.revision,
       lifecycleState: task.lifecycleState,
       attemptProjection,
+      commandSettled: false,
     });
     setError(undefined);
     Promise.resolve()
       .then(() => onCommand(command))
+      .then(() => {
+        if (launchRequestId.current !== id) return;
+        setLaunchPending((current) =>
+          current?.id === id ? { ...current, commandSettled: true } : current,
+        );
+      })
       .catch((caught) => {
         if (launchRequestId.current !== id) return;
         activeLaunchRequestId.current = undefined;

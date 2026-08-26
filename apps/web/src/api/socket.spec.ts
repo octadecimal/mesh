@@ -57,9 +57,15 @@ const project = {
   revision: 1,
 };
 
+const otherProject = {
+  ...project,
+  id: 'project-2',
+  displayName: 'Project two',
+};
+
 const sessionSnapshot = {
   protocolVersion: 1,
-  projects: [project],
+  projects: [project, otherProject],
   workspaces: [],
   sessions: [],
   events: [],
@@ -238,7 +244,7 @@ describe('MeshSocket', () => {
       protocolVersion: 1,
       type: 'subscribe',
       cursors: { 'session-1': 4 },
-      projectCursors: { [project.id]: 3 },
+      projectCursors: { [project.id]: 3, [otherProject.id]: 0 },
     });
     expect(reconnects).toBe(0);
 

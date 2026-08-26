@@ -128,6 +128,16 @@ export class TaskAttemptRepository {
     ).map(toTaskAttempt);
   }
 
+  listBySession(sessionId: string): TaskAttempt[] {
+    return (
+      this.database
+        .prepare(
+          'SELECT * FROM task_attempts WHERE session_id = ? ORDER BY ordinal, id',
+        )
+        .all(sessionId) as TaskAttemptRow[]
+    ).map(toTaskAttempt);
+  }
+
   unlink(
     id: string,
     actor: TaskActor,

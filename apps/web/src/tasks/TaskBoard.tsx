@@ -148,7 +148,7 @@ export function TaskBoard({
       const task = projection.tasksById[taskId];
       const matches =
         task?.lifecycleState === move.nextState &&
-        (move.kind === 'transition' || task.rank === move.nextRank);
+        (move.kind === 'transition' || task.revision > move.sourceRevision);
       if (!matches) conflicts.push(taskId);
     }
     setPendingMoves((current) => {

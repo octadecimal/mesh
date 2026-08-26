@@ -28,12 +28,20 @@ const projectEventStreamsMigration = {
     'utf8',
   ),
 };
+const taskAttemptSafetyMigration = {
+  id: '005-task-attempt-safety',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '005-task-attempt-safety.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
   commandStateMigration,
   taskBoardStorageMigration,
   projectEventStreamsMigration,
+  taskAttemptSafetyMigration,
 ];
 
 export const migrate = (database: Database): void => {

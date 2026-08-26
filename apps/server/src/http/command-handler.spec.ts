@@ -106,6 +106,51 @@ describe('executeCommand', () => {
     command,
   });
 
+  it.each(['system', 'agent'] as const)(
+    'rejects %s actors before project and task mutations',
+    async (actorType) => {
+      const { directory, repositoryPath } = await createRepository();
+      const { repositories, dependencies } = commandDependencies(directory);
+      repositories.projects.create(
+        projectSchema.parse({
+          id: 'p1',
+          displayName: 'Original',
+          repositoryPath,
+          repositoryIdentity: 'repository-1',
+          discoveredAt: now,
+          discoveryMetadata: {},
+        }),
+      );
+      const actor = { type: actorType, id: `${actorType}-1` };
+
+      await expect(
+        executeCommand(
+          projectCommand(`rename-${actorType}`, {
+            type: 'project.rename',
+            payload: {
+              projectId: 'p1',
+              expectedRevision: 1,
+              displayName: 'Unauthorized',
+              actor,
+            },
+          }),
+          dependencies,
+        ),
+      ).rejects.toMatchObject({ code: 'task_transition_unauthorized' });
+      await expect(
+        executeCommand(
+          projectCommand(`task-${actorType}`, {
+            type: 'task.create',
+            payload: { projectId: 'p1', title: 'Unauthorized', actor },
+          }),
+          dependencies,
+        ),
+      ).rejects.toMatchObject({ code: 'task_transition_unauthorized' });
+      expect(repositories.projects.get('p1')?.displayName).toBe('Original');
+      expect(repositories.tasks.listByProject('p1')).toEqual([]);
+    },
+  );
+
   it('imports a Git repository once and reports the existing project for a duplicate identity', async () => {
     const { directory, repositoryPath } = await createRepository();
     const { repositories, dependencies } = commandDependencies(directory);
@@ -476,37 +521,23 @@ describe('executeCommand', () => {
     const sessionId = (launched.result as { session: { id: string } }).session
       .id;
 
-    const unlinked = await executeCommand(
-      projectCommand('attempt-unlink-command', {
-        type: 'task.attempt.unlink',
-        payload: {
-          taskId: 't1',
-          expectedRevision: 2,
-          attemptId,
-          reason: 'Correct the association',
-          actor: { type: 'human', id: 'operator' },
-        },
-      }),
-      dependencies,
-    );
-    const relinked = await executeCommand(
-      projectCommand('attempt-relink-command', {
-        type: 'task.attempt.link',
-        payload: {
-          taskId: 't1',
-          expectedRevision: 2,
-          sessionId,
-          actor: { type: 'human', id: 'operator' },
-        },
-      }),
-      dependencies,
-    );
-
-    expect(unlinked.result).toMatchObject({
-      attempt: { unlinkReason: 'Correct the association' },
-    });
-    expect(relinked.result).toMatchObject({ attempt: { ordinal: 2 } });
-    expect(repositories.attempts.listByTask('t1')).toHaveLength(2);
+    await expect(
+      executeCommand(
+        projectCommand('attempt-unlink-command', {
+          type: 'task.attempt.unlink',
+          payload: {
+            taskId: 't1',
+            expectedRevision: 2,
+            attemptId,
+            reason: 'Correct the association',
+            actor: { type: 'human', id: 'operator' },
+          },
+        }),
+        dependencies,
+      ),
+    ).rejects.toMatchObject({ code: 'invalid_command' });
+    expect(sessionId).toBeTruthy();
+    expect(repositories.attempts.listByTask('t1')).toHaveLength(1);
   });
 
   it('does not decide an already-resolved permission request', async () => {

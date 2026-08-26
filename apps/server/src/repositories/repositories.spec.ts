@@ -304,6 +304,31 @@ describe('repositories', () => {
     ).toThrow();
   });
 
+  it('preserves current and historical attempt rows when session deletion is attempted', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    repos.tasks.create(task());
+    const linked = repos.attempts.createForTask(
+      'task-1',
+      's1',
+      'linked',
+      actor(),
+    );
+    repos.attempts.unlink(
+      linked.id,
+      actor(),
+      'Historical association',
+      '2026-08-24T00:02:00.000Z',
+    );
+
+    expect(() => repos.sessions.remove('s1')).toThrow(
+      'session has task attempt history',
+    );
+    expect(repos.sessions.get('s1')).toBeDefined();
+    expect(repos.attempts.listBySession('s1')).toHaveLength(1);
+  });
+
   it('allocates a generated attempt ordinal after beginning its write transaction', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);

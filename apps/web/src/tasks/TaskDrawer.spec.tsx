@@ -374,14 +374,10 @@ describe('TaskDrawer', () => {
     );
   });
 
-  it('ignores an old launch rejection after a newer launch starts', async () => {
+  it('keeps launch pending through a pre-start attempt event until command settlement', async () => {
     const user = userEvent.setup();
     const first = deferred<unknown>();
-    const second = deferred<unknown>();
-    const onCommand = vi
-      .fn()
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
+    const onCommand = vi.fn().mockReturnValue(first.promise);
     const readyTask = taskSchema.parse({
       ...task,
       lifecycleState: 'ready',
@@ -416,41 +412,60 @@ describe('TaskDrawer', () => {
         ],
       }),
     );
-    await user.click(screen.getByRole('button', { name: 'Launch attempt' }));
-
-    await act(async () => first.reject(new Error('Old launch failed')));
-
     expect(screen.getByRole('status')).toHaveTextContent(
       'waiting for project update',
     );
     expect(
       screen.getByRole('button', { name: 'Launch attempt' }),
     ).toBeDisabled();
-    await act(async () => second.resolve(undefined));
+    await act(async () => first.reject(new Error('Launch failed')));
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it('links only same-project sessions and confirms unlink with a reason', async () => {
     const user = userEvent.setup();
     const onCommand = vi.fn().mockResolvedValue(undefined);
-    renderDrawer({ onCommand });
+    const linkedAttempt = taskAttemptSchema.parse({
+      ...attempts[0],
+      id: 'attempt-linked-current',
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+    });
+    renderDrawer({
+      onCommand,
+      attemptRows: [
+        ...timelineAttempts(),
+        { attempt: linkedAttempt, session: sessions[1] },
+      ],
+      sessionRows: [
+        ...sessions,
+        sessionSchema.parse({
+          ...failedSession,
+          id: 'session-linkable',
+          title: 'Linkable run',
+          lifecycleState: 'completed',
+        }),
+      ],
+    });
 
     const choices = screen.getByLabelText('Existing session');
     expect(
-      within(choices).getByRole('option', { name: 'Old run' }),
+      within(choices).getByRole('option', { name: 'Linkable run' }),
     ).toBeDefined();
     expect(
       within(choices).queryByRole('option', { name: 'Other project' }),
     ).toBeNull();
-    await user.selectOptions(choices, 'session-unlinked');
+    await user.selectOptions(choices, 'session-linkable');
     await user.click(screen.getByRole('button', { name: 'Link session' }));
     expect(onCommand).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'task.attempt.link',
-        payload: expect.objectContaining({ sessionId: 'session-unlinked' }),
+        payload: expect.objectContaining({ sessionId: 'session-linkable' }),
       }),
     );
 
-    await user.click(screen.getByRole('button', { name: 'Unlink attempt 1' }));
+    await user.click(screen.getByRole('button', { name: 'Unlink attempt 2' }));
     expect(
       screen.getByRole('button', { name: 'Confirm unlink' }),
     ).toBeDisabled();
@@ -461,7 +476,7 @@ describe('TaskDrawer', () => {
       expect.objectContaining({
         type: 'task.attempt.unlink',
         payload: expect.objectContaining({
-          attemptId: 'attempt-1',
+          attemptId: 'attempt-linked-current',
           reason: 'Wrong task',
         }),
       }),
@@ -486,6 +501,9 @@ describe('TaskDrawer', () => {
 
     await user.click(screen.getByRole('button', { name: 'Open Failed run' }));
     expect(onOpenSession).toHaveBeenCalledWith(failedSession.id);
+    expect(
+      within(attempts[0]).queryByRole('button', { name: 'Unlink attempt 1' }),
+    ).toBeNull();
   });
 });
 
@@ -596,6 +614,7 @@ type DrawerOptions = {
   onOpenSession?: (sessionId: string) => void;
   withRepair?: boolean;
   attemptRows?: ReturnType<typeof timelineAttempts>;
+  sessionRows?: Session[];
 };
 
 const drawerElement = (options: DrawerOptions = {}) => {
@@ -621,7 +640,7 @@ const drawerElement = (options: DrawerOptions = {}) => {
             ]
           : []
       }
-      sessions={sessions}
+      sessions={options.sessionRows ?? sessions}
       onOpenChange={() => undefined}
       onCommand={onCommand}
       onOpenSession={onOpenSession}

@@ -70,7 +70,10 @@ describe('AttemptService', () => {
         ({
           canonicalPath: path,
           commonDirectory: path,
-          repositoryIdentity: path,
+          repositoryIdentity:
+            path === directory || path.endsWith('/project-1')
+              ? directory
+              : path,
         }) as RepositoryIdentity,
       now: () => now,
       createId,
@@ -192,6 +195,25 @@ describe('AttemptService', () => {
         .after('project-1', 0)
         .map((event) => event.type),
     ).toEqual(['task.attempt_changed', 'task.transitioned']);
+  });
+
+  it('durably admits only one concurrent launch for a task revision', async () => {
+    const { directory, repositories, service } = setup();
+    seedTask(repositories);
+
+    const [first, second] = await Promise.allSettled([
+      service.launch(launchInput(directory)),
+      service.launch({
+        ...launchInput(directory),
+        commandId: 'attempt-launch-2',
+      }),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual([
+      'fulfilled',
+      'rejected',
+    ]);
+    expect(repositories.attempts.listByTask('task-1')).toHaveLength(1);
   });
 
   it('retains the session and attempt but leaves the task ready when startup fails', async () => {
@@ -645,5 +667,25 @@ describe('AttemptService', () => {
       unlinked.attempt,
       second.attempt,
     ]);
+  });
+
+  it('never unlinks an attempt created by launch', async () => {
+    const { directory, repositories, service } = setup();
+    seedTask(repositories);
+    const launched = await service.launch(launchInput(directory));
+
+    await expect(
+      service.unlink({
+        commandId: 'attempt-unlink-launched',
+        taskId: 'task-1',
+        expectedRevision: launched.task.revision,
+        attemptId: launched.attempt.id,
+        reason: 'Must remain attached',
+        actor,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_command' });
+    expect(
+      repositories.attempts.listByTask('task-1')[0]?.unlinkedAt,
+    ).toBeNull();
   });
 });

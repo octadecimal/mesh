@@ -221,143 +221,148 @@ export class AttemptService {
         input.expectedRevision,
         actor,
       );
-      if (!input.workspace) {
-        throw new AttemptInvalidCommandError('Attempt workspace is required');
-      }
-      const workspace = await this.resolveWorkspace(
-        task.projectId,
-        input.workspace,
-      );
-      const occurredAt = this.now();
-      const session = sessionSchema.parse({
-        id: this.createId(),
-        projectId: task.projectId,
-        workspaceId: workspace.id,
-        title: input.title,
-        permissionMode: input.permissionMode,
-        lifecycleState: 'idle',
-        createdAt: occurredAt,
-        updatedAt: occurredAt,
-      });
-
-      const hasWorktreeReservation = workspace.type === 'worktree';
-      if (hasWorktreeReservation) {
-        if (input.workspace.type !== 'worktree') {
-          throw new AttemptInvalidCommandError('Worktree input was expected');
+      this.reserveLaunch(task.id, input.commandId);
+      try {
+        if (!input.workspace) {
+          throw new AttemptInvalidCommandError('Attempt workspace is required');
         }
+        const workspace = await this.resolveWorkspace(
+          task.projectId,
+          input.workspace,
+        );
+        const occurredAt = this.now();
+        const session = sessionSchema.parse({
+          id: this.createId(),
+          projectId: task.projectId,
+          workspaceId: workspace.id,
+          title: input.title,
+          permissionMode: input.permissionMode,
+          lifecycleState: 'idle',
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        });
+
+        const hasWorktreeReservation = workspace.type === 'worktree';
+        if (hasWorktreeReservation) {
+          if (input.workspace.type !== 'worktree') {
+            throw new AttemptInvalidCommandError('Worktree input was expected');
+          }
+          try {
+            this.persistWorkspaceReservation(
+              task,
+              input.expectedRevision,
+              actor,
+              workspace,
+              session,
+            );
+          } catch (error) {
+            if (isStableLaunchConflict(error)) throw error;
+            throw new AttemptAuditUnavailableError(error);
+          }
+          try {
+            await this.createReservedWorktree(input.workspace, workspace);
+          } catch (error) {
+            if (
+              !this.recordWorkspacePreservedDiagnostic(
+                session.id,
+                'workspace_creation',
+                error,
+              )
+            ) {
+              throw new AttemptReconciliationRequiredError(session.id, error);
+            }
+            throw new WorkspacePreservedError(error);
+          }
+        }
+
+        let prepared: {
+          session: Session;
+          attempt: TaskAttempt;
+          event: ProjectEvent;
+        };
         try {
-          this.persistWorkspaceReservation(
+          prepared = this.persistLaunchAudit(
             task,
             input.expectedRevision,
             actor,
             workspace,
             session,
+            occurredAt,
+            hasWorktreeReservation,
           );
         } catch (error) {
+          if (hasWorktreeReservation) {
+            this.recordWorkspacePreservedDiagnostic(
+              session.id,
+              'attempt_audit',
+              error,
+            );
+          }
           if (isStableLaunchConflict(error)) throw error;
+          if (hasWorktreeReservation) {
+            throw new WorkspacePreservedError(error);
+          }
           throw new AttemptAuditUnavailableError(error);
         }
+        this.dependencies.registry.publisher.publishProject(prepared.event);
+
         try {
-          await this.createReservedWorktree(input.workspace, workspace);
+          await this.dependencies.registry.create(prepared.session.id);
         } catch (error) {
           if (
-            !this.recordWorkspacePreservedDiagnostic(
-              session.id,
-              'workspace_creation',
-              error,
-            )
+            !this.recordDiagnostic(prepared.session.id, {
+              kind: 'task_attempt_launch',
+              stage: 'startup',
+              outcome: 'failed',
+              error: errorDetails(error),
+            })
           ) {
-            throw new AttemptReconciliationRequiredError(session.id, error);
+            throw new AttemptReconciliationRequiredError(
+              prepared.session.id,
+              error,
+            );
           }
-          throw new WorkspacePreservedError(error);
+          throw new AttemptStartFailedError(prepared.session.id, error);
         }
-      }
 
-      let prepared: {
-        session: Session;
-        attempt: TaskAttempt;
-        event: ProjectEvent;
-      };
-      try {
-        prepared = this.persistLaunchAudit(
-          task,
-          input.expectedRevision,
-          actor,
-          workspace,
-          session,
-          occurredAt,
-          hasWorktreeReservation,
-        );
-      } catch (error) {
-        if (hasWorktreeReservation) {
-          this.recordWorkspacePreservedDiagnostic(
-            session.id,
-            'attempt_audit',
-            error,
-          );
-        }
-        if (isStableLaunchConflict(error)) throw error;
-        if (hasWorktreeReservation) {
-          throw new WorkspacePreservedError(error);
-        }
-        throw new AttemptAuditUnavailableError(error);
-      }
-      this.dependencies.registry.publisher.publishProject(prepared.event);
-
-      try {
-        await this.dependencies.registry.create(prepared.session.id);
-      } catch (error) {
-        if (
-          !this.recordDiagnostic(prepared.session.id, {
-            kind: 'task_attempt_launch',
-            stage: 'startup',
-            outcome: 'failed',
-            error: errorDetails(error),
-          })
-        ) {
-          throw new AttemptReconciliationRequiredError(
-            prepared.session.id,
-            error,
-          );
-        }
-        throw new AttemptStartFailedError(prepared.session.id, error);
-      }
-
-      try {
-        const transition = await this.dependencies.taskService.transition({
-          commandId: `${input.commandId}:task-transition`,
-          taskId: task.id,
-          expectedRevision: input.expectedRevision,
-          nextState: 'in_progress',
-          actor,
-        });
-        this.dependencies.registry.publisher.publishProject(transition.event);
-        return {
-          task: transition.task,
-          attempt: prepared.attempt,
-          event: transition.event,
-          session: this.dependencies.sessions.get(prepared.session.id),
-        };
-      } catch (error) {
-        let cleanup: 'interrupted' | 'unknown' = 'interrupted';
         try {
-          await this.dependencies.registry.interrupt(prepared.session.id);
-        } catch {
-          cleanup = 'unknown';
+          const transition = await this.dependencies.taskService.transition({
+            commandId: `${input.commandId}:task-transition`,
+            taskId: task.id,
+            expectedRevision: input.expectedRevision,
+            nextState: 'in_progress',
+            actor,
+          });
+          this.dependencies.registry.publisher.publishProject(transition.event);
+          return {
+            task: transition.task,
+            attempt: prepared.attempt,
+            event: transition.event,
+            session: this.dependencies.sessions.get(prepared.session.id),
+          };
+        } catch (error) {
+          let cleanup: 'interrupted' | 'unknown' = 'interrupted';
+          try {
+            await this.dependencies.registry.interrupt(prepared.session.id);
+          } catch {
+            cleanup = 'unknown';
+          }
+          const diagnosed = this.recordDiagnostic(prepared.session.id, {
+            kind: 'task_attempt_launch',
+            stage: 'task_transition',
+            cleanup,
+            error: errorDetails(error),
+          });
+          if (cleanup === 'unknown' || !diagnosed) {
+            throw new AttemptReconciliationRequiredError(
+              prepared.session.id,
+              error,
+            );
+          }
+          throw new AttemptStartFailedError(prepared.session.id, error);
         }
-        const diagnosed = this.recordDiagnostic(prepared.session.id, {
-          kind: 'task_attempt_launch',
-          stage: 'task_transition',
-          cleanup,
-          error: errorDetails(error),
-        });
-        if (cleanup === 'unknown' || !diagnosed) {
-          throw new AttemptReconciliationRequiredError(
-            prepared.session.id,
-            error,
-          );
-        }
-        throw new AttemptStartFailedError(prepared.session.id, error);
+      } finally {
+        this.releaseLaunch(task.id, input.commandId);
       }
     });
   }
@@ -409,7 +414,7 @@ export class AttemptService {
         const attempt = this.dependencies.attempts
           .listByTask(task.id)
           .find((candidate) => candidate.id === input.attemptId);
-        if (!attempt || attempt.unlinkedAt) {
+        if (!attempt || attempt.unlinkedAt || attempt.source !== 'linked') {
           throw new AttemptInvalidCommandError(
             `Current task attempt '${input.attemptId}' was not found`,
           );
@@ -430,6 +435,28 @@ export class AttemptService {
     );
     this.dependencies.registry.publisher.publishProject(result.event);
     return result;
+  }
+
+  private reserveLaunch(taskId: string, commandId: string): void {
+    try {
+      this.dependencies.database
+        .prepare(
+          'INSERT INTO task_attempt_launch_reservations (task_id, command_id, created_at) VALUES (?, ?, ?)',
+        )
+        .run(taskId, commandId, this.now());
+    } catch {
+      const task = this.dependencies.tasks.get(taskId);
+      if (!task) throw new TaskNotFoundError(taskId);
+      throw new TaskRevisionConflictError(task);
+    }
+  }
+
+  private releaseLaunch(taskId: string, commandId: string): void {
+    this.dependencies.database
+      .prepare(
+        'DELETE FROM task_attempt_launch_reservations WHERE task_id = ? AND command_id = ?',
+      )
+      .run(taskId, commandId);
   }
 
   private requireTask(taskId: string, expectedRevision: number): Task {
@@ -472,6 +499,8 @@ export class AttemptService {
     const taskProject = this.requireActiveProject(task.projectId);
     const sessionProject = this.dependencies.projects.get(session.projectId);
     if (!sessionProject) throw new ProjectNotFoundError(session.projectId);
+    const workspace = this.dependencies.workspaces.get(session.workspaceId);
+    if (!workspace) throw new SessionRepositoryMismatchError(session.id);
     let taskIdentity = taskProject.repositoryIdentity;
     let sessionIdentity = sessionProject.repositoryIdentity;
     if (this.dependencies.pathOptions) {
@@ -480,7 +509,7 @@ export class AttemptService {
       [taskIdentity, sessionIdentity] = (
         await Promise.all([
           resolve(taskProject.repositoryPath, this.dependencies.pathOptions),
-          resolve(sessionProject.repositoryPath, this.dependencies.pathOptions),
+          resolve(workspace.path, this.dependencies.pathOptions),
         ])
       ).map((identity) => identity.repositoryIdentity) as [string, string];
     }
@@ -501,11 +530,25 @@ export class AttemptService {
     }
     const workspaceId = this.createId();
     if (input.type === 'shared') {
+      const project = this.requireActiveProject(projectId);
+      const path = await resolveWorkspacePath(input.path, pathOptions);
+      const resolve =
+        this.dependencies.resolveIdentity ?? resolveRepositoryIdentity;
+      const [projectIdentity, workspaceIdentity] = await Promise.all([
+        resolve(project.repositoryPath, pathOptions),
+        resolve(path, pathOptions),
+      ]);
+      if (
+        projectIdentity.repositoryIdentity !==
+        workspaceIdentity.repositoryIdentity
+      ) {
+        throw new SessionRepositoryMismatchError('new');
+      }
       return workspaceSchema.parse({
         id: workspaceId,
         projectId,
         type: 'shared',
-        path: await resolveWorkspacePath(input.path, pathOptions),
+        path,
         cleanupState: 'active',
       });
     }
