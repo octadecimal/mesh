@@ -80,3 +80,20 @@ NX   Successfully ran target typecheck for project server
 ```
 
 Both commands emitted the pre-existing Vite configuration deprecation warning. The Nx command also printed the environment's `pnpm` lookup warning before successfully running `tsc`.
+
+## Fix Round 2
+
+The publish-ordering test now opens a second connection with `openDatabase(repositories.path)`. The publisher callback reads `tasks`, `developer_execution_cycles`, `developer_completion_reports`, and `project_events` through that independent connection and asserts the committed rows and event payload. This avoids observing the command transaction through its own SQLite connection. Production code was unchanged.
+
+```text
+corepack pnpm vitest run apps/server/src/tasks/developer-execution-service.spec.ts apps/server/src/domain/task-lifecycle.spec.ts --config apps/server/vitest.config.ts
+
+Test Files  2 passed (2)
+Tests  25 passed (25)
+
+corepack pnpm nx typecheck server
+
+NX   Successfully ran target typecheck for project server
+```
+
+The focused Vitest command emitted the existing Vite configuration deprecation warning. The Nx invocation printed the environment `pnpm` lookup warning before successfully executing `tsc`.

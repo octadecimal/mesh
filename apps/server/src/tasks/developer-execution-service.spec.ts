@@ -8,9 +8,11 @@ import {
   taskActorSchema,
   taskAttemptSchema,
   taskSchema,
+  type ProjectEvent,
   workspaceSchema,
 } from '@mesh-session-platform/contracts';
 
+import { openDatabase } from '../db/database.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
 import { DeveloperExecutionService } from './developer-execution-service.js';
@@ -29,7 +31,7 @@ describe('DeveloperExecutionService', () => {
 
   const setup = (options?: {
     repositories?: Parameters<typeof createTestRepositories>[0];
-    publisher?: { publishProject: (event: unknown) => void };
+    publisher?: { publishProject: (event: ProjectEvent) => void };
   }) => {
     const repositories = createTestRepositories(options?.repositories);
     cleanups.push(repositories.dispose);
@@ -305,30 +307,60 @@ describe('DeveloperExecutionService', () => {
   it('publishes only after the outcome is durably observable', () => {
     let observed:
       | {
-          task: unknown;
-          cycle: unknown;
-          events: unknown;
-          event: unknown;
+          task: { lifecycle_state: string; revision: number };
+          cycle: {
+            ended_at: string | null;
+            terminal_disposition: string | null;
+            completion_report_id: string | null;
+            terminal_event_id: string | null;
+          };
+          report: { id: string; cycle_id: string };
+          event: { id: string; type: string; payload_json: string };
         }
-      | undefined;
-    let observedRepositories:
-      | ReturnType<typeof createTestRepositories>
       | undefined;
     const { service, repositories, capability, task, cycle } = setup({
       publisher: {
         publishProject: (event) => {
-          if (!observedRepositories)
-            throw new Error('Repositories unavailable');
+          if (!observerDatabase)
+            throw new Error('Observer database unavailable');
           observed = {
-            task: observedRepositories.tasks.get(task.id),
-            cycle: observedRepositories.developerExecutions.getCycle(cycle.id),
-            events: observedRepositories.projectEvents.after(task.projectId, 0),
-            event,
+            task: observerDatabase
+              .prepare(
+                'SELECT lifecycle_state, revision FROM tasks WHERE id = ?',
+              )
+              .get(task.id) as { lifecycle_state: string; revision: number },
+            cycle: observerDatabase
+              .prepare(
+                `
+                SELECT ended_at, terminal_disposition, completion_report_id, terminal_event_id
+                FROM developer_execution_cycles WHERE id = ?
+              `,
+              )
+              .get(cycle.id) as {
+              ended_at: string | null;
+              terminal_disposition: string | null;
+              completion_report_id: string | null;
+              terminal_event_id: string | null;
+            },
+            report: observerDatabase
+              .prepare(
+                'SELECT id, cycle_id FROM developer_completion_reports WHERE id = ?',
+              )
+              .get('report-1') as { id: string; cycle_id: string },
+            event: observerDatabase
+              .prepare(
+                'SELECT id, type, payload_json FROM project_events WHERE id = ?',
+              )
+              .get(event.id) as {
+              id: string;
+              type: string;
+              payload_json: string;
+            },
           };
         },
       },
     });
-    observedRepositories = repositories;
+    const observerDatabase = openDatabase(repositories.path);
 
     const result = service.submitForReview({
       commandId: 'command-publish',
@@ -337,12 +369,22 @@ describe('DeveloperExecutionService', () => {
       report: completion(),
       actor: developer,
     });
+    observerDatabase.close();
 
     expect(observed).toEqual({
-      task: result.task,
-      cycle: result.cycle,
-      events: [result.event],
-      event: result.event,
+      task: { lifecycle_state: 'review', revision: 2 },
+      cycle: {
+        ended_at: now,
+        terminal_disposition: 'submitted_for_review',
+        completion_report_id: 'report-1',
+        terminal_event_id: result.event.id,
+      },
+      report: { id: 'report-1', cycle_id: cycle.id },
+      event: {
+        id: result.event.id,
+        type: 'task.developer_execution_changed',
+        payload_json: JSON.stringify(result.event.payload),
+      },
     });
     expect(
       (result.event.payload as { completionReport: unknown }).completionReport,
