@@ -868,6 +868,8 @@ describe('AttemptService', () => {
     );
     const cycle = launched.cycle;
     if (!cycle) throw new Error('Expected a Developer execution cycle');
+    const session = launched.session;
+    if (!session) throw new Error('Expected a launched Developer session');
 
     await (driver as FakeClaudeSessionDriver).submitForReview(0, {
       id: idSchema.parse('developer-review-command'),
@@ -905,6 +907,12 @@ describe('AttemptService', () => {
       terminalDisposition: 'submitted_for_review',
       terminalCommandId: 'developer-review-command',
     });
+    expect(
+      (driver as FakeClaudeSessionDriver).createdSessions[0]?.interrupted,
+    ).toBe(true);
+    expect(repositories.sessions.get(session.id)?.lifecycleState).toBe(
+      'interrupted',
+    );
   });
 
   it('does not issue Developer controls when the launch audit fails', async () => {

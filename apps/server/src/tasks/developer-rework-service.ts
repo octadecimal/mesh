@@ -372,6 +372,7 @@ export class DeveloperReworkService {
             report,
             actor: agentActor,
           });
+          await this.dependencies.registry.interrupt(attempt.sessionId);
         },
         markBlocked: async (report) => {
           this.dependencies.developerExecutionService.markBlocked({
@@ -381,6 +382,7 @@ export class DeveloperReworkService {
             report,
             actor: agentActor,
           });
+          await this.dependencies.registry.interrupt(attempt.sessionId);
         },
       },
     };

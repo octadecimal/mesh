@@ -6,9 +6,11 @@ import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 
 import BetterSqlite3 from 'better-sqlite3';
-import { test as base } from '@playwright/test';
+import { expect, test as base } from '@playwright/test';
 import {
   sessionSnapshotSchema,
+  type DeveloperBlockerReport,
+  type DeveloperCompletionReport,
   type MutatingCommand,
   type SessionSnapshot,
 } from '@mesh-session-platform/contracts';
@@ -37,6 +39,11 @@ type FakeClaudeSessionDriverControl = {
     workspacePath?: string;
     permissionMode?: string;
   }>;
+  submitForReview(
+    index: number,
+    report: DeveloperCompletionReport,
+  ): Promise<void>;
+  markBlocked(index: number, report: DeveloperBlockerReport): Promise<void>;
 };
 
 type RunningServer = {
@@ -65,12 +72,12 @@ const initializeRepository = (path: string) => {
 };
 
 const waitUntil = async (predicate: () => boolean, timeoutMs = 5_000) => {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline)
-      throw new Error('Timed out waiting for fake Claude state');
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+  await expect
+    .poll(predicate, {
+      timeout: timeoutMs,
+      message: 'Timed out waiting for observable fake Claude state',
+    })
+    .toBe(true);
 };
 
 export type FakeClaudeHarness = {
@@ -236,4 +243,4 @@ export const test = base.extend<{ harness: FakeClaudeHarness }>({
   },
 });
 
-export { expect } from '@playwright/test';
+export { expect };
