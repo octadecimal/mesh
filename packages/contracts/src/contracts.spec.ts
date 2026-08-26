@@ -611,6 +611,22 @@ describe('session platform contracts', () => {
     };
 
     expect(projectEventSchema.parse(event)).toMatchObject(event);
+    const { title: _legacyTitle, ...legacyTaskSnapshot } =
+      event.payload.cycle.taskSnapshot;
+    const legacyEvent = {
+      ...event,
+      id: 'project-event-legacy-developer-cycle',
+      payload: {
+        ...event.payload,
+        cycle: {
+          ...event.payload.cycle,
+          taskSnapshot: legacyTaskSnapshot,
+        },
+      },
+    };
+    expect(
+      projectEventSchema.parse(legacyEvent).payload.cycle.taskSnapshot.title,
+    ).toBe('');
     expect(() =>
       projectEventSchema.parse({
         ...event,

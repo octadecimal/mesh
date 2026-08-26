@@ -129,6 +129,7 @@ describe('migrate', () => {
       { id: '005-task-attempt-safety' },
       { id: '006-task-attempt-launch-recovery' },
       { id: '007-developer-execution' },
+      { id: '008-developer-cycle-task-title' },
     ]);
     expect(
       database
@@ -184,7 +185,165 @@ describe('migrate', () => {
       { id: '005-task-attempt-safety' },
       { id: '006-task-attempt-launch-recovery' },
       { id: '007-developer-execution' },
+      { id: '008-developer-cycle-task-title' },
     ]);
+  });
+
+  it('applies the cycle-title migration to databases with 007 already recorded', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-cycle-title-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-25T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+    ];
+
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+
+    database
+      .prepare(
+        `INSERT INTO projects (
+          id, display_name, repository_path, discovered_at, discovery_metadata_json
+        ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'project-title-upgrade',
+        'Title upgrade',
+        'C:/code/title-upgrade',
+        appliedAt,
+        '{}',
+      );
+    database
+      .prepare(
+        `INSERT INTO workspaces (
+          id, project_id, type, path, cleanup_state
+        ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'workspace-title-upgrade',
+        'project-title-upgrade',
+        'shared',
+        'C:/code/title-upgrade',
+        'active',
+      );
+    database
+      .prepare(
+        `INSERT INTO sessions (
+          id, project_id, workspace_id, title, permission_mode,
+          lifecycle_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'session-title-upgrade',
+        'project-title-upgrade',
+        'workspace-title-upgrade',
+        'Title upgrade',
+        'interactive',
+        'running',
+        appliedAt,
+        appliedAt,
+      );
+    database
+      .prepare(
+        `INSERT INTO tasks (
+          id, project_id, title, description, acceptance_criteria_json,
+          priority, rank, lifecycle_state, labels_json, notes, blocked_json,
+          revision, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'task-title-upgrade',
+        'project-title-upgrade',
+        'Recover title',
+        'Recover the snapshot title.',
+        '[]',
+        'normal',
+        'a',
+        'in_progress',
+        '[]',
+        '',
+        'null',
+        1,
+        appliedAt,
+        appliedAt,
+      );
+    database
+      .prepare(
+        `INSERT INTO task_attempts (
+          id, task_id, session_id, ordinal, source, actor_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'attempt-title-upgrade',
+        'task-title-upgrade',
+        'session-title-upgrade',
+        1,
+        'launched',
+        '{"type":"human","id":"human-1"}',
+        appliedAt,
+      );
+    database
+      .prepare(
+        `INSERT INTO developer_execution_cycles (
+          id, attempt_id, ordinal, mode, authorized_by_json,
+          authorization_command_id, policy_version, project_instructions_content,
+          project_instructions_revision, task_snapshot_revision,
+          task_snapshot_description, task_snapshot_acceptance_criteria_json,
+          workspace_id, permission_mode, started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'cycle-title-upgrade',
+        'attempt-title-upgrade',
+        1,
+        'new',
+        '{"type":"human","id":"human-1"}',
+        'command-title-upgrade',
+        'developer-policy-v1',
+        '',
+        1,
+        1,
+        'Recover the snapshot title.',
+        '[]',
+        'workspace-title-upgrade',
+        'interactive',
+        appliedAt,
+      );
+
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM pragma_table_info('developer_execution_cycles')",
+        )
+        .all(),
+    ).not.toEqual(expect.arrayContaining([{ name: 'task_snapshot_title' }]));
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare(
+          'SELECT task_snapshot_title FROM developer_execution_cycles WHERE id = ?',
+        )
+        .get('cycle-title-upgrade'),
+    ).toEqual({ task_snapshot_title: 'Recover title' });
+    expect(
+      database.prepare('SELECT id FROM schema_migrations ORDER BY id').all(),
+    ).toContainEqual({ id: '008-developer-cycle-task-title' });
   });
 
   it('serializes simultaneous startup migration attempts from two worker connections', async () => {
@@ -221,6 +380,10 @@ describe('migrate', () => {
     copyFileSync(
       join(__dirname, 'migrations', '007-developer-execution.sql'),
       join(directory, 'migrations', '007-developer-execution.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '008-developer-cycle-task-title.sql'),
+      join(directory, 'migrations', '008-developer-cycle-task-title.sql'),
     );
     buildSync({
       bundle: true,
@@ -274,6 +437,7 @@ describe('migrate', () => {
         { id: '005-task-attempt-safety' },
         { id: '006-task-attempt-launch-recovery' },
         { id: '007-developer-execution' },
+        { id: '008-developer-cycle-task-title' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -347,6 +511,7 @@ describe('migrate', () => {
       { id: '005-task-attempt-safety' },
       { id: '006-task-attempt-launch-recovery' },
       { id: '007-developer-execution' },
+      { id: '008-developer-cycle-task-title' },
     ]);
   });
 
@@ -788,6 +953,7 @@ describe('migrate', () => {
         { id: '005-task-attempt-safety' },
         { id: '006-task-attempt-launch-recovery' },
         { id: '007-developer-execution' },
+        { id: '008-developer-cycle-task-title' },
       ]);
       expect(
         database

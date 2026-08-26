@@ -49,6 +49,13 @@ const developerExecutionMigration = {
     'utf8',
   ),
 };
+const developerCycleTaskTitleMigration = {
+  id: '008-developer-cycle-task-title',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '008-developer-cycle-task-title.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -58,6 +65,7 @@ const migrations = [
   taskAttemptSafetyMigration,
   taskAttemptLaunchRecoveryMigration,
   developerExecutionMigration,
+  developerCycleTaskTitleMigration,
 ];
 
 export const migrate = (database: Database): void => {

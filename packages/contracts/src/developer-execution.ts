@@ -22,7 +22,7 @@ export const acceptanceCriterionResultSchema = z.object({
 const taskSnapshotSchema = z
   .object({
     revision: z.number().int().positive(),
-    title: z.string().trim().min(1),
+    title: z.string().trim().min(1).default(''),
     description: z.string(),
     acceptanceCriteria: z.array(
       z.object({ id: idSchema, text: z.string().trim().min(1) }),
