@@ -18,6 +18,7 @@ import { openDatabase, type Database } from './database.js';
 import { migrate } from './migrate.js';
 import { CommandRepository } from '../repositories/command-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
+import { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import { waitForWorkerMessage } from '../test/wait-for-worker-message.js';
 
 const runProductionBuild = (
@@ -309,6 +310,67 @@ describe('migrate', () => {
         'review_automation_updated_at',
       ]),
     );
+
+    const currentActions = new QaExecutionRepository(database);
+    expect(
+      currentActions.completeAutomationAction('legacy-action', {
+        status: 'completed',
+        errorCode: null,
+        completedAt: '2026-08-26T01:00:00.000Z',
+      }),
+    ).toMatchObject({ status: 'completed' });
+    expect(
+      database
+        .prepare(
+          'SELECT status, error_code, completed_at FROM review_automation_actions WHERE id = ?',
+        )
+        .get('legacy-action'),
+    ).toEqual({
+      status: 'completed',
+      error_code: null,
+      completed_at: '2026-08-26T01:00:00.000Z',
+    });
+
+    database
+      .prepare(
+        `INSERT INTO review_automation_actions (
+          id, idempotency_key, project_id, task_id, attempt_id, source_cycle_id,
+          action_kind, generation, status, error_code, created_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'rollback-action',
+        'rollback-action-key',
+        'legacy-project',
+        'legacy-task',
+        'legacy-attempt',
+        'legacy-qa-cycle',
+        'resume_developer',
+        3,
+        'pending',
+        null,
+        appliedAt,
+        null,
+      );
+    database
+      .prepare(
+        `UPDATE review_automation_actions
+         SET status = 'failed', error_code = 'rollback_failure', completed_at = ?
+         WHERE id = ?`,
+      )
+      .run('2026-08-26T02:00:00.000Z', 'rollback-action');
+
+    migrate(database);
+
+    expect(
+      new QaExecutionRepository(database).getAutomationAction(
+        'rollback-action',
+      ),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'rollback_failure',
+      completedAt: '2026-08-26T02:00:00.000Z',
+    });
   });
 
   it('allows two connections to apply startup migrations without a duplicate ledger entry', () => {

@@ -155,10 +155,17 @@ describe('ReviewAutomationService', () => {
     );
 
     const launch = vi.fn(async () => ({ taskId: task.id }));
-    const resume = vi.fn(async () => {
+    const completedResumeCommands = new Set<string>();
+    let resumeStarts = 0;
+    const resume = vi.fn(async (input: { commandId: string }) => {
+      if (completedResumeCommands.has(input.commandId)) {
+        return { taskId: task.id };
+      }
       if (options?.resumeFailure) throw options.resumeFailure;
       const current = repositories.tasks.get(task.id);
       if (!current) throw new Error('Expected current task');
+      resumeStarts += 1;
+      completedResumeCommands.add(input.commandId);
       repositories.tasks.update(
         { ...current, lifecycleState: 'in_progress', updatedAt: now },
         current.revision,
@@ -246,15 +253,47 @@ describe('ReviewAutomationService', () => {
       })!;
     };
 
+    const pendingResumeAction = (cycle: ReturnType<typeof rejectedCycle>) => {
+      const action = reviewAutomationActionSchema.parse({
+        id: 'resume-action-1',
+        idempotencyKey: `${task.id}:${attempt.id}:${cycle.id}:resume_developer:2`,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        sourceCycleId: cycle.id,
+        actionKind: 'resume_developer',
+        generation: 2,
+        status: 'pending',
+        errorCode: null,
+        createdAt: now,
+        completedAt: null,
+      });
+      return repositories.qaExecutions.insertAutomationAction(action);
+    };
+
+    const recordCompletedResume = (commandId: string) => {
+      completedResumeCommands.add(commandId);
+      resumeStarts += 1;
+      const current = repositories.tasks.get(task.id);
+      if (!current) throw new Error('Expected current task');
+      repositories.tasks.update(
+        { ...current, lifecycleState: 'in_progress', updatedAt: now },
+        current.revision,
+      );
+    };
+
     return {
       attempt,
       developerCycle,
       developerSession,
       launch,
       project,
+      pendingResumeAction,
+      recordCompletedResume,
       rejectedCycle,
       repositories,
       resume,
+      resumeStarts: () => resumeStarts,
       service,
       task,
     };
@@ -340,22 +379,7 @@ describe('ReviewAutomationService', () => {
   it('continues a rejected verdict through the same-session resume boundary once', async () => {
     const context = setup();
     const cycle = context.rejectedCycle();
-    context.repositories.qaExecutions.insertAutomationAction(
-      reviewAutomationActionSchema.parse({
-        id: 'resume-action-1',
-        idempotencyKey: `${context.task.id}:${context.attempt.id}:${cycle.id}:resume_developer:2`,
-        projectId: context.project.id,
-        taskId: context.task.id,
-        attemptId: context.attempt.id,
-        sourceCycleId: cycle.id,
-        actionKind: 'resume_developer',
-        generation: 2,
-        status: 'pending',
-        errorCode: null,
-        createdAt: now,
-        completedAt: null,
-      }),
-    );
+    context.pendingResumeAction(cycle);
 
     const first = await context.service.continueRejectedVerdict({
       taskId: context.task.id,
@@ -384,22 +408,7 @@ describe('ReviewAutomationService', () => {
   it('fails the durable action and pauses after resume failure', async () => {
     const context = setup({ resumeFailure: new Error('resume unavailable') });
     const cycle = context.rejectedCycle();
-    context.repositories.qaExecutions.insertAutomationAction(
-      reviewAutomationActionSchema.parse({
-        id: 'resume-action-1',
-        idempotencyKey: `${context.task.id}:${context.attempt.id}:${cycle.id}:resume_developer:2`,
-        projectId: context.project.id,
-        taskId: context.task.id,
-        attemptId: context.attempt.id,
-        sourceCycleId: cycle.id,
-        actionKind: 'resume_developer',
-        generation: 2,
-        status: 'pending',
-        errorCode: null,
-        createdAt: now,
-        completedAt: null,
-      }),
-    );
+    context.pendingResumeAction(cycle);
 
     await expect(
       context.service.continueRejectedVerdict({
@@ -418,4 +427,72 @@ describe('ReviewAutomationService', () => {
       context.repositories.qaExecutions.listPendingAutomationActions(),
     ).toEqual([]);
   });
+
+  it('terminalizes a pending action by replaying a completed downstream resume', async () => {
+    const context = setup();
+    const cycle = context.rejectedCycle();
+    const action = context.pendingResumeAction(cycle);
+    context.recordCompletedResume(action.idempotencyKey);
+
+    const recovered = await context.service.continueRejectedVerdict({
+      taskId: context.task.id,
+      cycleId: cycle.id,
+    });
+
+    expect(recovered).toMatchObject({ id: action.id, status: 'completed' });
+    expect(context.resumeStarts()).toBe(1);
+    expect(context.resume).toHaveBeenCalledTimes(1);
+    expect(
+      context.repositories.qaExecutions.listPendingAutomationActions(),
+    ).toEqual([]);
+  });
+
+  it.each(['policy', 'state'] as const)(
+    'fails and pauses a pending action after a changed %s preflight',
+    async (change) => {
+      const context = setup({
+        resumeFailure: new Error(`changed ${change} preflight`),
+      });
+      const cycle = context.rejectedCycle();
+      const action = context.pendingResumeAction(cycle);
+      if (change === 'policy') {
+        context.repositories.projects.updateQaConfiguration(
+          context.project.id,
+          context.project.qaConfiguration.revision,
+          {
+            instructions: {
+              content: context.project.qaConfiguration.instructions.content,
+            },
+            reviewPolicy: 'manual',
+          },
+          human,
+        );
+      } else {
+        const current = context.repositories.tasks.get(context.task.id);
+        if (!current) throw new Error('Expected current task');
+        context.repositories.tasks.update(
+          { ...current, lifecycleState: 'in_progress', updatedAt: now },
+          current.revision,
+        );
+      }
+
+      await expect(
+        context.service.continueRejectedVerdict({
+          taskId: context.task.id,
+          cycleId: cycle.id,
+        }),
+      ).rejects.toThrow(`changed ${change} preflight`);
+
+      expect(context.resumeStarts()).toBe(0);
+      expect(
+        context.repositories.qaExecutions.getAutomationAction(action.id),
+      ).toMatchObject({ status: 'failed' });
+      expect(
+        context.repositories.qaExecutions.listPendingAutomationActions(),
+      ).toEqual([]);
+      expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+        reviewAutomation: { status: 'paused' },
+      });
+    },
+  );
 });

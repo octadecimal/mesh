@@ -334,27 +334,17 @@ export class ReviewAutomationService {
     input: SourceInput,
   ): Promise<ReviewAutomationAction> {
     const knownCycle = this.dependencies.qaExecutions.getCycle(input.cycleId);
-    if (knownCycle && knownCycle.taskId === input.taskId) {
-      const knownKey = this.actionKey(
-        knownCycle.taskId,
-        knownCycle.attemptId,
-        knownCycle.id,
-        'resume_developer',
-        knownCycle.automationGeneration,
+    if (!knownCycle || knownCycle.taskId !== input.taskId) {
+      throw new ReviewAutomationPausedError(
+        'The rejected QA source cycle is unavailable.',
       );
-      const existing =
-        this.dependencies.qaExecutions.getAutomationActionByIdempotencyKey(
-          knownKey,
-        );
-      if (existing && existing.status !== 'pending') return existing;
     }
-    const context = this.requireRejectedSource(input);
     const key = this.actionKey(
-      context.task.id,
-      context.attempt.id,
-      input.cycleId,
+      knownCycle.taskId,
+      knownCycle.attemptId,
+      knownCycle.id,
       'resume_developer',
-      context.cycle.automationGeneration,
+      knownCycle.automationGeneration,
     );
     const action =
       this.dependencies.qaExecutions.getAutomationActionByIdempotencyKey(key);
@@ -366,23 +356,36 @@ export class ReviewAutomationService {
     if (action.status !== 'pending') return action;
 
     try {
-      const current = this.requireRejectedSource(input);
+      if (
+        action.taskId !== knownCycle.taskId ||
+        action.attemptId !== knownCycle.attemptId ||
+        action.sourceCycleId !== knownCycle.id ||
+        action.generation !== knownCycle.automationGeneration ||
+        knownCycle.terminalDisposition !== 'rejected' ||
+        knownCycle.endedAt === null ||
+        knownCycle.rejectionOrdinal >= 2
+      ) {
+        throw new ReviewAutomationPausedError(
+          'The rejected QA source cycle is stale or incomplete.',
+        );
+      }
       const report = this.dependencies.qaExecutions.getReport(
-        current.cycle.reportId ?? '',
+        knownCycle.reportId ?? '',
       );
       if (!report || report.disposition !== 'rejected') {
         throw new ReviewAutomationPausedError(
           'The rejected QA report is unavailable.',
         );
       }
+      const currentTask = this.requireTask(action.taskId);
       const failedEvidence = report.criterionResults
         .filter(({ status }) => status !== 'passed')
         .map(({ criterionId, evidence }) => `${criterionId}: ${evidence}`)
         .join('\n');
       await this.dependencies.developerReworkService.resume({
         commandId: action.idempotencyKey,
-        taskId: current.task.id,
-        expectedRevision: current.task.revision,
+        taskId: action.taskId,
+        expectedRevision: currentTask.revision,
         kind: 'rejection',
         feedback:
           failedEvidence ||
@@ -390,8 +393,8 @@ export class ReviewAutomationService {
           'QA rejected the submission.',
         actor: policyActor,
         automation: {
-          sourceCycleId: current.cycle.id,
-          generation: current.cycle.automationGeneration,
+          sourceCycleId: knownCycle.id,
+          generation: knownCycle.automationGeneration,
         },
       });
       return this.finishAction(action, 'completed');
@@ -431,42 +434,6 @@ export class ReviewAutomationService {
       );
     }
     return { task, attempt };
-  }
-
-  private requireRejectedSource(
-    input: SourceInput,
-  ): AutomationContext & { cycle: QaExecutionCycle } {
-    const task = this.requireTask(input.taskId);
-    const project = this.dependencies.projects.get(task.projectId);
-    if (
-      !project ||
-      project.qaConfiguration.reviewPolicy !== 'autonomous_review' ||
-      task.reviewAutomation.status !== 'enabled' ||
-      task.lifecycleState !== 'review' ||
-      task.blocked
-    ) {
-      throw new ReviewAutomationPausedError(
-        'The task is no longer eligible for autonomous Developer resume.',
-      );
-    }
-    const attempt = this.currentAttempt(task.id);
-    const cycles = this.dependencies.qaExecutions.listCyclesForAttempts([
-      attempt.id,
-    ]);
-    const cycle = cycles.at(-1);
-    if (
-      !cycle ||
-      cycle.id !== input.cycleId ||
-      cycle.taskId !== task.id ||
-      cycle.terminalDisposition !== 'rejected' ||
-      cycle.endedAt === null ||
-      cycle.automationGeneration !== task.reviewAutomation.generation
-    ) {
-      throw new ReviewAutomationPausedError(
-        'The rejected QA source cycle is stale or incomplete.',
-      );
-    }
-    return { task, attempt, cycle };
   }
 
   private requireTask(taskId: string): Task {
