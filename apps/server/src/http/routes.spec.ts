@@ -928,6 +928,7 @@ describe('HTTP command routes', () => {
       unlinkedAt: null,
       unlinkedBy: null,
       unlinkReason: null,
+      role: null,
     });
     fixture.repositories.attempts.create({
       id: id('a2'),
@@ -940,6 +941,7 @@ describe('HTTP command routes', () => {
       unlinkedAt: null,
       unlinkedBy: null,
       unlinkReason: null,
+      role: null,
     });
     fixture.repositories.transitions.append({
       id: id('transition-1'),

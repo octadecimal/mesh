@@ -361,7 +361,7 @@ describe('repositories', () => {
       repos.projects.updateDeveloperInstructions('p1', 1, {
         content: 'Stale overwrite.',
         updatedAt: '2026-08-25T00:09:00.000Z',
-        updatedBy: { type: 'human', id: 'user-1' },
+        updatedBy: actor(),
       }),
     ).toBeUndefined();
     expect(repos.projects.get('p1')?.developerInstructions.content).toBe(
