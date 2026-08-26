@@ -505,6 +505,7 @@ function ConnectedApp({
               ) : null}
             </header>
             <DeveloperInstructions
+              key={activeProject.id}
               project={activeProject}
               disabled={
                 Boolean(activeProject.archivedAt) ||

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import type { Project } from '@mesh-session-platform/contracts';
 
@@ -30,23 +30,27 @@ export function DeveloperInstructions({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [conflictRevision, setConflictRevision] = useState<number>();
+  const projectId = useRef(project.id);
+  const dirty = useRef(false);
   const waitingForResync =
     conflictRevision !== undefined && project.revision < conflictRevision;
 
   useEffect(() => {
-    setDraft(canonical);
-    setError(undefined);
-    setConflictRevision((current) =>
-      current !== undefined && project.revision >= current
-        ? undefined
-        : current,
-    );
-  }, [
-    canonical,
-    project.id,
-    project.developerInstructions.revision,
-    project.revision,
-  ]);
+    if (projectId.current !== project.id) {
+      projectId.current = project.id;
+      dirty.current = false;
+      setDraft(canonical);
+      setError(undefined);
+      setConflictRevision(undefined);
+      return;
+    }
+    if (!dirty.current || draft === canonical) {
+      dirty.current = false;
+      setDraft(canonical);
+      setError(undefined);
+      setConflictRevision(undefined);
+    }
+  }, [canonical, draft, project.id]);
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -103,7 +107,10 @@ export function DeveloperInstructions({
             aria-label="Developer instructions"
             disabled={disabled || pending || waitingForResync}
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => {
+              dirty.current = event.target.value !== canonical;
+              setDraft(event.target.value);
+            }}
           />
         </label>
         <div className="dialog-actions">
@@ -114,8 +121,10 @@ export function DeveloperInstructions({
               disabled || pending || waitingForResync || draft === canonical
             }
             onClick={() => {
+              dirty.current = false;
               setDraft(canonical);
               setError(undefined);
+              setConflictRevision(undefined);
             }}
           >
             Cancel

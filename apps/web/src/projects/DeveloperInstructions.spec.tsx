@@ -102,7 +102,7 @@ describe('DeveloperInstructions', () => {
       message: 'The project was updated.',
       details: { project: { ...project, revision: 4 } },
     });
-    render(
+    const { rerender } = render(
       <DeveloperInstructions
         project={project}
         disabled={false}
@@ -122,6 +122,27 @@ describe('DeveloperInstructions', () => {
     expect(
       screen.getByRole('button', { name: 'Save instructions' }),
     ).toBeDisabled();
+
+    rerender(
+      <DeveloperInstructions
+        project={{
+          ...project,
+          revision: 4,
+          developerInstructions: {
+            ...project.developerInstructions,
+            content: 'Server instructions.',
+            revision: 3,
+          },
+        }}
+        disabled={false}
+        onSave={onSave}
+      />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'The server is at revision 4. Waiting for project resync.',
+    );
+    expect(input).toHaveValue('Keep my draft.');
   });
 });
 

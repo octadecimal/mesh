@@ -263,6 +263,66 @@ describe('App', () => {
     await waitFor(() => expect(instructions).toBeDisabled());
   });
 
+  it('does not carry a pending developer-instruction save into a switched project', async () => {
+    const user = userEvent.setup();
+    const pendingSave = deferred<{
+      protocolVersion: 1;
+      commandType: string;
+      result: Record<string, never>;
+      warnings: [];
+    }>();
+    const store = createMeshStore(crossProjectSnapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockImplementation((projectId) =>
+      Promise.resolve({
+        protocolVersion: 1,
+        project: projectId === 'p1' ? project : projectB,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 1,
+      }),
+    );
+    api.command.mockImplementation((command) =>
+      command.type === 'project.developer_instructions.update'
+        ? pendingSave.promise
+        : Promise.resolve({
+            protocolVersion: 1,
+            commandType: command.type,
+            result: {},
+            warnings: [],
+          }),
+    );
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    const projectAInstructions = await screen.findByLabelText(
+      'Developer instructions',
+    );
+    await user.type(projectAInstructions, 'Pending A.');
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }));
+    expect(
+      screen.getByRole('button', { name: 'Saving instructions…' }),
+    ).toBeDisabled();
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    const projectBInstructions = await screen.findByLabelText(
+      'Developer instructions',
+    );
+    expect(projectBInstructions).toHaveValue('Project B instructions.');
+    expect(projectBInstructions).toBeEnabled();
+    expect(
+      screen.queryByRole('button', { name: 'Saving instructions…' }),
+    ).toBeNull();
+
+    pendingSave.reject(new Error('Project A save failed.'));
+    await waitFor(() =>
+      expect(screen.queryByText('Project A save failed.')).toBeNull(),
+    );
+  });
+
   it('keeps an archived project board read-only and restores it explicitly', async () => {
     const user = userEvent.setup();
     const archivedStore = createMeshStore({
@@ -541,6 +601,10 @@ const projectB = {
   id: 'p2',
   displayName: 'Other',
   repositoryPath: '/other',
+  developerInstructions: {
+    ...project.developerInstructions,
+    content: 'Project B instructions.',
+  },
 };
 const workspaceB = {
   ...workspace,
