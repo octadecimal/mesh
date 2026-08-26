@@ -121,6 +121,51 @@ describe('project snapshot read consistency', () => {
     });
   });
 
+  it('projects manual QA defaults and the current QA configuration', () => {
+    const fixture = seed();
+
+    expect(
+      buildProjectSnapshot(fixture.repositories, fixture.project.id).project
+        .qaConfiguration,
+    ).toEqual({
+      instructions: {
+        content: '',
+        revision: 1,
+        updatedAt: now,
+        updatedBy: null,
+      },
+      reviewPolicy: 'manual',
+      revision: 1,
+      updatedAt: now,
+      updatedBy: null,
+    });
+
+    const updated = fixture.repositories.projects.updateQaConfiguration(
+      fixture.project.id,
+      1,
+      {
+        instructions: { content: 'Check every acceptance criterion.' },
+        reviewPolicy: 'autonomous_review',
+      },
+      { type: 'human', id: idSchema.parse('qa-operator') },
+    );
+    if (!updated) throw new Error('Expected QA configuration to update');
+
+    expect(
+      buildProjectSnapshot(fixture.repositories, fixture.project.id).project
+        .qaConfiguration,
+    ).toMatchObject({
+      instructions: {
+        content: 'Check every acceptance criterion.',
+        revision: 2,
+        updatedBy: { type: 'human', id: 'qa-operator' },
+      },
+      reviewPolicy: 'autonomous_review',
+      revision: 2,
+      updatedBy: { type: 'human', id: 'qa-operator' },
+    });
+  });
+
   it('returns repair records in snapshots and durable project history', () => {
     const fixture = seed();
     const repair = attemptRepairSchema.parse({

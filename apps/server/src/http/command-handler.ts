@@ -467,6 +467,60 @@ const executeDeveloperInstructionUpdate = (
   return commandResponse;
 };
 
+type QaConfigurationUpdateCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'project.qa_configuration.update' }
+>;
+
+const executeQaConfigurationUpdate = (
+  command: QaConfigurationUpdateCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): CommandResponse => {
+  const existing =
+    dependencies.commands.getExisting<CommandResponse>(idempotencyKey);
+  if (existing.found) return existing.response;
+
+  let event: ProjectEvent | undefined;
+  const commandResponse =
+    dependencies.commands.executeOnceInImmediateTransaction(
+      idempotencyKey,
+      () => {
+        const project = requireActiveProject(
+          dependencies,
+          command.payload.projectId,
+        );
+        const updated = dependencies.projects.updateQaConfiguration(
+          project.id,
+          command.payload.expectedRevision,
+          {
+            instructions: { content: command.payload.content },
+            reviewPolicy: command.payload.reviewPolicy,
+          },
+          command.payload.actor,
+        );
+        if (!updated) {
+          throw new CommandError(
+            'project_revision_conflict',
+            `Project '${project.id}' has changed`,
+            { project: dependencies.projects.get(project.id) },
+          );
+        }
+        event = dependencies.projectEvents.appendInTransaction(project.id, {
+          protocolVersion: 1,
+          id: (dependencies.createId ?? randomUUID)(),
+          projectId: project.id,
+          occurredAt: updated.qaConfiguration.updatedAt,
+          type: 'project.qa_configuration_changed',
+          payload: { project: updated },
+        });
+        return response(command.type, updated);
+      },
+    );
+  if (event) dependencies.registry.publisher.publishProject(event);
+  return commandResponse;
+};
+
 const assertMilestoneTwoHumanActor = (
   command: Extract<Command, { idempotencyKey: string }>['command'],
 ) => {
@@ -1025,6 +1079,13 @@ export const executeCommand = async (
 ): Promise<CommandResponse> => {
   const command = commandSchema.parse(input);
   if ('idempotencyKey' in command) {
+    if (command.command.type === 'project.qa_configuration.update') {
+      return executeQaConfigurationUpdate(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
     if (command.command.type === 'project.developer_instructions.update') {
       return executeDeveloperInstructionUpdate(
         command.command,

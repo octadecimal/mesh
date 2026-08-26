@@ -318,6 +318,191 @@ describe('executeCommand', () => {
     });
   });
 
+  it.each(['system', 'agent'] as const)(
+    'rejects %s actors from updating QA configuration',
+    async (actorType) => {
+      const { directory } = await createRepository();
+      const { repositories, dependencies } = commandDependencies(directory);
+      repositories.projects.create(
+        projectSchema.parse({
+          id: 'p1',
+          displayName: 'Project',
+          repositoryPath: directory,
+          repositoryIdentity: 'repository-p1',
+          discoveredAt: now,
+          discoveryMetadata: {},
+        }),
+      );
+
+      const error = await executeCommand(
+        projectCommand(`qa-configuration-${actorType}`, {
+          type: 'project.qa_configuration.update',
+          payload: {
+            projectId: 'p1',
+            expectedRevision: 1,
+            content: 'Do not mutate this project.',
+            reviewPolicy: 'autonomous_review',
+            actor: { type: actorType, id: `${actorType}-1` },
+          },
+        }),
+        dependencies,
+      ).catch((caught: unknown) => caught);
+
+      expect(toHttpError(error)).toMatchObject({
+        statusCode: 400,
+        body: { error: { code: 'invalid_command' } },
+      });
+      expect(repositories.projects.get('p1')?.qaConfiguration).toMatchObject({
+        instructions: { content: '', revision: 1, updatedBy: null },
+        reviewPolicy: 'manual',
+        revision: 1,
+        updatedBy: null,
+      });
+    },
+  );
+
+  it('updates QA configuration by its own revision before publishing and reuses the original response', async () => {
+    const { directory } = await createRepository();
+    const ids = ['qa-configuration-event'];
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => ids.shift() ?? 'unexpected-id',
+    );
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const renamedInstructions =
+      repositories.projects.updateDeveloperInstructions(
+        project.id,
+        project.revision,
+        {
+          content: 'The project revision can change independently.',
+          updatedAt: now,
+          updatedBy: { type: 'human', id: 'operator' },
+        },
+      );
+    if (!renamedInstructions) throw new Error('Expected project update');
+
+    const publishedAfterPersistence: boolean[] = [];
+    dependencies.registry.publisher.subscribeProject('p1', (event) => {
+      publishedAfterPersistence.push(
+        repositories.projectEvents
+          .after('p1', 0)
+          .some(({ id }) => id === event.id),
+      );
+    });
+    const command = projectCommand('qa-configuration-update', {
+      type: 'project.qa_configuration.update',
+      payload: {
+        projectId: 'p1',
+        expectedRevision: 1,
+        content: 'Run the focused server test before handoff.',
+        reviewPolicy: 'autonomous_review',
+        actor: { type: 'human', id: 'qa-operator', displayName: 'QA Operator' },
+      },
+    });
+
+    const first = await executeCommand(command, dependencies);
+    const duplicate = await executeCommand(command, dependencies);
+
+    expect(duplicate).toEqual(first);
+    expect(first).toMatchObject({
+      commandType: 'project.qa_configuration.update',
+      result: {
+        id: 'p1',
+        revision: 3,
+        qaConfiguration: {
+          instructions: {
+            content: 'Run the focused server test before handoff.',
+            revision: 2,
+            updatedBy: {
+              type: 'human',
+              id: 'qa-operator',
+              displayName: 'QA Operator',
+            },
+          },
+          reviewPolicy: 'autonomous_review',
+          revision: 2,
+          updatedBy: {
+            type: 'human',
+            id: 'qa-operator',
+            displayName: 'QA Operator',
+          },
+        },
+      },
+    });
+    expect(repositories.projectEvents.after('p1', 0)).toEqual([
+      expect.objectContaining({
+        id: 'qa-configuration-event',
+        type: 'project.qa_configuration_changed',
+      }),
+    ]);
+    expect(publishedAfterPersistence).toEqual([true]);
+  });
+
+  it('returns the current project for a stale QA configuration revision', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+        qaConfiguration: {
+          instructions: {
+            content: 'Current configuration.',
+            revision: 2,
+            updatedAt: now,
+            updatedBy: { type: 'human', id: 'operator' },
+          },
+          reviewPolicy: 'autonomous_review',
+          revision: 2,
+          updatedAt: now,
+          updatedBy: { type: 'human', id: 'operator' },
+        },
+      }),
+    );
+
+    const error = await executeCommand(
+      projectCommand('qa-configuration-stale', {
+        type: 'project.qa_configuration.update',
+        payload: {
+          projectId: 'p1',
+          expectedRevision: 1,
+          content: 'Stale content.',
+          reviewPolicy: 'manual',
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(toHttpError(error)).toMatchObject({
+      statusCode: 409,
+      body: {
+        error: {
+          code: 'project_revision_conflict',
+          details: {
+            project: expect.objectContaining({
+              id: 'p1',
+              qaConfiguration: expect.objectContaining({ revision: 2 }),
+            }),
+          },
+        },
+      },
+    });
+  });
+
   it('rejects developer-instruction updates for archived projects', async () => {
     const { directory } = await createRepository();
     const { repositories, dependencies } = commandDependencies(directory);
