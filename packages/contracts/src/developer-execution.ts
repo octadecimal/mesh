@@ -19,37 +19,62 @@ export const acceptanceCriterionResultSchema = z.object({
   evidence: z.string().trim().min(1),
 });
 
-const taskSnapshotSchema = z.object({
-  revision: z.number().int().positive(),
-  description: z.string(),
-  acceptanceCriteria: z.array(
-    z.object({ id: idSchema, text: z.string().trim().min(1) }),
-  ),
-});
-
-export const developerExecutionCycleSchema = z.object({
-  id: idSchema,
-  attemptId: idSchema,
-  ordinal: z.number().int().positive(),
-  mode: developerCycleModeSchema,
-  authorizedBy: taskActorSchema,
-  authorizationCommandId: idSchema,
-  policyVersion: z.string().trim().min(1),
-  projectInstructions: z.object({
-    content: z.string(),
+const taskSnapshotSchema = z
+  .object({
     revision: z.number().int().positive(),
-  }),
-  taskSnapshot: taskSnapshotSchema,
-  workspaceId: idSchema,
-  permissionMode: permissionModeSchema,
-  startedAt: isoTimestampSchema,
-  endedAt: isoTimestampSchema.nullable(),
-  terminalDisposition: developerCycleDispositionSchema.nullable(),
-  completionReportId: idSchema.nullable(),
-  blockerReportId: idSchema.nullable(),
-  terminalCommandId: idSchema.nullable(),
-  terminalEventId: idSchema.nullable(),
-});
+    description: z.string(),
+    acceptanceCriteria: z.array(
+      z.object({ id: idSchema, text: z.string().trim().min(1) }),
+    ),
+  })
+  .superRefine(({ acceptanceCriteria }, context) => {
+    const criterionIds = new Set<string>();
+
+    for (const [index, criterion] of acceptanceCriteria.entries()) {
+      if (criterionIds.has(criterion.id)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Task snapshot criterion IDs must be unique.',
+          path: ['acceptanceCriteria', index, 'id'],
+        });
+      }
+      criterionIds.add(criterion.id);
+    }
+  });
+
+export const developerExecutionCycleSchema = z
+  .object({
+    id: idSchema,
+    attemptId: idSchema,
+    ordinal: z.number().int().positive(),
+    mode: developerCycleModeSchema,
+    authorizedBy: taskActorSchema,
+    authorizationCommandId: idSchema,
+    policyVersion: z.string().trim().min(1),
+    projectInstructions: z.object({
+      content: z.string(),
+      revision: z.number().int().positive(),
+    }),
+    taskSnapshot: taskSnapshotSchema,
+    workspaceId: idSchema,
+    permissionMode: permissionModeSchema,
+    startedAt: isoTimestampSchema,
+    endedAt: isoTimestampSchema.nullable(),
+    terminalDisposition: developerCycleDispositionSchema.nullable(),
+    completionReportId: idSchema.nullable(),
+    blockerReportId: idSchema.nullable(),
+    terminalCommandId: idSchema.nullable(),
+    terminalEventId: idSchema.nullable(),
+  })
+  .superRefine(({ endedAt, terminalDisposition }, context) => {
+    if (terminalDisposition !== null && endedAt === null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Terminal Developer cycle dispositions require an end time.',
+        path: ['terminalDisposition'],
+      });
+    }
+  });
 
 const verificationResultSchema = z.object({
   command: z.string().trim().min(1),
@@ -84,13 +109,17 @@ export const developerBlockerReportSchema = z.object({
   createdAt: isoTimestampSchema,
 });
 
+const humanTaskActorSchema = taskActorSchema.extend({
+  type: z.literal('human'),
+});
+
 export const developerReviewFeedbackSchema = z.object({
   id: idSchema,
   cycleId: idSchema,
   taskId: idSchema,
   kind: z.enum(['rejection', 'unblock']),
   feedback: z.string().trim().min(1),
-  actor: taskActorSchema,
+  actor: humanTaskActorSchema,
   commandId: idSchema,
   createdAt: isoTimestampSchema,
 });
