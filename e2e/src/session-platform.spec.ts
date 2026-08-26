@@ -358,6 +358,35 @@ test('keeps the empty cockpit usable at a narrow viewport', async ({
   }
 });
 
+test('gives the project kanban the remaining board height', async ({
+  page,
+  harness,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await ensureImportedProject(harness, 'repository');
+  await harness.snapshot();
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'Board' }).click();
+
+  const instructions = page.getByRole('region', {
+    name: 'Developer instructions editor',
+  });
+  const columns = page.locator('.task-board-columns');
+  await expect(instructions).toBeVisible();
+  await expect(columns).toBeVisible();
+
+  const layout = await page.evaluate(() => ({
+    instructionsHeight: document
+      .querySelector('.developer-instructions')!
+      .getBoundingClientRect().height,
+    columnsHeight: document
+      .querySelector('.task-board-columns')!
+      .getBoundingClientRect().height,
+  }));
+  expect(layout.columnsHeight).toBeGreaterThan(layout.instructionsHeight);
+  expect(layout.columnsHeight).toBeGreaterThan(350);
+});
+
 test('creates shared and worktree sessions with the production-built server', async ({
   page,
   harness,
