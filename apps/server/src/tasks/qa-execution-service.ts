@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import {
   QaAlreadyActiveError,
+  ReviewAutomationPausedError,
   qaExecutionCycleSchema,
   rawDiagnosticSchema,
   sessionSchema,
@@ -279,6 +280,14 @@ export class QaExecutionService {
       throw new QaLaunchInvalidError(
         'task_transition_unauthorized',
         'QA launch trigger does not match the current project review policy',
+      );
+    }
+    if (
+      input.trigger === 'autonomous_policy' &&
+      task.reviewAutomation.status !== 'enabled'
+    ) {
+      throw new ReviewAutomationPausedError(
+        `Review automation is ${task.reviewAutomation.status} for task '${task.id}'.`,
       );
     }
 

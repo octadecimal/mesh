@@ -107,6 +107,18 @@ describe('QaExecutionService launch', () => {
         ...options?.task,
       }),
     );
+    if (options?.reviewPolicy === 'autonomous_review') {
+      const getPersistedTask = repositories.tasks.get.bind(repositories.tasks);
+      vi.spyOn(repositories.tasks, 'get').mockImplementation((taskId) => {
+        const persistedTask = getPersistedTask(taskId);
+        return persistedTask?.id === task.id
+          ? taskSchema.parse({
+              ...persistedTask,
+              reviewAutomation: task.reviewAutomation,
+            })
+          : persistedTask;
+      });
+    }
     const workspacePath =
       options?.workspaceType === 'worktree'
         ? join(directory, 'developer-worktree')
@@ -386,6 +398,56 @@ describe('QaExecutionService launch', () => {
       reviewPolicy: 'autonomous_review',
     });
   });
+
+  it.each(['paused', 'disabled'] as const)(
+    'rejects autonomous launch when task review automation is %s without side effects',
+    async (status) => {
+      const context = setup({
+        reviewPolicy: 'autonomous_review',
+        task: {
+          reviewAutomation: {
+            status,
+            generation: 2,
+            rejectionCount: 1,
+            pauseReason:
+              status === 'paused' ? 'Operator paused review automation.' : null,
+            updatedAt: now,
+          },
+        },
+      });
+      const sessionsBefore = context.repositories.sessions.listByProject(
+        context.project.id,
+        { includeArchived: true },
+      );
+      const eventsBefore = context.repositories.projectEvents.after(
+        context.project.id,
+        0,
+      );
+
+      await expect(
+        context.service.launch({
+          ...launchInput(context.task),
+          actor: policyActor,
+          trigger: 'autonomous_policy',
+        }),
+      ).rejects.toMatchObject({ code: 'review_automation_paused' });
+
+      expect(
+        context.repositories.sessions.listByProject(context.project.id, {
+          includeArchived: true,
+        }),
+      ).toEqual(sessionsBefore);
+      expect(
+        context.repositories.qaExecutions.listCyclesForAttempts([
+          context.attempt.id,
+        ]),
+      ).toEqual([]);
+      expect(
+        context.repositories.projectEvents.after(context.project.id, 0),
+      ).toEqual(eventsBefore);
+      expect(context.create).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ['manual', policyActor],
