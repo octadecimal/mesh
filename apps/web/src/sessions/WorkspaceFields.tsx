@@ -12,9 +12,11 @@ export type WorkspaceDraft = {
 export function WorkspaceFields({
   value,
   onChange,
+  disabled = false,
 }: {
   value: WorkspaceDraft;
   onChange: (next: WorkspaceDraft) => void;
+  disabled?: boolean;
 }) {
   const update =
     (key: keyof WorkspaceDraft) =>
@@ -22,7 +24,7 @@ export function WorkspaceFields({
       onChange({ ...value, [key]: event.target.value });
 
   return (
-    <fieldset>
+    <fieldset disabled={disabled}>
       <legend>Workspace</legend>
       <label>
         Workspace type

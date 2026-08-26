@@ -16,6 +16,10 @@ export const stableTaskErrorCodeSchema = z.enum([
   'session_repository_mismatch',
   'attempt_start_failed',
   'attempt_reconciliation_required',
+  'project_revision_conflict',
+  'developer_capability_invalid',
+  'developer_cycle_invalid',
+  'developer_report_invalid',
 ]);
 
 export type StableTaskErrorCode = z.infer<typeof stableTaskErrorCodeSchema>;

@@ -21,6 +21,19 @@ export const lifecycleStateSchema = z.enum([
   'archived',
 ]);
 
+export const taskActorSchema = z.object({
+  type: z.enum(['human', 'system', 'agent']),
+  id: idSchema,
+  displayName: z.string().trim().min(1).optional(),
+});
+
+export const developerInstructionsSchema = z.object({
+  content: z.string(),
+  revision: z.number().int().positive(),
+  updatedAt: isoTimestampSchema,
+  updatedBy: taskActorSchema.nullable(),
+});
+
 export const projectSchema = z
   .object({
     id: idSchema,
@@ -33,12 +46,19 @@ export const projectSchema = z
     createdAt: isoTimestampSchema.optional(),
     updatedAt: isoTimestampSchema.optional(),
     archivedAt: isoTimestampSchema.nullable().default(null),
+    developerInstructions: developerInstructionsSchema.optional(),
   })
   .transform((project) => ({
     ...project,
     repositoryIdentity: project.repositoryIdentity ?? project.repositoryPath,
     createdAt: project.createdAt ?? project.discoveredAt,
     updatedAt: project.updatedAt ?? project.discoveredAt,
+    developerInstructions: project.developerInstructions ?? {
+      content: '',
+      revision: 1,
+      updatedAt: project.updatedAt ?? project.discoveredAt,
+      updatedBy: null,
+    },
   }));
 
 export const taskLifecycleStateSchema = z.enum([
@@ -50,11 +70,6 @@ export const taskLifecycleStateSchema = z.enum([
   'cancelled',
 ]);
 export const taskPrioritySchema = z.enum(['low', 'normal', 'high', 'urgent']);
-export const taskActorSchema = z.object({
-  type: z.enum(['human', 'system', 'agent']),
-  id: idSchema,
-  displayName: z.string().trim().min(1).optional(),
-});
 export const blockedConditionSchema = z.object({
   reason: z.string().trim().min(1),
   actor: taskActorSchema,
@@ -90,6 +105,7 @@ export const taskAttemptSchema = z.object({
   unlinkedAt: isoTimestampSchema.nullable(),
   unlinkedBy: taskActorSchema.nullable(),
   unlinkReason: z.string().trim().min(1).nullable(),
+  role: z.literal('developer').nullable().default(null),
 });
 
 export const taskTransitionSchema = z.object({
@@ -109,6 +125,7 @@ export const attemptRepairSchema = z.object({
   sessionId: idSchema,
   reason: z.enum([
     'task_in_progress_without_live_session',
+    'developer_cycle_without_live_session',
     'startup_outcome_unknown',
   ]),
 });
@@ -160,6 +177,7 @@ export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;
 export type WorkspaceType = z.infer<typeof workspaceTypeSchema>;
 export type PermissionMode = z.infer<typeof permissionModeSchema>;
 export type LifecycleState = z.infer<typeof lifecycleStateSchema>;
+export type DeveloperInstructions = z.infer<typeof developerInstructionsSchema>;
 export type Project = z.infer<typeof projectSchema>;
 export type TaskLifecycleState = z.infer<typeof taskLifecycleStateSchema>;
 export type TaskPriority = z.infer<typeof taskPrioritySchema>;

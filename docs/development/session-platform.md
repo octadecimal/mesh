@@ -43,9 +43,66 @@ do not delete history or guess the missing outcome. Inspect the task, attempt,
 session diagnostics, and preserved workspace before choosing a human recovery
 action.
 
+## Developer execution workflow
+
+Configure **Developer instructions** on the project before starting work. The
+editor saves a revisioned project value, so a stale save is rejected instead of
+overwriting a newer edit. Instructions apply to future Developer cycles. Every
+cycle records the exact instruction revision and content it received; editing
+the project while a Developer is running does not rewrite that cycle's prompt or
+history.
+
+To start Developer, make the task `ready`, complete its title, description,
+acceptance criteria, and priority, and clear any blocker. In the task drawer,
+choose a shared workspace or isolated worktree and a permission mode, then select
+**Start Developer**. Mesh creates a session, attempt, and first execution cycle
+before starting Claude. The cycle's prompt contains the frozen task and project
+instructions and exposes only the scoped `submit_for_review` and `mark_blocked`
+controls. If startup fails, the durable attempt and diagnostics remain visible;
+Mesh does not claim that the task is running.
+
+Use **Execution history** as the durable review record. Each entry identifies
+the attempt, cycle, session, workspace, permission mode, task revision,
+instruction revision, and terminal disposition. A completion report maps every
+acceptance criterion to its result and evidence and records verification,
+limitations, and workspace state. A blocker report records why progress stopped,
+the evidence gathered, recovery guidance, and workspace state. Opening the
+linked session shows the separate runtime transcript; it does not replace the
+project report.
+
+When a completion report moves the task to `review`, inspect the report,
+workspace, and session as needed. **Accept as done** completes the task. To
+reject it, enter actionable feedback and choose either **Resume the same
+Developer attempt** or **Start a new Developer attempt**. Resume requires the
+original session's Claude resume ID and the same cycle workspace; a new attempt
+requires a new workspace and permission selection. Either choice persists the
+feedback and starts a new cycle with the current task and project-instruction
+truth. Previous cycles and reports remain immutable history.
+
+When Developer reports a blocker, the task stays `in_progress` with a durable
+blocked condition. Resolve the external issue first, enter an unblock reason,
+then choose **Resume the blocked attempt** or **Start a new attempt after
+unblock**. Mesh records the feedback and new cycle before starting work. A failed
+resume or new launch closes the failed cycle and restores the prior review or
+blocked truth when it can do so safely; an uncertain cleanup becomes an explicit
+repair state.
+
+`developer_cycle_without_live_session` means durable project truth says a cycle
+is active but no live session can continue it. Do not manufacture a completion
+or delete its history. Inspect the attempt, session diagnostics, and workspace,
+preserve any files, and use the offered human recovery only after deciding which
+state is trustworthy. Startup, task-transition, or cleanup uncertainty is
+handled the same way: retain the evidence and workspace until an operator can
+reconcile it.
+
 ## Subscription-only operation
 
-Mesh uses the installed Claude subscription through the Claude Agent SDK. It does not support an API-key or pay-per-token fallback. If `ANTHROPIC_API_KEY` is present, new and resumed sessions are refused. Remove the variable outside Mesh, verify the intended Claude subscription is active, and restart Mesh.
+Mesh uses the installed Claude subscription through the Claude Agent SDK. It
+does not support an API-key or pay-per-token fallback. This applies equally to
+starting Developer and to the resume paths after rejection or unblock. If
+`ANTHROPIC_API_KEY` is present, new and resumed sessions are refused. Remove the
+variable outside Mesh, verify the intended Claude subscription is active, and
+restart Mesh.
 
 Multiple live sessions that share a folder can modify the same files. Mesh warns about this collision; prefer an isolated worktree when sessions may overlap. Mesh-created worktrees are preserved on archive and on failed or ambiguous cleanup. Deletion removes one only after explicit confirmation and ownership/path checks; otherwise remove or preserve it manually with Git after inspecting its changes.
 

@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   attemptRepairSchema,
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
+  developerReviewFeedbackSchema,
+  idSchema,
   projectSchema,
+  sessionSchema,
+  taskAttemptSchema,
   taskSchema,
+  workspaceSchema,
 } from '@mesh-session-platform/contracts';
 
 import { openDatabase } from '../db/database.js';
@@ -89,6 +97,30 @@ const boundProxy = <Target extends object>(
 };
 
 describe('project snapshot read consistency', () => {
+  it('projects the current developer instructions through the project contract', () => {
+    const fixture = seed();
+    const updated = fixture.repositories.projects.updateDeveloperInstructions(
+      fixture.project.id,
+      fixture.project.revision,
+      {
+        content: 'Run the focused server test before handoff.',
+        updatedAt: '2026-08-24T00:01:00.000Z',
+        updatedBy: { type: 'human', id: idSchema.parse('operator') },
+      },
+    );
+    if (!updated) throw new Error('Expected developer instructions to update');
+
+    expect(
+      buildProjectSnapshot(fixture.repositories, fixture.project.id).project
+        .developerInstructions,
+    ).toEqual({
+      content: 'Run the focused server test before handoff.',
+      revision: 2,
+      updatedAt: '2026-08-24T00:01:00.000Z',
+      updatedBy: { type: 'human', id: 'operator' },
+    });
+  });
+
   it('returns repair records in snapshots and durable project history', () => {
     const fixture = seed();
     const repair = attemptRepairSchema.parse({
@@ -121,6 +153,156 @@ describe('project snapshot read consistency', () => {
         payload: { repair },
       }),
     ]);
+  });
+
+  it('returns complete ordered Developer history for every project task', () => {
+    const fixture = seed();
+    fixture.repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-1',
+        projectId: fixture.project.id,
+        type: 'shared',
+        path: 'C:/code/mesh',
+      }),
+    );
+    fixture.repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'session-1',
+        projectId: fixture.project.id,
+        workspaceId: 'workspace-1',
+        title: 'Developer attempt',
+        permissionMode: 'interactive',
+        lifecycleState: 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    fixture.repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: 'attempt-1',
+        taskId: fixture.task.id,
+        sessionId: 'session-1',
+        ordinal: 1,
+        source: 'launched',
+        actor: { type: 'human', id: 'operator' },
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: 'developer',
+      }),
+    );
+    const cycle = (id: string, ordinal: number) =>
+      developerExecutionCycleSchema.parse({
+        id,
+        attemptId: 'attempt-1',
+        ordinal,
+        mode: ordinal === 1 ? 'new' : 'resume',
+        authorizedBy: { type: 'human', id: 'operator' },
+        authorizationCommandId: `authorize-${ordinal}`,
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: 'Keep the history.', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: fixture.task.title,
+          description: fixture.task.description,
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'History survives refresh.' },
+          ],
+        },
+        workspaceId: 'workspace-1',
+        permissionMode: 'interactive',
+        startedAt: `2026-08-24T00:0${ordinal}:00.000Z`,
+        endedAt: null,
+        terminalDisposition: null,
+        completionReportId: null,
+        blockerReportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      });
+    const firstCycle = fixture.repositories.developerExecutions.createCycle(
+      cycle('cycle-1', 1),
+    );
+    const completion =
+      fixture.repositories.developerExecutions.appendCompletionReport(
+        developerCompletionReportSchema.parse({
+          id: 'completion-1',
+          cycleId: firstCycle.id,
+          summary: 'First pass is ready.',
+          criterionResults: [
+            { criterionId: 'criterion-1', status: 'met', evidence: 'Passed.' },
+          ],
+          verification: [
+            { command: 'pnpm test', outcome: 'passed', output: 'ok' },
+          ],
+          limitations: '',
+          workspaceState: {
+            summary: 'Clean.',
+            hasUncommittedChanges: false,
+            commitsCreated: true,
+          },
+          reviewerNotes: null,
+          createdAt: '2026-08-24T00:02:00.000Z',
+        }),
+      );
+    fixture.repositories.developerExecutions.closeCycle(firstCycle.id, {
+      endedAt: '2026-08-24T00:02:00.000Z',
+      terminalDisposition: 'submitted_for_review',
+      completionReportId: completion.id,
+      blockerReportId: null,
+      terminalCommandId: idSchema.parse('submit-1'),
+      terminalEventId: idSchema.parse('developer-event-1'),
+    });
+    const feedback = fixture.repositories.developerExecutions.appendFeedback(
+      developerReviewFeedbackSchema.parse({
+        id: 'feedback-1',
+        cycleId: firstCycle.id,
+        taskId: fixture.task.id,
+        kind: 'rejection',
+        feedback: 'Show the reconnect path.',
+        actor: { type: 'human', id: 'reviewer' },
+        commandId: 'reject-1',
+        createdAt: '2026-08-24T00:03:00.000Z',
+      }),
+    );
+    const secondCycle = fixture.repositories.developerExecutions.createCycle(
+      cycle('cycle-2', 2),
+    );
+    const blocker =
+      fixture.repositories.developerExecutions.appendBlockerReport(
+        developerBlockerReportSchema.parse({
+          id: 'blocker-1',
+          cycleId: secondCycle.id,
+          reason: 'Missing fixture.',
+          evidence: 'The fixture is absent.',
+          attemptedWork: 'Checked the test assets.',
+          suggestedHumanAction: 'Provide the fixture.',
+          preserveWorkspace: true,
+          createdAt: '2026-08-24T00:05:00.000Z',
+        }),
+      );
+    fixture.repositories.developerExecutions.closeCycle(secondCycle.id, {
+      endedAt: '2026-08-24T00:05:00.000Z',
+      terminalDisposition: 'blocked',
+      completionReportId: null,
+      blockerReportId: blocker.id,
+      terminalCommandId: idSchema.parse('block-1'),
+      terminalEventId: idSchema.parse('developer-event-2'),
+    });
+
+    const snapshot = buildProjectSnapshot(
+      fixture.repositories,
+      fixture.project.id,
+    );
+
+    expect(snapshot.developerCycles.map(({ id }) => id)).toEqual([
+      'cycle-1',
+      'cycle-2',
+    ]);
+    expect(snapshot.developerCompletionReports).toEqual([completion]);
+    expect(snapshot.developerBlockerReports).toEqual([blocker]);
+    expect(snapshot.developerReviewFeedback).toEqual([feedback]);
+    expect(JSON.stringify(snapshot)).not.toContain('capability');
   });
 
   it('keeps snapshot projections and cursor in one SQLite read view', () => {

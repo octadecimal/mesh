@@ -6,6 +6,7 @@ import { migrate } from '../db/migrate.js';
 import { openDatabase } from '../db/database.js';
 import { CommandRepository } from '../repositories/command-repository.js';
 import { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
+import { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import { EventRepository } from '../repositories/event-repository.js';
 import { LayoutRepository } from '../repositories/layout-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
@@ -20,6 +21,7 @@ export const createTestRepositories = (options?: {
   failDiagnosticInsert?: boolean;
   failProjectEventInsert?: boolean;
   failTaskTransitionInsert?: boolean;
+  failCommandCompleteFor?: string;
 }) => {
   const directory = mkdtempSync(join(tmpdir(), 'mesh-session-platform-'));
   const path = join(directory, 'test.sqlite');
@@ -56,12 +58,25 @@ export const createTestRepositories = (options?: {
     `);
   }
 
+  if (options?.failCommandCompleteFor) {
+    const idempotencyKey = options.failCommandCompleteFor.replace(/'/g, "''");
+    database.exec(`
+      CREATE TRIGGER fail_command_complete_update
+      BEFORE UPDATE OF state ON processed_commands
+      WHEN NEW.state = 'completed' AND OLD.idempotency_key = '${idempotencyKey}'
+      BEGIN
+        SELECT RAISE(FAIL, 'command complete failed');
+      END;
+    `);
+  }
+
   return {
     path,
     database,
     projects: new ProjectRepository(database),
     tasks: new TaskRepository(database),
     attempts: new TaskAttemptRepository(database),
+    developerExecutions: new DeveloperExecutionRepository(database),
     transitions: new TaskTransitionRepository(database),
     projectEvents: new ProjectEventRepository(database),
     workspaces: new WorkspaceRepository(database),

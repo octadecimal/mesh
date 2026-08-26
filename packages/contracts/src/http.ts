@@ -12,6 +12,12 @@ import {
   taskTransitionSchema,
   workspaceSchema,
 } from './domain.js';
+import {
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
+  developerReviewFeedbackSchema,
+} from './developer-execution.js';
 import { sessionEventSchema } from './events.js';
 import { projectEventSchema } from './project-events.js';
 import { protocolVersionSchema } from './protocol.js';
@@ -49,6 +55,12 @@ export const projectSnapshotSchema = z.object({
   attempts: z.array(taskAttemptSchema),
   transitions: z.array(taskTransitionSchema),
   repairs: z.array(attemptRepairSchema),
+  developerCycles: z.array(developerExecutionCycleSchema).default([]),
+  developerCompletionReports: z
+    .array(developerCompletionReportSchema)
+    .default([]),
+  developerBlockerReports: z.array(developerBlockerReportSchema).default([]),
+  developerReviewFeedback: z.array(developerReviewFeedbackSchema).default([]),
   cursor: z.number().int().nonnegative(),
 });
 

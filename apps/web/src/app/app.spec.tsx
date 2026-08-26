@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   taskActorSchema,
@@ -219,6 +219,236 @@ describe('App', () => {
     ).toBeDefined();
   });
 
+  it('saves developer instructions with the current project revision and disables them when disconnected', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    const instructions = await screen.findByLabelText('Developer instructions');
+    await user.clear(instructions);
+    await user.type(instructions, 'Run focused web tests.');
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }));
+
+    await waitFor(() =>
+      expect(api.command).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'project.developer_instructions.update',
+          payload: {
+            projectId: 'p1',
+            expectedRevision: 1,
+            content: 'Run focused web tests.',
+            actor: taskActorSchema.parse({
+              type: 'human',
+              id: 'operator',
+              displayName: 'Operator',
+            }),
+          },
+        }),
+      ),
+    );
+
+    act(() => store.setConnectionHealth('disconnected'));
+    await waitFor(() => expect(instructions).toBeDisabled());
+  });
+
+  it('routes Developer launch through MeshApi and disables it after disconnect', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    const readyDeveloperTask = taskSchema.parse({
+      ...boardTask,
+      lifecycleState: 'ready',
+      revision: 3,
+    });
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [readyDeveloperTask],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(
+      await screen.findByRole('button', { name: 'Open Board task' }),
+    );
+    await user.selectOptions(
+      screen.getByLabelText('Developer permission mode'),
+      'interactive',
+    );
+    await user.click(screen.getByRole('button', { name: 'Start Developer' }));
+
+    expect(api.command).toHaveBeenCalledWith({
+      type: 'task.developer.launch',
+      payload: {
+        taskId: readyDeveloperTask.id,
+        expectedRevision: 3,
+        title: readyDeveloperTask.title,
+        permissionMode: 'interactive',
+        workspace: { type: 'shared', path: project.repositoryPath },
+        actor: taskActorSchema.parse({
+          type: 'human',
+          id: 'operator',
+          displayName: 'Operator',
+        }),
+      },
+    });
+
+    act(() => store.setConnectionHealth('disconnected'));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Start Developer' }),
+      ).toBeDisabled(),
+    );
+    expect(
+      screen.getByText(/Developer actions are disconnected/i),
+    ).toBeDefined();
+  });
+
+  it('does not carry a pending developer-instruction save into a switched project', async () => {
+    const user = userEvent.setup();
+    const pendingSave = deferred<{
+      protocolVersion: 1;
+      commandType: string;
+      result: Record<string, never>;
+      warnings: [];
+    }>();
+    const store = createMeshStore(crossProjectSnapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockImplementation((projectId) =>
+      Promise.resolve({
+        protocolVersion: 1,
+        project: projectId === 'p1' ? project : projectB,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 1,
+      }),
+    );
+    api.command.mockImplementation((command) =>
+      command.type === 'project.developer_instructions.update'
+        ? pendingSave.promise
+        : Promise.resolve({
+            protocolVersion: 1,
+            commandType: command.type,
+            result: {},
+            warnings: [],
+          }),
+    );
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    const projectAInstructions = await screen.findByLabelText(
+      'Developer instructions',
+    );
+    await user.type(projectAInstructions, 'Pending A.');
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }));
+    expect(
+      screen.getByRole('button', { name: 'Saving instructions…' }),
+    ).toBeDisabled();
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    const projectBInstructions = await screen.findByLabelText(
+      'Developer instructions',
+    );
+    expect(projectBInstructions).toHaveValue('Project B instructions.');
+    expect(projectBInstructions).toBeEnabled();
+    expect(
+      screen.queryByRole('button', { name: 'Saving instructions…' }),
+    ).toBeNull();
+
+    pendingSave.reject(new Error('Project A save failed.'));
+    await waitFor(() =>
+      expect(screen.queryByText('Project A save failed.')).toBeNull(),
+    );
+  });
+
+  it('keeps a project instruction save pending when returning to its project', async () => {
+    const user = userEvent.setup();
+    const pendingSave = deferred<{
+      protocolVersion: 1;
+      commandType: string;
+      result: Record<string, never>;
+      warnings: [];
+    }>();
+    const store = createMeshStore(crossProjectSnapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockImplementation((projectId) =>
+      Promise.resolve({
+        protocolVersion: 1,
+        project: projectId === 'p1' ? project : projectB,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 1,
+      }),
+    );
+    api.command.mockImplementation((command) =>
+      command.type === 'project.developer_instructions.update'
+        ? pendingSave.promise
+        : Promise.resolve({
+            protocolVersion: 1,
+            commandType: command.type,
+            result: {},
+            warnings: [],
+          }),
+    );
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.type(
+      await screen.findByLabelText('Developer instructions'),
+      'Pending A.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }));
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    expect(
+      await screen.findByLabelText('Developer instructions'),
+    ).toBeEnabled();
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    const returnedProjectAInstructions = await screen.findByLabelText(
+      'Developer instructions',
+    );
+    expect(returnedProjectAInstructions).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Saving instructions…' }),
+    ).toBeDisabled();
+    expect(
+      api.command.mock.calls.filter(
+        ([command]) => command.type === 'project.developer_instructions.update',
+      ),
+    ).toHaveLength(1);
+
+    pendingSave.resolve({
+      protocolVersion: 1,
+      commandType: 'project.developer_instructions.update',
+      result: {},
+      warnings: [],
+    });
+    await waitFor(() => expect(returnedProjectAInstructions).toBeEnabled());
+  });
+
   it('keeps an archived project board read-only and restores it explicitly', async () => {
     const user = userEvent.setup();
     const archivedStore = createMeshStore({
@@ -256,6 +486,9 @@ describe('App', () => {
     ).toBeNull();
     expect(
       within(board).getByRole('combobox', { name: 'Move Board task to' }),
+    ).toBeDisabled();
+    expect(
+      within(board).getByLabelText('Developer instructions'),
     ).toBeDisabled();
     expect(
       within(board).getByRole('button', { name: 'Restore project' }),
@@ -313,14 +546,14 @@ describe('App', () => {
     expect(screen.getByRole('region', { name: 'Other board' })).toBeDefined();
   });
 
-  it('keeps the current board visible until a switched project snapshot resolves', async () => {
+  it('hides project A task controls while the selected project B snapshot is in flight', async () => {
     const user = userEvent.setup();
     const store = createMeshStore(crossProjectSnapshot);
     const api = createApi();
     const nextProject = deferred<{
       protocolVersion: 1;
       project: typeof projectB;
-      tasks: [];
+      tasks: (typeof boardTask)[];
       attempts: [];
       transitions: [];
       repairs: [];
@@ -330,7 +563,7 @@ describe('App', () => {
       .mockResolvedValueOnce({
         protocolVersion: 1,
         project,
-        tasks: [],
+        tasks: [boardTask],
         attempts: [],
         transitions: [],
         repairs: [],
@@ -343,12 +576,19 @@ describe('App', () => {
     expect(
       await screen.findByRole('region', { name: 'Mesh board' }),
     ).toBeDefined();
+    expect(
+      screen.getByRole('combobox', { name: 'Move Board task to' }),
+    ).toBeEnabled();
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
 
+    expect(screen.getByLabelText('Selected project')).toHaveValue('p2');
     expect(screen.getByRole('status')).toHaveTextContent(
       'Loading Other project…',
     );
-    expect(screen.getByRole('region', { name: 'Mesh board' })).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'Mesh board' })).toBeNull();
+    expect(
+      screen.queryByRole('combobox', { name: 'Move Board task to' }),
+    ).toBeNull();
     expect(screen.queryByRole('region', { name: 'Other board' })).toBeNull();
 
     nextProject.resolve({
@@ -413,8 +653,15 @@ const project = {
   id: 'p1',
   displayName: 'Mesh',
   repositoryPath: '/mesh',
+  revision: 1,
   discoveredAt: '2026-08-24T00:00:00.000Z',
   discoveryMetadata: {},
+  developerInstructions: {
+    content: '',
+    revision: 1,
+    updatedAt: '2026-08-24T00:00:00.000Z',
+    updatedBy: null,
+  },
 };
 const workspace = {
   id: 'w1',
@@ -487,6 +734,10 @@ const projectB = {
   id: 'p2',
   displayName: 'Other',
   repositoryPath: '/other',
+  developerInstructions: {
+    ...project.developerInstructions,
+    content: 'Project B instructions.',
+  },
 };
 const workspaceB = {
   ...workspace,

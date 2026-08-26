@@ -11,6 +11,8 @@ const repairMessage: Record<AttemptRepair['reason'], string> = {
     'Attempt repair needed: the launch outcome could not be confirmed.',
   task_in_progress_without_live_session:
     'Attempt repair needed: the task is in progress without a live session.',
+  developer_cycle_without_live_session:
+    'Attempt repair needed: the Developer cycle is in progress without a live session.',
 };
 
 const statusLabel = (state: Session['lifecycleState']) => {
@@ -41,15 +43,19 @@ export function AttemptTimeline({
         <h3>Attempts</h3>
         <span>{ordered.length}</span>
       </div>
-      {repairs.map((repair) => (
-        <p
-          className="notice notice-warning attempt-repair"
-          role="alert"
-          key={`${repair.attemptId}:${repair.reason}`}
-        >
-          {repairMessage[repair.reason]}
-        </p>
-      ))}
+      {repairs
+        .filter(
+          (repair) => repair.reason !== 'developer_cycle_without_live_session',
+        )
+        .map((repair) => (
+          <p
+            className="notice notice-warning attempt-repair"
+            role="alert"
+            key={`${repair.attemptId}:${repair.reason}`}
+          >
+            {repairMessage[repair.reason]}
+          </p>
+        ))}
       {ordered.length === 0 ? (
         <p className="task-empty-state">No attempts yet.</p>
       ) : (
@@ -65,7 +71,11 @@ export function AttemptTimeline({
                   <div className="attempt-card-heading">
                     <strong>Attempt {attempt.ordinal}</strong>
                     <span>
-                      {attempt.source === 'launched' ? 'Launched' : 'Linked'}
+                      {attempt.role === 'developer'
+                        ? 'Developer · Launched'
+                        : attempt.source === 'launched'
+                          ? 'Launched'
+                          : 'Linked'}
                     </span>
                   </div>
                   <p>

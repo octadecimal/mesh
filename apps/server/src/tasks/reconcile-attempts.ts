@@ -10,6 +10,7 @@ import {
 
 import type { Database } from '../db/database.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
+import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
@@ -33,6 +34,7 @@ type ReconciliationDependencies = {
   projects: Pick<ProjectRepository, 'list'>;
   tasks: Pick<TaskRepository, 'listByProject'>;
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
+  developerExecutions: Pick<DeveloperExecutionRepository, 'listByTask'>;
   sessions: Pick<SessionRepository, 'get'>;
   diagnostics: Pick<DiagnosticRepository, 'insert' | 'list'>;
   projectEvents: Pick<ProjectEventRepository, 'after' | 'appendInTransaction'>;
@@ -110,6 +112,7 @@ const isRecordedRepairEvent = (
 
 const repairFor = (
   taskState: string,
+  intentionallyDeveloperBlocked: boolean,
   attempts: Array<{
     attempt: TaskAttempt;
     sessionState: string;
@@ -122,6 +125,7 @@ const repairFor = (
 
   if (
     taskState === 'in_progress' &&
+    !intentionallyDeveloperBlocked &&
     attempts.length > 0 &&
     !attempts.some(({ sessionState }) => liveSessionStates.has(sessionState))
   ) {
@@ -153,6 +157,33 @@ const repairFor = (
       })
     : undefined;
 };
+
+const developerRepairsFor = (
+  dependencies: Pick<
+    ReconciliationDependencies,
+    'developerExecutions' | 'sessions'
+  >,
+  taskId: string,
+  attempts: TaskAttempt[],
+): AttemptRepair[] =>
+  dependencies.developerExecutions.listByTask(taskId).flatMap((cycle) => {
+    if (cycle.endedAt !== null) return [];
+    const attempt = attempts.find(
+      (candidate) => candidate.id === cycle.attemptId,
+    );
+    if (!attempt) return [];
+    const session = dependencies.sessions.get(attempt.sessionId);
+    if (session && liveSessionStates.has(session.lifecycleState)) return [];
+
+    return [
+      attemptRepairSchema.parse({
+        taskId: attempt.taskId,
+        attemptId: attempt.id,
+        sessionId: attempt.sessionId,
+        reason: 'developer_cycle_without_live_session',
+      }),
+    ];
+  });
 
 const persistRepair = (
   dependencies: ReconciliationDependencies,
@@ -201,8 +232,8 @@ export const reconcileTaskAttempts = (
   for (const project of dependencies.projects.list()) {
     const recordedEvents = dependencies.projectEvents.after(project.id, 0);
     for (const task of dependencies.tasks.listByProject(project.id)) {
-      const attempts = dependencies.attempts
-        .listByTask(task.id)
+      const taskAttempts = dependencies.attempts.listByTask(task.id);
+      const attempts = taskAttempts
         .filter((candidate) => candidate.unlinkedAt === null)
         .flatMap((attempt) => {
           const session = dependencies.sessions.get(attempt.sessionId);
@@ -216,26 +247,55 @@ export const reconcileTaskAttempts = (
               ]
             : [];
         });
-      const repair = repairFor(task.lifecycleState, attempts);
-      if (!repair) continue;
-      repairs.push(repair);
-      const diagnostics =
-        attempts.find(({ attempt }) => attempt.id === repair.attemptId)
-          ?.diagnostics ?? [];
-      if (
-        recordedEvents.some((event) => isRecordedRepairEvent(event, repair))
-      ) {
-        continue;
-      }
-      const event = persistRepair(
+      const developerRepairs = developerRepairsFor(
         dependencies,
-        project.id,
-        repair,
-        now(),
-        diagnostics.some((diagnostic) => isRecordedRepair(diagnostic, repair)),
+        task.id,
+        taskAttempts,
       );
-      recordedEvents.push(event);
-      events.push(event);
+      const intentionallyDeveloperBlocked = Boolean(
+        task.blocked &&
+          dependencies.developerExecutions
+            .listByTask(task.id)
+            .some(
+              (cycle) =>
+                cycle.endedAt !== null &&
+                cycle.terminalDisposition === 'blocked' &&
+                cycle.blockerReportId !== null,
+            ),
+      );
+      const taskRepair = repairFor(
+        task.lifecycleState,
+        intentionallyDeveloperBlocked,
+        attempts,
+      );
+      const taskRepairs =
+        developerRepairs.length > 0
+          ? developerRepairs
+          : taskRepair
+            ? [taskRepair]
+            : [];
+      for (const repair of taskRepairs) {
+        repairs.push(repair);
+        const diagnostics =
+          attempts.find(({ attempt }) => attempt.id === repair.attemptId)
+            ?.diagnostics ?? [];
+        if (
+          recordedEvents.some((event) => isRecordedRepairEvent(event, repair))
+        ) {
+          continue;
+        }
+        const event = persistRepair(
+          dependencies,
+          project.id,
+          repair,
+          now(),
+          diagnostics.some((diagnostic) =>
+            isRecordedRepair(diagnostic, repair),
+          ),
+        );
+        recordedEvents.push(event);
+        events.push(event);
+      }
     }
   }
 

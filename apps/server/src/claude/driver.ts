@@ -1,4 +1,6 @@
 import type {
+  DeveloperBlockerReportInput,
+  DeveloperCompletionReportInput,
   LifecycleState,
   PermissionMode,
 } from '@mesh-session-platform/contracts';
@@ -12,16 +14,28 @@ export interface DiscoveredClaudeSession {
   title?: string;
 }
 
+export interface DeveloperRuntimeControls {
+  submitForReview(report: DeveloperCompletionReportInput): Promise<void>;
+  markBlocked(report: DeveloperBlockerReportInput): Promise<void>;
+}
+
+export interface DeveloperRuntimeConfiguration {
+  initialPrompt: string;
+  controls: DeveloperRuntimeControls;
+}
+
 export interface StartClaudeSessionRequest {
   title: string;
   workspacePath?: string;
   permissionMode?: PermissionMode;
+  developer?: DeveloperRuntimeConfiguration;
 }
 
 export interface ResumeClaudeSessionRequest {
   claudeResumeId: string;
   workspacePath?: string;
   permissionMode?: PermissionMode;
+  developer?: DeveloperRuntimeConfiguration;
 }
 
 export type DriverEvent =

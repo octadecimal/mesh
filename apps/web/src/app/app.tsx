@@ -8,6 +8,7 @@ import {
   type SavedLayout,
   type Session,
   type SessionSnapshot,
+  type TaskActor,
   type Workspace,
 } from '@mesh-session-platform/contracts';
 
@@ -37,6 +38,7 @@ import {
   type ImportedProject,
   type ProjectImportSuggestion,
 } from '../projects/ProjectImportDialog';
+import { DeveloperInstructions } from '../projects/DeveloperInstructions';
 import { TaskBoard } from '../tasks/TaskBoard';
 
 type MeshStore = ReturnType<typeof createMeshStore>;
@@ -50,7 +52,7 @@ const operator = taskActorSchema.parse({
   type: 'human',
   id: 'operator',
   displayName: 'Operator',
-});
+}) as Extract<TaskActor, { type: 'human' }>;
 
 type AppProps = {
   projects?: Project[];
@@ -147,6 +149,10 @@ function ConnectedApp({
   const [resumeSessionOpen, setResumeSessionOpen] = useState(false);
   const [flowError, setFlowError] = useState<SessionFlowError>();
   const [collisionWarning, setCollisionWarning] = useState<string>();
+  const [
+    pendingDeveloperInstructionsByProjectId,
+    setPendingDeveloperInstructionsByProjectId,
+  ] = useState<Record<string, boolean>>({});
   const workspaceById = new Map(
     workspaces.map((workspace) => [workspace.id, workspace]),
   );
@@ -275,6 +281,43 @@ function ConnectedApp({
         actor: operator,
       },
     });
+  };
+  const saveDeveloperInstructions = async ({
+    content,
+    expectedRevision,
+  }: {
+    content: string;
+    expectedRevision: number;
+  }) => {
+    if (!activeProject) return;
+    const projectId = activeProject.id;
+    if (pendingDeveloperInstructionsByProjectId[projectId]) return;
+    const command: MutatingCommand = {
+      type: 'project.developer_instructions.update',
+      payload: {
+        projectId,
+        expectedRevision,
+        content,
+        actor: operator,
+      },
+    };
+    onCommand?.({ type: command.type, payload: command.payload });
+    if (!api)
+      throw new Error(
+        'Developer instructions are unavailable while disconnected.',
+      );
+    setPendingDeveloperInstructionsByProjectId((current) => ({
+      ...current,
+      [projectId]: true,
+    }));
+    try {
+      await api.command(command);
+    } finally {
+      setPendingDeveloperInstructionsByProjectId((current) => {
+        const { [projectId]: _, ...remaining } = current;
+        return remaining;
+      });
+    }
   };
 
   return (
@@ -447,7 +490,7 @@ function ConnectedApp({
               </div>
             </div>
           </section>
-        ) : view === 'board' && activeProject ? (
+        ) : view === 'board' && activeProject && !projectLoadTargetId ? (
           <section
             className={`project-board-boundary${
               activeProject.archivedAt ? ' project-board-read-only' : ''
@@ -478,12 +521,28 @@ function ConnectedApp({
                 </div>
               ) : null}
             </header>
+            <DeveloperInstructions
+              key={activeProject.id}
+              project={activeProject}
+              disabled={
+                Boolean(activeProject.archivedAt) ||
+                projection.connectionHealth !== 'connected' ||
+                !api
+              }
+              saving={Boolean(
+                pendingDeveloperInstructionsByProjectId[activeProject.id],
+              )}
+              onSave={saveDeveloperInstructions}
+            />
             <TaskBoard
               project={activeProject}
               projection={projection}
               onCommand={submitTaskCommand}
               onSelectTask={onSelectTask}
               onOpenSession={openSession}
+              connected={
+                projection.connectionHealth === 'connected' && Boolean(api)
+              }
             />
           </section>
         ) : null}

@@ -15,6 +15,7 @@ export type StableErrorCode =
   | 'repository_invalid'
   | 'repository_ambiguous'
   | 'repository_already_imported'
+  | 'project_revision_conflict'
   | 'task_revision_conflict'
   | 'task_not_found'
   | 'task_not_ready'
@@ -65,6 +66,7 @@ const statusCodes: Record<StableErrorCode, number> = {
   repository_invalid: 400,
   repository_ambiguous: 400,
   repository_already_imported: 409,
+  project_revision_conflict: 409,
   task_revision_conflict: 409,
   task_not_found: 404,
   session_already_linked: 409,

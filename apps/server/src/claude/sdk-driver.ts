@@ -2,6 +2,7 @@ import type { PermissionMode } from '@mesh-session-platform/contracts';
 
 import type {
   ClaudeSessionDriver,
+  DeveloperRuntimeConfiguration,
   DiscoverClaudeSessionsRequest,
   DiscoveredClaudeSession,
   DriverEvent,
@@ -40,6 +41,7 @@ export interface SdkQueryOptions {
   cwd?: string;
   title?: string;
   resume?: string;
+  developer?: DeveloperRuntimeConfiguration;
   onPermission?(request: SdkPermissionRequest): Promise<SdkPermissionDecision>;
 }
 
@@ -279,6 +281,7 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
       cwd: request.workspacePath,
       title: 'title' in request ? request.title : undefined,
       resume,
+      developer: request.developer,
     };
     if (mode !== 'inherit') {
       options.onPermission = (permission) => {
@@ -293,6 +296,9 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
     const session = new SdkDriverSession(query, mode);
     sessionRef.current = session;
     await session.initialize();
+    if (request.developer) {
+      await session.sendPrompt(request.developer.initialPrompt);
+    }
     return session;
   }
 }

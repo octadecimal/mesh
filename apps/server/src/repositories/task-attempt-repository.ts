@@ -23,6 +23,7 @@ type TaskAttemptRow = {
   unlinked_at: string | null;
   unlinked_by_json: string | null;
   unlink_reason: string | null;
+  role: string | null;
 };
 
 const toTaskAttempt = (row: TaskAttemptRow): TaskAttempt =>
@@ -37,7 +38,17 @@ const toTaskAttempt = (row: TaskAttemptRow): TaskAttempt =>
     unlinkedAt: row.unlinked_at,
     unlinkedBy: row.unlinked_by_json ? JSON.parse(row.unlinked_by_json) : null,
     unlinkReason: row.unlink_reason,
+    role: row.role,
   });
+
+const withRole = `
+  SELECT task_attempts.*,
+         CASE WHEN EXISTS (
+           SELECT 1 FROM developer_execution_cycles
+           WHERE developer_execution_cycles.attempt_id = task_attempts.id
+         ) THEN 'developer' ELSE NULL END AS role
+  FROM task_attempts
+`;
 
 export class TaskAttemptRepository {
   private readonly insert;
@@ -57,14 +68,12 @@ export class TaskAttemptRepository {
         @unlinkedAt, @unlinkedByJson, @unlinkReason
       )
     `);
-    this.selectById = database.prepare(
-      'SELECT * FROM task_attempts WHERE id = ?',
-    );
+    this.selectById = database.prepare(`${withRole} WHERE id = ?`);
     this.selectCurrentBySession = database.prepare(
-      'SELECT * FROM task_attempts WHERE session_id = ? AND unlinked_at IS NULL',
+      `${withRole} WHERE session_id = ? AND unlinked_at IS NULL`,
     );
     this.selectByTask = database.prepare(
-      'SELECT * FROM task_attempts WHERE task_id = ? ORDER BY ordinal',
+      `${withRole} WHERE task_id = ? ORDER BY ordinal`,
     );
     this.nextOrdinal = database.prepare(
       'SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM task_attempts WHERE task_id = ?',
@@ -87,6 +96,7 @@ export class TaskAttemptRepository {
     sessionId: string,
     source: TaskAttemptSource,
     actor: TaskActor,
+    role: TaskAttempt['role'] = null,
   ): TaskAttempt {
     const parsedTaskId = idSchema.parse(taskId);
     const parsedSessionId = idSchema.parse(sessionId);
@@ -106,6 +116,7 @@ export class TaskAttemptRepository {
         unlinkedAt: null,
         unlinkedBy: null,
         unlinkReason: null,
+        role,
       });
       this.insert.run(this.toParameters(attempt));
       return attempt;
@@ -131,9 +142,7 @@ export class TaskAttemptRepository {
   listBySession(sessionId: string): TaskAttempt[] {
     return (
       this.database
-        .prepare(
-          'SELECT * FROM task_attempts WHERE session_id = ? ORDER BY ordinal, id',
-        )
+        .prepare(`${withRole} WHERE session_id = ? ORDER BY ordinal, id`)
         .all(sessionId) as TaskAttemptRow[]
     ).map(toTaskAttempt);
   }

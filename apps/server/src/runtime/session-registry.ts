@@ -1,7 +1,11 @@
 import type { PermissionMode } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
-import type { ClaudeSessionDriver, DriverSession } from '../claude/driver.js';
+import type {
+  ClaudeSessionDriver,
+  DeveloperRuntimeConfiguration,
+  DriverSession,
+} from '../claude/driver.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
@@ -17,13 +21,24 @@ interface SessionRegistryDependencies {
   diagnostics: DiagnosticRepository;
   driver: ClaudeSessionDriver;
   publisher?: EventPublisher;
+  invalidateDeveloperCapability?: (sessionId: string) => void;
+  onRuntimeStopped?: (sessionId: string) => void;
   shutdownTimeoutMs?: number;
   closeDatabase?: () => void;
 }
 
+type PendingAttachCancellation = 'audit' | 'interrupt' | 'shutdown';
+
+type PendingAttach = {
+  cancellation?: PendingAttachCancellation;
+  settled: Promise<void>;
+  resolveSettled(): void;
+};
+
 export class SessionRegistry {
   readonly publisher: EventPublisher;
   private readonly runtimes = new Map<string, SessionRuntime>();
+  private readonly pendingAttaches = new Map<string, PendingAttach>();
   private unavailable = false;
   private shuttingDown = false;
 
@@ -35,13 +50,17 @@ export class SessionRegistry {
     return this.unavailable ? 'audit_unavailable' : 'available';
   }
 
-  async create(sessionId: string): Promise<void> {
-    await this.attach(sessionId, 'create');
+  async create(
+    sessionId: string,
+    developer?: DeveloperRuntimeConfiguration,
+  ): Promise<void> {
+    await this.attach(sessionId, 'create', developer);
   }
 
   async resume(
     sessionId: string,
     configuration: { workspaceId: string; permissionMode: PermissionMode },
+    developer?: DeveloperRuntimeConfiguration,
   ): Promise<void> {
     const configured = this.dependencies.sessions.configureResume(
       sessionId,
@@ -49,7 +68,7 @@ export class SessionRegistry {
       configuration.permissionMode,
     );
     if (!configured) throw { code: 'session_not_found', sessionId };
-    await this.attach(sessionId, 'resume');
+    await this.attach(sessionId, 'resume', developer);
   }
 
   async sendPrompt(sessionId: string, prompt: string): Promise<void> {
@@ -60,7 +79,20 @@ export class SessionRegistry {
 
   async interrupt(sessionId: string): Promise<void> {
     this.assertWritable();
+    const pending = this.pendingAttaches.get(sessionId);
+    if (pending) {
+      this.cancelPendingAttach(sessionId, pending, 'interrupt');
+      return;
+    }
+    this.invalidateDeveloperCapability(sessionId);
     await this.requireRuntime(sessionId).interrupt();
+  }
+
+  async emergencyClose(sessionId: string): Promise<void> {
+    const runtime = this.runtimes.get(sessionId);
+    if (!runtime) return;
+    runtime.emergencyInterrupt();
+    await runtime.forceClose();
   }
 
   async resolvePermission(
@@ -75,7 +107,15 @@ export class SessionRegistry {
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
-    const runtimes = [...this.runtimes.values()];
+    const pendingEntries = [...this.pendingAttaches.entries()];
+    for (const [sessionId, pending] of pendingEntries) {
+      this.cancelPendingAttach(sessionId, pending, 'shutdown');
+    }
+    const runtimeEntries = [...this.runtimes.entries()];
+    for (const [sessionId] of runtimeEntries) {
+      this.invalidateDeveloperCapability(sessionId);
+    }
+    const runtimes = runtimeEntries.map(([, runtime]) => runtime);
     const timeoutMs = this.dependencies.shutdownTimeoutMs ?? 5_000;
     const deadline = Date.now() + timeoutMs;
     const waitWithinDeadline = async (
@@ -95,7 +135,12 @@ export class SessionRegistry {
     const interruptions = runtimes.map((runtime) =>
       runtime.interrupt().catch(() => undefined),
     );
-    await waitWithinDeadline(Promise.allSettled(interruptions));
+    await waitWithinDeadline(
+      Promise.allSettled([
+        ...interruptions,
+        ...pendingEntries.map(([, pending]) => pending.settled),
+      ]),
+    );
     const closures = runtimes.map((runtime) =>
       runtime.forceClose().catch(() => undefined),
     );
@@ -109,9 +154,10 @@ export class SessionRegistry {
   private async attach(
     sessionId: string,
     mode: 'create' | 'resume',
+    developer?: DeveloperRuntimeConfiguration,
   ): Promise<void> {
     this.assertWritable();
-    if (this.runtimes.has(sessionId)) {
+    if (this.runtimes.has(sessionId) || this.pendingAttaches.has(sessionId)) {
       const state =
         this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
       throw { code: 'invalid_session_state', from: state, trigger: mode };
@@ -136,37 +182,58 @@ export class SessionRegistry {
       };
     }
 
-    const runtimeRef: { current?: SessionRuntime } = {};
-    const onStopped = () => {
-      if (
-        runtimeRef.current &&
-        this.runtimes.get(sessionId) === runtimeRef.current
-      )
-        this.runtimes.delete(sessionId);
+    let resolveSettled!: () => void;
+    const pending: PendingAttach = {
+      settled: new Promise<void>((resolve) => {
+        resolveSettled = resolve;
+      }),
+      resolveSettled: () => resolveSettled(),
     };
-    const placeholder: DriverSession = await (mode === 'create'
-      ? this.dependencies.driver.create({
-          title: session.title,
-          workspacePath: workspace.path,
-          permissionMode: session.permissionMode,
-        })
-      : this.dependencies.driver.resume({
-          claudeResumeId: session.claudeResumeId!,
-          workspacePath: workspace.path,
-          permissionMode: session.permissionMode,
-        }));
-    const runtime = new SessionRuntime({
-      session,
-      driverSession: placeholder,
-      events: this.dependencies.events,
-      diagnostics: this.dependencies.diagnostics,
-      publisher: this.publisher,
-      onAuditFailure: (error) => this.tripAuditBarrier(error),
-      onStopped,
-    });
-    runtimeRef.current = runtime;
-    this.runtimes.set(sessionId, runtime);
+    this.pendingAttaches.set(sessionId, pending);
+    const runtimeRef: { current?: SessionRuntime } = {};
+    let stopped = false;
+    const onStopped = () => {
+      if (stopped) return;
+      stopped = true;
+      const runtime = runtimeRef.current;
+      if (runtime && this.runtimes.get(sessionId) === runtime) {
+        this.runtimes.delete(sessionId);
+        this.invalidateDeveloperCapability(sessionId);
+        try {
+          this.dependencies.onRuntimeStopped?.(sessionId);
+        } catch (error) {
+          this.tripAuditBarrier(error);
+        }
+      }
+    };
+    let placeholder: DriverSession | undefined;
     try {
+      placeholder = await (mode === 'create'
+        ? this.dependencies.driver.create({
+            title: session.title,
+            workspacePath: workspace.path,
+            permissionMode: session.permissionMode,
+            developer,
+          })
+        : this.dependencies.driver.resume({
+            claudeResumeId: session.claudeResumeId!,
+            workspacePath: workspace.path,
+            permissionMode: session.permissionMode,
+            developer,
+          }));
+      this.assertPendingAttachCurrent(sessionId, pending);
+      const runtime = new SessionRuntime({
+        session,
+        driverSession: placeholder,
+        events: this.dependencies.events,
+        diagnostics: this.dependencies.diagnostics,
+        publisher: this.publisher,
+        onAuditFailure: (error) => this.tripAuditBarrier(error),
+        onStopped,
+      });
+      runtimeRef.current = runtime;
+      this.runtimes.set(sessionId, runtime);
+      this.pendingAttaches.delete(sessionId);
       runtime.persistTransition({
         type: mode === 'create' ? 'start' : 'resume',
       });
@@ -177,11 +244,43 @@ export class SessionRegistry {
       );
       runtime.startConsuming();
     } catch (error) {
-      this.runtimes.delete(sessionId);
-      await placeholder.interrupt().catch(() => undefined);
-      await placeholder.close().catch(() => undefined);
+      const runtime = runtimeRef.current;
+      if (runtime && this.runtimes.get(sessionId) === runtime) {
+        this.runtimes.delete(sessionId);
+        this.invalidateDeveloperCapability(sessionId);
+      } else if (
+        this.pendingAttaches.get(sessionId) === pending &&
+        !pending.cancellation
+      ) {
+        this.invalidateDeveloperCapability(sessionId);
+      }
+      await placeholder?.interrupt().catch(() => undefined);
+      await placeholder?.close().catch(() => undefined);
       throw error;
+    } finally {
+      if (this.pendingAttaches.get(sessionId) === pending) {
+        this.pendingAttaches.delete(sessionId);
+      }
+      pending.resolveSettled();
     }
+  }
+
+  private assertPendingAttachCurrent(
+    sessionId: string,
+    pending: PendingAttach,
+  ): void {
+    this.assertWritable();
+    if (
+      this.pendingAttaches.get(sessionId) === pending &&
+      !pending.cancellation
+    ) {
+      return;
+    }
+    throw {
+      code: 'invalid_session_state',
+      from: 'interrupting',
+      trigger: pending.cancellation ?? 'driver_required',
+    };
   }
 
   private assertWritable(): void {
@@ -210,6 +309,31 @@ export class SessionRegistry {
   private tripAuditBarrier(_error: unknown): void {
     if (this.unavailable) return;
     this.unavailable = true;
-    for (const runtime of this.runtimes.values()) runtime.emergencyInterrupt();
+    for (const [sessionId, pending] of this.pendingAttaches) {
+      this.cancelPendingAttach(sessionId, pending, 'audit');
+    }
+    for (const [sessionId, runtime] of this.runtimes) {
+      this.invalidateDeveloperCapability(sessionId);
+      runtime.emergencyInterrupt();
+    }
+  }
+
+  private cancelPendingAttach(
+    sessionId: string,
+    pending: PendingAttach,
+    cancellation: PendingAttachCancellation,
+  ): void {
+    if (
+      this.pendingAttaches.get(sessionId) !== pending ||
+      pending.cancellation
+    ) {
+      return;
+    }
+    pending.cancellation = cancellation;
+    this.invalidateDeveloperCapability(sessionId);
+  }
+
+  private invalidateDeveloperCapability(sessionId: string): void {
+    this.dependencies.invalidateDeveloperCapability?.(sessionId);
   }
 }

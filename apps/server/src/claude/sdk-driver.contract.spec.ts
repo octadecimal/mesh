@@ -153,6 +153,34 @@ describe('SdkClaudeSessionDriver contract', () => {
     expect(sdk.query.closed).toBe(true);
   });
 
+  it('forwards Developer runtime configuration for create and resume queries', async () => {
+    const controls = {
+      submitForReview: async () => undefined,
+      markBlocked: async () => undefined,
+    };
+    const developer = { initialPrompt: 'Execute the assigned task.', controls };
+    const createSdk = new ScriptedFacade([
+      { kind: 'started', sessionId: 'resume-create', apiKeySource: 'none' },
+    ]);
+    const resumeSdk = new ScriptedFacade([
+      { kind: 'started', sessionId: 'resume-existing', apiKeySource: 'none' },
+    ]);
+
+    await new SdkClaudeSessionDriver(createSdk).create({
+      title: 'Developer',
+      developer,
+    });
+    await new SdkClaudeSessionDriver(resumeSdk).resume({
+      claudeResumeId: 'resume-existing',
+      developer,
+    });
+
+    expect(createSdk.queryCalls[0]?.developer).toBe(developer);
+    expect(resumeSdk.queryCalls[0]?.developer).toBe(developer);
+    expect(createSdk.query.prompts).toEqual(['Execute the assigned task.']);
+    expect(resumeSdk.query.prompts).toEqual(['Execute the assigned task.']);
+  });
+
   it('blocks an interactive permission callback until the driver resolves it', async () => {
     const sdk = new ScriptedFacade([
       { kind: 'started', sessionId: 'resume-3', apiKeySource: 'none' },

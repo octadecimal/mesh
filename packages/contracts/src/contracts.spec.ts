@@ -4,6 +4,10 @@ import {
   blockedConditionSchema,
   commandSchema,
   commandEnvelopeSchema,
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
+  developerReviewFeedbackSchema,
   projectEventSchema,
   projectHistorySchema,
   projectSchema,
@@ -387,6 +391,352 @@ describe('session platform contracts', () => {
         cursor: 4,
       }).events[0],
     ).toEqual(event);
+  });
+
+  it('parses complete immutable Developer execution records', () => {
+    const cycle = {
+      id: 'developer-cycle-1',
+      attemptId: 'attempt-1',
+      ordinal: 1,
+      mode: 'new' as const,
+      authorizedBy: actor,
+      authorizationCommandId: 'command-launch-1',
+      policyVersion: 'developer-policy-v1',
+      projectInstructions: { content: 'Run focused tests.', revision: 2 },
+      taskSnapshot: {
+        revision: 3,
+        title: 'Implement the execution model',
+        description: 'Implement the execution model.',
+        acceptanceCriteria: [{ id: 'criterion-1', text: 'Contracts compile.' }],
+      },
+      workspaceId: 'workspace-1',
+      permissionMode: 'safe_auto' as const,
+      startedAt: now,
+      endedAt: null,
+      terminalDisposition: null,
+      completionReportId: null,
+      blockerReportId: null,
+      terminalCommandId: null,
+      terminalEventId: null,
+    };
+    const completionReport = {
+      id: 'completion-report-1',
+      cycleId: 'developer-cycle-1',
+      summary: 'Added the Developer execution contracts.',
+      criterionResults: [
+        {
+          criterionId: 'criterion-1',
+          status: 'met' as const,
+          evidence: 'corepack pnpm nx typecheck contracts',
+        },
+      ],
+      verification: [
+        {
+          command: 'corepack pnpm nx test contracts',
+          outcome: 'passed' as const,
+          output: 'All contract tests passed.',
+        },
+      ],
+      limitations: 'None.',
+      workspaceState: {
+        summary: 'Clean worktree.',
+        hasUncommittedChanges: false,
+        commitsCreated: true,
+      },
+      reviewerNotes: null,
+      createdAt: now,
+    };
+
+    for (const [schema, record] of [
+      [developerExecutionCycleSchema, cycle],
+      [developerCompletionReportSchema, completionReport],
+      [
+        developerBlockerReportSchema,
+        {
+          id: 'blocker-report-1',
+          cycleId: 'developer-cycle-1',
+          reason: 'Missing repository access.',
+          evidence: 'The repository identity could not be resolved.',
+          attemptedWork: 'Retried resolution with the configured path.',
+          suggestedHumanAction: 'Confirm the repository is available.',
+          preserveWorkspace: true,
+          createdAt: now,
+        },
+      ],
+      [
+        developerReviewFeedbackSchema,
+        {
+          id: 'feedback-1',
+          cycleId: 'developer-cycle-1',
+          taskId: 'task-1',
+          kind: 'rejection',
+          feedback: 'Please add a regression test.',
+          actor,
+          commandId: 'command-reject-1',
+          createdAt: now,
+        },
+      ],
+    ] as const) {
+      expect(schema.parse(record)).toMatchObject(record);
+    }
+
+    expect(() =>
+      developerCompletionReportSchema.parse({
+        ...completionReport,
+        criterionResults: [],
+      }),
+    ).toThrow();
+    expect(() =>
+      developerExecutionCycleSchema.parse({
+        ...cycle,
+        terminalDisposition: 'blocked',
+      }),
+    ).toThrow();
+    expect(
+      developerExecutionCycleSchema.parse({ ...cycle, endedAt: now }),
+    ).toMatchObject({ endedAt: now, terminalDisposition: null });
+    expect(() =>
+      developerReviewFeedbackSchema.parse({
+        id: 'feedback-agent-1',
+        cycleId: 'developer-cycle-1',
+        taskId: 'task-1',
+        kind: 'rejection',
+        feedback: 'Please add a regression test.',
+        actor: { type: 'agent', id: 'developer-1' },
+        commandId: 'command-reject-1',
+        createdAt: now,
+      }),
+    ).toThrow();
+  });
+
+  it('requires each snapshotted criterion exactly once at the Developer event boundary', () => {
+    const task = {
+      id: 'task-1',
+      projectId: 'project-1',
+      title: 'Implement the execution model',
+      description: 'Add the Developer execution contracts.',
+      acceptanceCriteria: ['Contracts compile.', 'Tests pass.'],
+      priority: 'normal' as const,
+      rank: 'm',
+      lifecycleState: 'review' as const,
+      labels: [],
+      notes: '',
+      blocked: null,
+      revision: 3,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const attempt = {
+      id: 'attempt-1',
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      ordinal: 1,
+      source: 'launched' as const,
+      actor,
+      createdAt: now,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+      role: 'developer' as const,
+    };
+    const cycle = {
+      id: 'developer-cycle-1',
+      attemptId: 'attempt-1',
+      ordinal: 1,
+      mode: 'new' as const,
+      authorizedBy: actor,
+      authorizationCommandId: 'command-launch-1',
+      policyVersion: 'developer-policy-v1',
+      projectInstructions: { content: '', revision: 1 },
+      taskSnapshot: {
+        revision: 3,
+        title: 'Implement the execution model',
+        description: 'Add the Developer execution contracts.',
+        acceptanceCriteria: [
+          { id: 'criterion-1', text: 'Contracts compile.' },
+          { id: 'criterion-2', text: 'Tests pass.' },
+        ],
+      },
+      workspaceId: 'workspace-1',
+      permissionMode: 'safe_auto' as const,
+      startedAt: now,
+      endedAt: now,
+      terminalDisposition: 'submitted_for_review' as const,
+      completionReportId: 'completion-report-1',
+      blockerReportId: null,
+      terminalCommandId: 'developer-command-1',
+      terminalEventId: 'project-event-1',
+    };
+    const report = {
+      id: 'completion-report-1',
+      cycleId: 'developer-cycle-1',
+      summary: 'Added the Developer execution contracts.',
+      criterionResults: [
+        {
+          criterionId: 'criterion-1',
+          status: 'met' as const,
+          evidence: 'corepack pnpm nx typecheck contracts',
+        },
+        {
+          criterionId: 'criterion-2',
+          status: 'met' as const,
+          evidence: 'corepack pnpm nx test contracts',
+        },
+      ],
+      verification: [],
+      limitations: '',
+      workspaceState: {
+        summary: 'Clean worktree.',
+        hasUncommittedChanges: false,
+        commitsCreated: true,
+      },
+      reviewerNotes: null,
+      createdAt: now,
+    };
+    const event = {
+      protocolVersion: 1,
+      id: 'project-event-1',
+      projectId: 'project-1',
+      sequence: 1,
+      occurredAt: now,
+      type: 'task.developer_execution_changed' as const,
+      payload: {
+        task,
+        attempt,
+        cycle,
+        completionReport: report,
+        blockerReport: null,
+        reviewFeedback: null,
+      },
+    };
+
+    expect(projectEventSchema.parse(event)).toMatchObject(event);
+    const { title: _legacyTitle, ...legacyTaskSnapshot } =
+      event.payload.cycle.taskSnapshot;
+    const legacyEvent = {
+      ...event,
+      id: 'project-event-legacy-developer-cycle',
+      payload: {
+        ...event.payload,
+        cycle: {
+          ...event.payload.cycle,
+          taskSnapshot: legacyTaskSnapshot,
+        },
+      },
+    };
+    expect(
+      projectEventSchema.parse(legacyEvent).payload.cycle.taskSnapshot.title,
+    ).toBe('');
+    expect(() =>
+      projectEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          completionReport: {
+            ...report,
+            criterionResults: [report.criterionResults[0]],
+          },
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      projectEventSchema.parse({
+        ...event,
+        payload: {
+          ...event.payload,
+          completionReport: {
+            ...report,
+            criterionResults: [
+              report.criterionResults[0],
+              { ...report.criterionResults[0], status: 'not_met' as const },
+            ],
+          },
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('requires an agent actor for scoped Developer commands', () => {
+    const command = {
+      type: 'task.developer.submit_review' as const,
+      payload: {
+        capability: 'developer-capability-1',
+        expectedRevision: 3,
+        report: {
+          id: 'completion-report-1',
+          cycleId: 'developer-cycle-1',
+          summary: 'Added the Developer execution contracts.',
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: 'met' as const,
+              evidence: 'corepack pnpm nx typecheck contracts',
+            },
+          ],
+          verification: [
+            {
+              command: 'corepack pnpm nx test contracts',
+              outcome: 'passed' as const,
+              output: 'All contract tests passed.',
+            },
+          ],
+          limitations: 'None.',
+          workspaceState: {
+            summary: 'Clean worktree.',
+            hasUncommittedChanges: false,
+            commitsCreated: true,
+          },
+          reviewerNotes: null,
+          createdAt: now,
+        },
+        actor: { type: 'agent' as const, id: 'developer-1' },
+      },
+    };
+
+    expect(
+      commandEnvelopeSchema.parse({
+        protocolVersion: 1,
+        idempotencyKey: 'developer-command-1',
+        command,
+      }).command.type,
+    ).toBe('task.developer.submit_review');
+    expect(() =>
+      commandEnvelopeSchema.parse({
+        protocolVersion: 1,
+        idempotencyKey: 'developer-command-2',
+        command: { ...command, payload: { ...command.payload, actor } },
+      }),
+    ).toThrow();
+  });
+
+  it('decodes Milestone 2 project and attempt payloads with Developer defaults', () => {
+    const oldProject = {
+      id: 'project-1',
+      displayName: 'Mesh',
+      repositoryPath: 'C:/code/mesh',
+      discoveredAt: now,
+      updatedAt: now,
+    };
+    const oldAttempt = {
+      id: 'attempt-1',
+      taskId: 'task-1',
+      sessionId: 'session-1',
+      ordinal: 1,
+      source: 'launched' as const,
+      actor,
+      createdAt: now,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+    };
+
+    expect(projectSchema.parse(oldProject).developerInstructions).toEqual({
+      content: '',
+      revision: 1,
+      updatedAt: oldProject.updatedAt,
+      updatedBy: null,
+    });
+    expect(taskAttemptSchema.parse(oldAttempt).role).toBeNull();
   });
 
   it('rejects a mutating command without an idempotency key', () => {

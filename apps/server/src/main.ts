@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { dirname } from 'node:path';
 
 import type { FastifyInstance } from 'fastify';
+import type { AttemptRepair } from '@mesh-session-platform/contracts';
 
 import { buildApp, createOriginPolicy } from './app.js';
 import { createClaudeSdkFacade } from './claude/sdk-adapter.js';
@@ -25,6 +26,7 @@ import { GitAdapter } from './platform/git.js';
 import { NodeProcessRunner } from './platform/process-runner.js';
 import { CommandRepository } from './repositories/command-repository.js';
 import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
+import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
 import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
 import { ProjectEventRepository } from './repositories/project-event-repository.js';
@@ -37,6 +39,9 @@ import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { recoverInterruptedSessions } from './runtime/recovery.js';
 import { SessionRegistry } from './runtime/session-registry.js';
 import { AttemptService } from './tasks/attempt-service.js';
+import { DeveloperCapabilityRegistry } from './tasks/developer-capability-registry.js';
+import { DeveloperExecutionService } from './tasks/developer-execution-service.js';
+import { DeveloperReworkService } from './tasks/developer-rework-service.js';
 import {
   reconcileTaskAttemptLaunchReservations,
   reconcileTaskAttempts,
@@ -171,6 +176,7 @@ export const startServer = async (
   const workspaces = new WorkspaceRepository(database);
   const sessions = new SessionRepository(database);
   const diagnostics = new DiagnosticRepository(database);
+  const developerExecutions = new DeveloperExecutionRepository(database);
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
@@ -188,6 +194,35 @@ export const startServer = async (
     options.test?.driver,
     environment,
   );
+  const capabilities = new DeveloperCapabilityRegistry();
+  const runtimeRepairs: AttemptRepair[] = [];
+  const reconcileStoppedRuntime = (activeRegistry: SessionRegistry) => {
+    const result = reconcileTaskAttempts({
+      database,
+      projects,
+      tasks,
+      attempts,
+      sessions,
+      diagnostics,
+      developerExecutions,
+      projectEvents,
+    });
+    for (const repair of result.repairs) {
+      if (
+        !runtimeRepairs.some(
+          (current) =>
+            current.taskId === repair.taskId &&
+            current.attemptId === repair.attemptId &&
+            current.sessionId === repair.sessionId &&
+            current.reason === repair.reason,
+        )
+      ) {
+        runtimeRepairs.push(repair);
+      }
+    }
+    for (const event of result.events)
+      activeRegistry.publisher.publishProject(event);
+  };
   const registry = new SessionRegistry({
     database,
     sessions,
@@ -195,6 +230,36 @@ export const startServer = async (
     events,
     diagnostics,
     driver,
+    invalidateDeveloperCapability: (sessionId) =>
+      capabilities.invalidateSession(sessionId),
+    onRuntimeStopped: () => reconcileStoppedRuntime(registry),
+  });
+  const developerExecutionService = new DeveloperExecutionService({
+    projects,
+    tasks,
+    attempts,
+    developerExecutions,
+    transitions,
+    projectEvents,
+    commands,
+    taskService,
+    capabilities,
+    publisher: registry.publisher,
+  });
+  const developerReworkService = new DeveloperReworkService({
+    database,
+    projects,
+    tasks,
+    attempts,
+    sessions,
+    diagnostics,
+    developerExecutions,
+    projectEvents,
+    commands,
+    taskService,
+    registry,
+    capabilities,
+    developerExecutionService,
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
   const git = new GitAdapter(new NodeProcessRunner(), pathOptions);
@@ -206,10 +271,13 @@ export const startServer = async (
     sessions,
     workspaces,
     diagnostics,
+    developerExecutions,
     projectEvents,
     commands,
     taskService,
     registry,
+    capabilities,
+    developerReworkService,
     git,
     pathOptions,
     billingConflicts,
@@ -221,8 +289,10 @@ export const startServer = async (
     attempts,
     sessions,
     diagnostics,
+    developerExecutions,
     projectEvents,
   });
+  runtimeRepairs.push(...reconciliation.repairs);
   reconcileTaskAttemptLaunchReservations(database);
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
@@ -231,10 +301,12 @@ export const startServer = async (
     tasks,
     taskService,
     attemptService,
+    developerExecutionService,
     attempts,
     transitions,
     projectEvents,
-    repairs: reconciliation.repairs,
+    developerExecutions,
+    repairs: runtimeRepairs,
     workspaces,
     sessions,
     diagnostics,

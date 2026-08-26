@@ -1,5 +1,9 @@
 import type {
   AttemptRepair,
+  DeveloperBlockerReport,
+  DeveloperCompletionReport,
+  DeveloperExecutionCycle,
+  DeveloperReviewFeedback,
   ProjectEvent,
   ProjectSnapshot,
   SessionEvent,
@@ -104,6 +108,72 @@ const repair: AttemptRepair = {
   reason: 'startup_outcome_unknown',
 };
 
+const developerCycle: DeveloperExecutionCycle = {
+  id: 'cycle-1',
+  attemptId: attempt.id,
+  ordinal: 1,
+  mode: 'new',
+  authorizedBy: { type: 'human', id: 'operator' },
+  authorizationCommandId: 'command-developer-1',
+  policyVersion: 'v1',
+  projectInstructions: { content: 'Use tests.', revision: 1 },
+  taskSnapshot: {
+    revision: 1,
+    title: 'Task one',
+    description: '',
+    acceptanceCriteria: [{ id: 'criterion-1', text: 'Complete the task.' }],
+  },
+  workspaceId: 'workspace-1',
+  permissionMode: 'interactive',
+  startedAt: timestamp,
+  endedAt: null,
+  terminalDisposition: null,
+  completionReportId: null,
+  blockerReportId: null,
+  terminalCommandId: null,
+  terminalEventId: null,
+};
+
+const completionReport: DeveloperCompletionReport = {
+  id: 'completion-1',
+  cycleId: developerCycle.id,
+  summary: 'Completed.',
+  criterionResults: [
+    { criterionId: 'criterion-1', status: 'met', evidence: 'Completed.' },
+  ],
+  verification: [],
+  limitations: '',
+  workspaceState: {
+    summary: 'Clean.',
+    hasUncommittedChanges: false,
+    commitsCreated: true,
+  },
+  reviewerNotes: null,
+  createdAt: timestamp,
+};
+
+const blockerReport: DeveloperBlockerReport = {
+  id: 'blocker-1',
+  cycleId: developerCycle.id,
+  reason: 'Blocked.',
+  evidence: 'Evidence.',
+  attemptedWork: 'Attempted.',
+  suggestedHumanAction: 'Help.',
+  preserveWorkspace: true,
+  createdAt: timestamp,
+};
+
+const reviewFeedback: DeveloperReviewFeedback = {
+  id: 'feedback-1',
+  cycleId: developerCycle.id,
+  taskId: task().id,
+  kind: 'rejection',
+  feedback: 'Please revise.',
+  actor: { type: 'human', id: 'operator' },
+  commandId: 'command-feedback-1',
+  createdAt: timestamp,
+};
+
 const projectSnapshot = (
   overrides: Partial<ProjectSnapshot> = {},
 ): ProjectSnapshot => ({
@@ -113,6 +183,10 @@ const projectSnapshot = (
   attempts: [attempt],
   transitions: [transition],
   repairs: [repair],
+  developerCycles: [developerCycle],
+  developerCompletionReports: [completionReport],
+  developerBlockerReports: [blockerReport],
+  developerReviewFeedback: [reviewFeedback],
   cursor: 3,
   ...overrides,
 });
@@ -232,6 +306,87 @@ describe('replaceSnapshot', () => {
 });
 
 describe('project projection', () => {
+  it('replaces developer records for only the snapshotted project', () => {
+    const otherProject = {
+      ...project,
+      id: 'project-2',
+      displayName: 'Project two',
+    };
+    const otherTask = task({ id: 'task-2', projectId: otherProject.id });
+    const otherAttempt = { ...attempt, id: 'attempt-2', taskId: otherTask.id };
+    const otherCycle = {
+      ...developerCycle,
+      id: 'cycle-2',
+      attemptId: otherAttempt.id,
+    };
+    const otherCompletion = {
+      ...completionReport,
+      id: 'completion-2',
+      cycleId: otherCycle.id,
+    };
+    const otherBlocker = {
+      ...blockerReport,
+      id: 'blocker-2',
+      cycleId: otherCycle.id,
+    };
+    const otherFeedback = {
+      ...reviewFeedback,
+      id: 'feedback-2',
+      cycleId: otherCycle.id,
+      taskId: otherTask.id,
+    };
+    const laterOtherFeedback = {
+      ...otherFeedback,
+      id: 'feedback-3',
+      feedback: 'One more revision.',
+    };
+    const withBothProjects = replaceProjectSnapshot(
+      replaceProjectSnapshot(createProjection(snapshot()), projectSnapshot()),
+      projectSnapshot({
+        project: otherProject,
+        tasks: [otherTask],
+        attempts: [otherAttempt],
+        transitions: [],
+        repairs: [],
+        developerCycles: [otherCycle],
+        developerCompletionReports: [otherCompletion],
+        developerBlockerReports: [otherBlocker],
+        developerReviewFeedback: [otherFeedback, laterOtherFeedback],
+      }),
+    );
+    const freshCycle = { ...developerCycle, id: 'cycle-fresh' };
+
+    const next = replaceProjectSnapshot(
+      withBothProjects,
+      projectSnapshot({
+        developerCycles: [freshCycle],
+        developerCompletionReports: [],
+        developerBlockerReports: [],
+        developerReviewFeedback: [],
+      }),
+    );
+
+    expect(next.developerCyclesByAttemptId[attempt.id]).toEqual([freshCycle]);
+    expect(
+      next.developerCompletionReportsByCycleId[developerCycle.id],
+    ).toBeUndefined();
+    expect(next.developerCyclesByAttemptId[otherAttempt.id]).toEqual([
+      otherCycle,
+    ]);
+    expect(next.developerCompletionReportsByCycleId[otherCycle.id]).toEqual(
+      otherCompletion,
+    );
+    expect(next.developerBlockerReportsByCycleId[otherCycle.id]).toEqual(
+      otherBlocker,
+    );
+    expect(next.developerReviewFeedbackByCycleId[otherFeedback.id]).toEqual(
+      otherFeedback,
+    );
+    expect(
+      next.developerReviewFeedbackByCycleId[laterOtherFeedback.id],
+    ).toEqual(laterOtherFeedback);
+  });
+
   it('replaces only one project snapshot while retaining session projection data', () => {
     const current = {
       ...createProjection(snapshot(3)),
@@ -319,6 +474,85 @@ describe('project projection', () => {
       expect(repairDetected.state.repairsByProjectId[project.id]).toEqual([
         repair,
       ]);
+    }
+  });
+
+  it('orders developer events, updates instructions, and keeps duplicate and gap handling unchanged', () => {
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({
+        developerCycles: [],
+        developerCompletionReports: [],
+        developerBlockerReports: [],
+        developerReviewFeedback: [],
+      }),
+    );
+    const developerChanged: ProjectEvent = {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'task.developer_execution_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        attempt,
+        cycle: developerCycle,
+        completionReport,
+        blockerReport,
+        reviewFeedback,
+      },
+    };
+
+    const applied = applyProjectEvent(starting, developerChanged);
+    expect(applied.kind).toBe('applied');
+    if (applied.kind !== 'applied') return;
+    expect(applied.state.developerCyclesByAttemptId[attempt.id]).toEqual([
+      developerCycle,
+    ]);
+    expect(
+      applied.state.developerCompletionReportsByCycleId[developerCycle.id],
+    ).toEqual(completionReport);
+    expect(
+      applied.state.developerBlockerReportsByCycleId[developerCycle.id],
+    ).toEqual(blockerReport);
+    expect(
+      applied.state.developerReviewFeedbackByCycleId[reviewFeedback.id],
+    ).toEqual(reviewFeedback);
+    expect(applied.state.tasksById[task().id].lifecycleState).toBe('review');
+    expect(applyProjectEvent(applied.state, developerChanged)).toEqual({
+      kind: 'duplicate',
+    });
+    expect(
+      applyProjectEvent(applied.state, { ...developerChanged, sequence: 6 }),
+    ).toEqual({ kind: 'gap', expected: 5, received: 6 });
+
+    const instructionsChanged = applyProjectEvent(applied.state, {
+      protocolVersion: 1,
+      id: 'project-event-5',
+      projectId: project.id,
+      sequence: 5,
+      occurredAt: timestamp,
+      type: 'project.developer_instructions_changed',
+      payload: {
+        project: {
+          ...project,
+          revision: 2,
+          developerInstructions: {
+            content: 'Use focused tests.',
+            revision: 2,
+            updatedAt: timestamp,
+            updatedBy: { type: 'human', id: 'operator' },
+          },
+        },
+      },
+    });
+    expect(instructionsChanged.kind).toBe('applied');
+    if (instructionsChanged.kind === 'applied') {
+      expect(
+        instructionsChanged.state.projectsById[project.id].developerInstructions
+          .content,
+      ).toBe('Use focused tests.');
     }
   });
 });

@@ -10,6 +10,12 @@ import {
   taskSchema,
   taskTransitionSchema,
 } from './domain.js';
+import {
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
+  developerReviewFeedbackSchema,
+} from './developer-execution.js';
 import { protocolVersionSchema } from './protocol.js';
 
 const projectEvent = <Type extends string, Payload extends z.ZodType>(
@@ -54,6 +60,63 @@ export const taskAttemptRepairDetectedEventSchema = projectEvent(
   'task.attempt_repair_detected',
   z.object({ repair: attemptRepairSchema }),
 );
+export const projectDeveloperInstructionsChangedEventSchema = projectEvent(
+  'project.developer_instructions_changed',
+  z.object({ project: projectSchema }),
+);
+const taskDeveloperExecutionChangedPayloadSchema = z
+  .object({
+    task: taskSchema,
+    attempt: taskAttemptSchema,
+    cycle: developerExecutionCycleSchema,
+    completionReport: developerCompletionReportSchema.nullable(),
+    blockerReport: developerBlockerReportSchema.nullable(),
+    reviewFeedback: developerReviewFeedbackSchema.nullable(),
+  })
+  .superRefine(({ cycle, completionReport }, context) => {
+    if (completionReport === null) {
+      return;
+    }
+
+    const expectedCriterionIds = new Set(
+      cycle.taskSnapshot.acceptanceCriteria.map(({ id }) => id),
+    );
+    const reportedCriterionIds = new Set<string>();
+
+    for (const [index, result] of completionReport.criterionResults.entries()) {
+      if (!expectedCriterionIds.has(result.criterionId)) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'Completion reports may only reference snapshotted criteria.',
+          path: ['completionReport', 'criterionResults', index, 'criterionId'],
+        });
+      }
+      if (reportedCriterionIds.has(result.criterionId)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Completion reports must include each criterion only once.',
+          path: ['completionReport', 'criterionResults', index, 'criterionId'],
+        });
+      }
+      reportedCriterionIds.add(result.criterionId);
+    }
+
+    for (const criterionId of expectedCriterionIds) {
+      if (!reportedCriterionIds.has(criterionId)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Completion reports must cover every snapshotted criterion.',
+          path: ['completionReport', 'criterionResults'],
+        });
+      }
+    }
+  });
+
+export const taskDeveloperExecutionChangedEventSchema = projectEvent(
+  'task.developer_execution_changed',
+  taskDeveloperExecutionChangedPayloadSchema,
+);
 
 export const projectEventSchema = z.discriminatedUnion('type', [
   projectChangedEventSchema,
@@ -63,6 +126,8 @@ export const projectEventSchema = z.discriminatedUnion('type', [
   taskRankChangedEventSchema,
   taskAttemptChangedEventSchema,
   taskAttemptRepairDetectedEventSchema,
+  projectDeveloperInstructionsChangedEventSchema,
+  taskDeveloperExecutionChangedEventSchema,
 ]);
 
 export type ProjectEvent = z.infer<typeof projectEventSchema>;

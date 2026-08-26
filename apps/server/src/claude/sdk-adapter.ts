@@ -1,15 +1,22 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  createSdkMcpServer,
   listSessions,
   query,
+  tool,
   type CanUseTool,
   type PermissionResult,
   type Query,
   type SDKMessage,
   type SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
+import {
+  developerBlockerReportInputSchema,
+  developerCompletionReportInputSchema,
+} from '@mesh-session-platform/contracts';
 
+import type { DeveloperRuntimeControls } from './driver.js';
 import {
   UnsupportedSdkCapabilityError,
   type SdkFacade,
@@ -74,6 +81,89 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null
     ? (value as Record<string, unknown>)
     : undefined;
+
+const safeDeveloperControlErrorCodes = new Set([
+  'invalid_input',
+  'developer_control_failed',
+  'developer_capability_invalid',
+  'developer_execution_outcome_invalid',
+  'project_not_found',
+  'project_archived',
+  'task_not_found',
+  'task_revision_conflict',
+  'task_blocked',
+  'task_transition_invalid',
+  'task_transition_unauthorized',
+  'command_reconciliation_required',
+]);
+
+const developerControlFailure = (error: unknown) => {
+  const record = asRecord(error);
+  const candidate =
+    typeof record?.code === 'string'
+      ? record.code
+      : typeof error === 'string'
+        ? error
+        : undefined;
+  const code =
+    candidate && safeDeveloperControlErrorCodes.has(candidate)
+      ? candidate
+      : 'developer_control_failed';
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({ status: 'error', code }),
+      },
+    ],
+    isError: true,
+  };
+};
+
+const developerControlSuccess = (
+  status: 'submitted_for_review' | 'blocked',
+) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify({ status }) }],
+});
+
+const createDeveloperMcpServer = (controls: DeveloperRuntimeControls) =>
+  createSdkMcpServer({
+    name: 'mesh_developer',
+    version: '1',
+    alwaysLoad: true,
+    tools: [
+      tool(
+        'submit_for_review',
+        'Submit completed work and evidence for human review.',
+        developerCompletionReportInputSchema.shape,
+        async (input) => {
+          const parsed = developerCompletionReportInputSchema.safeParse(input);
+          if (!parsed.success) return developerControlFailure('invalid_input');
+          try {
+            await controls.submitForReview(parsed.data);
+            return developerControlSuccess('submitted_for_review');
+          } catch (error) {
+            return developerControlFailure(error);
+          }
+        },
+      ),
+      tool(
+        'mark_blocked',
+        'Report why work cannot safely continue and request human action.',
+        developerBlockerReportInputSchema.shape,
+        async (input) => {
+          const parsed = developerBlockerReportInputSchema.safeParse(input);
+          if (!parsed.success) return developerControlFailure('invalid_input');
+          try {
+            await controls.markBlocked(parsed.data);
+            return developerControlSuccess('blocked');
+          } catch (error) {
+            return developerControlFailure(error);
+          }
+        },
+      ),
+    ],
+  });
 
 const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
   if (message.type === 'system' && message.subtype === 'init') {
@@ -263,6 +353,15 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
         includePartialMessages: true,
         permissionMode: 'default',
         ...(canUseTool ? { canUseTool } : {}),
+        ...(options.developer
+          ? {
+              mcpServers: {
+                mesh_developer: createDeveloperMcpServer(
+                  options.developer.controls,
+                ),
+              },
+            }
+          : {}),
       },
     });
     if (

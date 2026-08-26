@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  developerExecutionCycleSchema,
+  idSchema,
+  developerBlockerReportSchema,
   projectSchema,
   rawDiagnosticSchema,
   sessionSchema,
@@ -35,6 +38,7 @@ describe('reconcileTaskAttempts', () => {
     cleanupState?: 'active' | 'pending';
     source?: TaskAttemptSource;
     repositories?: Parameters<typeof createTestRepositories>[0];
+    blocked?: boolean;
   }) => {
     const repositories = createTestRepositories(options.repositories);
     disposals.push(repositories.dispose);
@@ -60,7 +64,9 @@ describe('reconcileTaskAttempts', () => {
         lifecycleState: options.taskState,
         labels: [],
         notes: '',
-        blocked: null,
+        blocked: options.blocked
+          ? { reason: 'Waiting for input', actor, blockedAt: now }
+          : null,
         revision: 1,
         createdAt: now,
         updatedAt: now,
@@ -262,6 +268,236 @@ describe('reconcileTaskAttempts', () => {
     expect(repositories.projectEvents.after('project-1', 0)).toEqual(
       first.events,
     );
+  });
+
+  it('records one repair for an open Developer cycle with a non-live canonical session', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'completed',
+    });
+    const cycle = repositories.developerExecutions.createCycle(
+      developerExecutionCycleSchema.parse({
+        id: 'cycle-1',
+        attemptId: 'attempt-1',
+        ordinal: 1,
+        mode: 'new',
+        authorizedBy: actor,
+        authorizationCommandId: 'launch-1',
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Recover attempt state',
+          description: 'Keep task outcomes under human control.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Restart state is explicit.' },
+          ],
+        },
+        workspaceId: 'workspace-1',
+        permissionMode: 'interactive',
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        completionReportId: null,
+        blockerReportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+
+    const first = reconcile(repositories);
+    const second = reconcile(repositories);
+
+    expect(first.repairs).toEqual([
+      {
+        taskId: 'task-1',
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+        reason: 'developer_cycle_without_live_session',
+      },
+    ]);
+    expect(first.events).toHaveLength(1);
+    expect(first.events[0]).toMatchObject({
+      type: 'task.attempt_repair_detected',
+      payload: { repair: first.repairs[0] },
+    });
+    expect(second).toEqual({ repairs: first.repairs, events: [] });
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe(
+      'in_progress',
+    );
+    expect(repositories.developerExecutions.getCycle(cycle.id)).toEqual(cycle);
+    expect(
+      repositories.database
+        .prepare('SELECT COUNT(*) AS count FROM developer_completion_reports')
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      repositories.database
+        .prepare('SELECT COUNT(*) AS count FROM developer_blocker_reports')
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      repositories.diagnostics
+        .list('session-1')
+        .filter(
+          ({ payload }) =>
+            typeof payload === 'object' &&
+            payload !== null &&
+            'kind' in payload &&
+            payload.kind === 'attempt_repair',
+        ),
+    ).toHaveLength(1);
+  });
+
+  it('does not flag a normal terminal Developer blocker as an orphaned task', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'interrupted',
+      blocked: true,
+    });
+    const active = repositories.developerExecutions.createCycle(
+      developerExecutionCycleSchema.parse({
+        id: 'cycle-blocked',
+        attemptId: 'attempt-1',
+        ordinal: 1,
+        mode: 'new',
+        authorizedBy: actor,
+        authorizationCommandId: 'launch-blocked',
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Recover attempt state',
+          description: 'Keep task outcomes under human control.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Restart state is explicit.' },
+          ],
+        },
+        workspaceId: 'workspace-1',
+        permissionMode: 'interactive',
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        completionReportId: null,
+        blockerReportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    const blocker = developerBlockerReportSchema.parse({
+      id: 'blocker-1',
+      cycleId: active.id,
+      reason: 'Waiting for input',
+      evidence: 'Dependency is unavailable.',
+      attemptedWork: 'Checked local inputs.',
+      suggestedHumanAction: 'Provide the dependency.',
+      preserveWorkspace: true,
+      createdAt: now,
+    });
+    repositories.developerExecutions.appendBlockerReport(blocker);
+    repositories.developerExecutions.closeCycle(active.id, {
+      endedAt: now,
+      terminalDisposition: 'blocked',
+      completionReportId: null,
+      blockerReportId: blocker.id,
+      terminalCommandId: idSchema.parse('block-command'),
+      terminalEventId: idSchema.parse('block-event'),
+    });
+
+    expect(reconcile(repositories)).toEqual({ repairs: [], events: [] });
+  });
+
+  it('records every orphan Developer cycle once when a task has multiple attempts', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'completed',
+    });
+    addAttempt(repositories, {
+      ordinal: 2,
+      sessionId: 'session-2',
+      sessionState: 'failed',
+    });
+    const cycle = (
+      id: string,
+      attemptId: string,
+      ordinal: number,
+      workspaceId: string,
+    ) =>
+      developerExecutionCycleSchema.parse({
+        id,
+        attemptId,
+        ordinal,
+        mode: 'new',
+        authorizedBy: actor,
+        authorizationCommandId: `launch-${ordinal}`,
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Recover attempt state',
+          description: 'Keep task outcomes under human control.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Restart state is explicit.' },
+          ],
+        },
+        workspaceId,
+        permissionMode: 'interactive',
+        startedAt: `2026-08-25T12:0${ordinal}:00.000Z`,
+        endedAt: null,
+        terminalDisposition: null,
+        completionReportId: null,
+        blockerReportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      });
+    repositories.developerExecutions.createCycle(
+      cycle('cycle-1', 'attempt-1', 1, 'workspace-1'),
+    );
+    repositories.developerExecutions.createCycle(
+      cycle('cycle-2', 'attempt-2', 1, 'workspace-session-2'),
+    );
+
+    const first = reconcile(repositories);
+    const second = reconcile(repositories);
+
+    const expectedRepairs = [
+      {
+        taskId: 'task-1',
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+        reason: 'developer_cycle_without_live_session',
+      },
+      {
+        taskId: 'task-1',
+        attemptId: 'attempt-2',
+        sessionId: 'session-2',
+        reason: 'developer_cycle_without_live_session',
+      },
+    ] as const;
+    expect(first.repairs).toEqual(expectedRepairs);
+    expect(
+      first.events.map((event) =>
+        event.type === 'task.attempt_repair_detected'
+          ? event.payload.repair
+          : undefined,
+      ),
+    ).toEqual(expectedRepairs);
+    expect(second).toEqual({ repairs: expectedRepairs, events: [] });
+    expect(repositories.projectEvents.after('project-1', 0)).toHaveLength(2);
+    expect(
+      ['session-1', 'session-2'].map(
+        (sessionId) =>
+          repositories.diagnostics
+            .list(sessionId)
+            .filter(
+              ({ payload }) =>
+                typeof payload === 'object' &&
+                payload !== null &&
+                'kind' in payload &&
+                payload.kind === 'attempt_repair',
+            ).length,
+      ),
+    ).toEqual([1, 1]);
   });
 
   it('reports an unknown startup after recovery while retaining the ready task', () => {

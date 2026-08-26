@@ -11,6 +11,7 @@ import {
   sessionSchema,
   workspaceSchema,
   type Command,
+  type ProjectEvent,
   type Session,
 } from '@mesh-session-platform/contracts';
 
@@ -37,6 +38,7 @@ import type {
   AttemptMutationResult,
   AttemptService,
 } from '../tasks/attempt-service.js';
+import type { DeveloperExecutionService } from '../tasks/developer-execution-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
@@ -70,6 +72,7 @@ export interface CommandDependencies {
   commands: CommandRepository;
   taskService: TaskService;
   attemptService?: AttemptService;
+  developerExecutionService?: DeveloperExecutionService;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
@@ -115,6 +118,108 @@ const requireAttemptService = (dependencies: CommandDependencies) => {
     );
   }
   return dependencies.attemptService;
+};
+
+const requireDeveloperExecutionService = (
+  dependencies: CommandDependencies,
+) => {
+  if (!dependencies.developerExecutionService) {
+    throw new CommandError(
+      'invalid_command',
+      'Developer execution support is unavailable',
+    );
+  }
+  return dependencies.developerExecutionService;
+};
+
+type DeveloperLaunchCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'task.developer.launch' }
+>;
+
+const executeDeveloperLaunch = async (
+  command: DeveloperLaunchCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  if (command.payload.actor.type !== 'human') {
+    throw new CommandError(
+      'task_transition_unauthorized',
+      'Only a human may launch a Developer',
+    );
+  }
+  return response(
+    command.type,
+    attemptResponse(
+      await requireAttemptService(dependencies).launchDeveloper({
+        ...command.payload,
+        commandId: idempotencyKey,
+      }),
+    ),
+  );
+};
+
+type DeveloperHumanCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  {
+    type:
+      | 'task.developer.accept'
+      | 'task.developer.reject_resume'
+      | 'task.developer.reject_new'
+      | 'task.developer.unblock_resume'
+      | 'task.developer.unblock_new';
+  }
+>;
+
+const executeDeveloperHumanCommand = async (
+  command: DeveloperHumanCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  if (command.payload.actor.type !== 'human') {
+    throw new CommandError(
+      'task_transition_unauthorized',
+      'Only a human may review or recover Developer work',
+    );
+  }
+  if (command.type === 'task.developer.accept') {
+    const result = await requireDeveloperExecutionService(dependencies).accept({
+      ...command.payload,
+      commandId: idempotencyKey,
+    });
+    return response(command.type, {
+      ...result,
+      projectEventCursor: result.event.sequence,
+    });
+  }
+  const kind = command.type.startsWith('task.developer.reject')
+    ? ('rejection' as const)
+    : ('unblock' as const);
+  if (
+    command.type === 'task.developer.reject_resume' ||
+    command.type === 'task.developer.unblock_resume'
+  ) {
+    return response(
+      command.type,
+      attemptResponse(
+        await requireAttemptService(dependencies).resumeDeveloper({
+          ...command.payload,
+          kind,
+          commandId: idempotencyKey,
+        }),
+      ),
+    );
+  }
+  return response(
+    command.type,
+    attemptResponse(
+      await requireAttemptService(dependencies).reworkDeveloperNew({
+        ...command.payload,
+        kind,
+        commandId: idempotencyKey,
+      }),
+    ),
+  );
 };
 
 const requireTaskCommandId = (commandId: string | undefined): string => {
@@ -285,7 +390,7 @@ const updateProject = (
     );
     if (!updated)
       throw new CommandError(
-        'task_revision_conflict',
+        'project_revision_conflict',
         `Project '${project.id}' has changed`,
         { project: dependencies.projects.get(project.id) },
       );
@@ -305,6 +410,61 @@ const updateProject = (
       dependencies.database.exec('ROLLBACK');
     throw error;
   }
+};
+
+type DeveloperInstructionUpdateCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'project.developer_instructions.update' }
+>;
+
+const executeDeveloperInstructionUpdate = (
+  command: DeveloperInstructionUpdateCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): CommandResponse => {
+  const existing =
+    dependencies.commands.getExisting<CommandResponse>(idempotencyKey);
+  if (existing.found) return existing.response;
+
+  let event: ProjectEvent | undefined;
+  const commandResponse =
+    dependencies.commands.executeOnceInImmediateTransaction(
+      idempotencyKey,
+      () => {
+        const project = requireActiveProject(
+          dependencies,
+          command.payload.projectId,
+        );
+        const now = (dependencies.now ?? (() => new Date().toISOString()))();
+        const updated = dependencies.projects.updateDeveloperInstructions(
+          project.id,
+          command.payload.expectedRevision,
+          {
+            content: command.payload.content,
+            updatedAt: now,
+            updatedBy: command.payload.actor,
+          },
+        );
+        if (!updated) {
+          throw new CommandError(
+            'project_revision_conflict',
+            `Project '${project.id}' has changed`,
+            { project: dependencies.projects.get(project.id) },
+          );
+        }
+        event = dependencies.projectEvents.appendInTransaction(project.id, {
+          protocolVersion: 1,
+          id: (dependencies.createId ?? randomUUID)(),
+          projectId: project.id,
+          occurredAt: now,
+          type: 'project.developer_instructions_changed',
+          payload: { project: updated },
+        });
+        return response(command.type, updated);
+      },
+    );
+  if (event) dependencies.registry.publisher.publishProject(event);
+  return commandResponse;
 };
 
 const assertMilestoneTwoHumanActor = (
@@ -368,7 +528,7 @@ const reconcileLegacyProjectIdentities = async (
     );
     if (!reconciled) {
       throw new CommandError(
-        'task_revision_conflict',
+        'project_revision_conflict',
         `Project '${project.id}' changed while reconciling its repository identity`,
         { project: dependencies.projects.get(project.id) },
       );
@@ -865,6 +1025,35 @@ export const executeCommand = async (
 ): Promise<CommandResponse> => {
   const command = commandSchema.parse(input);
   if ('idempotencyKey' in command) {
+    if (command.command.type === 'project.developer_instructions.update') {
+      return executeDeveloperInstructionUpdate(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (command.command.type === 'task.developer.launch') {
+      return executeDeveloperLaunch(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (
+      [
+        'task.developer.accept',
+        'task.developer.reject_resume',
+        'task.developer.reject_new',
+        'task.developer.unblock_resume',
+        'task.developer.unblock_new',
+      ].includes(command.command.type)
+    ) {
+      return executeDeveloperHumanCommand(
+        command.command as DeveloperHumanCommand,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
     if (
       [
         'task.create',

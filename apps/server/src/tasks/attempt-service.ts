@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  developerExecutionCycleSchema,
   rawDiagnosticSchema,
   sessionSchema,
   stableTaskErrorCodeSchema,
   taskActorSchema,
   workspaceSchema,
   type MutatingCommand,
+  type DeveloperExecutionCycle,
+  type DeveloperReviewFeedback,
   type Project,
   type ProjectEvent,
   type Session,
@@ -16,6 +19,8 @@ import {
   type Workspace,
 } from '@mesh-session-platform/contracts';
 
+import type { DeveloperRuntimeConfiguration } from '../claude/driver.js';
+import { DEVELOPER_POLICY_VERSION } from '../domain/developer-policy.js';
 import { authorizeTaskTransition } from '../domain/task-lifecycle.js';
 import type { GitAdapter } from '../platform/git.js';
 import {
@@ -28,6 +33,7 @@ import {
   type RepositoryIdentity,
 } from '../projects/repository-identity.js';
 import type { CommandRepository } from '../repositories/command-repository.js';
+import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
@@ -37,6 +43,11 @@ import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { Database } from '../db/database.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
+import type { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
+import type {
+  DeveloperReworkService,
+  PreparedDeveloperRecovery,
+} from './developer-rework-service.js';
 import {
   ProjectArchivedError,
   ProjectNotFoundError,
@@ -61,6 +72,26 @@ export type AttemptLaunchInput = {
   actor: AttemptActorInput;
 };
 
+export type DeveloperAttemptLaunchInput = Omit<AttemptLaunchInput, 'actor'> & {
+  actor: Omit<AttemptActorInput, 'type'> & { type: 'human' };
+};
+
+export type DeveloperRecoveryKind = 'rejection' | 'unblock';
+
+export type DeveloperAttemptResumeInput = {
+  commandId: string;
+  taskId: string;
+  expectedRevision: number;
+  kind: DeveloperRecoveryKind;
+  feedback: string;
+  actor: Omit<AttemptActorInput, 'type'> & { type: 'human' };
+};
+
+export type DeveloperAttemptReworkInput = DeveloperAttemptLaunchInput & {
+  kind: DeveloperRecoveryKind;
+  feedback: string;
+};
+
 export type AttemptLinkInput = {
   commandId: string;
   taskId: string;
@@ -83,10 +114,15 @@ export type AttemptMutationResult = {
   attempt: TaskAttempt;
   event: ProjectEvent;
   session?: Session;
+  cycle?: DeveloperExecutionCycle;
+  feedback?: DeveloperReviewFeedback;
 };
 
 type AttemptRegistry = {
-  create(sessionId: string): Promise<void>;
+  create(
+    sessionId: string,
+    developer?: DeveloperRuntimeConfiguration,
+  ): Promise<void>;
   interrupt(sessionId: string): Promise<void>;
   publisher: Pick<EventPublisher, 'publishProject'>;
 };
@@ -99,10 +135,13 @@ type AttemptServiceDependencies = {
   sessions: SessionRepository;
   workspaces: WorkspaceRepository;
   diagnostics: DiagnosticRepository;
+  developerExecutions: DeveloperExecutionRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
   taskService: TaskService;
   registry: AttemptRegistry;
+  capabilities: DeveloperCapabilityRegistry;
+  developerReworkService: DeveloperReworkService;
   git?: Pick<GitAdapter, 'createWorktree'>;
   pathOptions?: ResolveWorkspacePathOptions;
   billingConflicts?: readonly { variable: string }[];
@@ -214,14 +253,56 @@ export class AttemptService {
   }
 
   launch(input: AttemptLaunchInput): Promise<AttemptMutationResult> {
-    return this.dependencies.commands.executeOnce(input.commandId, async () => {
+    return this.launchAttempt(input, false);
+  }
+
+  launchDeveloper(
+    input: DeveloperAttemptLaunchInput,
+  ): Promise<AttemptMutationResult> {
+    return this.launchAttempt(input, true);
+  }
+
+  reworkDeveloperNew(
+    input: DeveloperAttemptReworkInput,
+  ): Promise<AttemptMutationResult> {
+    return this.launchAttempt(input, true, input);
+  }
+
+  async resumeDeveloper(
+    input: DeveloperAttemptResumeInput,
+  ): Promise<AttemptMutationResult> {
+    this.assertBillingSafe();
+    return this.dependencies.developerReworkService.resume(input);
+  }
+
+  private async launchAttempt(
+    input: AttemptLaunchInput,
+    developer: boolean,
+    recovery?: DeveloperAttemptReworkInput,
+  ): Promise<AttemptMutationResult> {
+    let completedLaunch:
+      | {
+          sessionId: string;
+          developerCycleId?: string;
+          recovery?: {
+            prepared: PreparedDeveloperRecovery;
+            input: DeveloperAttemptReworkInput;
+            actor: TaskActor;
+          };
+        }
+      | undefined;
+    const executeLaunch = async () => {
       this.assertBillingSafe();
       const actor = taskActorSchema.parse(input.actor);
-      const task = this.requireLaunchableTask(
-        input.taskId,
-        input.expectedRevision,
-        actor,
-      );
+      const recoveryContext = recovery
+        ? this.dependencies.developerReworkService.requireRecovery(
+            recovery,
+            actor,
+          )
+        : undefined;
+      const task =
+        recoveryContext?.task ??
+        this.requireLaunchableTask(input.taskId, input.expectedRevision, actor);
       this.reserveLaunch(task.id, input.commandId);
       try {
         if (!input.workspace) {
@@ -255,6 +336,7 @@ export class AttemptService {
               actor,
               workspace,
               session,
+              recovery,
             );
           } catch (error) {
             if (isStableLaunchConflict(error)) throw error;
@@ -280,6 +362,8 @@ export class AttemptService {
           session: Session;
           attempt: TaskAttempt;
           event: ProjectEvent;
+          cycle?: DeveloperExecutionCycle;
+          feedback?: DeveloperReviewFeedback;
         };
         try {
           prepared = this.persistLaunchAudit(
@@ -291,6 +375,8 @@ export class AttemptService {
             session,
             occurredAt,
             hasWorktreeReservation,
+            developer,
+            recovery,
           );
         } catch (error) {
           if (hasWorktreeReservation) {
@@ -308,9 +394,41 @@ export class AttemptService {
         }
         this.dependencies.registry.publisher.publishProject(prepared.event);
 
+        let developerRuntime: DeveloperRuntimeConfiguration | undefined;
+        let developerCycle: DeveloperExecutionCycle | undefined;
         try {
-          await this.dependencies.registry.create(prepared.session.id);
+          if (prepared.cycle) {
+            developerCycle = prepared.cycle;
+            developerRuntime =
+              this.dependencies.developerReworkService.createRuntime(
+                task,
+                prepared.attempt,
+                developerCycle,
+                input.expectedRevision + 1,
+                prepared.feedback,
+              );
+          }
+          await this.dependencies.registry.create(
+            prepared.session.id,
+            developerRuntime,
+          );
         } catch (error) {
+          if (developerCycle) {
+            this.dependencies.capabilities.invalidateCycle(developerCycle.id);
+          }
+          if (prepared.cycle) {
+            this.dependencies.developerReworkService.closeFailed(
+              {
+                task,
+                attempt: prepared.attempt,
+                cycle: prepared.cycle,
+                event: prepared.event,
+                ...(prepared.feedback ? { feedback: prepared.feedback } : {}),
+              },
+              'startup',
+              error,
+            );
+          }
           if (
             !this.recordDiagnostic(prepared.session.id, {
               kind: 'task_attempt_launch',
@@ -328,21 +446,51 @@ export class AttemptService {
         }
 
         try {
-          const transition = await this.dependencies.taskService.transition({
-            commandId: `${input.commandId}:task-transition`,
-            taskId: task.id,
-            expectedRevision: input.expectedRevision,
-            nextState: 'in_progress',
-            actor,
-          });
+          const transition = recovery
+            ? await this.dependencies.developerReworkService.complete(
+                recovery,
+                actor,
+              )
+            : await this.dependencies.taskService.transition({
+                commandId: `${input.commandId}:task-transition`,
+                taskId: task.id,
+                expectedRevision: input.expectedRevision,
+                nextState: 'in_progress',
+                actor,
+              });
           this.dependencies.registry.publisher.publishProject(transition.event);
-          return {
+          const result = {
             task: transition.task,
             attempt: prepared.attempt,
             event: transition.event,
             session: this.dependencies.sessions.get(prepared.session.id),
+            ...(prepared.cycle ? { cycle: prepared.cycle } : {}),
+            ...(prepared.feedback ? { feedback: prepared.feedback } : {}),
           };
+          completedLaunch = {
+            sessionId: prepared.session.id,
+            ...(prepared.cycle ? { developerCycleId: prepared.cycle.id } : {}),
+            ...(recovery && prepared.cycle && prepared.feedback
+              ? {
+                  recovery: {
+                    prepared: {
+                      task,
+                      attempt: prepared.attempt,
+                      cycle: prepared.cycle,
+                      feedback: prepared.feedback,
+                      event: prepared.event,
+                    },
+                    input: recovery,
+                    actor,
+                  },
+                }
+              : {}),
+          };
+          return result;
         } catch (error) {
+          if (prepared.cycle) {
+            this.dependencies.capabilities.invalidateCycle(prepared.cycle.id);
+          }
           let cleanup: 'interrupted' | 'unknown' = 'interrupted';
           try {
             await this.dependencies.registry.interrupt(prepared.session.id);
@@ -355,6 +503,20 @@ export class AttemptService {
             cleanup,
             error: errorDetails(error),
           });
+          if (recovery && prepared.cycle && prepared.feedback) {
+            this.dependencies.developerReworkService.closeFailed(
+              {
+                task,
+                attempt: prepared.attempt,
+                cycle: prepared.cycle,
+                feedback: prepared.feedback,
+                event: prepared.event,
+              },
+              'task_transition',
+              error,
+              cleanup,
+            );
+          }
           if (cleanup === 'unknown' || !diagnosed) {
             throw new AttemptReconciliationRequiredError(
               prepared.session.id,
@@ -366,6 +528,47 @@ export class AttemptService {
       } finally {
         this.releaseLaunch(task.id, input.commandId);
       }
+    };
+    try {
+      return await this.dependencies.commands.executeOnce(
+        input.commandId,
+        executeLaunch,
+      );
+    } catch (error) {
+      if (completedLaunch?.recovery) {
+        await this.dependencies.developerReworkService.reconcileCommandCompletionFailure(
+          completedLaunch.recovery.prepared,
+          completedLaunch.recovery.input,
+          completedLaunch.recovery.actor,
+          error,
+        );
+      }
+      if (completedLaunch) {
+        await this.cleanupCommandCompletionFailure(completedLaunch, error);
+      }
+      throw error;
+    }
+  }
+
+  private async cleanupCommandCompletionFailure(
+    launch: { sessionId: string; developerCycleId?: string },
+    error: unknown,
+  ): Promise<void> {
+    if (launch.developerCycleId) {
+      this.dependencies.capabilities.invalidateCycle(launch.developerCycleId);
+    }
+    let cleanup: 'interrupted' | 'unknown' = 'interrupted';
+    try {
+      await this.dependencies.registry.interrupt(launch.sessionId);
+    } catch {
+      cleanup = 'unknown';
+    }
+    this.recordDiagnostic(launch.sessionId, {
+      kind: 'task_attempt_launch',
+      stage: 'command_completion',
+      cleanup,
+      reconciliationRequired: true,
+      error: errorDetails(error),
     });
   }
 
@@ -630,10 +833,18 @@ export class AttemptService {
     actor: TaskActor,
     workspace: Workspace,
     session: Session,
+    recovery?: DeveloperAttemptReworkInput,
   ): void {
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
-      this.requireLaunchableTask(task.id, expectedRevision, actor);
+      if (recovery) {
+        this.dependencies.developerReworkService.requireRecovery(
+          recovery,
+          actor,
+        );
+      } else {
+        this.requireLaunchableTask(task.id, expectedRevision, actor);
+      }
       this.dependencies.workspaces.create(workspace);
       this.dependencies.sessions.create(session);
       this.dependencies.database.exec('COMMIT');
@@ -654,14 +865,20 @@ export class AttemptService {
     session: Session,
     occurredAt: string,
     hasWorktreeReservation: boolean,
+    developer: boolean,
+    recovery?: DeveloperAttemptReworkInput,
   ) {
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
-      const current = this.requireLaunchableTask(
-        task.id,
-        expectedRevision,
-        actor,
-      );
+      const recoveryContext = recovery
+        ? this.dependencies.developerReworkService.requireRecovery(
+            recovery,
+            actor,
+          )
+        : undefined;
+      const current =
+        recoveryContext?.task ??
+        this.requireLaunchableTask(task.id, expectedRevision, actor);
       let persistedSession: Session;
       if (hasWorktreeReservation) {
         if (!this.dependencies.workspaces.markActive(workspace.id)) {
@@ -679,7 +896,58 @@ export class AttemptService {
         persistedSession.id,
         'launched',
         actor,
+        developer ? 'developer' : null,
       );
+      let cycle: DeveloperExecutionCycle | undefined;
+      let feedback: DeveloperReviewFeedback | undefined;
+      if (developer) {
+        const project = this.requireActiveProject(current.projectId);
+        if (recovery && recoveryContext) {
+          feedback = this.dependencies.developerExecutions.appendFeedback(
+            this.dependencies.developerReworkService.createFeedback(
+              recovery,
+              actor,
+              recoveryContext.previousCycle,
+              occurredAt,
+            ),
+          );
+        }
+        cycle = this.dependencies.developerExecutions.createCycle(
+          developerExecutionCycleSchema.parse({
+            id: this.createId(),
+            attemptId: attempt.id,
+            ordinal: 1,
+            mode: 'new',
+            authorizedBy: actor,
+            authorizationCommandId: commandId,
+            policyVersion: DEVELOPER_POLICY_VERSION,
+            projectInstructions: {
+              content: project.developerInstructions.content,
+              revision: project.developerInstructions.revision,
+            },
+            taskSnapshot: {
+              revision: current.revision,
+              title: current.title,
+              description: current.description,
+              acceptanceCriteria: current.acceptanceCriteria.map(
+                (text, index) => ({
+                  id: `criterion-${index + 1}`,
+                  text,
+                }),
+              ),
+            },
+            workspaceId: persistedSession.workspaceId,
+            permissionMode: persistedSession.permissionMode,
+            startedAt: occurredAt,
+            endedAt: null,
+            terminalDisposition: null,
+            completionReportId: null,
+            blockerReportId: null,
+            terminalCommandId: null,
+            terminalEventId: null,
+          }),
+        );
+      }
       const linkedReservation = this.dependencies.database
         .prepare(
           'UPDATE task_attempt_launch_reservations SET session_id = ? WHERE task_id = ? AND command_id = ?',
@@ -688,19 +956,44 @@ export class AttemptService {
       if (linkedReservation.changes !== 1) {
         throw new Error(`Launch reservation for task '${current.id}' was lost`);
       }
-      const event = this.dependencies.projectEvents.appendInTransaction(
-        current.projectId,
-        {
-          protocolVersion: 1,
-          id: this.createId(),
-          projectId: current.projectId,
-          occurredAt,
-          type: 'task.attempt_changed',
-          payload: { attempt },
-        },
-      );
+      const event = cycle
+        ? this.dependencies.projectEvents.appendInTransaction(
+            current.projectId,
+            {
+              protocolVersion: 1,
+              id: this.createId(),
+              projectId: current.projectId,
+              occurredAt,
+              type: 'task.developer_execution_changed',
+              payload: {
+                task: current,
+                attempt,
+                cycle,
+                completionReport: null,
+                blockerReport: null,
+                reviewFeedback: feedback ?? null,
+              },
+            },
+          )
+        : this.dependencies.projectEvents.appendInTransaction(
+            current.projectId,
+            {
+              protocolVersion: 1,
+              id: this.createId(),
+              projectId: current.projectId,
+              occurredAt,
+              type: 'task.attempt_changed',
+              payload: { attempt },
+            },
+          );
       this.dependencies.database.exec('COMMIT');
-      return { session: persistedSession, attempt, event };
+      return {
+        session: persistedSession,
+        attempt,
+        event,
+        ...(cycle ? { cycle } : {}),
+        ...(feedback ? { feedback } : {}),
+      };
     } catch (error) {
       if (this.dependencies.database.inTransaction) {
         this.dependencies.database.exec('ROLLBACK');

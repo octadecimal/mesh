@@ -1,6 +1,8 @@
 import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
   projectSchema,
   sessionSchema,
   taskActorSchema,
@@ -8,6 +10,8 @@ import {
   taskSchema,
   taskTransitionSchema,
   type MutatingCommand,
+  type DeveloperCompletionReport,
+  type DeveloperExecutionCycle,
   type Session,
   type Task,
 } from '@mesh-session-platform/contracts';
@@ -505,6 +509,33 @@ describe('TaskDrawer', () => {
       within(attempts[0]).queryByRole('button', { name: 'Unlink attempt 1' }),
     ).toBeNull();
   });
+
+  it('composes projected Developer execution history in the focused panel', () => {
+    renderDrawer({
+      task: taskSchema.parse({
+        ...task,
+        lifecycleState: 'review',
+        revision: 2,
+      }),
+      developerCycles: [developerCycle],
+      developerCompletionReports: [developerCompletionReport],
+    });
+
+    const developer = screen.getByRole('region', {
+      name: 'Developer workflow',
+    });
+    expect(
+      within(developer).getByText('Developer report in drawer.'),
+    ).toBeDefined();
+    expect(within(developer).getByText('Not met')).toBeDefined();
+    expect(
+      within(developer).getByRole('button', { name: 'Accept as done' }),
+    ).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Mark done' })).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Return to progress' }),
+    ).toBeNull();
+  });
 });
 
 const timestamp = '2026-08-25T00:00:00.000Z';
@@ -601,6 +632,56 @@ const transitions = [
     occurredAt: timestamp,
   }),
 ];
+const developerCycle: DeveloperExecutionCycle =
+  developerExecutionCycleSchema.parse({
+    id: 'developer-cycle-1',
+    attemptId: 'attempt-1',
+    ordinal: 1,
+    mode: 'new',
+    authorizedBy: actor,
+    authorizationCommandId: 'developer-launch-1',
+    policyVersion: 'developer-policy-v1',
+    projectInstructions: { content: '', revision: 1 },
+    taskSnapshot: {
+      revision: 1,
+      title: task.title,
+      description: task.description,
+      acceptanceCriteria: [
+        { id: 'criterion-1', text: task.acceptanceCriteria[0] },
+      ],
+    },
+    workspaceId: 'workspace-1',
+    permissionMode: 'interactive',
+    startedAt: timestamp,
+    endedAt: timestamp,
+    terminalDisposition: 'submitted_for_review',
+    completionReportId: 'developer-report-1',
+    blockerReportId: null,
+    terminalCommandId: 'developer-submit-1',
+    terminalEventId: 'developer-event-1',
+  });
+const developerCompletionReport: DeveloperCompletionReport =
+  developerCompletionReportSchema.parse({
+    id: 'developer-report-1',
+    cycleId: developerCycle.id,
+    summary: 'Developer report in drawer.',
+    criterionResults: [
+      {
+        criterionId: 'criterion-1',
+        status: 'not_met',
+        evidence: 'Needs an integrated check.',
+      },
+    ],
+    verification: [],
+    limitations: '',
+    workspaceState: {
+      summary: 'Clean workspace.',
+      hasUncommittedChanges: false,
+      commitsCreated: true,
+    },
+    reviewerNotes: null,
+    createdAt: timestamp,
+  });
 
 const timelineAttempts = () =>
   attempts.map((attempt) => ({
@@ -615,6 +696,9 @@ type DrawerOptions = {
   withRepair?: boolean;
   attemptRows?: ReturnType<typeof timelineAttempts>;
   sessionRows?: Session[];
+  developerCycles?: DeveloperExecutionCycle[];
+  developerCompletionReports?: DeveloperCompletionReport[];
+  connected?: boolean;
 };
 
 const drawerElement = (options: DrawerOptions = {}) => {
@@ -641,6 +725,11 @@ const drawerElement = (options: DrawerOptions = {}) => {
           : []
       }
       sessions={options.sessionRows ?? sessions}
+      developerCycles={options.developerCycles ?? []}
+      developerCompletionReports={options.developerCompletionReports ?? []}
+      developerBlockerReports={[]}
+      developerReviewFeedback={[]}
+      connected={options.connected ?? true}
       onOpenChange={() => undefined}
       onCommand={onCommand}
       onOpenSession={onOpenSession}

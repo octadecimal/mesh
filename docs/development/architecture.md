@@ -56,6 +56,26 @@ transition fails, Mesh interrupts the started runtime; an unknown startup or
 cleanup outcome becomes an explicit repair condition rather than an inferred
 success.
 
+Developer execution adds a durable cycle inside that attempt. Each cycle freezes
+the task revision, acceptance criteria, project-instruction revision, workspace,
+permission mode, policy version, attempt, and session that authorized the work.
+The project's instructions remain editable project truth, but an active cycle
+continues with its frozen instruction snapshot. A rejection or resolved blocker
+creates another cycle, either by resuming the same session or by launching a new
+attempt. The session remains the source of truth for its runtime lifecycle and
+transcript; the project remains the source of truth for task state, cycles,
+reports, feedback, and their ordered audit events.
+
+Developer controls use scoped, ephemeral capabilities rather than giving the
+Claude process general task authority. The server issues an in-memory capability
+bound to one agent actor, task, attempt, cycle, and session. At the Claude SDK
+boundary, Mesh adapts the `submit_for_review` and `mark_blocked` handlers into an
+in-process MCP server and passes only those controls to the Developer runtime.
+The capability registry is not durable or replayable. It invalidates tokens when
+a cycle closes, a session ends, startup or recovery fails, or the registry is
+cleared during shutdown/restart; the durable cycle and session state determine
+what recovery is allowed next.
+
 Not every browser action enters this flow. Selection, filters, and drafts stay
 local. Layout, archive, and delete commands take repository-backed paths that do
 not start or drive a Claude session.
@@ -96,10 +116,15 @@ The fake driver implements the same behavioral interface for deterministic
 tests.
 
 `apps/server/src/tasks` owns task readiness, legal task transitions, attempt
-launch/link/unlink composition, and restart reconciliation. In Milestone 2 only
-a human actor may move a task into `review` or `done`. Actor and policy contracts
-are explicit so later authority can be added deliberately; agents do not gain
-transition authority by launching or running a session.
+launch/link/unlink composition, Developer cycles and rework, and restart
+reconciliation. `DeveloperExecutionService` owns the two agent-authorized
+terminal outcomes. It validates the capability, actor, current attempt, open
+cycle, and expected task revision before accepting a complete criterion report
+or blocker report. In one transaction it appends the report, closes the cycle,
+updates the task, appends its transition, and appends the project event; only
+then does it publish the event and invalidate the capability. Human commands
+separately own accepting review as done, rejecting with feedback, and resolving
+a blocker by choosing resume or a new attempt.
 
 ### Persistence
 
@@ -111,9 +136,12 @@ State-bearing driver input is written with its raw diagnostic before it is
 published. This audit barrier is intentional: if durable persistence fails,
 Mesh must not continue presenting an unaudited state as successful.
 
-Projects, tasks, attempts, task transitions, and ordered project events are
-durable repository state. Their foreign keys preserve project, session,
-workspace, and layout identities when an existing database is upgraded.
+Projects, project instructions, tasks, attempts, Developer cycles, completion
+and blocker reports, review or unblock feedback, task transitions, and ordered
+project events are durable repository state. Their foreign keys preserve
+project, session, workspace, and layout identities when an existing database is
+upgraded. Capability tokens and live MCP handler state are deliberately absent
+from persistence.
 
 Migrations are forward-moving, deterministic, and safe for existing databases.
 Do not edit an applied migration to change history; add the next migration and
@@ -124,10 +152,10 @@ cover both fresh and upgraded databases.
 `apps/web/src/api` owns transport clients. `apps/web/src/state` owns projection,
 replay/resync behavior, selection, filters, drafts, and connection health.
 `apps/web/src/projects` and `apps/web/src/tasks` render project import, board,
-drawer, attempt, and repair states. `apps/web/src/sessions` and
-`apps/web/src/workspace` render and compose session states. Components should
-express interaction and presentation rather than reimplementing server
-lifecycle rules.
+drawer, Developer execution history and reports, attempt, and repair states.
+`apps/web/src/sessions` and `apps/web/src/workspace` render and compose session
+states. Components should express interaction and presentation rather than
+reimplementing server lifecycle rules.
 
 Treat disconnect, stale snapshot, invalid payload, empty data, loading,
 permission requests, and terminal states as first-class UI states. Reconnect
@@ -152,7 +180,8 @@ apps/server/                     Fastify API, runtime, drivers, persistence
   src/realtime/                  WebSocket hub and durable replay
   src/repositories/              persistent data access
   src/runtime/                   lifecycle, registry, recovery, publication
-  src/tasks/                     task lifecycle, attempts, restart repair
+  src/tasks/                     task lifecycle, attempts, Developer execution
+                                 and rework, restart repair
 apps/web/                        React/Vite client
   src/api/                       HTTP and WebSocket clients
   src/projects/                  explicit project import

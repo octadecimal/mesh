@@ -2,6 +2,10 @@ import * as Dialog from '@radix-ui/react-dialog';
 import {
   taskActorSchema,
   type AttemptRepair,
+  type DeveloperBlockerReport,
+  type DeveloperCompletionReport,
+  type DeveloperExecutionCycle,
+  type DeveloperReviewFeedback,
   type MutatingCommand,
   type PermissionMode,
   type Project,
@@ -19,6 +23,7 @@ import {
   type WorkspaceDraft,
 } from '../sessions/WorkspaceFields';
 import { AttemptTimeline } from './AttemptTimeline';
+import { DeveloperExecutionPanel } from './DeveloperExecutionPanel';
 
 type TimelineAttempt = { attempt: TaskAttempt; session?: Session };
 
@@ -164,6 +169,11 @@ export function TaskDrawer({
   transitions,
   repairs,
   sessions,
+  developerCycles,
+  developerCompletionReports,
+  developerBlockerReports,
+  developerReviewFeedback,
+  connected,
   onCommand,
   onOpenSession,
 }: {
@@ -175,6 +185,11 @@ export function TaskDrawer({
   transitions: readonly TaskTransition[];
   repairs: readonly AttemptRepair[];
   sessions: readonly Session[];
+  developerCycles: readonly DeveloperExecutionCycle[];
+  developerCompletionReports: readonly DeveloperCompletionReport[];
+  developerBlockerReports: readonly DeveloperBlockerReport[];
+  developerReviewFeedback: readonly DeveloperReviewFeedback[];
+  connected: boolean;
   onCommand: (command: MutatingCommand) => Promise<unknown> | void;
   onOpenSession?: (sessionId: string) => void;
 }) {
@@ -199,6 +214,30 @@ export function TaskDrawer({
     ? readinessProblems(draftFor(task))
     : missingReadiness;
   const taskRepairs = repairs.filter((repair) => repair.taskId === task?.id);
+  const attemptOrdinals = new Map(
+    attempts.map(({ attempt }) => [attempt.id, attempt.ordinal]),
+  );
+  const orderedDeveloperCycles = [...developerCycles].sort(
+    (left, right) =>
+      left.startedAt.localeCompare(right.startedAt) ||
+      (attemptOrdinals.get(left.attemptId) ?? Number.MAX_SAFE_INTEGER) -
+        (attemptOrdinals.get(right.attemptId) ?? Number.MAX_SAFE_INTEGER) ||
+      left.ordinal - right.ordinal,
+  );
+  const latestDeveloperCycle =
+    orderedDeveloperCycles[orderedDeveloperCycles.length - 1];
+  const hasDeveloperReview = Boolean(
+    latestDeveloperCycle?.terminalDisposition === 'submitted_for_review' &&
+      developerCompletionReports.some(
+        (report) => report.cycleId === latestDeveloperCycle.id,
+      ),
+  );
+  const hasDeveloperBlocker = Boolean(
+    latestDeveloperCycle?.terminalDisposition === 'blocked' &&
+      developerBlockerReports.some(
+        (report) => report.cycleId === latestDeveloperCycle.id,
+      ),
+  );
   const attemptProjection = attempts
     .map(
       ({ attempt }) =>
@@ -693,8 +732,17 @@ export function TaskDrawer({
                     </p>
                   ) : null}
                   <div className="task-lifecycle-actions">
-                    {Object.entries(transitionLabels[task.lifecycleState]).map(
-                      ([nextState, label]) => (
+                    {Object.entries(transitionLabels[task.lifecycleState])
+                      .filter(
+                        ([nextState]) =>
+                          !(
+                            hasDeveloperReview &&
+                            task.lifecycleState === 'review' &&
+                            (nextState === 'done' ||
+                              nextState === 'in_progress')
+                          ),
+                      )
+                      .map(([nextState, label]) => (
                         <button
                           className="button button-secondary"
                           type="button"
@@ -715,19 +763,22 @@ export function TaskDrawer({
                         >
                           {label}
                         </button>
-                      ),
-                    )}
-                    <button
-                      className="button button-ghost"
-                      type="button"
-                      disabled={readOnly || pending || awaitingConflictResync}
-                      onClick={() => {
-                        setAction({ kind: task.blocked ? 'unblock' : 'block' });
-                        setReason('');
-                      }}
-                    >
-                      {task.blocked ? 'Unblock task' : 'Block task'}
-                    </button>
+                      ))}
+                    {!(task.blocked && hasDeveloperBlocker) ? (
+                      <button
+                        className="button button-ghost"
+                        type="button"
+                        disabled={readOnly || pending || awaitingConflictResync}
+                        onClick={() => {
+                          setAction({
+                            kind: task.blocked ? 'unblock' : 'block',
+                          });
+                          setReason('');
+                        }}
+                      >
+                        {task.blocked ? 'Unblock task' : 'Block task'}
+                      </button>
+                    ) : null}
                   </div>
                 </section>
 
@@ -801,6 +852,21 @@ export function TaskDrawer({
                     </div>
                   </section>
                 ) : null}
+
+                <DeveloperExecutionPanel
+                  project={project}
+                  task={task}
+                  attempts={attempts}
+                  cycles={developerCycles}
+                  completionReports={developerCompletionReports}
+                  blockerReports={developerBlockerReports}
+                  feedback={developerReviewFeedback}
+                  repairs={taskRepairs}
+                  connected={connected}
+                  readOnly={readOnly}
+                  onCommand={onCommand}
+                  onOpenSession={onOpenSession}
+                />
 
                 <section
                   className="task-drawer-section"

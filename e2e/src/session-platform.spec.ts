@@ -1,5 +1,13 @@
 import type { Page } from '@playwright/test';
-import type { MutatingCommand } from '@mesh-session-platform/contracts';
+import {
+  idSchema,
+  projectSnapshotSchema,
+  type DeveloperBlockerReportInput,
+  type DeveloperCompletionReportInput,
+  type DeveloperExecutionCycle,
+  type MutatingCommand,
+  type ProjectSnapshot,
+} from '@mesh-session-platform/contracts';
 
 import {
   expect,
@@ -197,15 +205,128 @@ const launchIsolatedFakeAttempt = async (
   harness: FakeClaudeHarness,
   waitForStart = true,
 ) => {
-  await taskDialog.getByLabel('Workspace type').selectOption('worktree');
-  await taskDialog.getByLabel('Repository').fill(harness.repositoryPath);
-  await taskDialog.getByLabel('Branch').fill('mesh-task-attempt');
-  await taskDialog.getByLabel('Start point').fill('HEAD');
-  await taskDialog.getByLabel('Worktree path').fill(harness.worktreePath);
-  await taskDialog.getByLabel('Permission mode').selectOption('interactive');
-  await taskDialog.getByRole('button', { name: 'Launch attempt' }).click();
+  const launch = taskDialog.getByRole('region', { name: 'Launch attempt' });
+  await launch.getByLabel('Workspace type').selectOption('worktree');
+  await launch.getByLabel('Repository').fill(harness.repositoryPath);
+  await launch.getByLabel('Branch').fill('mesh-task-attempt');
+  await launch.getByLabel('Start point').fill('HEAD');
+  await launch.getByLabel('Worktree path').fill(harness.worktreePath);
+  await launch.getByLabel('Permission mode').selectOption('interactive');
+  await launch.getByRole('button', { name: 'Launch attempt' }).click();
   if (waitForStart) await harness.waitForCreated();
 };
+
+const readProjectSnapshot = async (
+  harness: FakeClaudeHarness,
+  projectId: string,
+): Promise<ProjectSnapshot> => {
+  const response = await fetch(
+    `${harness.origin}/api/projects/${projectId}/snapshot`,
+  );
+  const body = await response.json();
+  expect(response.status, JSON.stringify(body)).toBe(200);
+  return projectSnapshotSchema.parse(body);
+};
+
+const waitForProjectSnapshot = async (
+  harness: FakeClaudeHarness,
+  projectId: string,
+  predicate: (snapshot: ProjectSnapshot) => boolean,
+  message: string,
+) => {
+  await expect
+    .poll(
+      async () => predicate(await readProjectSnapshot(harness, projectId)),
+      {
+        message,
+      },
+    )
+    .toBe(true);
+  return readProjectSnapshot(harness, projectId);
+};
+
+const saveDeveloperInstructions = async (
+  page: Page,
+  harness: FakeClaudeHarness,
+  content: string,
+) => {
+  await page
+    .getByRole('textbox', { name: 'Developer instructions' })
+    .fill(content);
+  await page.getByRole('button', { name: 'Save instructions' }).click();
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.project.developerInstructions.content === content,
+    `Developer instructions were not persisted for project ${projectId}`,
+  );
+  return projectId;
+};
+
+const launchDeveloper = async (
+  taskDialog: ReturnType<Page['getByRole']>,
+  harness: FakeClaudeHarness,
+  expectedCreatedCount: number,
+) => {
+  const workflow = taskDialog.getByRole('region', {
+    name: 'Developer workflow',
+  });
+  await workflow
+    .getByLabel('Developer permission mode')
+    .selectOption('interactive');
+  await workflow.getByRole('button', { name: 'Start Developer' }).click();
+  await harness.waitForCreated(expectedCreatedCount);
+  await expect(
+    taskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('in progress');
+  return workflow;
+};
+
+const completionReport = (
+  cycle: DeveloperExecutionCycle,
+  input: {
+    id: string;
+    summary: string;
+    evidence: string;
+    command: string;
+    output: string;
+    createdAt: string;
+  },
+): DeveloperCompletionReportInput => ({
+  idempotencyKey: idSchema.parse(input.id),
+  summary: input.summary,
+  criterionResults: cycle.taskSnapshot.acceptanceCriteria.map((criterion) => ({
+    criterionId: criterion.id,
+    status: 'met',
+    evidence: input.evidence,
+  })),
+  verification: [
+    {
+      command: input.command,
+      outcome: 'passed',
+      output: input.output,
+    },
+  ],
+  limitations: 'No known limitations.',
+  workspaceState: {
+    summary: 'Changes committed in the temporary repository.',
+    hasUncommittedChanges: false,
+    commitsCreated: true,
+  },
+  reviewerNotes: null,
+});
+
+const blockerReport = (
+  cycle: DeveloperExecutionCycle,
+): DeveloperBlockerReportInput => ({
+  idempotencyKey: idSchema.parse('developer-blocker-report-1'),
+  reason: 'Required fixture is unavailable',
+  evidence: 'The deterministic dependency probe returned no fixture.',
+  attemptedWork: 'Checked the repository and reran the focused probe.',
+  suggestedHumanAction: 'Provide the missing fixture before retrying.',
+  preserveWorkspace: true,
+});
 
 test('keeps the empty cockpit usable at a narrow viewport', async ({
   page,
@@ -235,6 +356,35 @@ test('keeps the empty cockpit usable at a narrow viewport', async ({
       fullPage: true,
     });
   }
+});
+
+test('gives the project kanban the remaining board height', async ({
+  page,
+  harness,
+}) => {
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await ensureImportedProject(harness, 'repository');
+  await harness.snapshot();
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'Board' }).click();
+
+  const instructions = page.getByRole('region', {
+    name: 'Developer instructions editor',
+  });
+  const columns = page.locator('.task-board-columns');
+  await expect(instructions).toBeVisible();
+  await expect(columns).toBeVisible();
+
+  const layout = await page.evaluate(() => ({
+    instructionsHeight: document
+      .querySelector('.developer-instructions')!
+      .getBoundingClientRect().height,
+    columnsHeight: document
+      .querySelector('.task-board-columns')!
+      .getBoundingClientRect().height,
+  }));
+  expect(layout.columnsHeight).toBeGreaterThan(layout.instructionsHeight);
+  expect(layout.columnsHeight).toBeGreaterThan(350);
 });
 
 test('creates shared and worktree sessions with the production-built server', async ({
@@ -620,6 +770,246 @@ test('discovers and resumes a Claude session and records restart interruption tr
         type === 'session.status' && payload.reason === 'backend_restart',
     ),
   ).toBe(true);
+});
+
+test('Developer review rework persists both completion cycles and human feedback after reload', async ({
+  page,
+  harness,
+}) => {
+  const title = 'Ship deterministic review flow';
+  const instructions =
+    'Run focused verification and report literal evidence for every criterion.';
+  const rejectionFeedback =
+    'Cover the reconnect case and rerun the focused acceptance test.';
+  await importTemporaryRepository(page, harness, 'Developer review acceptance');
+  const projectId = await saveDeveloperInstructions(
+    page,
+    harness,
+    instructions,
+  );
+  const taskDialog = await createReadyTask(page, {
+    title,
+    description: 'Prove a rejected Developer submission can resume safely.',
+    acceptanceCriteria: [
+      'Both completion reports and review feedback survive a reload.',
+    ],
+  });
+  const workflow = await launchDeveloper(taskDialog, harness, 1);
+
+  const firstSnapshot = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.developerCycles.length === 1 &&
+      snapshot.developerCycles[0]?.terminalDisposition === null,
+    'The initial Developer cycle did not become active',
+  );
+  const firstCycle = firstSnapshot.developerCycles[0];
+  if (!firstCycle) throw new Error('Expected the initial Developer cycle');
+  await harness.driver.submitForReview(
+    0,
+    completionReport(firstCycle, {
+      id: 'developer-completion-report-1',
+      summary: 'Initial implementation is ready for review.',
+      evidence:
+        'The focused review-flow test passed before reconnect coverage.',
+      command: 'corepack pnpm nx test web',
+      output: 'Initial focused verification passed.',
+      createdAt: '2026-08-26T01:00:00.000Z',
+    }),
+  );
+  await expect
+    .poll(() => harness.driver.createdSessions[0]?.interrupted, {
+      message: 'The submitted Developer runtime was not interrupted',
+    })
+    .toBe(true);
+
+  await expect(
+    taskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('review');
+  await expect(
+    workflow.getByRole('region', { name: 'Completion report' }),
+  ).toContainText('Initial implementation is ready for review.');
+  await workflow.getByLabel('Rejection feedback').fill(rejectionFeedback);
+  await workflow.getByLabel('Resume the same Developer attempt').check();
+  await workflow.getByRole('button', { name: 'Reject submission' }).click();
+  await harness.waitForResumed();
+
+  const resumedSnapshot = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.developerCycles.length === 2 &&
+      snapshot.developerReviewFeedback.some(
+        (entry) => entry.feedback === rejectionFeedback,
+      ),
+    'The resumed Developer cycle and rejection feedback were not persisted',
+  );
+  const resumedCycle = resumedSnapshot.developerCycles.find(
+    (cycle) => cycle.ordinal === 2,
+  );
+  if (!resumedCycle) throw new Error('Expected the resumed Developer cycle');
+  expect(resumedCycle.attemptId).toBe(firstCycle.attemptId);
+  await harness.driver.submitForReview(
+    1,
+    completionReport(resumedCycle, {
+      id: 'developer-completion-report-2',
+      summary: 'Reconnect coverage is complete and ready for review.',
+      evidence: 'The reconnect acceptance path now passes after rework.',
+      command: 'corepack pnpm nx e2e e2e --project=chromium --grep Developer',
+      output: 'Reworked Developer acceptance path passed.',
+      createdAt: '2026-08-26T01:30:00.000Z',
+    }),
+  );
+
+  await expect(
+    workflow.getByText('Reconnect coverage is complete and ready for review.'),
+  ).toBeVisible();
+  await workflow.getByRole('button', { name: 'Accept as done' }).click();
+  await expect(
+    taskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('done');
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  await page.getByRole('button', { name: 'Show completed tasks' }).click();
+  const completedCard = page
+    .getByRole('region', { name: 'Completed tasks' })
+    .getByRole('article', { name: `${title} task card` });
+  await expect(completedCard).toBeVisible();
+  await completedCard.getByRole('button', { name: `Open ${title}` }).click();
+
+  const reloadedDialog = page.getByRole('dialog', { name: title });
+  const history = reloadedDialog.getByRole('region', {
+    name: 'Developer execution history',
+  });
+  await expect(history.getByRole('article')).toHaveCount(2);
+  const firstHistoryCycle = history.getByRole('article', {
+    name: 'Developer attempt 1 cycle 1',
+  });
+  await expect(firstHistoryCycle).toContainText(
+    'Initial implementation is ready for review.',
+  );
+  await expect(firstHistoryCycle).toContainText(rejectionFeedback);
+  await expect(
+    history.getByRole('article', { name: 'Developer attempt 1 cycle 2' }),
+  ).toContainText('Reconnect coverage is complete and ready for review.');
+  expect(
+    (await readProjectSnapshot(harness, projectId)).project
+      .developerInstructions.content,
+  ).toBe(instructions);
+});
+
+test('Developer blocker stops its runtime and fresh recovery retains blocked history after reload', async ({
+  page,
+  harness,
+}) => {
+  const title = 'Recover a blocked Developer';
+  const unblockFeedback =
+    'The missing fixture is now available; restart in a fresh attempt.';
+  await importTemporaryRepository(
+    page,
+    harness,
+    'Developer blocker acceptance',
+  );
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  const taskDialog = await createReadyTask(page, {
+    title,
+    description: 'Keep blocker evidence while a human starts fresh recovery.',
+    acceptanceCriteria: [
+      'The prior blocker and fresh completion remain in Developer history.',
+    ],
+  });
+  const workflow = await launchDeveloper(taskDialog, harness, 1);
+
+  const activeSnapshot = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.developerCycles.length === 1,
+    'The blocked-path Developer cycle did not become active',
+  );
+  const blockedCycle = activeSnapshot.developerCycles[0];
+  if (!blockedCycle) throw new Error('Expected the blocked Developer cycle');
+  await harness.driver.markBlocked(0, blockerReport(blockedCycle));
+
+  await expect
+    .poll(() => harness.driver.createdSessions[0]?.interrupted, {
+      message: 'The blocked Developer runtime was not interrupted',
+    })
+    .toBe(true);
+  await expect(
+    taskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('in progress');
+  await expect(
+    taskDialog.getByText('Blocked — Required fixture is unavailable'),
+  ).toBeVisible();
+  const blocker = workflow.getByRole('region', { name: 'Blocker report' });
+  await expect(blocker).toContainText(
+    'The deterministic dependency probe returned no fixture.',
+  );
+  await expect(blocker.getByText('Yes', { exact: true })).toBeVisible();
+
+  await workflow.getByLabel('Unblock reason').fill(unblockFeedback);
+  await workflow.getByLabel('Start a new attempt after unblock').check();
+  await workflow
+    .getByLabel('Developer permission mode')
+    .selectOption('interactive');
+  await workflow.getByRole('button', { name: 'Unblock Developer' }).click();
+  await harness.waitForCreated(2);
+
+  const freshSnapshot = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.attempts.length === 2 &&
+      snapshot.developerCycles.length === 2 &&
+      snapshot.developerReviewFeedback.some(
+        (entry) => entry.feedback === unblockFeedback,
+      ),
+    'The fresh unblock attempt did not preserve blocker feedback and history',
+  );
+  const freshCycle = freshSnapshot.developerCycles.find(
+    (cycle) => cycle.attemptId !== blockedCycle.attemptId,
+  );
+  if (!freshCycle) throw new Error('Expected a fresh Developer attempt cycle');
+  await harness.driver.submitForReview(
+    1,
+    completionReport(freshCycle, {
+      id: 'developer-completion-after-blocker',
+      summary: 'Fresh recovery completed with the fixture available.',
+      evidence: 'The recovered acceptance path passed in a new attempt.',
+      command: 'corepack pnpm nx e2e e2e --project=chromium --grep Developer',
+      output: 'Fresh recovery verification passed.',
+      createdAt: '2026-08-26T02:30:00.000Z',
+    }),
+  );
+  await expect(
+    taskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('review');
+  await expect(
+    workflow.getByText('Fresh recovery completed with the fixture available.'),
+  ).toBeVisible();
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  const reviewCard = page
+    .getByRole('region', { name: 'Review tasks' })
+    .getByRole('article', { name: `${title} task card` });
+  await expect(reviewCard).toBeVisible();
+  await reviewCard.getByRole('button', { name: `Open ${title}` }).click();
+
+  const history = page
+    .getByRole('dialog', { name: title })
+    .getByRole('region', { name: 'Developer execution history' });
+  await expect(history.getByRole('article')).toHaveCount(2);
+  const blockedHistory = history.getByRole('article', {
+    name: 'Developer attempt 1 cycle 1',
+  });
+  await expect(blockedHistory).toContainText('Required fixture is unavailable');
+  await expect(blockedHistory).toContainText(unblockFeedback);
+  await expect(
+    history.getByRole('article', { name: 'Developer attempt 2 cycle 1' }),
+  ).toContainText('Fresh recovery completed with the fixture available.');
 });
 
 test('imports a project and preserves an attempted task across refresh', async ({
