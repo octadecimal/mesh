@@ -495,4 +495,124 @@ describe('ReviewAutomationService', () => {
       });
     },
   );
+
+  it('enables review automation as an idempotent human command', async () => {
+    const context = setup({ automationStatus: 'disabled' });
+    const input = {
+      commandId: 'enable-automation-1',
+      taskId: context.task.id,
+      expectedRevision: context.task.revision,
+      actor: human,
+    };
+
+    const enabled = await context.service.enable(input);
+    const duplicate = await context.service.enable(input);
+
+    expect(duplicate).toEqual(enabled);
+    expect(enabled).toMatchObject({
+      task: {
+        id: context.task.id,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 3,
+          rejectionCount: 0,
+          pauseReason: null,
+        },
+      },
+      event: {
+        type: 'task.review_automation_changed',
+        payload: { action: null },
+      },
+    });
+    expect(
+      context.repositories.projectEvents.after(context.project.id, 0),
+    ).toContainEqual(enabled.event);
+  });
+
+  it('pauses future automation without interrupting the active session', async () => {
+    const context = setup();
+    const before = context.repositories.sessions.get(
+      context.developerSession.id,
+    );
+
+    const paused = await context.service.pause({
+      commandId: 'pause-automation-1',
+      taskId: context.task.id,
+      expectedRevision: context.task.revision,
+      actor: human,
+    });
+
+    expect(paused.task.reviewAutomation).toMatchObject({
+      status: 'paused',
+      generation: 3,
+      rejectionCount: 0,
+      pauseReason: 'Paused by operator-1.',
+    });
+    expect(
+      context.repositories.sessions.get(context.developerSession.id),
+    ).toEqual(before);
+  });
+
+  it('does not resume Developer work after a human pauses a pending rejection action', async () => {
+    const context = setup();
+    const cycle = context.rejectedCycle();
+    context.pendingResumeAction(cycle);
+    const current = context.repositories.tasks.get(context.task.id);
+    if (!current) throw new Error('Expected current task');
+    context.service.pause({
+      commandId: 'pause-before-resume',
+      taskId: current.id,
+      expectedRevision: current.revision,
+      actor: human,
+    });
+
+    await expect(
+      context.service.continueRejectedVerdict({
+        taskId: context.task.id,
+        cycleId: cycle.id,
+      }),
+    ).rejects.toMatchObject({ code: 'review_automation_paused' });
+    expect(context.resumeStarts()).toBe(0);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+  });
+
+  it('rejects non-human automation controls and stale revisions with current task truth', async () => {
+    const context = setup({ automationStatus: 'disabled' });
+
+    expect(() =>
+      context.service.enable({
+        commandId: 'enable-system',
+        taskId: context.task.id,
+        expectedRevision: context.task.revision,
+        actor: taskActorSchema.parse({ type: 'system', id: 'review-loop' }),
+      }),
+    ).toThrow(
+      expect.objectContaining({ code: 'task_transition_unauthorized' }),
+    );
+
+    const current = context.repositories.tasks.get(context.task.id);
+    if (!current) throw new Error('Expected current task');
+    context.repositories.tasks.update(
+      { ...current, notes: 'Concurrent update.' },
+      current.revision,
+    );
+    expect(() =>
+      context.service.pause({
+        commandId: 'pause-stale',
+        taskId: context.task.id,
+        expectedRevision: current.revision,
+        actor: human,
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: 'task_revision_conflict',
+        task: expect.objectContaining({
+          id: context.task.id,
+          revision: current.revision + 1,
+        }),
+      }),
+    );
+  });
 });

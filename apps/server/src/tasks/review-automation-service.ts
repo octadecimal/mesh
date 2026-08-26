@@ -10,10 +10,12 @@ import {
   type QaReport,
   type ReviewAutomationAction,
   type Task,
+  type TaskActor,
   type TaskAttempt,
 } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
+import type { CommandRepository } from '../repositories/command-repository.js';
 import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
@@ -243,8 +245,37 @@ export const planQaVerdict = (
 
 type SourceInput = { taskId: string; cycleId: string };
 
+export type ReviewAutomationCommandInput = {
+  commandId: string;
+  taskId: string;
+  expectedRevision: number;
+  actor: TaskActor;
+};
+
+export type ReviewAutomationCommandOutcome = {
+  task: Task;
+  event: ProjectEvent;
+};
+
+class ReviewAutomationControlError extends Error {
+  constructor(
+    readonly code:
+      | 'project_not_found'
+      | 'task_not_found'
+      | 'task_revision_conflict'
+      | 'task_transition_invalid'
+      | 'task_transition_unauthorized',
+    message: string,
+    readonly task?: Task,
+  ) {
+    super(message);
+    this.name = 'ReviewAutomationControlError';
+  }
+}
+
 type Dependencies = {
   database: Database;
+  commands: CommandRepository;
   projects: ProjectRepository;
   tasks: TaskRepository;
   attempts: TaskAttemptRepository;
@@ -272,6 +303,14 @@ export class ReviewAutomationService {
   constructor(private readonly dependencies: Dependencies) {
     this.now = dependencies.now ?? (() => new Date().toISOString());
     this.createId = dependencies.createId ?? randomUUID;
+  }
+
+  enable(input: ReviewAutomationCommandInput): ReviewAutomationCommandOutcome {
+    return this.changeAutomation(input, 'enabled');
+  }
+
+  pause(input: ReviewAutomationCommandInput): ReviewAutomationCommandOutcome {
+    return this.changeAutomation(input, 'paused');
   }
 
   async afterDeveloperSubmission(
@@ -326,6 +365,109 @@ export class ReviewAutomationService {
     }
   }
 
+  private changeAutomation(
+    input: ReviewAutomationCommandInput,
+    status: 'enabled' | 'paused',
+  ): ReviewAutomationCommandOutcome {
+    const existing =
+      this.dependencies.commands.getExisting<ReviewAutomationCommandOutcome>(
+        input.commandId,
+      );
+    if (existing.found) return existing.response;
+
+    let event: ProjectEvent | undefined;
+    const outcome =
+      this.dependencies.commands.executeOnceInImmediateTransaction(
+        input.commandId,
+        () => {
+          const actor = taskActorSchema.parse(input.actor);
+          if (actor.type !== 'human') {
+            throw new ReviewAutomationControlError(
+              'task_transition_unauthorized',
+              'Only a human may enable or pause review automation.',
+            );
+          }
+          const task = this.dependencies.tasks.get(input.taskId);
+          if (!task) {
+            throw new ReviewAutomationControlError(
+              'task_not_found',
+              `Task '${input.taskId}' was not found.`,
+            );
+          }
+          if (task.revision !== input.expectedRevision) {
+            throw new ReviewAutomationControlError(
+              'task_revision_conflict',
+              `Task '${task.id}' has changed.`,
+              task,
+            );
+          }
+          const project = this.dependencies.projects.get(task.projectId);
+          if (!project) {
+            throw new ReviewAutomationControlError(
+              'project_not_found',
+              `Project '${task.projectId}' was not found.`,
+            );
+          }
+          if (
+            status === 'enabled' &&
+            project.qaConfiguration.reviewPolicy !== 'autonomous_review'
+          ) {
+            throw new ReviewAutomationControlError(
+              'task_transition_invalid',
+              'Review automation requires the autonomous review policy.',
+              task,
+            );
+          }
+
+          const occurredAt = this.now();
+          const updated = this.dependencies.tasks.update(
+            {
+              ...task,
+              reviewAutomation: {
+                status,
+                generation: task.reviewAutomation.generation + 1,
+                rejectionCount:
+                  status === 'enabled'
+                    ? 0
+                    : task.reviewAutomation.rejectionCount,
+                pauseReason:
+                  status === 'paused' ? `Paused by ${actor.id}.` : null,
+                updatedAt: occurredAt,
+              },
+              updatedAt: occurredAt,
+            },
+            task.revision,
+          );
+          if (!updated) {
+            const current = this.dependencies.tasks.get(task.id) ?? task;
+            throw new ReviewAutomationControlError(
+              'task_revision_conflict',
+              `Task '${task.id}' has changed.`,
+              current,
+            );
+          }
+          event = this.dependencies.projectEvents.appendInTransaction(
+            updated.projectId,
+            {
+              protocolVersion: 1,
+              id: this.createId(),
+              projectId: updated.projectId,
+              occurredAt,
+              type: 'task.review_automation_changed',
+              payload: {
+                task: updated,
+                automation: updated.reviewAutomation,
+                action: null,
+              },
+            },
+          );
+          return { task: updated, event };
+        },
+      );
+    if (event) this.dependencies.publisher.publishProject(event);
+    return outcome;
+  }
+
   afterQaVerdict(input: SourceInput): Promise<ReviewAutomationAction> {
     return this.continueRejectedVerdict(input);
   }
@@ -356,11 +498,14 @@ export class ReviewAutomationService {
     if (action.status !== 'pending') return action;
 
     try {
+      const currentTask = this.requireTask(action.taskId);
       if (
         action.taskId !== knownCycle.taskId ||
         action.attemptId !== knownCycle.attemptId ||
         action.sourceCycleId !== knownCycle.id ||
         action.generation !== knownCycle.automationGeneration ||
+        currentTask.reviewAutomation.status !== 'enabled' ||
+        currentTask.reviewAutomation.generation !== action.generation ||
         knownCycle.terminalDisposition !== 'rejected' ||
         knownCycle.endedAt === null ||
         knownCycle.rejectionOrdinal >= 2
@@ -377,7 +522,6 @@ export class ReviewAutomationService {
           'The rejected QA report is unavailable.',
         );
       }
-      const currentTask = this.requireTask(action.taskId);
       const failedEvidence = report.criterionResults
         .filter(({ status }) => status !== 'passed')
         .map(({ criterionId, evidence }) => `${criterionId}: ${evidence}`)

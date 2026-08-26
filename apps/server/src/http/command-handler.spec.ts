@@ -6,6 +6,13 @@ import { promisify } from 'node:util';
 
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  DeveloperResumeUnavailableError,
+  QaAlreadyActiveError,
+  QaCapabilityInvalidError,
+  QaRejectionCeilingReachedError,
+  QaReportIncompleteError,
+  ReviewAutomationPausedError,
+  UnsafeQaWorkspaceError,
   developerExecutionCycleSchema,
   idSchema,
   projectSchema,
@@ -23,6 +30,9 @@ import { AttemptService } from '../tasks/attempt-service.js';
 import { DeveloperCapabilityRegistry } from '../tasks/developer-capability-registry.js';
 import { DeveloperExecutionService } from '../tasks/developer-execution-service.js';
 import { DeveloperReworkService } from '../tasks/developer-rework-service.js';
+import { QaCapabilityRegistry } from '../tasks/qa-capability-registry.js';
+import { QaExecutionService } from '../tasks/qa-execution-service.js';
+import { ReviewAutomationService } from '../tasks/review-automation-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
 import { toHttpError } from './errors.js';
@@ -68,11 +78,14 @@ describe('executeCommand', () => {
     const repositories = createTestRepositories();
     const driver = new FakeClaudeSessionDriver();
     const capabilities = new DeveloperCapabilityRegistry();
+    const qaCapabilities = new QaCapabilityRegistry();
     const registry = new SessionRegistry({
       ...repositories,
       driver,
-      invalidateDeveloperCapability: (sessionId) =>
-        capabilities.invalidateSession(sessionId),
+      invalidateDeveloperCapability: (sessionId) => {
+        capabilities.invalidateSession(sessionId);
+        qaCapabilities.invalidateSession(sessionId);
+      },
       closeDatabase: () => undefined,
     });
     const taskService = new TaskService({
@@ -108,6 +121,22 @@ describe('executeCommand', () => {
       now: () => now,
       createId,
     });
+    const qaExecutionService = new QaExecutionService({
+      ...repositories,
+      attemptService,
+      capabilities: qaCapabilities,
+      registry,
+      now: () => now,
+      createId,
+    });
+    const reviewAutomationService = new ReviewAutomationService({
+      ...repositories,
+      qaExecutionService,
+      developerReworkService,
+      publisher: registry.publisher,
+      now: () => now,
+      createId,
+    });
     cleanups.push(async () => {
       await registry.shutdown();
       repositories.dispose();
@@ -119,6 +148,8 @@ describe('executeCommand', () => {
         taskService,
         attemptService,
         developerExecutionService,
+        qaExecutionService,
+        reviewAutomationService,
         registry,
         driver,
         pathOptions,
@@ -132,6 +163,382 @@ describe('executeCommand', () => {
     protocolVersion: 1,
     idempotencyKey,
     command,
+  });
+
+  it('dispatches manual QA launch without exposing runtime capabilities', async () => {
+    const { directory } = await createRepository();
+    const { dependencies } = commandDependencies(directory);
+    let launchInput: unknown;
+    (dependencies as { qaExecutionService: unknown }).qaExecutionService = {
+      launch: async (input: unknown) => {
+        launchInput = input;
+        return {
+          task: { id: 'task-1' },
+          attempt: { id: 'attempt-1' },
+          session: { id: 'qa-session-1' },
+          cycle: { id: 'qa-cycle-1' },
+          event: { sequence: 7 },
+          capability: 'must-not-leak',
+          driver: { internal: true },
+        };
+      },
+      submitVerdict: () => undefined,
+    };
+
+    const result = await executeCommand(
+      projectCommand('qa-launch-command', {
+        type: 'task.qa.launch',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 4,
+          actor: { type: 'human', id: 'operator-1' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(launchInput).toEqual({
+      commandId: 'qa-launch-command',
+      taskId: 'task-1',
+      expectedRevision: 4,
+      actor: { type: 'human', id: 'operator-1' },
+      trigger: 'manual',
+    });
+    expect(result).toEqual({
+      protocolVersion: 1,
+      commandType: 'task.qa.launch',
+      result: {
+        task: { id: 'task-1' },
+        attempt: { id: 'attempt-1' },
+        session: { id: 'qa-session-1' },
+        cycle: { id: 'qa-cycle-1' },
+        event: { sequence: 7 },
+        projectEventCursor: 7,
+      },
+      warnings: [],
+    });
+  });
+
+  it('routes human automation enable and pause through the domain service', async () => {
+    const { directory } = await createRepository();
+    let nextId = 0;
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => `automation-http-${++nextId}`,
+    );
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'project-automation',
+        displayName: 'Automation project',
+        repositoryPath: directory,
+        discoveredAt: now,
+        discoveryMetadata: {},
+        qaConfiguration: {
+          instructions: {
+            content: 'Verify the task.',
+            revision: 1,
+            updatedAt: now,
+            updatedBy: { type: 'human', id: 'operator-1' },
+          },
+          reviewPolicy: 'autonomous_review',
+          revision: 1,
+          updatedAt: now,
+          updatedBy: { type: 'human', id: 'operator-1' },
+        },
+      }),
+    );
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'task-automation',
+        projectId: project.id,
+        title: 'Control automation',
+        description: '',
+        acceptanceCriteria: ['Controls are durable.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const actor = { type: 'human' as const, id: 'operator-1' };
+    const enable = projectCommand('enable-automation-command', {
+      type: 'task.review_automation.enable',
+      payload: {
+        taskId: task.id,
+        expectedRevision: task.revision,
+        actor,
+      },
+    });
+
+    const enabled = await executeCommand(enable, dependencies);
+    const duplicate = await executeCommand(enable, dependencies);
+    const enabledTask = repositories.tasks.get(task.id);
+    if (!enabledTask) throw new Error('Expected enabled task');
+    const paused = await executeCommand(
+      projectCommand('pause-automation-command', {
+        type: 'task.review_automation.pause',
+        payload: {
+          taskId: task.id,
+          expectedRevision: enabledTask.revision,
+          actor,
+        },
+      }),
+      dependencies,
+    );
+
+    expect(duplicate).toEqual(enabled);
+    expect(enabled).toMatchObject({
+      commandType: 'task.review_automation.enable',
+      result: { task: { reviewAutomation: { status: 'enabled' } } },
+    });
+    expect(paused).toMatchObject({
+      commandType: 'task.review_automation.pause',
+      result: { task: { reviewAutomation: { status: 'paused' } } },
+    });
+
+    const conflict = await executeCommand(
+      projectCommand('pause-automation-stale', {
+        type: 'task.review_automation.pause',
+        payload: {
+          taskId: task.id,
+          expectedRevision: task.revision,
+          actor,
+        },
+      }),
+      dependencies,
+    ).catch((error: unknown) => error);
+    expect(toHttpError(conflict)).toMatchObject({
+      statusCode: 409,
+      body: {
+        error: {
+          code: 'task_revision_conflict',
+          details: {
+            task: {
+              id: task.id,
+              revision: task.revision + 2,
+              reviewAutomation: { status: 'paused' },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it('returns the committed rejection with durable pause truth when Developer resume fails', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'project-rejected',
+        displayName: 'Rejected project',
+        repositoryPath: directory,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'task-rejected',
+        projectId: 'project-rejected',
+        title: 'Rejected task',
+        description: '',
+        acceptanceCriteria: ['QA evidence is retained.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 3,
+        createdAt: now,
+        updatedAt: now,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 1,
+          rejectionCount: 1,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      }),
+    );
+    const committed = {
+      task,
+      attempt: { id: 'attempt-1' },
+      cycle: {
+        id: 'qa-cycle-rejected',
+        reviewPolicy: 'autonomous_review',
+        rejectionOrdinal: 0,
+      },
+      report: { disposition: 'rejected' },
+      event: { sequence: 8 },
+      events: [{ sequence: 8 }],
+    };
+    (dependencies as { qaExecutionService: unknown }).qaExecutionService = {
+      launch: async () => undefined,
+      submitVerdict: () => committed,
+    };
+    (
+      dependencies as { reviewAutomationService: unknown }
+    ).reviewAutomationService = {
+      continueRejectedVerdict: async () => {
+        const current = repositories.tasks.get(task.id);
+        if (!current) throw new Error('Expected current task');
+        repositories.tasks.update(
+          {
+            ...current,
+            reviewAutomation: {
+              ...current.reviewAutomation,
+              status: 'paused',
+              pauseReason: 'Developer resume unavailable.',
+            },
+          },
+          current.revision,
+        );
+        throw new DeveloperResumeUnavailableError();
+      },
+    };
+
+    const result = await executeCommand(
+      projectCommand('qa-verdict-command', {
+        type: 'task.qa.submit_verdict',
+        payload: {
+          capability: 'qa-capability-1',
+          expectedRevision: task.revision,
+          report: {
+            disposition: 'rejected',
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status: 'failed',
+                evidence: 'Focused test failed.',
+              },
+            ],
+            verificationCommands: [],
+            limitations: [],
+            residualRisks: ['Regression remains.'],
+            workspaceBefore: 'source-state-1',
+            workspaceAfter: 'source-state-1',
+          },
+          actor: { type: 'agent', id: 'qa-agent-1' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(result).toMatchObject({
+      commandType: 'task.qa.submit_verdict',
+      result: {
+        task: {
+          id: task.id,
+          reviewAutomation: {
+            status: 'paused',
+            pauseReason: 'Developer resume unavailable.',
+          },
+        },
+        report: { disposition: 'rejected' },
+        projectEventCursor: 8,
+      },
+      warnings: [{ code: 'developer_resume_unavailable' }],
+    });
+  });
+
+  it('starts review automation only after a committed Developer submission', async () => {
+    const { directory } = await createRepository();
+    const { dependencies } = commandDependencies(directory);
+    const committed = {
+      task: { id: 'task-submitted' },
+      attempt: { id: 'attempt-submitted' },
+      cycle: { id: 'developer-cycle-submitted' },
+      report: { id: 'developer-report-submitted' },
+      event: { sequence: 5 },
+    };
+    let followUp: unknown;
+    (
+      dependencies as { developerExecutionService: unknown }
+    ).developerExecutionService = {
+      submitForReview: () => committed,
+      accept: () => undefined,
+      block: () => undefined,
+    };
+    (
+      dependencies as { reviewAutomationService: unknown }
+    ).reviewAutomationService = {
+      afterDeveloperSubmission: async (input: unknown) => {
+        followUp = input;
+      },
+    };
+
+    const result = await executeCommand(
+      projectCommand('developer-submit-command', {
+        type: 'task.developer.submit_review',
+        payload: {
+          capability: 'developer-capability-1',
+          expectedRevision: 2,
+          report: {
+            id: 'developer-report-submitted',
+            cycleId: 'developer-cycle-submitted',
+            summary: 'Ready for QA.',
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status: 'met',
+                evidence: 'Focused test passed.',
+              },
+            ],
+            verification: [],
+            limitations: '',
+            workspaceState: {
+              summary: 'Committed changes.',
+              hasUncommittedChanges: false,
+              commitsCreated: true,
+            },
+            reviewerNotes: null,
+            createdAt: now,
+          },
+          actor: { type: 'agent', id: 'developer-agent-1' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(followUp).toEqual({
+      taskId: 'task-submitted',
+      cycleId: 'developer-cycle-submitted',
+    });
+    expect(result).toMatchObject({
+      commandType: 'task.developer.submit_review',
+      result: { projectEventCursor: 5 },
+    });
+  });
+
+  it('maps QA authorization and validation failures to stable HTTP errors', () => {
+    for (const [error, statusCode, code] of [
+      [new QaCapabilityInvalidError(), 403, 'qa_capability_invalid'],
+      [new QaReportIncompleteError(), 422, 'qa_report_incomplete'],
+      [new QaAlreadyActiveError(), 409, 'qa_already_active'],
+      [new ReviewAutomationPausedError(), 409, 'review_automation_paused'],
+      [
+        new QaRejectionCeilingReachedError(),
+        409,
+        'qa_rejection_ceiling_reached',
+      ],
+      [new UnsafeQaWorkspaceError(), 409, 'unsafe_qa_workspace'],
+      [
+        new DeveloperResumeUnavailableError(),
+        409,
+        'developer_resume_unavailable',
+      ],
+    ] as const) {
+      expect(toHttpError(error)).toMatchObject({
+        statusCode,
+        body: { error: { code } },
+      });
+    }
   });
 
   it.each(['system', 'agent'] as const)(

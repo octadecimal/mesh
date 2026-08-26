@@ -31,6 +31,7 @@ import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
+import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
 import type { TaskMutationResult, TaskService } from '../tasks/task-service.js';
@@ -39,6 +40,15 @@ import type {
   AttemptService,
 } from '../tasks/attempt-service.js';
 import type { DeveloperExecutionService } from '../tasks/developer-execution-service.js';
+import type {
+  QaExecutionService,
+  QaLaunchResult,
+  QaVerdictOutcome,
+} from '../tasks/qa-execution-service.js';
+import type {
+  ReviewAutomationCommandOutcome,
+  ReviewAutomationService,
+} from '../tasks/review-automation-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
@@ -71,8 +81,14 @@ export interface CommandDependencies {
   layouts: LayoutRepository;
   commands: CommandRepository;
   taskService: TaskService;
+  tasks: Pick<TaskRepository, 'get'>;
   attemptService?: AttemptService;
   developerExecutionService?: DeveloperExecutionService;
+  qaExecutionService?: Pick<QaExecutionService, 'launch' | 'submitVerdict'>;
+  reviewAutomationService?: Pick<
+    ReviewAutomationService,
+    'afterDeveloperSubmission' | 'continueRejectedVerdict' | 'enable' | 'pause'
+  >;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
@@ -132,6 +148,72 @@ const requireDeveloperExecutionService = (
   return dependencies.developerExecutionService;
 };
 
+const requireQaExecutionService = (dependencies: CommandDependencies) => {
+  if (!dependencies.qaExecutionService) {
+    throw new CommandError(
+      'invalid_command',
+      'QA execution support is unavailable',
+    );
+  }
+  return dependencies.qaExecutionService;
+};
+
+const requireReviewAutomationService = (dependencies: CommandDependencies) => {
+  if (!dependencies.reviewAutomationService) {
+    throw new CommandError(
+      'invalid_command',
+      'Review automation support is unavailable',
+    );
+  }
+  return dependencies.reviewAutomationService;
+};
+
+const followUpErrorCodes = new Set([
+  'audit_unavailable',
+  'developer_resume_unavailable',
+  'review_automation_paused',
+  'unsafe_qa_workspace',
+]);
+
+const safeErrorCode = (error: unknown, fallback: string): string => {
+  const candidate =
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    typeof error.code === 'string'
+      ? error.code
+      : undefined;
+  return candidate && followUpErrorCodes.has(candidate) ? candidate : fallback;
+};
+
+const qaLaunchResponse = (result: QaLaunchResult) => ({
+  task: result.task,
+  attempt: result.attempt,
+  session: result.session,
+  cycle: result.cycle,
+  event: result.event,
+  projectEventCursor: result.event.sequence,
+});
+
+const qaVerdictResponse = (
+  result: QaVerdictOutcome,
+  projectEventCursor = result.events.at(-1)?.sequence ?? result.event.sequence,
+) => ({
+  task: result.task,
+  attempt: result.attempt,
+  cycle: result.cycle,
+  report: result.report,
+  event: result.event,
+  events: result.events,
+  projectEventCursor,
+});
+
+const reviewAutomationResponse = (result: ReviewAutomationCommandOutcome) => ({
+  task: result.task,
+  event: result.event,
+  projectEventCursor: result.event.sequence,
+});
+
 type DeveloperLaunchCommand = Extract<
   Extract<Command, { idempotencyKey: string }>['command'],
   { type: 'task.developer.launch' }
@@ -170,6 +252,144 @@ type DeveloperHumanCommand = Extract<
       | 'task.developer.unblock_new';
   }
 >;
+
+type DeveloperAgentCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'task.developer.submit_review' | 'task.developer.block' }
+>;
+
+const executeDeveloperAgentCommand = async (
+  command: DeveloperAgentCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  const service = requireDeveloperExecutionService(dependencies);
+  if (command.type === 'task.developer.block') {
+    const result = service.markBlocked({
+      ...command.payload,
+      commandId: idempotencyKey,
+    });
+    return response(command.type, {
+      ...result,
+      projectEventCursor: result.event.sequence,
+    });
+  }
+
+  const result = service.submitForReview({
+    ...command.payload,
+    commandId: idempotencyKey,
+  });
+  const warnings: Array<{ code: string; message: string }> = [];
+  let task = result.task;
+  let projectEventCursor = result.event.sequence;
+  try {
+    await requireReviewAutomationService(dependencies).afterDeveloperSubmission(
+      {
+        taskId: result.task.id,
+        cycleId: result.cycle.id,
+      },
+    );
+  } catch (error) {
+    task = dependencies.tasks.get(result.task.id) ?? result.task;
+    projectEventCursor = Math.max(
+      projectEventCursor,
+      dependencies.projectEvents.latestSequence(task.projectId),
+    );
+    warnings.push({
+      code: safeErrorCode(error, 'review_automation_paused'),
+      message: 'Developer submission was committed; review automation paused.',
+    });
+  }
+  return response(
+    command.type,
+    { ...result, task, projectEventCursor },
+    warnings,
+  );
+};
+
+type QaCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'task.qa.launch' | 'task.qa.submit_verdict' }
+>;
+
+const executeQaCommand = async (
+  command: QaCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  const service = requireQaExecutionService(dependencies);
+  if (command.type === 'task.qa.launch') {
+    const result = await service.launch({
+      ...command.payload,
+      commandId: idempotencyKey,
+      trigger: 'manual',
+    });
+    return response(command.type, qaLaunchResponse(result));
+  }
+
+  const committed = service.submitVerdict({
+    ...command.payload,
+    commandId: idempotencyKey,
+  });
+  const warnings: Array<{ code: string; message: string }> = [];
+  let outcome = committed;
+  let projectEventCursor =
+    committed.events.at(-1)?.sequence ?? committed.event.sequence;
+  if (
+    committed.report.disposition === 'rejected' &&
+    committed.cycle.reviewPolicy === 'autonomous_review' &&
+    committed.cycle.rejectionOrdinal < 2 &&
+    committed.task.reviewAutomation.status === 'enabled'
+  ) {
+    try {
+      await requireReviewAutomationService(
+        dependencies,
+      ).continueRejectedVerdict({
+        taskId: committed.task.id,
+        cycleId: committed.cycle.id,
+      });
+    } catch (error) {
+      outcome = {
+        ...committed,
+        task: dependencies.tasks.get(committed.task.id) ?? committed.task,
+      };
+      projectEventCursor = Math.max(
+        projectEventCursor,
+        dependencies.projectEvents.latestSequence(outcome.task.projectId),
+      );
+      warnings.push({
+        code: safeErrorCode(error, 'review_automation_paused'),
+        message:
+          'QA verdict was committed; Developer resume failed and automation paused.',
+      });
+    }
+  }
+  return response(
+    command.type,
+    qaVerdictResponse(outcome, projectEventCursor),
+    warnings,
+  );
+};
+
+type ReviewAutomationCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  {
+    type: 'task.review_automation.enable' | 'task.review_automation.pause';
+  }
+>;
+
+const executeReviewAutomationCommand = (
+  command: ReviewAutomationCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): CommandResponse => {
+  const service = requireReviewAutomationService(dependencies);
+  const result =
+    command.type === 'task.review_automation.enable'
+      ? service.enable({ ...command.payload, commandId: idempotencyKey })
+      : service.pause({ ...command.payload, commandId: idempotencyKey });
+  return response(command.type, reviewAutomationResponse(result));
+};
 
 const executeDeveloperHumanCommand = async (
   command: DeveloperHumanCommand,
@@ -1095,6 +1315,36 @@ export const executeCommand = async (
     }
     if (command.command.type === 'task.developer.launch') {
       return executeDeveloperLaunch(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (
+      command.command.type === 'task.developer.submit_review' ||
+      command.command.type === 'task.developer.block'
+    ) {
+      return executeDeveloperAgentCommand(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (
+      command.command.type === 'task.qa.launch' ||
+      command.command.type === 'task.qa.submit_verdict'
+    ) {
+      return executeQaCommand(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (
+      command.command.type === 'task.review_automation.enable' ||
+      command.command.type === 'task.review_automation.pause'
+    ) {
+      return executeReviewAutomationCommand(
         command.command,
         command.idempotencyKey,
         dependencies,

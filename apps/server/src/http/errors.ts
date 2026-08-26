@@ -22,6 +22,16 @@ export type StableErrorCode =
   | 'task_blocked'
   | 'task_transition_invalid'
   | 'task_transition_unauthorized'
+  | 'developer_capability_invalid'
+  | 'developer_cycle_invalid'
+  | 'developer_report_invalid'
+  | 'qa_capability_invalid'
+  | 'qa_report_incomplete'
+  | 'qa_already_active'
+  | 'review_automation_paused'
+  | 'qa_rejection_ceiling_reached'
+  | 'unsafe_qa_workspace'
+  | 'developer_resume_unavailable'
   | 'session_already_linked'
   | 'session_repository_mismatch'
   | 'attempt_start_failed'
@@ -77,6 +87,16 @@ const statusCodes: Record<StableErrorCode, number> = {
   task_blocked: 409,
   task_transition_invalid: 409,
   task_transition_unauthorized: 403,
+  developer_capability_invalid: 403,
+  developer_cycle_invalid: 409,
+  developer_report_invalid: 422,
+  qa_capability_invalid: 403,
+  qa_report_incomplete: 422,
+  qa_already_active: 409,
+  review_automation_paused: 409,
+  qa_rejection_ceiling_reached: 409,
+  unsafe_qa_workspace: 409,
+  developer_resume_unavailable: 409,
   command_reconciliation_required: 409,
   internal_error: 500,
 };
@@ -100,8 +120,20 @@ export const toHttpError = (error: unknown): HttpError => {
     const candidate = String(error.code) as StableErrorCode;
     if (stableCodes.has(candidate)) {
       code = candidate;
-      message = error instanceof Error ? error.message : candidate;
-      details = error;
+      message =
+        error instanceof Error
+          ? error.message
+          : 'message' in error && typeof error.message === 'string'
+            ? error.message
+            : candidate;
+      if ('details' in error && error.details !== undefined)
+        details = error.details;
+      else if ('task' in error && error.task !== undefined)
+        details = { task: error.task };
+      else if ('project' in error && error.project !== undefined)
+        details = { project: error.project };
+      else if ('sessionId' in error && error.sessionId !== undefined)
+        details = { sessionId: error.sessionId };
     }
   }
 

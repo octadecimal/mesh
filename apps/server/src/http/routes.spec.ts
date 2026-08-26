@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  QaCapabilityInvalidError,
   idSchema,
   projectSchema,
   taskAttemptSchema,
@@ -13,6 +14,7 @@ import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { GitAdapter } from '../platform/git.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
+import type { QaExecutionService } from '../tasks/qa-execution-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { buildApp } from '../app.js';
 
@@ -28,6 +30,7 @@ const setup = (options?: {
   withGit?: boolean;
   gitExitCode?: number;
   seedProject?: boolean;
+  qaExecutionService?: Pick<QaExecutionService, 'launch' | 'submitVerdict'>;
 }) => {
   const repositories = createTestRepositories();
   const workspacePath = options?.useDatabaseDirectoryAsWorkspace
@@ -128,6 +131,64 @@ describe('HTTP command routes', () => {
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  });
+
+  it('maps a rejected QA capability to the stable forbidden envelope', async () => {
+    const fixture = setup({
+      qaExecutionService: {
+        launch: async () => {
+          throw new Error('unused');
+        },
+        submitVerdict: () => {
+          throw new QaCapabilityInvalidError();
+        },
+      },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'qa-verdict-invalid-capability',
+        command: {
+          type: 'task.qa.submit_verdict',
+          payload: {
+            capability: 'invalid-qa-capability',
+            expectedRevision: 2,
+            report: {
+              disposition: 'rejected',
+              criterionResults: [
+                {
+                  criterionId: 'criterion-1',
+                  status: 'failed',
+                  evidence: 'Focused test failed.',
+                },
+              ],
+              verificationCommands: [],
+              limitations: [],
+              residualRisks: ['The change remains unverified.'],
+              workspaceBefore: 'state-1',
+              workspaceAfter: 'state-1',
+            },
+            actor: { type: 'agent', id: 'qa-agent-1' },
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({
+      error: {
+        code: 'qa_capability_invalid',
+        message: 'The QA capability is invalid.',
+      },
+    });
   });
 
   it('does not persist a project while discovering a fresh workspace', async () => {

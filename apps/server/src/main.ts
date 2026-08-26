@@ -325,6 +325,7 @@ export const startServer = async (
   });
   roleServices.reviewAutomation = new ReviewAutomationService({
     database,
+    commands,
     projects,
     tasks,
     attempts,
@@ -355,6 +356,8 @@ export const startServer = async (
     taskService,
     attemptService,
     developerExecutionService,
+    qaExecutionService,
+    reviewAutomationService: roleServices.reviewAutomation,
     attempts,
     transitions,
     projectEvents,
