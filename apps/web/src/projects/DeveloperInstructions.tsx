@@ -19,10 +19,12 @@ const failureDetails = (caught: unknown): CommandFailure | undefined =>
 export function DeveloperInstructions({
   project,
   disabled,
+  saving = false,
   onSave,
 }: {
   project: Project;
   disabled: boolean;
+  saving?: boolean;
   onSave: (input: SaveInput) => Promise<void>;
 }) {
   const canonical = project.developerInstructions.content;
@@ -34,6 +36,7 @@ export function DeveloperInstructions({
   const dirty = useRef(false);
   const waitingForResync =
     conflictRevision !== undefined && project.revision < conflictRevision;
+  const isSaving = saving || pending;
 
   useEffect(() => {
     if (projectId.current !== project.id) {
@@ -54,7 +57,7 @@ export function DeveloperInstructions({
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (disabled || pending || waitingForResync || draft === canonical) return;
+    if (disabled || isSaving || waitingForResync || draft === canonical) return;
     setPending(true);
     setError(undefined);
     try {
@@ -105,7 +108,7 @@ export function DeveloperInstructions({
           Developer instructions
           <textarea
             aria-label="Developer instructions"
-            disabled={disabled || pending || waitingForResync}
+            disabled={disabled || isSaving || waitingForResync}
             value={draft}
             onChange={(event) => {
               dirty.current = event.target.value !== canonical;
@@ -118,7 +121,7 @@ export function DeveloperInstructions({
             className="button button-ghost"
             type="button"
             disabled={
-              disabled || pending || waitingForResync || draft === canonical
+              disabled || isSaving || waitingForResync || draft === canonical
             }
             onClick={() => {
               dirty.current = false;
@@ -133,10 +136,10 @@ export function DeveloperInstructions({
             className="button button-primary"
             type="submit"
             disabled={
-              disabled || pending || waitingForResync || draft === canonical
+              disabled || isSaving || waitingForResync || draft === canonical
             }
           >
-            {pending ? 'Saving instructions…' : 'Save instructions'}
+            {isSaving ? 'Saving instructions…' : 'Save instructions'}
           </button>
         </div>
       </form>

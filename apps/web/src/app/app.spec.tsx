@@ -323,6 +323,74 @@ describe('App', () => {
     );
   });
 
+  it('keeps a project instruction save pending when returning to its project', async () => {
+    const user = userEvent.setup();
+    const pendingSave = deferred<{
+      protocolVersion: 1;
+      commandType: string;
+      result: Record<string, never>;
+      warnings: [];
+    }>();
+    const store = createMeshStore(crossProjectSnapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockImplementation((projectId) =>
+      Promise.resolve({
+        protocolVersion: 1,
+        project: projectId === 'p1' ? project : projectB,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 1,
+      }),
+    );
+    api.command.mockImplementation((command) =>
+      command.type === 'project.developer_instructions.update'
+        ? pendingSave.promise
+        : Promise.resolve({
+            protocolVersion: 1,
+            commandType: command.type,
+            result: {},
+            warnings: [],
+          }),
+    );
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.type(
+      await screen.findByLabelText('Developer instructions'),
+      'Pending A.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }));
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    expect(
+      await screen.findByLabelText('Developer instructions'),
+    ).toBeEnabled();
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    const returnedProjectAInstructions = await screen.findByLabelText(
+      'Developer instructions',
+    );
+    expect(returnedProjectAInstructions).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Saving instructions…' }),
+    ).toBeDisabled();
+    expect(
+      api.command.mock.calls.filter(
+        ([command]) => command.type === 'project.developer_instructions.update',
+      ),
+    ).toHaveLength(1);
+
+    pendingSave.resolve({
+      protocolVersion: 1,
+      commandType: 'project.developer_instructions.update',
+      result: {},
+      warnings: [],
+    });
+    await waitFor(() => expect(returnedProjectAInstructions).toBeEnabled());
+  });
+
   it('keeps an archived project board read-only and restores it explicitly', async () => {
     const user = userEvent.setup();
     const archivedStore = createMeshStore({

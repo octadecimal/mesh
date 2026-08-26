@@ -149,6 +149,10 @@ function ConnectedApp({
   const [resumeSessionOpen, setResumeSessionOpen] = useState(false);
   const [flowError, setFlowError] = useState<SessionFlowError>();
   const [collisionWarning, setCollisionWarning] = useState<string>();
+  const [
+    pendingDeveloperInstructionsByProjectId,
+    setPendingDeveloperInstructionsByProjectId,
+  ] = useState<Record<string, boolean>>({});
   const workspaceById = new Map(
     workspaces.map((workspace) => [workspace.id, workspace]),
   );
@@ -286,10 +290,12 @@ function ConnectedApp({
     expectedRevision: number;
   }) => {
     if (!activeProject) return;
+    const projectId = activeProject.id;
+    if (pendingDeveloperInstructionsByProjectId[projectId]) return;
     const command: MutatingCommand = {
       type: 'project.developer_instructions.update',
       payload: {
-        projectId: activeProject.id,
+        projectId,
         expectedRevision,
         content,
         actor: operator,
@@ -300,7 +306,18 @@ function ConnectedApp({
       throw new Error(
         'Developer instructions are unavailable while disconnected.',
       );
-    await api.command(command);
+    setPendingDeveloperInstructionsByProjectId((current) => ({
+      ...current,
+      [projectId]: true,
+    }));
+    try {
+      await api.command(command);
+    } finally {
+      setPendingDeveloperInstructionsByProjectId((current) => {
+        const { [projectId]: _, ...remaining } = current;
+        return remaining;
+      });
+    }
   };
 
   return (
@@ -512,6 +529,9 @@ function ConnectedApp({
                 projection.connectionHealth !== 'connected' ||
                 !api
               }
+              saving={Boolean(
+                pendingDeveloperInstructionsByProjectId[activeProject.id],
+              )}
               onSave={saveDeveloperInstructions}
             />
             <TaskBoard
