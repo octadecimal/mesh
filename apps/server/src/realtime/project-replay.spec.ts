@@ -3,27 +3,29 @@ import {
   attemptRepairSchema,
   idSchema,
   projectEventSchema,
+  taskSchema,
   type ProjectEvent,
 } from '@mesh-session-platform/contracts';
 
 import { ProjectReplayService } from './project-replay.js';
 
-const task = (projectId: string) => ({
-  id: idSchema.parse(`task-${projectId}`),
-  projectId: idSchema.parse(projectId),
-  title: 'Task',
-  description: '',
-  acceptanceCriteria: [],
-  priority: 'normal' as const,
-  rank: 'a',
-  lifecycleState: 'backlog' as const,
-  labels: [],
-  notes: '',
-  blocked: null,
-  revision: 1,
-  createdAt: '2026-08-24T00:00:00.000Z',
-  updatedAt: '2026-08-24T00:00:00.000Z',
-});
+const task = (projectId: string) =>
+  taskSchema.parse({
+    id: idSchema.parse(`task-${projectId}`),
+    projectId: idSchema.parse(projectId),
+    title: 'Task',
+    description: '',
+    acceptanceCriteria: [],
+    priority: 'normal' as const,
+    rank: 'a',
+    lifecycleState: 'backlog' as const,
+    labels: [],
+    notes: '',
+    blocked: null,
+    revision: 1,
+    createdAt: '2026-08-24T00:00:00.000Z',
+    updatedAt: '2026-08-24T00:00:00.000Z',
+  });
 
 const event = (projectId: string, sequence: number): ProjectEvent => ({
   protocolVersion: 1,

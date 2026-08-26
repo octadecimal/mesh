@@ -12,6 +12,7 @@ import {
   projectHistorySchema,
   projectSchema,
   projectSnapshotSchema,
+  qaExecutionCycleSchema,
   qaReportSchema,
   reviewPolicySchema,
   serverMessageSchema,
@@ -1166,6 +1167,28 @@ describe('session platform contracts', () => {
       };
 
       expect(projectEventSchema.parse(event)).toMatchObject(event);
+      expect(() =>
+        qaExecutionCycleSchema.parse({ ...cycle, endedAt: null }),
+      ).toThrow();
+      expect(() =>
+        qaExecutionCycleSchema.parse({
+          ...cycle,
+          terminalDisposition: null,
+        }),
+      ).toThrow();
+      expect(() =>
+        qaExecutionCycleSchema.parse({
+          ...cycle,
+          endedAt: null,
+          terminalDisposition: null,
+          reportId: null,
+          terminalCommandId: null,
+          terminalEventId: null,
+        }),
+      ).not.toThrow();
+      expect(() =>
+        qaExecutionCycleSchema.parse({ ...cycle, reportId: null }),
+      ).toThrow();
       expect(() =>
         projectEventSchema.parse({
           ...event,

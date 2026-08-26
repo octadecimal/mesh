@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   idSchema,
   projectSchema,
+  taskAttemptSchema,
   taskSchema,
 } from '@mesh-session-platform/contracts';
 
@@ -917,32 +918,36 @@ describe('HTTP command routes', () => {
     const selectedTask = fixture.repositories.tasks.create(task('t1', 'p1'));
     const otherTask = fixture.repositories.tasks.create(task('t2', 'p2'));
     const actor = { type: 'human' as const, id: id('human-1') };
-    fixture.repositories.attempts.create({
-      id: id('a1'),
-      taskId: selectedTask.id,
-      sessionId: id('s1'),
-      ordinal: 1,
-      source: 'linked',
-      actor,
-      createdAt: now,
-      unlinkedAt: null,
-      unlinkedBy: null,
-      unlinkReason: null,
-      role: null,
-    });
-    fixture.repositories.attempts.create({
-      id: id('a2'),
-      taskId: otherTask.id,
-      sessionId: id('s2'),
-      ordinal: 1,
-      source: 'linked',
-      actor,
-      createdAt: now,
-      unlinkedAt: null,
-      unlinkedBy: null,
-      unlinkReason: null,
-      role: null,
-    });
+    fixture.repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: id('a1'),
+        taskId: selectedTask.id,
+        sessionId: id('s1'),
+        ordinal: 1,
+        source: 'linked',
+        actor,
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: null,
+      }),
+    );
+    fixture.repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: id('a2'),
+        taskId: otherTask.id,
+        sessionId: id('s2'),
+        ordinal: 1,
+        source: 'linked',
+        actor,
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: null,
+      }),
+    );
     fixture.repositories.transitions.append({
       id: id('transition-1'),
       taskId: selectedTask.id,

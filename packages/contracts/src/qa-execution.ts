@@ -103,30 +103,80 @@ const qaTaskSnapshotSchema = z
     }
   });
 
-export const qaExecutionCycleSchema = z.object({
-  id,
-  taskId: id,
-  attemptId: id,
-  sessionId: id,
-  ordinal: z.number().int().positive(),
-  authorizedBy: actor,
-  authorizationCommandId: id,
-  policyVersion: z.string().trim().min(1),
-  qaInstructions: qaInstructionsSchema.pick({ content: true, revision: true }),
-  taskSnapshot: qaTaskSnapshotSchema,
-  developerCompletionReportId: id,
-  workspaceId: id,
-  reviewPolicy: reviewPolicySchema,
-  reviewPolicyRevision: z.number().int().positive(),
-  automationGeneration: z.number().int().nonnegative(),
-  rejectionOrdinal: z.number().int().nonnegative(),
-  startedAt: timestamp,
-  endedAt: timestamp.nullable(),
-  terminalDisposition: z.enum(['verified', 'rejected']).nullable(),
-  reportId: id.nullable(),
-  terminalCommandId: id.nullable(),
-  terminalEventId: id.nullable(),
-});
+export const qaExecutionCycleSchema = z
+  .object({
+    id,
+    taskId: id,
+    attemptId: id,
+    sessionId: id,
+    ordinal: z.number().int().positive(),
+    authorizedBy: actor,
+    authorizationCommandId: id,
+    policyVersion: z.string().trim().min(1),
+    qaInstructions: qaInstructionsSchema.pick({
+      content: true,
+      revision: true,
+    }),
+    taskSnapshot: qaTaskSnapshotSchema,
+    developerCompletionReportId: id,
+    workspaceId: id,
+    reviewPolicy: reviewPolicySchema,
+    reviewPolicyRevision: z.number().int().positive(),
+    automationGeneration: z.number().int().nonnegative(),
+    rejectionOrdinal: z.number().int().nonnegative(),
+    startedAt: timestamp,
+    endedAt: timestamp.nullable(),
+    terminalDisposition: z.enum(['verified', 'rejected']).nullable(),
+    reportId: id.nullable(),
+    terminalCommandId: id.nullable(),
+    terminalEventId: id.nullable(),
+  })
+  .superRefine(
+    (
+      {
+        endedAt,
+        terminalDisposition,
+        reportId,
+        terminalCommandId,
+        terminalEventId,
+      },
+      context,
+    ) => {
+      const terminalMetadata = [reportId, terminalCommandId, terminalEventId];
+
+      if (terminalDisposition === null) {
+        if (
+          endedAt !== null ||
+          terminalMetadata.some((value) => value !== null)
+        ) {
+          context.addIssue({
+            code: 'custom',
+            message: 'Active QA cycles may not carry terminal metadata.',
+            path: ['terminalDisposition'],
+          });
+        }
+        return;
+      }
+
+      if (endedAt === null) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Terminal QA cycle dispositions require an end time.',
+          path: ['terminalDisposition'],
+        });
+      }
+      for (const [index, value] of terminalMetadata.entries()) {
+        if (value === null) {
+          context.addIssue({
+            code: 'custom',
+            message:
+              'Terminal QA cycles require report, command, and event metadata.',
+            path: [['reportId', 'terminalCommandId', 'terminalEventId'][index]],
+          });
+        }
+      }
+    },
+  );
 
 export const reviewAutomationStateSchema = z.object({
   status: z.enum(['disabled', 'enabled', 'paused']),

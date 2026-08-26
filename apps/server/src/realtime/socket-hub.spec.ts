@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   idSchema,
   projectEventSchema,
+  taskSchema,
   type ProjectEvent,
   type ServerMessage,
   type SessionEvent,
@@ -25,22 +26,23 @@ const event = (sequence: number): SessionEvent => ({
   payload: { text: String(sequence) },
 });
 
-const projectTask = (projectId: string) => ({
-  id: idSchema.parse(`task-${projectId}`),
-  projectId: idSchema.parse(projectId),
-  title: 'Task',
-  description: '',
-  acceptanceCriteria: [],
-  priority: 'normal' as const,
-  rank: 'a',
-  lifecycleState: 'backlog' as const,
-  labels: [],
-  notes: '',
-  blocked: null,
-  revision: 1,
-  createdAt: '2026-08-24T00:00:00.000Z',
-  updatedAt: '2026-08-24T00:00:00.000Z',
-});
+const projectTask = (projectId: string) =>
+  taskSchema.parse({
+    id: idSchema.parse(`task-${projectId}`),
+    projectId: idSchema.parse(projectId),
+    title: 'Task',
+    description: '',
+    acceptanceCriteria: [],
+    priority: 'normal' as const,
+    rank: 'a',
+    lifecycleState: 'backlog' as const,
+    labels: [],
+    notes: '',
+    blocked: null,
+    revision: 1,
+    createdAt: '2026-08-24T00:00:00.000Z',
+    updatedAt: '2026-08-24T00:00:00.000Z',
+  });
 
 const projectEvent = (projectId: string, sequence: number): ProjectEvent => ({
   protocolVersion: 1,

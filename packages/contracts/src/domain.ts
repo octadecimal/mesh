@@ -117,7 +117,7 @@ type TaskSchemaOutput = Omit<
   z.output<typeof taskSchemaBase>,
   'reviewAutomation'
 > & {
-  reviewAutomation?: z.output<typeof reviewAutomationStateSchema>;
+  reviewAutomation: z.output<typeof reviewAutomationStateSchema>;
 };
 
 export const taskSchema = taskSchemaBase.transform((task) => ({
@@ -151,7 +151,7 @@ type TaskAttemptSchemaOutput = Omit<
   z.output<typeof taskAttemptSchemaBase>,
   'qaCycles'
 > & {
-  qaCycles?: Array<z.output<typeof qaExecutionCycleSchema>>;
+  qaCycles: Array<z.output<typeof qaExecutionCycleSchema>>;
 };
 
 export const taskAttemptSchema = taskAttemptSchemaBase as z.ZodType<
