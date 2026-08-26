@@ -3,8 +3,12 @@ import {
   idSchema,
   isoTimestampSchema,
   projectSchema,
+  qaConfigurationSchema,
+  taskActorSchema,
   type Project,
   type DeveloperInstructions,
+  type QaConfiguration,
+  type TaskActor,
 } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
@@ -24,6 +28,19 @@ type ProjectRow = {
   developer_instructions_revision: number;
   developer_instructions_updated_at: string;
   developer_instructions_updated_by_json: string | null;
+  qa_instructions_content: string;
+  qa_instructions_revision: number;
+  qa_instructions_updated_at: string;
+  qa_instructions_updated_by_json: string | null;
+  qa_review_policy: string;
+  qa_configuration_revision: number;
+  qa_configuration_updated_at: string;
+  qa_configuration_updated_by_json: string | null;
+};
+
+type QaConfigurationUpdate = {
+  instructions: Pick<QaConfiguration['instructions'], 'content'>;
+  reviewPolicy: QaConfiguration['reviewPolicy'];
 };
 
 const toProject = (row: ProjectRow): Project =>
@@ -46,6 +63,22 @@ const toProject = (row: ProjectRow): Project =>
         ? JSON.parse(row.developer_instructions_updated_by_json)
         : null,
     },
+    qaConfiguration: {
+      instructions: {
+        content: row.qa_instructions_content,
+        revision: row.qa_instructions_revision,
+        updatedAt: row.qa_instructions_updated_at,
+        updatedBy: row.qa_instructions_updated_by_json
+          ? JSON.parse(row.qa_instructions_updated_by_json)
+          : null,
+      },
+      reviewPolicy: row.qa_review_policy,
+      revision: row.qa_configuration_revision,
+      updatedAt: row.qa_configuration_updated_at,
+      updatedBy: row.qa_configuration_updated_by_json
+        ? JSON.parse(row.qa_configuration_updated_by_json)
+        : null,
+    },
   });
 
 export class ProjectRepository {
@@ -55,6 +88,7 @@ export class ProjectRepository {
   private readonly selectAll;
   private readonly updateByRevision;
   private readonly updateDeveloperInstructionsByRevision;
+  private readonly updateQaConfigurationByRevision;
 
   constructor(private readonly database: Database) {
     this.insert = database.prepare(`
@@ -62,12 +96,20 @@ export class ProjectRepository {
         id, display_name, repository_path, discovered_at, discovery_metadata_json,
         repository_identity, revision, created_at, updated_at, archived_at,
         developer_instructions_content, developer_instructions_revision,
-        developer_instructions_updated_at, developer_instructions_updated_by_json
+        developer_instructions_updated_at, developer_instructions_updated_by_json,
+        qa_instructions_content, qa_instructions_revision,
+        qa_instructions_updated_at, qa_instructions_updated_by_json,
+        qa_review_policy, qa_configuration_revision,
+        qa_configuration_updated_at, qa_configuration_updated_by_json
       ) VALUES (
         @id, @displayName, @repositoryPath, @discoveredAt, @discoveryMetadataJson,
         @repositoryIdentity, @revision, @createdAt, @updatedAt, @archivedAt,
         @developerInstructionsContent, @developerInstructionsRevision,
-        @developerInstructionsUpdatedAt, @developerInstructionsUpdatedByJson
+        @developerInstructionsUpdatedAt, @developerInstructionsUpdatedByJson,
+        @qaInstructionsContent, @qaInstructionsRevision,
+        @qaInstructionsUpdatedAt, @qaInstructionsUpdatedByJson,
+        @qaReviewPolicy, @qaConfigurationRevision,
+        @qaConfigurationUpdatedAt, @qaConfigurationUpdatedByJson
       )
     `);
     this.selectById = database.prepare('SELECT * FROM projects WHERE id = ?');
@@ -91,7 +133,15 @@ export class ProjectRepository {
         developer_instructions_content = @developerInstructionsContent,
         developer_instructions_revision = @developerInstructionsRevision,
         developer_instructions_updated_at = @developerInstructionsUpdatedAt,
-        developer_instructions_updated_by_json = @developerInstructionsUpdatedByJson
+        developer_instructions_updated_by_json = @developerInstructionsUpdatedByJson,
+        qa_instructions_content = @qaInstructionsContent,
+        qa_instructions_revision = @qaInstructionsRevision,
+        qa_instructions_updated_at = @qaInstructionsUpdatedAt,
+        qa_instructions_updated_by_json = @qaInstructionsUpdatedByJson,
+        qa_review_policy = @qaReviewPolicy,
+        qa_configuration_revision = @qaConfigurationRevision,
+        qa_configuration_updated_at = @qaConfigurationUpdatedAt,
+        qa_configuration_updated_by_json = @qaConfigurationUpdatedByJson
       WHERE id = @id AND revision = @expectedRevision
     `);
     this.updateDeveloperInstructionsByRevision = database.prepare(`
@@ -100,6 +150,20 @@ export class ProjectRepository {
           developer_instructions_revision = @revision,
           developer_instructions_updated_at = @updatedAt,
           developer_instructions_updated_by_json = @updatedByJson,
+          revision = @revision,
+          updated_at = @updatedAt
+      WHERE id = @projectId AND revision = @expectedRevision
+    `);
+    this.updateQaConfigurationByRevision = database.prepare(`
+      UPDATE projects
+      SET qa_instructions_content = @instructionsContent,
+          qa_instructions_revision = @revision,
+          qa_instructions_updated_at = @updatedAt,
+          qa_instructions_updated_by_json = @actorJson,
+          qa_review_policy = @reviewPolicy,
+          qa_configuration_revision = @revision,
+          qa_configuration_updated_at = @updatedAt,
+          qa_configuration_updated_by_json = @actorJson,
           revision = @revision,
           updated_at = @updatedAt
       WHERE id = @projectId AND revision = @expectedRevision
@@ -117,6 +181,18 @@ export class ProjectRepository {
       developerInstructionsUpdatedAt: value.developerInstructions.updatedAt,
       developerInstructionsUpdatedByJson: value.developerInstructions.updatedBy
         ? JSON.stringify(value.developerInstructions.updatedBy)
+        : null,
+      qaInstructionsContent: value.qaConfiguration.instructions.content,
+      qaInstructionsRevision: value.qaConfiguration.instructions.revision,
+      qaInstructionsUpdatedAt: value.qaConfiguration.instructions.updatedAt,
+      qaInstructionsUpdatedByJson: value.qaConfiguration.instructions.updatedBy
+        ? JSON.stringify(value.qaConfiguration.instructions.updatedBy)
+        : null,
+      qaReviewPolicy: value.qaConfiguration.reviewPolicy,
+      qaConfigurationRevision: value.qaConfiguration.revision,
+      qaConfigurationUpdatedAt: value.qaConfiguration.updatedAt,
+      qaConfigurationUpdatedByJson: value.qaConfiguration.updatedBy
+        ? JSON.stringify(value.qaConfiguration.updatedBy)
         : null,
     });
     return value;
@@ -161,6 +237,18 @@ export class ProjectRepository {
       developerInstructionsUpdatedByJson: next.developerInstructions.updatedBy
         ? JSON.stringify(next.developerInstructions.updatedBy)
         : null,
+      qaInstructionsContent: next.qaConfiguration.instructions.content,
+      qaInstructionsRevision: next.qaConfiguration.instructions.revision,
+      qaInstructionsUpdatedAt: next.qaConfiguration.instructions.updatedAt,
+      qaInstructionsUpdatedByJson: next.qaConfiguration.instructions.updatedBy
+        ? JSON.stringify(next.qaConfiguration.instructions.updatedBy)
+        : null,
+      qaReviewPolicy: next.qaConfiguration.reviewPolicy,
+      qaConfigurationRevision: next.qaConfiguration.revision,
+      qaConfigurationUpdatedAt: next.qaConfiguration.updatedAt,
+      qaConfigurationUpdatedByJson: next.qaConfiguration.updatedBy
+        ? JSON.stringify(next.qaConfiguration.updatedBy)
+        : null,
       expectedRevision,
     });
     return result.changes === 1 ? next : undefined;
@@ -190,6 +278,44 @@ export class ProjectRepository {
       updatedByJson: instructions.updatedBy
         ? JSON.stringify(instructions.updatedBy)
         : null,
+    });
+    return result.changes === 1 ? this.get(parsedProjectId) : undefined;
+  }
+
+  updateQaConfiguration(
+    projectId: string,
+    expectedRevision: number,
+    value: QaConfigurationUpdate,
+    actor: TaskActor,
+  ): Project | undefined {
+    const parsedProjectId = idSchema.parse(projectId);
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
+      throw new TypeError(
+        'Expected project revision must be a positive integer',
+      );
+    }
+    const updatedAt = new Date().toISOString();
+    const parsedActor = taskActorSchema.parse(actor);
+    const configuration = qaConfigurationSchema.parse({
+      instructions: {
+        content: value.instructions.content,
+        revision: expectedRevision + 1,
+        updatedAt,
+        updatedBy: parsedActor,
+      },
+      reviewPolicy: value.reviewPolicy,
+      revision: expectedRevision + 1,
+      updatedAt,
+      updatedBy: parsedActor,
+    });
+    const result = this.updateQaConfigurationByRevision.run({
+      projectId: parsedProjectId,
+      expectedRevision,
+      instructionsContent: configuration.instructions.content,
+      reviewPolicy: configuration.reviewPolicy,
+      revision: configuration.revision,
+      updatedAt: configuration.updatedAt,
+      actorJson: JSON.stringify(parsedActor),
     });
     return result.changes === 1 ? this.get(parsedProjectId) : undefined;
   }

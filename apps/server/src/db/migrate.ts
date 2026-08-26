@@ -56,6 +56,13 @@ const developerCycleTaskTitleMigration = {
     'utf8',
   ),
 };
+const qaExecutionMigration = {
+  id: '009-qa-execution',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '009-qa-execution.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -66,6 +73,7 @@ const migrations = [
   taskAttemptLaunchRecoveryMigration,
   developerExecutionMigration,
   developerCycleTaskTitleMigration,
+  qaExecutionMigration,
 ];
 
 export const migrate = (database: Database): void => {

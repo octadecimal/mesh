@@ -10,6 +10,7 @@ import { DeveloperExecutionRepository } from '../repositories/developer-executio
 import { EventRepository } from '../repositories/event-repository.js';
 import { LayoutRepository } from '../repositories/layout-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
+import { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import { SessionRepository } from '../repositories/session-repository.js';
 import { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
@@ -77,6 +78,7 @@ export const createTestRepositories = (options?: {
     tasks: new TaskRepository(database),
     attempts: new TaskAttemptRepository(database),
     developerExecutions: new DeveloperExecutionRepository(database),
+    qaExecutions: new QaExecutionRepository(database),
     transitions: new TaskTransitionRepository(database),
     projectEvents: new ProjectEventRepository(database),
     workspaces: new WorkspaceRepository(database),
