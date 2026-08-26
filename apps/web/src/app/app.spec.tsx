@@ -219,6 +219,50 @@ describe('App', () => {
     ).toBeDefined();
   });
 
+  it('saves developer instructions with the current project revision and disables them when disconnected', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    const instructions = await screen.findByLabelText('Developer instructions');
+    await user.clear(instructions);
+    await user.type(instructions, 'Run focused web tests.');
+    await user.click(screen.getByRole('button', { name: 'Save instructions' }));
+
+    await waitFor(() =>
+      expect(api.command).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'project.developer_instructions.update',
+          payload: {
+            projectId: 'p1',
+            expectedRevision: 1,
+            content: 'Run focused web tests.',
+            actor: taskActorSchema.parse({
+              type: 'human',
+              id: 'operator',
+              displayName: 'Operator',
+            }),
+          },
+        }),
+      ),
+    );
+
+    store.setConnectionHealth('disconnected');
+    await waitFor(() => expect(instructions).toBeDisabled());
+  });
+
   it('keeps an archived project board read-only and restores it explicitly', async () => {
     const user = userEvent.setup();
     const archivedStore = createMeshStore({
@@ -256,6 +300,9 @@ describe('App', () => {
     ).toBeNull();
     expect(
       within(board).getByRole('combobox', { name: 'Move Board task to' }),
+    ).toBeDisabled();
+    expect(
+      within(board).getByLabelText('Developer instructions'),
     ).toBeDisabled();
     expect(
       within(board).getByRole('button', { name: 'Restore project' }),
@@ -413,8 +460,15 @@ const project = {
   id: 'p1',
   displayName: 'Mesh',
   repositoryPath: '/mesh',
+  revision: 1,
   discoveredAt: '2026-08-24T00:00:00.000Z',
   discoveryMetadata: {},
+  developerInstructions: {
+    content: '',
+    revision: 1,
+    updatedAt: '2026-08-24T00:00:00.000Z',
+    updatedBy: null,
+  },
 };
 const workspace = {
   id: 'w1',

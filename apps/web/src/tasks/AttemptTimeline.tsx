@@ -11,6 +11,8 @@ const repairMessage: Record<AttemptRepair['reason'], string> = {
     'Attempt repair needed: the launch outcome could not be confirmed.',
   task_in_progress_without_live_session:
     'Attempt repair needed: the task is in progress without a live session.',
+  developer_cycle_without_live_session:
+    'Attempt repair needed: the Developer cycle is in progress without a live session.',
 };
 
 const statusLabel = (state: Session['lifecycleState']) => {

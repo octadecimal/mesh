@@ -8,6 +8,7 @@ import {
   type SavedLayout,
   type Session,
   type SessionSnapshot,
+  type TaskActor,
   type Workspace,
 } from '@mesh-session-platform/contracts';
 
@@ -37,6 +38,7 @@ import {
   type ImportedProject,
   type ProjectImportSuggestion,
 } from '../projects/ProjectImportDialog';
+import { DeveloperInstructions } from '../projects/DeveloperInstructions';
 import { TaskBoard } from '../tasks/TaskBoard';
 
 type MeshStore = ReturnType<typeof createMeshStore>;
@@ -50,7 +52,7 @@ const operator = taskActorSchema.parse({
   type: 'human',
   id: 'operator',
   displayName: 'Operator',
-});
+}) as Extract<TaskActor, { type: 'human' }>;
 
 type AppProps = {
   projects?: Project[];
@@ -276,6 +278,30 @@ function ConnectedApp({
       },
     });
   };
+  const saveDeveloperInstructions = async ({
+    content,
+    expectedRevision,
+  }: {
+    content: string;
+    expectedRevision: number;
+  }) => {
+    if (!activeProject) return;
+    const command: MutatingCommand = {
+      type: 'project.developer_instructions.update',
+      payload: {
+        projectId: activeProject.id,
+        expectedRevision,
+        content,
+        actor: operator,
+      },
+    };
+    onCommand?.({ type: command.type, payload: command.payload });
+    if (!api)
+      throw new Error(
+        'Developer instructions are unavailable while disconnected.',
+      );
+    await api.command(command);
+  };
 
   return (
     <div className="app-shell">
@@ -478,6 +504,15 @@ function ConnectedApp({
                 </div>
               ) : null}
             </header>
+            <DeveloperInstructions
+              project={activeProject}
+              disabled={
+                Boolean(activeProject.archivedAt) ||
+                projection.connectionHealth !== 'connected' ||
+                !api
+              }
+              onSave={saveDeveloperInstructions}
+            />
             <TaskBoard
               project={activeProject}
               projection={projection}

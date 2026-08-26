@@ -1,5 +1,9 @@
 import type {
   AttemptRepair,
+  DeveloperBlockerReport,
+  DeveloperCompletionReport,
+  DeveloperExecutionCycle,
+  DeveloperReviewFeedback,
   PermissionRequest,
   Project,
   ProjectEvent,
@@ -27,6 +31,13 @@ export type MeshProjection = {
   attemptsById: Record<string, TaskAttempt>;
   transitionsByTaskId: Record<string, TaskTransition[]>;
   repairsByProjectId: Record<string, AttemptRepair[]>;
+  developerCyclesByAttemptId: Record<string, DeveloperExecutionCycle[]>;
+  developerCompletionReportsByCycleId: Record<
+    string,
+    DeveloperCompletionReport
+  >;
+  developerBlockerReportsByCycleId: Record<string, DeveloperBlockerReport>;
+  developerReviewFeedbackByCycleId: Record<string, DeveloperReviewFeedback>;
   projectCursors: Record<string, number>;
   workspaces: SessionSnapshot['workspaces'];
   sessions: Session[];
@@ -92,6 +103,10 @@ export const createProjection = (
   attemptsById: {},
   transitionsByTaskId: {},
   repairsByProjectId: {},
+  developerCyclesByAttemptId: {},
+  developerCompletionReportsByCycleId: {},
+  developerBlockerReportsByCycleId: {},
+  developerReviewFeedbackByCycleId: {},
   projectCursors: Object.fromEntries(
     snapshot.projects.map((project) => [project.id, 0]),
   ),
@@ -162,6 +177,11 @@ export const replaceSnapshot = (
   attemptsById: state.attemptsById,
   transitionsByTaskId: state.transitionsByTaskId,
   repairsByProjectId: state.repairsByProjectId,
+  developerCyclesByAttemptId: state.developerCyclesByAttemptId,
+  developerCompletionReportsByCycleId:
+    state.developerCompletionReportsByCycleId,
+  developerBlockerReportsByCycleId: state.developerBlockerReportsByCycleId,
+  developerReviewFeedbackByCycleId: state.developerReviewFeedbackByCycleId,
   projectCursors: Object.fromEntries(
     snapshot.projects.map((project) => [
       project.id,
@@ -196,10 +216,28 @@ const transitionsByTask = (transitions: readonly TaskTransition[]) =>
     return result;
   }, {});
 
+const cyclesByAttempt = (cycles: readonly DeveloperExecutionCycle[]) =>
+  cycles.reduce<Record<string, DeveloperExecutionCycle[]>>((result, cycle) => {
+    result[cycle.attemptId] = [...(result[cycle.attemptId] ?? []), cycle];
+    return result;
+  }, {});
+
+const byCycleId = <Value extends { cycleId: string }>(
+  items: readonly Value[],
+) =>
+  Object.fromEntries(items.map((item) => [item.cycleId, item])) as Record<
+    string,
+    Value
+  >;
+
 export const replaceProjectSnapshot = (
   state: MeshProjection,
   snapshot: ProjectSnapshot,
 ): MeshProjection => {
+  const developerCycles = snapshot.developerCycles ?? [];
+  const developerCompletionReports = snapshot.developerCompletionReports ?? [];
+  const developerBlockerReports = snapshot.developerBlockerReports ?? [];
+  const developerReviewFeedback = snapshot.developerReviewFeedback ?? [];
   const replacedTaskIds = new Set<string>([
     ...Object.values(state.tasksById)
       .filter((task) => task.projectId === snapshot.project.id)
@@ -216,6 +254,38 @@ export const replaceProjectSnapshot = (
       ([, attempt]) => !replacedTaskIds.has(attempt.taskId),
     ),
   ) as Record<string, TaskAttempt>;
+  const replacedAttemptIds = new Set<string>([
+    ...Object.values(state.attemptsById)
+      .filter((attempt) => replacedTaskIds.has(attempt.taskId))
+      .map((attempt) => attempt.id),
+    ...snapshot.attempts.map((attempt) => attempt.id),
+  ]);
+  const replacedCycleIds = new Set<string>([
+    ...Object.entries(state.developerCyclesByAttemptId)
+      .filter(([attemptId]) => replacedAttemptIds.has(attemptId))
+      .flatMap(([, cycles]) => cycles.map((cycle) => cycle.id)),
+    ...developerCycles.map((cycle) => cycle.id),
+  ]);
+  const developerCyclesByAttemptId = Object.fromEntries(
+    Object.entries(state.developerCyclesByAttemptId).filter(
+      ([attemptId]) => !replacedAttemptIds.has(attemptId),
+    ),
+  ) as Record<string, DeveloperExecutionCycle[]>;
+  const developerCompletionReportsByCycleId = Object.fromEntries(
+    Object.entries(state.developerCompletionReportsByCycleId).filter(
+      ([cycleId]) => !replacedCycleIds.has(cycleId),
+    ),
+  ) as Record<string, DeveloperCompletionReport>;
+  const developerBlockerReportsByCycleId = Object.fromEntries(
+    Object.entries(state.developerBlockerReportsByCycleId).filter(
+      ([cycleId]) => !replacedCycleIds.has(cycleId),
+    ),
+  ) as Record<string, DeveloperBlockerReport>;
+  const developerReviewFeedbackByCycleId = Object.fromEntries(
+    Object.entries(state.developerReviewFeedbackByCycleId).filter(
+      ([cycleId]) => !replacedCycleIds.has(cycleId),
+    ),
+  ) as Record<string, DeveloperReviewFeedback>;
   const transitionsByTaskId = Object.fromEntries(
     Object.entries(state.transitionsByTaskId).filter(
       ([taskId]) => !replacedTaskIds.has(taskId),
@@ -238,6 +308,22 @@ export const replaceProjectSnapshot = (
     repairsByProjectId: {
       ...state.repairsByProjectId,
       [snapshot.project.id]: snapshot.repairs,
+    },
+    developerCyclesByAttemptId: {
+      ...developerCyclesByAttemptId,
+      ...cyclesByAttempt(developerCycles),
+    },
+    developerCompletionReportsByCycleId: {
+      ...developerCompletionReportsByCycleId,
+      ...byCycleId(developerCompletionReports),
+    },
+    developerBlockerReportsByCycleId: {
+      ...developerBlockerReportsByCycleId,
+      ...byCycleId(developerBlockerReports),
+    },
+    developerReviewFeedbackByCycleId: {
+      ...developerReviewFeedbackByCycleId,
+      ...byCycleId(developerReviewFeedback),
     },
     projectCursors: {
       ...state.projectCursors,
@@ -264,7 +350,10 @@ export const applyProjectEvent = (
     },
   };
 
-  if (event.type === 'project.changed') {
+  if (
+    event.type === 'project.changed' ||
+    event.type === 'project.developer_instructions_changed'
+  ) {
     next = {
       ...next,
       projects: projectsAfter(next.projects, event.payload.project),
@@ -328,6 +417,53 @@ export const applyProjectEvent = (
           ? repairs
           : [...repairs, event.payload.repair],
       },
+    };
+  }
+
+  if (event.type === 'task.developer_execution_changed') {
+    const cycles =
+      next.developerCyclesByAttemptId[event.payload.cycle.attemptId] ?? [];
+    const cyclesForAttempt = cycles.some(
+      ({ id }) => id === event.payload.cycle.id,
+    )
+      ? cycles.map((cycle) =>
+          cycle.id === event.payload.cycle.id ? event.payload.cycle : cycle,
+        )
+      : [...cycles, event.payload.cycle];
+    next = {
+      ...next,
+      tasksById: {
+        ...next.tasksById,
+        [event.payload.task.id]: event.payload.task,
+      },
+      attemptsById: {
+        ...next.attemptsById,
+        [event.payload.attempt.id]: event.payload.attempt,
+      },
+      developerCyclesByAttemptId: {
+        ...next.developerCyclesByAttemptId,
+        [event.payload.cycle.attemptId]: cyclesForAttempt,
+      },
+      developerCompletionReportsByCycleId: event.payload.completionReport
+        ? {
+            ...next.developerCompletionReportsByCycleId,
+            [event.payload.completionReport.cycleId]:
+              event.payload.completionReport,
+          }
+        : next.developerCompletionReportsByCycleId,
+      developerBlockerReportsByCycleId: event.payload.blockerReport
+        ? {
+            ...next.developerBlockerReportsByCycleId,
+            [event.payload.blockerReport.cycleId]: event.payload.blockerReport,
+          }
+        : next.developerBlockerReportsByCycleId,
+      developerReviewFeedbackByCycleId: event.payload.reviewFeedback
+        ? {
+            ...next.developerReviewFeedbackByCycleId,
+            [event.payload.reviewFeedback.cycleId]:
+              event.payload.reviewFeedback,
+          }
+        : next.developerReviewFeedbackByCycleId,
     };
   }
 
