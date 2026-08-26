@@ -55,8 +55,8 @@ export class TaskTransitionRepository {
   }
 
   listByTask(taskId: string): TaskTransition[] {
-    return (this.selectByTask.all(idSchema.parse(taskId)) as TaskTransitionRow[]).map(
-      toTaskTransition,
-    );
+    return (
+      this.selectByTask.all(idSchema.parse(taskId)) as TaskTransitionRow[]
+    ).map(toTaskTransition);
   }
 }

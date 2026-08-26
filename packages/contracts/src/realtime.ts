@@ -20,9 +20,7 @@ export const subscribeFrameSchema = z.object({
   protocolVersion: protocolVersionSchema,
   type: z.literal('subscribe'),
   cursors: z.record(idSchema, z.number().int().nonnegative()),
-  projectCursors: z
-    .record(idSchema, z.number().int().nonnegative())
-    .optional(),
+  projectCursors: z.record(idSchema, z.number().int().nonnegative()).optional(),
 });
 
 export const serverMessageSchema = z.discriminatedUnion('type', [

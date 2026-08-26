@@ -63,7 +63,9 @@ export class TaskTransitionReasonRequiredError extends Error {
     readonly from: TaskLifecycleState,
     readonly nextState: TaskLifecycleState,
   ) {
-    super(`A reason is required to transition task from ${from} to ${nextState}`);
+    super(
+      `A reason is required to transition task from ${from} to ${nextState}`,
+    );
   }
 }
 
@@ -121,11 +123,17 @@ export const authorizeTaskTransition = (
     blocked !== undefined && blocked !== Boolean(task.blocked);
   const permittedStateChange = allowedTaskTransitions(task).includes(nextState);
 
-  if (!permittedStateChange && !(changesBlockedState && nextState === task.lifecycleState)) {
+  if (
+    !permittedStateChange &&
+    !(changesBlockedState && nextState === task.lifecycleState)
+  ) {
     throw new TaskTransitionInvalidError(task.lifecycleState, nextState);
   }
 
-  if ((nextState === 'review' || nextState === 'done') && actor.type !== 'human') {
+  if (
+    (nextState === 'review' || nextState === 'done') &&
+    actor.type !== 'human'
+  ) {
     throw new TaskTransitionUnauthorizedError(nextState, actor);
   }
 

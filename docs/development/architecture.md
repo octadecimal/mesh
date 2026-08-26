@@ -33,6 +33,29 @@ notifications, unread flags, and in-progress streaming text are intentionally
 local interaction state. A browser view is a projection, not the source of
 truth.
 
+Project task-board state follows a parallel durable flow. Each imported project
+has its own ordered project-event sequence and cursor, separate from every
+session event stream. Project snapshots contain that project's tasks, attempts,
+transition history, and repair conditions. A project gap triggers only that
+project's snapshot refresh; importing a project establishes its cursor before
+the browser resubscribes. Session snapshots and cursors continue independently.
+
+Ownership is explicit. A durable project represents one explicitly imported Git
+repository. A task belongs to exactly one project. An attempt belongs to exactly
+one task and references one session; the project stream owns the task-attempt
+association, while the session stream owns the session lifecycle and transcript.
+Workspaces and sessions retain their existing project identities, and repository
+discovery remains suggestion-only rather than creating durable projects.
+
+Launching a task attempt composes the existing workspace and session boundaries:
+the server validates a ready, unblocked task; resolves or creates the workspace;
+persists the session, attempt, and project audit event; starts the session
+runtime; and only then transitions the task to `in_progress`. A startup failure
+retains the session and attempt while leaving the task `ready`. If the later task
+transition fails, Mesh interrupts the started runtime; an unknown startup or
+cleanup outcome becomes an explicit repair condition rather than an inferred
+success.
+
 Not every browser action enters this flow. Selection, filters, and drafts stay
 local. Layout, archive, and delete commands take repository-backed paths that do
 not start or drive a Claude session.
@@ -72,6 +95,12 @@ specific shapes at this boundary so the rest of Mesh speaks its own contracts.
 The fake driver implements the same behavioral interface for deterministic
 tests.
 
+`apps/server/src/tasks` owns task readiness, legal task transitions, attempt
+launch/link/unlink composition, and restart reconciliation. In Milestone 2 only
+a human actor may move a task into `review` or `done`. Actor and policy contracts
+are explicit so later authority can be added deliberately; agents do not gain
+transition authority by launching or running a session.
+
 ### Persistence
 
 `apps/server/src/db` owns SQLite setup and migrations.
@@ -82,6 +111,10 @@ State-bearing driver input is written with its raw diagnostic before it is
 published. This audit barrier is intentional: if durable persistence fails,
 Mesh must not continue presenting an unaudited state as successful.
 
+Projects, tasks, attempts, task transitions, and ordered project events are
+durable repository state. Their foreign keys preserve project, session,
+workspace, and layout identities when an existing database is upgraded.
+
 Migrations are forward-moving, deterministic, and safe for existing databases.
 Do not edit an applied migration to change history; add the next migration and
 cover both fresh and upgraded databases.
@@ -90,9 +123,11 @@ cover both fresh and upgraded databases.
 
 `apps/web/src/api` owns transport clients. `apps/web/src/state` owns projection,
 replay/resync behavior, selection, filters, drafts, and connection health.
-`apps/web/src/sessions` and `apps/web/src/workspace` render and compose those
-states. Components should express interaction and presentation rather than
-reimplementing server lifecycle rules.
+`apps/web/src/projects` and `apps/web/src/tasks` render project import, board,
+drawer, attempt, and repair states. `apps/web/src/sessions` and
+`apps/web/src/workspace` render and compose session states. Components should
+express interaction and presentation rather than reimplementing server
+lifecycle rules.
 
 Treat disconnect, stale snapshot, invalid payload, empty data, loading,
 permission requests, and terminal states as first-class UI states. Reconnect
@@ -117,9 +152,12 @@ apps/server/                     Fastify API, runtime, drivers, persistence
   src/realtime/                  WebSocket hub and durable replay
   src/repositories/              persistent data access
   src/runtime/                   lifecycle, registry, recovery, publication
+  src/tasks/                     task lifecycle, attempts, restart repair
 apps/web/                        React/Vite client
   src/api/                       HTTP and WebSocket clients
+  src/projects/                  explicit project import
   src/state/                     client projection and resynchronization
+  src/tasks/                     board, drawer, attempts, repair states
   src/sessions/                  session interaction and transcript UI
   src/workspace/                 workspace composition and layout
 packages/contracts/              shared schemas, commands, events, protocols

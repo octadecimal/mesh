@@ -129,7 +129,9 @@ describe('migrate', () => {
     ]);
     expect(
       database
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
         .all()
         .map((row) => (row as { name: string }).name),
     ).toEqual(
@@ -414,7 +416,9 @@ describe('migrate', () => {
     migrate(database);
 
     expect(
-      database.prepare('SELECT * FROM projects WHERE id = ?').get('project-existing'),
+      database
+        .prepare('SELECT * FROM projects WHERE id = ?')
+        .get('project-existing'),
     ).toMatchObject({
       id: 'project-existing',
       repository_path: repositoryPath,
@@ -441,7 +445,9 @@ describe('migrate', () => {
     ).toEqual({ id: 'workspace-existing', project_id: 'project-existing' });
     expect(
       database
-        .prepare('SELECT id, project_id, workspace_id FROM sessions WHERE id = ?')
+        .prepare(
+          'SELECT id, project_id, workspace_id FROM sessions WHERE id = ?',
+        )
         .get('session-existing'),
     ).toEqual({
       id: 'session-existing',
@@ -450,7 +456,9 @@ describe('migrate', () => {
     });
     expect(
       database
-        .prepare('SELECT id, project_id, session_id, workspace_id FROM saved_layouts WHERE id = ?')
+        .prepare(
+          'SELECT id, project_id, session_id, workspace_id FROM saved_layouts WHERE id = ?',
+        )
         .get('layout-existing'),
     ).toEqual({
       id: 'layout-existing',
@@ -460,7 +468,9 @@ describe('migrate', () => {
     });
     expect(
       database
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
         .all()
         .map((row) => (row as { name: string }).name),
     ).toEqual(
@@ -516,13 +526,9 @@ describe('migrate', () => {
       ['002-command-state', '002-command-state.sql'],
       ['003-task-board-storage', '003-task-board-storage.sql'],
     ] as const) {
-      database.exec(
-        readFileSync(join(__dirname, 'migrations', file), 'utf8'),
-      );
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
       database
-        .prepare(
-          'INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)',
-        )
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
         .run(id, '2026-08-24T00:00:00.000Z');
     }
     database

@@ -141,6 +141,10 @@ textarea:focus-visible {
 }
 .project-view > div:not([hidden]) {
   height: 100%;
+  min-height: 0;
+}
+.project-view .session-workspace {
+  height: 100%;
 }
 .project-board-header {
   display: flex;

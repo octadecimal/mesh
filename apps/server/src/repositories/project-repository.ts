@@ -84,7 +84,9 @@ export class ProjectRepository {
   }
 
   get(id: string): Project | undefined {
-    const row = this.selectById.get(idSchema.parse(id)) as ProjectRow | undefined;
+    const row = this.selectById.get(idSchema.parse(id)) as
+      | ProjectRow
+      | undefined;
     return row ? toProject(row) : undefined;
   }
 
@@ -102,7 +104,9 @@ export class ProjectRepository {
   update(project: Project, expectedRevision: number): Project | undefined {
     const value = projectSchema.parse(project);
     if (!Number.isInteger(expectedRevision) || expectedRevision < 1) {
-      throw new TypeError('Expected project revision must be a positive integer');
+      throw new TypeError(
+        'Expected project revision must be a positive integer',
+      );
     }
     const next = projectSchema.parse({
       ...value,
@@ -136,5 +140,4 @@ export class ProjectRepository {
       project.revision,
     );
   }
-
 }

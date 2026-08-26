@@ -94,9 +94,9 @@ export class TaskRepository {
   }
 
   listByProject(projectId: string): Task[] {
-    return (this.selectByProject.all(idSchema.parse(projectId)) as TaskRow[]).map(
-      toTask,
-    );
+    return (
+      this.selectByProject.all(idSchema.parse(projectId)) as TaskRow[]
+    ).map(toTask);
   }
 
   update(task: Task, expectedRevision: number): Task | undefined {

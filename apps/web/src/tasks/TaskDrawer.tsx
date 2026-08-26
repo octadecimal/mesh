@@ -222,6 +222,7 @@ export function TaskDrawer({
     setDraft(draftFor(task));
     setConflict(undefined);
     setLaunchPending(undefined);
+    launchRequestId.current += 1;
     activeLaunchRequestId.current = undefined;
     setAction(undefined);
     setReason('');
@@ -440,7 +441,7 @@ export function TaskDrawer({
     Promise.resolve()
       .then(() => onCommand(command))
       .catch((caught) => {
-        if (activeLaunchRequestId.current !== id) return;
+        if (launchRequestId.current !== id) return;
         activeLaunchRequestId.current = undefined;
         setLaunchPending((current) =>
           current?.id === id ? undefined : current,
@@ -531,11 +532,7 @@ export function TaskDrawer({
                     displayPriority(draft.priority),
                     displayPriority(conflict.task.priority),
                   ],
-                  [
-                    'Labels',
-                    draft.labels,
-                    conflict.task.labels.join(', '),
-                  ],
+                  ['Labels', draft.labels, conflict.task.labels.join(', ')],
                 ].map(([label, draftValue, serverValue]) => (
                   <div className="task-conflict-field" key={label}>
                     <strong>{label}</strong>

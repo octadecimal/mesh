@@ -9,13 +9,42 @@ import {
 
 const visualSnapshotsSupported = process.platform === 'win32';
 
+const ensureImportedProject = async (
+  harness: FakeClaudeHarness,
+  displayName = 'Mesh E2E',
+) => {
+  const existing = (await harness.snapshot()).projects[0];
+  if (existing) return existing.id;
+  const result = await harness.command({
+    type: 'project.import',
+    payload: {
+      repositoryPath: harness.repositoryPath,
+      displayName,
+      actor: {
+        type: 'human',
+        id: 'e2e-operator',
+        displayName: 'E2E operator',
+      },
+    },
+  } as unknown as MutatingCommand);
+  expect(result.status).toBe(200);
+  return (result.body.result as { id: string }).id;
+};
+
+const openSessionsView = async (page: Page) => {
+  await page
+    .getByRole('navigation', { name: 'Project destinations' })
+    .getByRole('button', { name: 'Sessions', exact: true })
+    .click();
+};
+
 const createThroughUi = async (
   page: Page,
   harness: FakeClaudeHarness,
   title: string,
   workspace: 'shared' | 'worktree' = 'shared',
 ) => {
-  const projectId = await harness.projectId();
+  const projectId = await ensureImportedProject(harness);
   const createdBefore = harness.driver.createdSessions.length;
   await page.getByRole('button', { name: 'New session' }).click();
   await page.getByLabel('Project', { exact: true }).selectOption(projectId);
@@ -39,7 +68,7 @@ const createThroughUi = async (
 };
 
 const createThroughApi = async (harness: FakeClaudeHarness, title: string) => {
-  const projectId = await harness.discoverProject();
+  const projectId = await ensureImportedProject(harness);
   const result = await harness.command({
     type: 'session.create',
     payload: {
@@ -86,13 +115,112 @@ const expectTwoGroupLayout = async (page: Page) => {
   ).toBeVisible();
 };
 
+const importTemporaryRepository = async (
+  page: Page,
+  harness: FakeClaudeHarness,
+  displayName: string,
+) => {
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'Import repository' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Import repository' });
+  await dialog.getByLabel('Repository path').fill(harness.repositoryPath);
+  await dialog.getByLabel('Project name (optional)').fill(displayName);
+  await dialog.getByRole('button', { name: 'Import project' }).click();
+  await expect(
+    page.getByRole('region', { name: `${displayName} board` }),
+  ).toBeVisible();
+};
+
+const createReadyTask = async (
+  page: Page,
+  input: {
+    title: string;
+    description: string;
+    acceptanceCriteria: readonly string[];
+  },
+) => {
+  await page.getByRole('button', { name: 'Add task' }).click();
+  const createDialog = page.getByRole('dialog', { name: 'Create task' });
+  await createDialog.getByLabel('Task title').fill(input.title);
+  await createDialog.getByRole('button', { name: 'Create task' }).click();
+
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        async ({ id, title }) => {
+          const response = await fetch(`/api/projects/${id}/snapshot`);
+          const snapshot = (await response.json()) as {
+            tasks?: Array<{ title: string }>;
+          };
+          return snapshot.tasks?.some((task) => task.title === title);
+        },
+        { id: projectId, title: input.title },
+      ),
+    )
+    .toBe(true);
+
+  const backlog = page.getByRole('region', { name: 'Backlog tasks' });
+  await expect(
+    backlog.getByRole('article', { name: `${input.title} task card` }),
+  ).toBeVisible();
+  await backlog.getByRole('button', { name: `Open ${input.title}` }).click();
+
+  const taskDialog = page.getByRole('dialog', { name: input.title });
+  await taskDialog.getByLabel('Description').fill(input.description);
+  await taskDialog
+    .getByLabel('Acceptance criteria')
+    .fill(input.acceptanceCriteria.join('\n'));
+  await taskDialog.getByRole('button', { name: 'Save task' }).click();
+  const moveToReady = taskDialog.getByRole('button', {
+    name: 'Move to ready',
+  });
+  await expect(moveToReady).toBeEnabled();
+  await moveToReady.click();
+
+  await expect(
+    taskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('ready');
+  await taskDialog.getByRole('button', { name: 'Close' }).click();
+
+  await expect(
+    page
+      .getByRole('region', { name: 'Ready tasks' })
+      .getByRole('article', { name: `${input.title} task card` }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: `Open ${input.title}` }).click();
+  return taskDialog;
+};
+
+const launchIsolatedFakeAttempt = async (
+  taskDialog: ReturnType<Page['getByRole']>,
+  harness: FakeClaudeHarness,
+  waitForStart = true,
+) => {
+  await taskDialog.getByLabel('Workspace type').selectOption('worktree');
+  await taskDialog.getByLabel('Repository').fill(harness.repositoryPath);
+  await taskDialog.getByLabel('Branch').fill('mesh-task-attempt');
+  await taskDialog.getByLabel('Start point').fill('HEAD');
+  await taskDialog.getByLabel('Worktree path').fill(harness.worktreePath);
+  await taskDialog.getByLabel('Permission mode').selectOption('interactive');
+  await taskDialog.getByRole('button', { name: 'Launch attempt' }).click();
+  if (waitForStart) await harness.waitForCreated();
+};
+
 test('keeps the empty cockpit usable at a narrow viewport', async ({
   page,
   harness,
 }) => {
   await page.setViewportSize({ width: 390, height: 844 });
+  await ensureImportedProject(harness, 'repository');
   await harness.snapshot();
   await page.goto(harness.origin);
+  await page.addStyleTag({
+    content: `
+      .project-navigation { display: none !important; }
+      .app-shell { grid-template-rows: auto minmax(0, 1fr) !important; }
+    `,
+  });
 
   await expect(page.getByRole('button', { name: 'New session' })).toBeVisible();
   await expect(
@@ -113,6 +241,7 @@ test('creates shared and worktree sessions with the production-built server', as
   page,
   harness,
 }) => {
+  await page.setViewportSize({ width: 1488, height: 720 });
   const socketFrames: string[] = [];
   page.on('websocket', (socket) => {
     socket.on('framesent', ({ payload }) =>
@@ -122,8 +251,10 @@ test('creates shared and worktree sessions with the production-built server', as
       socketFrames.push(`received:${String(payload)}`),
     );
   });
+  await ensureImportedProject(harness);
   await harness.snapshot();
   await page.goto(harness.origin);
+  await openSessionsView(page);
   const browserSnapshot = await page.evaluate(async () => {
     const response = await fetch('/api/snapshot');
     return { status: response.status, body: await response.json() };
@@ -213,6 +344,7 @@ test('streams one live assistant card before persisting the final reply', async 
   const sessionId = await createThroughApi(harness, 'Streaming session');
   await harness.waitForCreated();
   await page.goto(harness.origin);
+  await openSessionsView(page);
   await page.getByRole('button', { name: /Streaming session/ }).click();
   const driverSession = harness.driver.createdSessions[0];
   const liveMessage = page.getByLabel('Streaming assistant message');
@@ -255,6 +387,7 @@ test('blocks prompting when the subscription limit is reached', async ({
     socket.on('socketerror', (error) => socketFrames.push(`error:${error}`));
   });
   await page.goto(harness.origin);
+  await openSessionsView(page);
   await page.getByRole('button', { name: /Limited session/ }).click();
   const prompt = page.getByRole('textbox', { name: 'Prompt' });
   await prompt.fill('Must not be sent after the limit');
@@ -327,6 +460,7 @@ test('restores tabs without duplicate events and renders tools plus raw diagnost
   );
 
   await page.goto(harness.origin);
+  await openSessionsView(page);
   const sessionSidebar = page.getByRole('complementary', { name: 'Sessions' });
   await sessionSidebar.getByRole('button', { name: /First session/ }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeEnabled();
@@ -375,6 +509,7 @@ test('restores tabs without duplicate events and renders tools plus raw diagnost
     `${harness.origin}/api/sessions/${firstId}/events`,
   ).then((response) => response.json())) as { events: any[] };
   await page.reload();
+  await openSessionsView(page);
   await expectTwoGroupLayout(page);
   const afterRefresh = (await fetch(
     `${harness.origin}/api/sessions/${firstId}/events`,
@@ -413,6 +548,7 @@ test('persists interactive approval across browser reconnect while backend conti
   );
 
   await page.goto(harness.origin);
+  await openSessionsView(page);
   await page.getByRole('button', { name: /Approval session/ }).click();
   await expect(page.getByLabel('Permission Write')).toContainText(
     'Status: pending',
@@ -431,6 +567,7 @@ test('persists interactive approval across browser reconnect while backend conti
 
   const reconnected = await browser.newPage();
   await reconnected.goto(harness.origin);
+  await openSessionsView(reconnected);
   await reconnected.getByRole('button', { name: /Approval session/ }).click();
   await expect(reconnected.getByLabel('Permission Write')).toContainText(
     'Status: pending',
@@ -438,6 +575,7 @@ test('persists interactive approval across browser reconnect while backend conti
   await reconnected.getByRole('button', { name: 'Approve' }).click();
   await expect.poll(() => driverSession.permissionDecisions.length).toBe(1);
   await reconnected.reload();
+  await openSessionsView(reconnected);
   await reconnected.getByRole('button', { name: /Approval session/ }).click();
   await expect(reconnected.getByLabel('Permission Write')).toContainText(
     'Status: approved',
@@ -484,11 +622,120 @@ test('discovers and resumes a Claude session and records restart interruption tr
   ).toBe(true);
 });
 
+test('imports a project and preserves an attempted task across refresh', async ({
+  page,
+  harness,
+}) => {
+  const title = 'Add retry controls';
+  await importTemporaryRepository(page, harness, 'Task board acceptance');
+  const taskDialog = await createReadyTask(page, {
+    title,
+    description: 'Expose a safe retry action.',
+    acceptanceCriteria: ['A failed session can be retried explicitly.'],
+  });
+
+  await launchIsolatedFakeAttempt(taskDialog, harness);
+  await expect(
+    taskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('in progress');
+  await expect(
+    taskDialog.getByRole('article', { name: 'Attempt 1' }),
+  ).toContainText('Running');
+  await taskDialog.getByRole('button', { name: 'Close' }).click();
+  await expect(
+    page
+      .getByRole('region', { name: 'In progress tasks' })
+      .getByRole('article', { name: `${title} task card` }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: `Open ${title}` }).click();
+
+  await taskDialog.getByRole('button', { name: `Open ${title}` }).click();
+  await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeVisible();
+  await page.getByRole('button', { name: 'Board' }).click();
+  await page.getByRole('button', { name: `Open ${title}` }).click();
+
+  const refreshedTaskDialog = page.getByRole('dialog', { name: title });
+  await refreshedTaskDialog
+    .getByRole('button', { name: 'Mark for review' })
+    .click();
+  await expect(
+    refreshedTaskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('review');
+  await refreshedTaskDialog.getByRole('button', { name: 'Close' }).click();
+  await expect(
+    page
+      .getByRole('region', { name: 'Review tasks' })
+      .getByRole('article', { name: `${title} task card` }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: `Open ${title}` }).click();
+  await refreshedTaskDialog.getByRole('button', { name: 'Mark done' }).click();
+  await expect(
+    refreshedTaskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('done');
+  await refreshedTaskDialog.getByRole('button', { name: 'Close' }).click();
+
+  await page.getByRole('button', { name: 'Show completed tasks' }).click();
+  await expect(
+    page
+      .getByRole('region', { name: 'Completed tasks' })
+      .getByRole('article', { name: `${title} task card` }),
+  ).toBeVisible();
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  await page.getByRole('button', { name: 'Show completed tasks' }).click();
+  const doneCard = page
+    .getByRole('region', { name: 'Completed tasks' })
+    .getByRole('article', { name: `${title} task card` });
+  await expect(doneCard).toBeVisible();
+  await doneCard.getByRole('button', { name: `Open ${title}` }).click();
+  await expect(
+    page.getByRole('dialog', { name: title }).getByRole('article', {
+      name: 'Attempt 1',
+    }),
+  ).toBeVisible();
+});
+
+test('imports a project and retains a failed startup attempt', async ({
+  page,
+  harness,
+}) => {
+  const title = 'Recover failed startup';
+  await importTemporaryRepository(page, harness, 'Failed start acceptance');
+  const taskDialog = await createReadyTask(page, {
+    title,
+    description: 'Keep failed startup history visible.',
+    acceptanceCriteria: ['The task remains ready after startup fails.'],
+  });
+  const driver = harness.driver as FakeClaudeHarness['driver'] & {
+    create(request: unknown): Promise<never>;
+  };
+  driver.create = async () => {
+    throw new Error('Simulated fake-driver startup failure');
+  };
+
+  await launchIsolatedFakeAttempt(taskDialog, harness, false);
+
+  await expect(taskDialog.getByRole('alert')).toContainText(/did not start/i);
+  await expect(
+    taskDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('ready');
+  await expect(
+    taskDialog.getByRole('article', { name: 'Attempt 1' }),
+  ).toContainText('Launched');
+  await taskDialog.getByRole('button', { name: 'Close' }).click();
+  await expect(
+    page
+      .getByRole('region', { name: 'Ready tasks' })
+      .getByRole('article', { name: `${title} task card` }),
+  ).toBeVisible();
+});
+
 test('refuses API-billing conflicts without invoking Claude', async ({
   harness,
 }) => {
+  const projectId = await ensureImportedProject(harness);
   await harness.restart({ billingConflict: true });
-  const projectId = await harness.discoverProject();
   const before = harness.driver.createdRequests.length;
   const response = await harness.command({
     type: 'session.create',

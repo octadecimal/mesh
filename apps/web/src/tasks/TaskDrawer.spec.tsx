@@ -95,7 +95,10 @@ describe('TaskDrawer', () => {
     await user.clear(screen.getByLabelText('Description'));
     await user.type(screen.getByLabelText('Description'), 'My local draft');
     await user.clear(screen.getByLabelText('Acceptance criteria'));
-    await user.type(screen.getByLabelText('Acceptance criteria'), 'Local criterion');
+    await user.type(
+      screen.getByLabelText('Acceptance criteria'),
+      'Local criterion',
+    );
     await user.selectOptions(screen.getByLabelText('Priority'), 'high');
     await user.clear(screen.getByLabelText('Labels'));
     await user.type(screen.getByLabelText('Labels'), 'local');
@@ -145,9 +148,7 @@ describe('TaskDrawer', () => {
     expect(
       screen.queryByRole('button', { name: 'Retry with server revision' }),
     ).toBeNull();
-    expect(
-      screen.queryByRole('button', { name: 'Confirm block' }),
-    ).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Confirm block' })).toBeNull();
   });
 
   it('explains missing readiness fields and requires reasons for audited actions', async () => {
@@ -279,14 +280,18 @@ describe('TaskDrawer', () => {
       'interactive',
     );
     await user.click(screen.getByRole('button', { name: 'Launch attempt' }));
-    expect(screen.getByRole('button', { name: 'Launch attempt' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Launch attempt' }),
+    ).toBeDisabled();
     expect(screen.getByRole('status')).toHaveTextContent(
       'waiting for project update',
     );
 
     await act(async () => command.resolve(undefined));
 
-    expect(screen.getByRole('button', { name: 'Launch attempt' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Launch attempt' }),
+    ).toBeDisabled();
     expect(screen.getByRole('status')).toHaveTextContent(
       'waiting for project update',
     );
@@ -315,7 +320,58 @@ describe('TaskDrawer', () => {
     );
 
     expect(screen.queryByRole('status')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Launch attempt' })).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Launch attempt' }),
+    ).toBeEnabled();
+  });
+
+  it('shows a launch rejection after the retained attempt arrives', async () => {
+    const user = userEvent.setup();
+    const command = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(command.promise);
+    const readyTask = taskSchema.parse({
+      ...task,
+      lifecycleState: 'ready',
+      blocked: null,
+    });
+    const rendered = renderDrawer({ task: readyTask, onCommand });
+
+    await user.selectOptions(
+      screen.getByLabelText('Permission mode'),
+      'interactive',
+    );
+    await user.click(screen.getByRole('button', { name: 'Launch attempt' }));
+
+    const retainedAttempt = taskAttemptSchema.parse({
+      id: 'attempt-retained',
+      taskId: task.id,
+      sessionId: 'session-retained',
+      ordinal: 3,
+      source: 'launched',
+      actor,
+      createdAt: timestamp,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+    });
+    rendered.rerender(
+      drawerElement({
+        task: readyTask,
+        onCommand,
+        attemptRows: [
+          ...timelineAttempts(),
+          { attempt: retainedAttempt, session: undefined },
+        ],
+      }),
+    );
+
+    await act(async () =>
+      command.reject(new Error('Attempt startup remained failed')),
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Attempt startup remained failed',
+    );
   });
 
   it('ignores an old launch rejection after a newer launch starts', async () => {
@@ -367,7 +423,9 @@ describe('TaskDrawer', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       'waiting for project update',
     );
-    expect(screen.getByRole('button', { name: 'Launch attempt' })).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Launch attempt' }),
+    ).toBeDisabled();
     await act(async () => second.resolve(undefined));
   });
 

@@ -24,20 +24,20 @@ const taskIn = (
   overrides: Partial<Task> = {},
 ): Task =>
   taskSchema.parse({
-  id: 'task-1',
-  projectId: 'project-1',
-  title: 'Implement task board',
-  description: 'Build the task board lifecycle.',
-  acceptanceCriteria: ['Transitions are authorized.'],
-  priority: 'normal',
-  rank: 'm',
-  lifecycleState,
-  labels: [],
-  notes: '',
-  blocked: null,
-  revision: 1,
-  createdAt: timestamp,
-  updatedAt: timestamp,
+    id: 'task-1',
+    projectId: 'project-1',
+    title: 'Implement task board',
+    description: 'Build the task board lifecycle.',
+    acceptanceCriteria: ['Transitions are authorized.'],
+    priority: 'normal',
+    rank: 'm',
+    lifecycleState,
+    labels: [],
+    notes: '',
+    blocked: null,
+    revision: 1,
+    createdAt: timestamp,
+    updatedAt: timestamp,
     ...overrides,
   }) as Task;
 
@@ -90,7 +90,11 @@ describe('task lifecycle policy', () => {
     expect(() =>
       authorizeTaskTransition({
         task: taskIn('ready', {
-          blocked: { reason: 'Waiting on API', actor: human, blockedAt: timestamp },
+          blocked: {
+            reason: 'Waiting on API',
+            actor: human,
+            blockedAt: timestamp,
+          },
         }),
         nextState: 'in_progress',
         actor: human,
@@ -118,7 +122,11 @@ describe('task lifecycle policy', () => {
       { task: taskIn('backlog'), nextState: 'backlog' as const, blocked: true },
       {
         task: taskIn('backlog', {
-          blocked: { reason: 'Waiting on API', actor: human, blockedAt: timestamp },
+          blocked: {
+            reason: 'Waiting on API',
+            actor: human,
+            blockedAt: timestamp,
+          },
         }),
         nextState: 'backlog' as const,
         blocked: false,

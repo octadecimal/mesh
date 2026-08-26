@@ -93,8 +93,25 @@ const start = async () => {
     discover: api.discover.bind(api),
     projectSnapshot: api.projectSnapshot.bind(api),
     command: async (...args: Parameters<MeshApi['command']>) => {
-      const response = await api.command(...args);
+      let response: Awaited<ReturnType<MeshApi['command']>>;
+      try {
+        response = await api.command(...args);
+      } catch (error) {
+        await coordinator
+          .refresh()
+          .catch(() =>
+            store.notifyInvalidPayload(
+              'Mesh could not refresh state after the command failed.',
+            ),
+          );
+        throw error;
+      }
       await coordinator.refresh();
+      if (args[0].type === 'project.import') {
+        const project = response.result as { id: string };
+        await coordinator.refreshProject(project.id);
+        socket.resubscribe();
+      }
       if (args[0].type === 'session.create') socket.resubscribe();
       return response;
     },

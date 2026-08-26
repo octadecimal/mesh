@@ -120,8 +120,7 @@ export function TaskBoard({
     selectedDrawerTask?.projectId === project.id
       ? selectedDrawerTask
       : undefined;
-  const creatingTaskForProject =
-    creatingTask && drawerProjectId === project.id;
+  const creatingTaskForProject = creatingTask && drawerProjectId === project.id;
   const terminalTasks = useMemo(() => {
     const tasks = Object.values(projection.tasksById).filter(
       (task) => task.projectId === project.id,
