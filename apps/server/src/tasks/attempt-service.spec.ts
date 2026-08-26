@@ -467,6 +467,36 @@ describe('AttemptService', () => {
     );
   });
 
+  it('rejects launch when the imported project repository is missing', async () => {
+    const { directory, driver, repositories, service } = setup({
+      git: {
+        createWorktree: async () => ({ created: true }),
+      },
+    });
+    seedTask(repositories);
+    const project = repositories.projects.get('project-1');
+    if (!project) throw new Error('Expected project fixture');
+    const missingRepositoryPath = join(directory, 'deleted-project');
+    repositories.projects.update(
+      { ...project, repositoryPath: missingRepositoryPath },
+      project.revision,
+    );
+
+    await expect(
+      service.launch({
+        ...worktreeLaunchInput(directory),
+        workspace: {
+          ...worktreeLaunchInput(directory).workspace,
+          repositoryPath: missingRepositoryPath,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'repository_invalid' });
+
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
+    expect(repositories.workspaces.listByProject('project-1')).toEqual([]);
+    expect(repositories.sessions.listByProject('project-1')).toEqual([]);
+  });
+
   it('interrupts and diagnoses the runtime when the task transition audit fails', async () => {
     const { directory, driver, repositories, service } = setup({
       repositories: { failTaskTransitionInsert: true },

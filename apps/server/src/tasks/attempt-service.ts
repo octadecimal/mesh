@@ -23,6 +23,7 @@ import {
   type ResolveWorkspacePathOptions,
 } from '../platform/paths.js';
 import {
+  RepositoryIdentityError,
   resolveRepositoryIdentity,
   type RepositoryIdentity,
 } from '../projects/repository-identity.js';
@@ -559,14 +560,23 @@ export class AttemptService {
       );
     }
     const project = this.requireActiveProject(projectId);
-    const [repositoryPath, projectPath, worktreePath] = await Promise.all([
-      resolveWorkspacePath(input.repositoryPath, pathOptions),
-      resolveWorkspacePath(project.repositoryPath, pathOptions),
-      resolveWorkspacePath(input.path, {
-        ...pathOptions,
-        allowMissingLeaf: true,
-      }),
-    ]);
+    let repositoryPath: string;
+    let projectPath: string;
+    try {
+      [repositoryPath, projectPath] = await Promise.all([
+        resolveWorkspacePath(input.repositoryPath, pathOptions),
+        resolveWorkspacePath(project.repositoryPath, pathOptions),
+      ]);
+    } catch {
+      throw new RepositoryIdentityError(
+        'repository_invalid',
+        'The selected project repository is missing or unreadable; import the repository again',
+      );
+    }
+    const worktreePath = await resolveWorkspacePath(input.path, {
+      ...pathOptions,
+      allowMissingLeaf: true,
+    });
     if (repositoryPath !== projectPath) {
       throw new AttemptInvalidCommandError(
         'Worktree repository does not match the selected project',
