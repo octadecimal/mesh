@@ -273,6 +273,13 @@ class ReviewAutomationControlError extends Error {
   }
 }
 
+class ReviewAutomationFollowUpFailedError extends Error {
+  constructor(readonly code: string) {
+    super('The durable review automation follow-up previously failed.');
+    this.name = 'ReviewAutomationFollowUpFailedError';
+  }
+}
+
 type Dependencies = {
   database: Database;
   commands: CommandRepository;
@@ -480,6 +487,11 @@ export class ReviewAutomationService {
           cycle.automationGeneration,
         ),
       );
+    if (action?.status === 'failed') {
+      throw new ReviewAutomationFollowUpFailedError(
+        action.errorCode ?? 'review_automation_paused',
+      );
+    }
     if (action?.status !== 'pending') return undefined;
     return this.continueRejectedVerdict(input);
   }

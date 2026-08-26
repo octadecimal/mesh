@@ -16,6 +16,9 @@ import {
   developerExecutionCycleSchema,
   idSchema,
   projectSchema,
+  qaExecutionCycleSchema,
+  qaReportSchema,
+  reviewAutomationActionSchema,
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
@@ -445,6 +448,236 @@ describe('executeCommand', () => {
       },
       warnings: [{ code: 'developer_resume_unavailable' }],
     });
+  });
+
+  it('replays a failed verdict follow-up without resuming or emitting again', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'project-replay',
+        displayName: 'Replay project',
+        repositoryPath: directory,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'task-replay',
+        projectId: project.id,
+        title: 'Replay failed follow-up',
+        description: '',
+        acceptanceCriteria: ['Failure replay remains stable.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 3,
+        createdAt: now,
+        updatedAt: now,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 1,
+          rejectionCount: 1,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      }),
+    );
+    const workspace = repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-replay',
+        projectId: project.id,
+        type: 'shared',
+        path: directory,
+      }),
+    );
+    const developerSession = repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'developer-session-replay',
+        projectId: project.id,
+        workspaceId: workspace.id,
+        title: 'Developer replay',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'interrupted',
+        claudeResumeId: 'claude-developer-replay',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const attempt = repositories.attempts.createForTask(
+      task.id,
+      developerSession.id,
+      'launched',
+      taskActorSchema.parse({ type: 'human', id: 'operator-1' }),
+      'developer',
+    );
+    const qaSession = repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'qa-session-replay',
+        projectId: project.id,
+        workspaceId: workspace.id,
+        title: 'QA replay',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'interrupted',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const startedCycle = repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'qa-cycle-replay',
+        taskId: task.id,
+        attemptId: attempt.id,
+        sessionId: qaSession.id,
+        ordinal: 1,
+        authorizedBy: { type: 'system', id: 'review-loop' },
+        authorizationCommandId: 'qa-launch-replay',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: 'Verify replay.', revision: 1 },
+        taskSnapshot: {
+          revision: task.revision,
+          title: task.title,
+          description: task.description,
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: task.acceptanceCriteria[0] },
+          ],
+        },
+        developerCompletionReportId: 'developer-report-replay',
+        workspaceId: workspace.id,
+        reviewPolicy: 'autonomous_review',
+        reviewPolicyRevision: 1,
+        automationGeneration: 1,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    const report = repositories.qaExecutions.insertReport(
+      qaReportSchema.parse({
+        id: 'qa-report-replay',
+        cycleId: startedCycle.id,
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Focused test failed.',
+          },
+        ],
+        verificationCommands: [],
+        limitations: [],
+        residualRisks: ['Regression remains.'],
+        workspaceBefore: 'source-state-1',
+        workspaceAfter: 'source-state-1',
+        createdAt: now,
+      }),
+    );
+    const cycle = repositories.qaExecutions.completeCycle(startedCycle.id, {
+      endedAt: now,
+      terminalDisposition: 'rejected',
+      reportId: report.id,
+      terminalCommandId: 'qa-verdict-replay',
+      terminalEventId: 'qa-event-replay',
+    });
+    if (!cycle) throw new Error('Expected completed QA cycle');
+    const action = repositories.qaExecutions.insertAutomationAction(
+      reviewAutomationActionSchema.parse({
+        id: 'resume-action-replay',
+        idempotencyKey: `${task.id}:${attempt.id}:${cycle.id}:resume_developer:1`,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        sourceCycleId: cycle.id,
+        actionKind: 'resume_developer',
+        generation: 1,
+        status: 'pending',
+        errorCode: null,
+        createdAt: now,
+        completedAt: null,
+      }),
+    );
+    const committed = {
+      task,
+      attempt,
+      cycle,
+      report,
+      event: { sequence: 8 },
+      events: [{ sequence: 8 }],
+    };
+    (dependencies as { qaExecutionService: unknown }).qaExecutionService = {
+      launch: async () => undefined,
+      submitVerdict: () => committed,
+    };
+    let resumeAttempts = 0;
+    (
+      dependencies as { reviewAutomationService: unknown }
+    ).reviewAutomationService = new ReviewAutomationService({
+      ...repositories,
+      qaExecutionService: { launch: async () => undefined },
+      developerReworkService: {
+        resume: async () => {
+          resumeAttempts += 1;
+          throw new DeveloperResumeUnavailableError();
+        },
+      },
+      publisher: dependencies.registry.publisher,
+      now: () => now,
+      createId: () => 'automation-failed-event',
+    });
+    const command = projectCommand('qa-verdict-replay', {
+      type: 'task.qa.submit_verdict',
+      payload: {
+        capability: 'qa-capability-replay',
+        expectedRevision: task.revision,
+        report: {
+          disposition: 'rejected',
+          criterionResults: report.criterionResults,
+          verificationCommands: [],
+          limitations: [],
+          residualRisks: report.residualRisks,
+          workspaceBefore: report.workspaceBefore,
+          workspaceAfter: report.workspaceAfter,
+        },
+        actor: { type: 'agent', id: 'qa-agent-replay' },
+      },
+    });
+
+    const first = await executeCommand(command, dependencies);
+    const eventCountAfterFailure = repositories.projectEvents.after(
+      project.id,
+      0,
+    ).length;
+    const duplicate = await executeCommand(command, dependencies);
+
+    expect(duplicate).toEqual(first);
+    expect(first).toMatchObject({
+      result: {
+        task: {
+          id: task.id,
+          reviewAutomation: { status: 'paused' },
+        },
+      },
+      warnings: [{ code: 'developer_resume_unavailable' }],
+    });
+    expect(resumeAttempts).toBe(1);
+    expect(eventCountAfterFailure).toBe(1);
+    expect(
+      repositories.qaExecutions.getAutomationAction(action.id),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'developer_resume_unavailable',
+    });
+    expect(repositories.projectEvents.after(project.id, 0)).toHaveLength(
+      eventCountAfterFailure,
+    );
   });
 
   it('starts review automation only after a committed Developer submission', async () => {
