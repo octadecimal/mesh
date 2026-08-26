@@ -16,7 +16,7 @@ import {
   developerCompletionReportInputSchema,
 } from '@mesh-session-platform/contracts';
 
-import type { DeveloperRuntimeControls } from './driver.js';
+import type { DeveloperRuntimeControls, RoleControlServer } from './driver.js';
 import {
   UnsupportedSdkCapabilityError,
   type SdkFacade,
@@ -163,6 +163,21 @@ const createDeveloperMcpServer = (controls: DeveloperRuntimeControls) =>
         },
       ),
     ],
+  });
+
+const createRoleMcpServer = (server: RoleControlServer) =>
+  createSdkMcpServer({
+    name: server.name,
+    version: server.version,
+    alwaysLoad: true,
+    tools: server.tools.map((control) =>
+      tool(
+        control.name,
+        control.description,
+        control.inputSchema,
+        control.execute,
+      ),
+    ),
   });
 
 const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
@@ -352,12 +367,27 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
         sessionId: options.resume ? undefined : sessionId,
         includePartialMessages: true,
         permissionMode: 'default',
+        ...(options.role
+          ? {
+              allowedTools: [...options.role.allowedTools],
+              disallowedTools: [...options.role.disallowedTools],
+            }
+          : {}),
         ...(canUseTool ? { canUseTool } : {}),
         ...(options.developer
           ? {
               mcpServers: {
                 mesh_developer: createDeveloperMcpServer(
                   options.developer.controls,
+                ),
+              },
+            }
+          : {}),
+        ...(options.role
+          ? {
+              mcpServers: {
+                [options.role.controlServer.name]: createRoleMcpServer(
+                  options.role.controlServer,
                 ),
               },
             }

@@ -17,6 +17,8 @@ type ToolDefinition = {
 
 type QueryInput = {
   options: {
+    allowedTools?: string[];
+    disallowedTools?: string[];
     includePartialMessages?: boolean;
     mcpServers?: Record<string, unknown>;
   };
@@ -109,6 +111,71 @@ describe('createClaudeSdkFacade', () => {
     expect(
       Object.keys(query.mock.calls[0]?.[0].options.mcpServers ?? {}),
     ).toEqual(['mesh_developer']);
+  });
+
+  it('installs one generic QA control server without Developer or source-authoring tools', async () => {
+    const execute = vi.fn(async () => ({
+      content: [{ type: 'text' as const, text: '{"status":"submitted"}' }],
+    }));
+
+    createClaudeSdkFacade().startQuery({
+      title: 'QA',
+      role: {
+        role: 'qa',
+        initialPrompt: 'Verify the submission.',
+        allowedTools: [
+          'Read',
+          'Glob',
+          'Grep',
+          'Bash',
+          'mcp__mesh_qa__submit_qa_verdict',
+        ],
+        disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+        controlServer: {
+          name: 'mesh_qa',
+          version: '1',
+          tools: [
+            {
+              name: 'submit_qa_verdict',
+              description: 'Submit one structured QA verdict.',
+              inputSchema: {},
+              execute,
+            },
+          ],
+        },
+      },
+    });
+
+    const serverOptions = createSdkMcpServer.mock.calls.at(-1)?.[0] as {
+      name: string;
+      version: string;
+      alwaysLoad: boolean;
+      tools: ToolDefinition[];
+    };
+    expect(serverOptions).toMatchObject({
+      name: 'mesh_qa',
+      version: '1',
+      alwaysLoad: true,
+    });
+    expect(serverOptions.tools.map(({ name }) => name)).toEqual([
+      'submit_qa_verdict',
+    ]);
+    expect(query.mock.calls.at(-1)?.[0].options).toMatchObject({
+      allowedTools: [
+        'Read',
+        'Glob',
+        'Grep',
+        'Bash',
+        'mcp__mesh_qa__submit_qa_verdict',
+      ],
+      disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+    });
+    expect(
+      Object.keys(query.mock.calls.at(-1)?.[0].options.mcpServers ?? {}),
+    ).toEqual(['mesh_qa']);
+
+    await serverOptions.tools[0]?.handler({ disposition: 'verified' });
+    expect(execute).toHaveBeenCalledWith({ disposition: 'verified' });
   });
 
   it('invokes Developer controls from model-visible evidence and an idempotency key', async () => {

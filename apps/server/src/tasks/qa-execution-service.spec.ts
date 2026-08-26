@@ -53,6 +53,10 @@ describe('QaExecutionService', () => {
     startupFailure?: Error;
     repositoryIdentity?: 'matching' | 'mismatched' | 'ambiguous';
     missingDeveloperReport?: boolean;
+    afterRejectedVerdict?: (input: {
+      taskId: string;
+      cycleId: string;
+    }) => Promise<void>;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-qa-launch-'));
     const repositories = createTestRepositories();
@@ -304,12 +308,14 @@ describe('QaExecutionService', () => {
         if (options?.startupFailure) throw options.startupFailure;
       },
     );
+    const interrupt = vi.fn(async () => undefined);
     const qaCapabilities = new QaCapabilityRegistry();
     const service = new QaExecutionService({
       ...repositories,
       attemptService,
       capabilities: qaCapabilities,
-      registry: { create, interrupt: async () => undefined, publisher },
+      registry: { create, interrupt, publisher },
+      afterRejectedVerdict: options?.afterRejectedVerdict,
       billingConflicts: options?.billingConflict
         ? [{ variable: 'ANTHROPIC_API_KEY' }]
         : [],
@@ -331,6 +337,7 @@ describe('QaExecutionService', () => {
       repositories,
       service,
       starts,
+      interrupt,
       task,
       workspace,
     };
@@ -375,11 +382,17 @@ describe('QaExecutionService', () => {
       expect(context.durableAtStart).toEqual([true]);
       expect(context.starts[0]?.configuration).toMatchObject({
         role: 'qa',
-        meshControls: ['submit_qa_verdict'],
-        toolPolicy: {
-          sourceRead: true,
-          verificationCommands: true,
-          sourceWrite: false,
+        allowedTools: [
+          'Read',
+          'Glob',
+          'Grep',
+          'Bash',
+          'mcp__mesh_qa__submit_qa_verdict',
+        ],
+        disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+        controlServer: {
+          name: 'mesh_qa',
+          version: '1',
         },
       });
       expect(context.starts[0]?.configuration.initialPrompt).toContain(
@@ -396,8 +409,98 @@ describe('QaExecutionService', () => {
         attemptId: context.attempt.id,
         cycleId: result.cycle.id,
       });
+      expect(
+        start.configuration.controlServer.tools.map(({ name }) => name),
+      ).toEqual(['submit_qa_verdict']);
     },
   );
+
+  it('binds the only QA control to server-owned cycle context and closes the runtime after one verdict', async () => {
+    const context = setup();
+    const launched = await context.service.launch(launchInput(context.task));
+    const configuration = context.starts[0]?.configuration;
+    if (!configuration) throw new Error('Expected QA runtime configuration');
+    const control = configuration.controlServer.tools[0];
+    if (!control) throw new Error('Expected QA verdict control');
+    const report = reportFor(launched.cycle);
+
+    const response = await control.execute(report);
+
+    expect(response).toMatchObject({
+      content: [{ type: 'text', text: '{"status":"submitted_qa_verdict"}' }],
+    });
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+    expect(
+      context.repositories.qaExecutions.getReport(
+        context.repositories.qaExecutions.getCycle(launched.cycle.id)
+          ?.reportId ?? '',
+      ),
+    ).toMatchObject(report);
+    expect(JSON.stringify(configuration.controlServer)).not.toContain(
+      configuration.capability,
+    );
+    expect(JSON.stringify(configuration.controlServer)).not.toContain(
+      launched.cycle.id,
+    );
+  });
+
+  it('continues an eligible autonomous rejection only after the QA runtime closes', async () => {
+    const afterRejectedVerdict = vi.fn(async () => undefined);
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      afterRejectedVerdict,
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools[0];
+    if (!control) throw new Error('Expected QA verdict control');
+
+    await control.execute(
+      reportFor(launched.cycle, {
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Focused verification failed.',
+          },
+        ],
+      }),
+    );
+
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+    expect(afterRejectedVerdict).toHaveBeenCalledWith({
+      taskId: context.task.id,
+      cycleId: launched.cycle.id,
+    });
+  });
+
+  it('does not continue a rejected manual review when automation state is stale', async () => {
+    const afterRejectedVerdict = vi.fn(async () => undefined);
+    const context = setup({ afterRejectedVerdict });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools[0];
+    if (!control) throw new Error('Expected QA verdict control');
+
+    await control.execute(
+      reportFor(launched.cycle, {
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Focused verification failed.',
+          },
+        ],
+      }),
+    );
+
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+    expect(afterRejectedVerdict).not.toHaveBeenCalled();
+  });
 
   it('launches only an enabled autonomous-review policy as a system actor', async () => {
     const context = setup({ reviewPolicy: 'autonomous_review' });

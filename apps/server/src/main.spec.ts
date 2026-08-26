@@ -48,6 +48,33 @@ describe('server configuration', () => {
     ).toThrow('Fake Claude driver is restricted to test configuration');
   });
 
+  it('keeps the billing guard in front of both role starts and resumes', async () => {
+    const driver = selectClaudeDriver(
+      [{ variable: 'ANTHROPIC_API_KEY' }],
+      () => new FakeClaudeSessionDriver(),
+    );
+
+    await expect(
+      driver.create({
+        title: 'QA',
+        role: {
+          role: 'qa',
+          initialPrompt: 'Verify.',
+          allowedTools: ['Read', 'mcp__mesh_qa__submit_qa_verdict'],
+          disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+          controlServer: {
+            name: 'mesh_qa',
+            version: '1',
+            tools: [],
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'billing_configuration_conflict' });
+    await expect(
+      driver.resume({ claudeResumeId: 'resume-developer' }),
+    ).rejects.toMatchObject({ code: 'billing_configuration_conflict' });
+  });
+
   it('permits an ephemeral port only in explicit test configuration', () => {
     expect(loadServerConfig({ NODE_ENV: 'test', MESH_PORT: '0' }).port).toBe(0);
     expect(() =>

@@ -4,6 +4,7 @@ import type {
   LifecycleState,
   PermissionMode,
 } from '@mesh-session-platform/contracts';
+import type { ZodType } from 'zod';
 
 export interface DiscoverClaudeSessionsRequest {
   workspacePath?: string;
@@ -24,11 +25,43 @@ export interface DeveloperRuntimeConfiguration {
   controls: DeveloperRuntimeControls;
 }
 
+export interface RoleControlResponse {
+  [key: string]: unknown;
+  content: Array<{ type: 'text'; text: string }>;
+  isError?: boolean;
+}
+
+export interface RoleControlTool {
+  name: string;
+  description: string;
+  inputSchema: Readonly<Record<string, ZodType>>;
+  execute(input: unknown): Promise<RoleControlResponse>;
+}
+
+export interface RoleControlServer {
+  name: string;
+  version: string;
+  tools: readonly RoleControlTool[];
+}
+
+export interface RoleRuntimeConfiguration {
+  role: 'qa';
+  initialPrompt: string;
+  allowedTools: readonly string[];
+  disallowedTools: readonly string[];
+  controlServer: RoleControlServer;
+}
+
+export type AgentRuntimeConfiguration =
+  | DeveloperRuntimeConfiguration
+  | RoleRuntimeConfiguration;
+
 export interface StartClaudeSessionRequest {
   title: string;
   workspacePath?: string;
   permissionMode?: PermissionMode;
   developer?: DeveloperRuntimeConfiguration;
+  role?: RoleRuntimeConfiguration;
 }
 
 export interface ResumeClaudeSessionRequest {
@@ -36,6 +69,7 @@ export interface ResumeClaudeSessionRequest {
   workspacePath?: string;
   permissionMode?: PermissionMode;
   developer?: DeveloperRuntimeConfiguration;
+  role?: RoleRuntimeConfiguration;
 }
 
 export type DriverEvent =

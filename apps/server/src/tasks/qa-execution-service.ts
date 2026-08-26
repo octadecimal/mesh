@@ -27,6 +27,7 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
+import type { RoleRuntimeConfiguration } from '../claude/driver.js';
 import { QA_POLICY_VERSION, composeQaPrompt } from '../domain/qa-policy.js';
 import { authorizeQaVerdict } from '../domain/task-lifecycle.js';
 import type { CommandRepository } from '../repositories/command-repository.js';
@@ -61,16 +62,8 @@ export type QaLaunchInput = {
   trigger: QaLaunchTrigger;
 };
 
-export type QaRuntimeConfiguration = {
-  role: 'qa';
-  initialPrompt: string;
+export type QaRuntimeConfiguration = RoleRuntimeConfiguration & {
   capability: string;
-  meshControls: ['submit_qa_verdict'];
-  toolPolicy: {
-    sourceRead: true;
-    verificationCommands: true;
-    sourceWrite: false;
-  };
 };
 
 export type QaLaunchResult = {
@@ -124,6 +117,10 @@ type QaExecutionServiceDependencies = {
   capabilities: QaCapabilityRegistry;
   registry: QaRegistry;
   billingConflicts?: readonly { variable: string }[];
+  afterRejectedVerdict?: (input: {
+    taskId: string;
+    cycleId: string;
+  }) => Promise<void>;
   now?: () => string;
   createId?: () => string;
 };
@@ -178,6 +175,45 @@ const errorDetails = (error: unknown) =>
   error instanceof Error
     ? { name: error.name, message: error.message }
     : { message: String(error) };
+
+const safeQaControlErrorCodes = new Set([
+  'invalid_input',
+  'qa_control_failed',
+  'qa_capability_invalid',
+  'qa_report_incomplete',
+  'project_not_found',
+  'project_archived',
+  'task_not_found',
+  'task_revision_conflict',
+  'task_transition_invalid',
+  'task_transition_unauthorized',
+  'review_automation_paused',
+]);
+
+const qaControlFailure = (error: unknown) => {
+  const candidate =
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    typeof error.code === 'string'
+      ? error.code
+      : typeof error === 'string'
+        ? error
+        : undefined;
+  const code =
+    candidate && safeQaControlErrorCodes.has(candidate)
+      ? candidate
+      : 'qa_control_failed';
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({ status: 'error', code }),
+      },
+    ],
+    isError: true,
+  };
+};
 
 export class QaExecutionService {
   private readonly now: () => string;
@@ -691,6 +727,11 @@ export class QaExecutionService {
     developerReport: DeveloperCompletionReport,
     capability: string,
   ): QaRuntimeConfiguration {
+    const commandId = `${prepared.cycle.id}:submit-qa-verdict`;
+    const actor = taskActorSchema.parse({
+      type: 'agent',
+      id: `qa-${prepared.session.id}`,
+    });
     return {
       role: 'qa',
       initialPrompt: composeQaPrompt({
@@ -702,11 +743,61 @@ export class QaExecutionService {
         developerCompletionReport: developerReport,
       }),
       capability,
-      meshControls: ['submit_qa_verdict'],
-      toolPolicy: {
-        sourceRead: true,
-        verificationCommands: true,
-        sourceWrite: false,
+      allowedTools: [
+        'Read',
+        'Glob',
+        'Grep',
+        'Bash',
+        'mcp__mesh_qa__submit_qa_verdict',
+      ],
+      disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+      controlServer: {
+        name: 'mesh_qa',
+        version: '1',
+        tools: [
+          {
+            name: 'submit_qa_verdict',
+            description:
+              'Submit the one structured verification verdict for this QA cycle.',
+            inputSchema: qaReportInputSchema.shape,
+            execute: async (input) => {
+              const parsed = qaReportInputSchema.safeParse(input);
+              if (!parsed.success) return qaControlFailure('invalid_input');
+              try {
+                const outcome = this.submitVerdict({
+                  commandId,
+                  capability,
+                  expectedRevision: prepared.task.revision,
+                  report: parsed.data,
+                  actor,
+                });
+                await this.dependencies.registry.interrupt(prepared.session.id);
+                if (
+                  outcome.report.disposition === 'rejected' &&
+                  outcome.cycle.reviewPolicy === 'autonomous_review' &&
+                  outcome.task.reviewAutomation.status === 'enabled'
+                ) {
+                  await this.dependencies.afterRejectedVerdict?.({
+                    taskId: outcome.task.id,
+                    cycleId: outcome.cycle.id,
+                  });
+                }
+                return {
+                  content: [
+                    {
+                      type: 'text' as const,
+                      text: JSON.stringify({
+                        status: 'submitted_qa_verdict',
+                      }),
+                    },
+                  ],
+                };
+              } catch (error) {
+                return qaControlFailure(error);
+              }
+            },
+          },
+        ],
       },
     };
   }

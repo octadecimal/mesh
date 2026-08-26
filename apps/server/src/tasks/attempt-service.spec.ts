@@ -54,6 +54,10 @@ describe('AttemptService', () => {
     interrupt?: (sessionId: string) => Promise<void>;
     terminalInterrupt?: (sessionId: string) => Promise<void>;
     emergencyClose?: (sessionId: string) => Promise<void>;
+    afterDeveloperSubmission?: (input: {
+      taskId: string;
+      cycleId: string;
+    }) => Promise<void>;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-attempt-service-'));
     const repositories = createTestRepositories(options?.repositories);
@@ -86,6 +90,7 @@ describe('AttemptService', () => {
       taskService,
       capabilities,
       developerExecutionService,
+      afterDeveloperSubmission: options?.afterDeveloperSubmission,
       registry: {
         resume: (sessionId, configuration, developer) =>
           registry.resume(sessionId, configuration, developer),
@@ -1022,7 +1027,10 @@ describe('AttemptService', () => {
   });
 
   it('binds installed Developer controls to the launched task and cycle', async () => {
-    const { directory, driver, repositories, service } = setup();
+    const afterDeveloperSubmission = vi.fn(async () => undefined);
+    const { directory, driver, repositories, service } = setup({
+      afterDeveloperSubmission,
+    });
     seedTask(repositories);
     const launched = await service.launchDeveloper(
       developerLaunchInput(directory),
@@ -1074,6 +1082,10 @@ describe('AttemptService', () => {
     expect(repositories.sessions.get(session.id)?.lifecycleState).toBe(
       'interrupted',
     );
+    expect(afterDeveloperSubmission).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      cycleId: cycle.id,
+    });
   });
 
   it('keeps submit-for-review durable when runtime interruption fails', async () => {

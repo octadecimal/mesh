@@ -11,6 +11,7 @@ import type {
   ClaudeSessionDriver,
   DeveloperRuntimeConfiguration,
   DriverSession,
+  RoleRuntimeConfiguration,
 } from '../claude/driver.js';
 import {
   FakeClaudeSessionDriver,
@@ -164,6 +165,40 @@ describe('SessionRegistry Developer attachment', () => {
       permissionMode: 'safe_auto',
       developer: configuration,
     });
+  });
+
+  it('passes QA role configuration without populating Developer controls', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'create-qa');
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    const configuration: RoleRuntimeConfiguration = {
+      role: 'qa',
+      initialPrompt: 'Verify the assigned Developer cycle.',
+      allowedTools: ['Read', 'mcp__mesh_qa__submit_qa_verdict'],
+      disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+      controlServer: {
+        name: 'mesh_qa',
+        version: '1',
+        tools: [],
+      },
+    };
+
+    await registry.create('create-qa', configuration);
+
+    expect(driver.createdRequests[0]?.role).toBe(configuration);
+    expect(driver.createdRequests[0]?.developer).toBeUndefined();
+    expect(driver.createdSessions[0]?.prompts).toEqual([
+      'Verify the assigned Developer cycle.',
+    ]);
   });
 
   it('invalidates session capabilities on interruption and shutdown', async () => {

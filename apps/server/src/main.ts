@@ -43,10 +43,13 @@ import { AttemptService } from './tasks/attempt-service.js';
 import { DeveloperCapabilityRegistry } from './tasks/developer-capability-registry.js';
 import { DeveloperExecutionService } from './tasks/developer-execution-service.js';
 import { DeveloperReworkService } from './tasks/developer-rework-service.js';
+import { QaCapabilityRegistry } from './tasks/qa-capability-registry.js';
+import { QaExecutionService } from './tasks/qa-execution-service.js';
 import {
   reconcileTaskAttemptLaunchReservations,
   reconcileTaskAttempts,
 } from './tasks/reconcile-attempts.js';
+import { ReviewAutomationService } from './tasks/review-automation-service.js';
 import { TaskService } from './tasks/task-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
@@ -197,6 +200,14 @@ export const startServer = async (
     environment,
   );
   const capabilities = new DeveloperCapabilityRegistry();
+  const qaCapabilities = new QaCapabilityRegistry();
+  const roleServices: { reviewAutomation?: ReviewAutomationService } = {};
+  const requireReviewAutomation = (): ReviewAutomationService => {
+    if (!roleServices.reviewAutomation) {
+      throw new Error('Review automation service is not composed');
+    }
+    return roleServices.reviewAutomation;
+  };
   const runtimeRepairs: AttemptRepair[] = [];
   const reconcileStoppedRuntime = (activeRegistry: SessionRegistry) => {
     const result = reconcileTaskAttempts({
@@ -232,8 +243,10 @@ export const startServer = async (
     events,
     diagnostics,
     driver,
-    invalidateDeveloperCapability: (sessionId) =>
-      capabilities.invalidateSession(sessionId),
+    invalidateDeveloperCapability: (sessionId) => {
+      capabilities.invalidateSession(sessionId);
+      qaCapabilities.invalidateSession(sessionId);
+    },
     onRuntimeStopped: () => reconcileStoppedRuntime(registry),
   });
   const developerExecutionService = new DeveloperExecutionService({
@@ -264,6 +277,9 @@ export const startServer = async (
     registry,
     capabilities,
     developerExecutionService,
+    afterDeveloperSubmission: async (input) => {
+      await requireReviewAutomation().afterDeveloperSubmission(input);
+    },
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
   const git = new GitAdapter(new NodeProcessRunner(), pathOptions);
@@ -285,6 +301,39 @@ export const startServer = async (
     git,
     pathOptions,
     billingConflicts,
+  });
+  const qaExecutionService = new QaExecutionService({
+    database,
+    projects,
+    tasks,
+    transitions,
+    attempts,
+    sessions,
+    workspaces,
+    diagnostics,
+    developerExecutions,
+    qaExecutions,
+    projectEvents,
+    commands,
+    attemptService,
+    capabilities: qaCapabilities,
+    registry,
+    billingConflicts,
+    afterRejectedVerdict: async (input) => {
+      await requireReviewAutomation().afterQaVerdict(input);
+    },
+  });
+  roleServices.reviewAutomation = new ReviewAutomationService({
+    database,
+    projects,
+    tasks,
+    attempts,
+    developerExecutions,
+    qaExecutions,
+    projectEvents,
+    qaExecutionService,
+    developerReworkService,
+    publisher: registry.publisher,
   });
   const reconciliation = reconcileTaskAttempts({
     database,

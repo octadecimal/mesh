@@ -7,6 +7,7 @@ import type {
   DiscoveredClaudeSession,
   DriverEvent,
   DriverSession,
+  RoleRuntimeConfiguration,
   ResumeClaudeSessionRequest,
   StartClaudeSessionRequest,
 } from './driver.js';
@@ -42,6 +43,7 @@ export interface SdkQueryOptions {
   title?: string;
   resume?: string;
   developer?: DeveloperRuntimeConfiguration;
+  role?: RoleRuntimeConfiguration;
   onPermission?(request: SdkPermissionRequest): Promise<SdkPermissionDecision>;
 }
 
@@ -275,6 +277,11 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
     request: StartClaudeSessionRequest | ResumeClaudeSessionRequest,
     resume?: string,
   ): Promise<SdkDriverSession> {
+    if (request.developer && request.role) {
+      throw new Error(
+        'A session cannot combine Developer and QA runtime controls',
+      );
+    }
     const mode = request.permissionMode ?? 'interactive';
     const sessionRef: { current?: SdkDriverSession } = {};
     const options: SdkQueryOptions = {
@@ -282,6 +289,7 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
       title: 'title' in request ? request.title : undefined,
       resume,
       developer: request.developer,
+      role: request.role,
     };
     if (mode !== 'inherit') {
       options.onPermission = (permission) => {
@@ -298,6 +306,8 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
     await session.initialize();
     if (request.developer) {
       await session.sendPrompt(request.developer.initialPrompt);
+    } else if (request.role) {
+      await session.sendPrompt(request.role.initialPrompt);
     }
     return session;
   }
