@@ -1,6 +1,6 @@
 ---
 name: complete-work
-description: Use when a Mesh development branch is finished and the user wants it committed, proposed as a pull request if needed, merged, cleaned up, and made available for hands-on testing.
+description: Use when a Mesh development branch is finished and the user wants a pull request prepared for hands-on testing, then merged only after explicit post-test approval.
 ---
 
 # Complete Work
@@ -51,10 +51,14 @@ If no open PR exists:
 4. Re-run `gh pr view` and require an open PR whose head is the current branch
    and whose base is `master`.
 
-The user's explicit complete-work request authorizes the normal commit, push, PR
-creation, squash merge, cleanup, and any restart required by Step 5. It does not
-authorize including unrelated changes, bypassing failed checks, force-pushing,
-or weakening branch protection.
+The user's explicit complete-work request authorizes the normal commit, push,
+and PR creation needed to make the branch testable. It does **not** authorize
+merging, cleanup, or switching the test stack to `master`. Those actions require
+a later approval given after the user reports completing hands-on testing of
+this PR. Approval given before testing, urgency, a green local suite, or green CI
+does not satisfy the post-test approval gate. It also does not authorize
+including unrelated changes, bypassing failed checks, force-pushing, or
+weakening branch protection.
 
 ## 2. Apply the pre-merge gate
 
@@ -74,7 +78,31 @@ Do not rerun Mesh's full verification suite here. This gate trusts the fresh
 milestone verification already completed before invocation and verifies GitHub's
 current merge evidence.
 
-## 3. Merge
+## 3. Make the PR available for hands-on testing
+
+When runtime behavior changed, start or restart Mesh from the feature worktree,
+not `master`, using the safe listener inspection, subscription-only checks,
+build, launch, and health-check procedure in Step 6, but substitute the verified
+feature-worktree root for every `C:\code\mesh` command root. Do not remove or
+switch that worktree while its test stack is running. For documentation-only
+changes, skip the runtime and provide a file/review walkthrough.
+
+Produce the tailored walkthrough from Step 7, including the PR URL and exact
+success criteria. Then stop and wait. The required gate is two facts from the
+user after testing this PR:
+
+1. They completed the hands-on test.
+2. They explicitly approve merging this PR.
+
+Do not treat silence, a request to “complete work,” prior approval, CI success,
+or the agent's own browser testing as either fact. Preserve the PR, branch, and
+worktree while waiting.
+
+## 4. Re-check and merge after post-test approval
+
+After receiving both facts, re-run the complete pre-merge gate from Step 2 so
+the merge decision uses current GitHub state. Stop again if the PR is behind,
+checks are pending or failing, or mergeability changed.
 
 Use Mesh's standard merge method:
 
@@ -84,7 +112,7 @@ gh pr merge --squash --delete-branch
 
 Confirm the PR reports `MERGED` before cleanup.
 
-## 4. Sync main and clean up
+## 5. Sync main and clean up
 
 Run repository coordination commands from `C:\code\mesh`, never by switching the
 linked worktree itself to `main`:
@@ -106,7 +134,7 @@ expected self-rooted exception: continue, report both leftovers precisely, and
 give the later cleanup commands. It is not permission to force-remove any other
 path.
 
-## 5. Restart Mesh from main when runtime behavior changed
+## 6. Restart Mesh from main when runtime behavior changed
 
 Inspect the merged PR's file list before touching processes. Restart Mesh only
 when at least one changed path can affect the built application, runtime
@@ -166,9 +194,9 @@ Both must return HTTP 200. Also confirm listener command lines point at the
 primary checkout. Background processes may terminate when the agent session ends;
 surface that lifecycle limitation.
 
-## 6. Produce the manual walkthrough
+## 7. Produce the manual walkthrough
 
-Read the merged PR title, body, files, and diff:
+Read the current PR title, body, files, and diff:
 
 ```powershell
 gh pr view <number> --json title,body,files,url
@@ -186,10 +214,11 @@ instructions. Otherwise include:
 
 ## Completion report
 
-Report the merged PR, synced `main` commit, worktree/branch cleanup or exact
-self-rooted leftovers, restart decision with file-scope evidence, and the
-tailored walkthrough. Include stack process/health status and UI URL only when
-Step 5 ran.
+Before post-test approval, report the open PR, current CI state, preserved branch
+and worktree, test-stack status, and tailored walkthrough. After approval and
+merge, report the merged PR, synced `main` commit, worktree/branch cleanup or
+exact self-rooted leftovers, and the post-merge restart decision. Include stack
+process/health status and UI URL only when the relevant runtime step ran.
 
 ## Quick reference
 
@@ -200,6 +229,9 @@ Step 5 ran.
 | CI pending                   | Watch, then re-evaluate the full gate            |
 | CI failed                    | Ask: fix, explicit bypass, or abort              |
 | PR behind                    | Update branch and re-check CI                    |
+| Human test not completed     | Preserve PR/worktree; provide walkthrough; wait  |
+| Human tested, no approval    | Preserve PR/worktree; wait for explicit approval |
+| Human tested and approved    | Re-check current gate, then squash merge          |
 | Docs/metadata-only PR        | Skip restart; report file-scope evidence         |
 | Unknown port owner           | Stop; do not kill it                             |
 | API billing override present | Stop; subscription-only policy is not satisfied  |
@@ -208,6 +240,9 @@ Step 5 ran.
 ## Common mistakes
 
 - Guessing `--merge` instead of using Mesh's required squash merge.
+- Treating complete-work invocation, green CI, or pre-test approval as merge
+  authority.
+- Cleaning the branch or worktree before the human test and approval gate.
 - Treating previous local tests as permission to skip current PR checks.
 - Requiring or exposing an Anthropic API key.
 - Starting Docker or an invented stack command instead of Mesh's Nx/Vite stack.
