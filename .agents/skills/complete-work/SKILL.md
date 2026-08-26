@@ -83,9 +83,12 @@ current merge evidence.
 When runtime behavior changed, start or restart Mesh from the feature worktree,
 not `master`, using the safe listener inspection, subscription-only checks,
 build, launch, and health-check procedure in Step 6, but substitute the verified
-feature-worktree root for every `C:\code\mesh` command root. Do not remove or
-switch that worktree while its test stack is running. For documentation-only
-changes, skip the runtime and provide a file/review walkthrough.
+feature-worktree root for build and process working directories. Set
+`MESH_WORKSPACE_ROOT` to the verified primary checkout root so the test server
+can safely import the primary repository and any linked worktree beneath it.
+Do not remove or switch the feature worktree while its test stack is running.
+For documentation-only changes, skip the runtime and provide a file/review
+walkthrough.
 
 Produce the tailored walkthrough from Step 7, including the PR URL and exact
 success criteria. Then stop and wait. The required gate is two facts from the
@@ -177,6 +180,7 @@ corepack pnpm install --frozen-lockfile
 corepack pnpm nx build server
 $env:NODE_ENV = 'development'
 $env:MESH_DEV_ORIGIN = "http://127.0.0.1:<ui-port>"
+$env:MESH_WORKSPACE_ROOT = 'C:\code\mesh'
 node -e 'require("./dist/apps/server/main.js").startServer().then((server) => console.log(server.origin)).catch((error) => { console.error(error); process.exit(1); })'
 corepack pnpm exec vite --config apps/web/vite.config.ts --host=127.0.0.1 --port <ui-port>
 ```
