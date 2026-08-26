@@ -1091,4 +1091,51 @@ describe('QaExecutionService', () => {
       }),
     ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
   });
+
+  it('rejects a fresh capability bound to a durably closed cycle before persistence', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    context.publicationSnapshots.splice(0);
+    const first = context.service.submitVerdict(
+      verdictInput(context, launched),
+    );
+    const eventsBeforeReplay = context.repositories.projectEvents.after(
+      context.project.id,
+      0,
+    );
+    context.repositories.database.exec(`
+      CREATE TRIGGER fail_terminal_qa_report_replay
+      BEFORE INSERT ON qa_reports
+      BEGIN
+        SELECT RAISE(FAIL, 'terminal replay reached report persistence');
+      END;
+    `);
+    const freshCapability = context.qaCapabilities.issue({
+      sessionId: first.cycle.sessionId,
+      taskId: first.task.id,
+      attemptId: first.attempt.id,
+      cycleId: first.cycle.id,
+    });
+
+    expect(() =>
+      context.service.submitVerdict({
+        ...verdictInput(context, launched),
+        commandId: 'qa-verdict-closed-cycle-replay',
+        capability: freshCapability,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([first.report]);
+    expect(context.repositories.qaExecutions.getCycle(first.cycle.id)).toEqual(
+      first.cycle,
+    );
+    expect(
+      context.repositories.projectEvents.after(context.project.id, 0),
+    ).toEqual(eventsBeforeReplay);
+    expect(context.publicationSnapshots).toHaveLength(1);
+    expect(context.qaCapabilities.resolve(freshCapability)).toBeDefined();
+  });
 });
