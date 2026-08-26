@@ -1,7 +1,11 @@
 import type { PermissionMode } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
-import type { ClaudeSessionDriver, DriverSession } from '../claude/driver.js';
+import type {
+  ClaudeSessionDriver,
+  DeveloperRuntimeConfiguration,
+  DriverSession,
+} from '../claude/driver.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
@@ -17,6 +21,7 @@ interface SessionRegistryDependencies {
   diagnostics: DiagnosticRepository;
   driver: ClaudeSessionDriver;
   publisher?: EventPublisher;
+  invalidateDeveloperCapability?: (sessionId: string) => void;
   shutdownTimeoutMs?: number;
   closeDatabase?: () => void;
 }
@@ -35,13 +40,17 @@ export class SessionRegistry {
     return this.unavailable ? 'audit_unavailable' : 'available';
   }
 
-  async create(sessionId: string): Promise<void> {
-    await this.attach(sessionId, 'create');
+  async create(
+    sessionId: string,
+    developer?: DeveloperRuntimeConfiguration,
+  ): Promise<void> {
+    await this.attach(sessionId, 'create', developer);
   }
 
   async resume(
     sessionId: string,
     configuration: { workspaceId: string; permissionMode: PermissionMode },
+    developer?: DeveloperRuntimeConfiguration,
   ): Promise<void> {
     const configured = this.dependencies.sessions.configureResume(
       sessionId,
@@ -49,7 +58,7 @@ export class SessionRegistry {
       configuration.permissionMode,
     );
     if (!configured) throw { code: 'session_not_found', sessionId };
-    await this.attach(sessionId, 'resume');
+    await this.attach(sessionId, 'resume', developer);
   }
 
   async sendPrompt(sessionId: string, prompt: string): Promise<void> {
@@ -60,6 +69,7 @@ export class SessionRegistry {
 
   async interrupt(sessionId: string): Promise<void> {
     this.assertWritable();
+    this.invalidateDeveloperCapability(sessionId);
     await this.requireRuntime(sessionId).interrupt();
   }
 
@@ -75,7 +85,11 @@ export class SessionRegistry {
   async shutdown(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
-    const runtimes = [...this.runtimes.values()];
+    const runtimeEntries = [...this.runtimes.entries()];
+    for (const [sessionId] of runtimeEntries) {
+      this.invalidateDeveloperCapability(sessionId);
+    }
+    const runtimes = runtimeEntries.map(([, runtime]) => runtime);
     const timeoutMs = this.dependencies.shutdownTimeoutMs ?? 5_000;
     const deadline = Date.now() + timeoutMs;
     const waitWithinDeadline = async (
@@ -109,6 +123,7 @@ export class SessionRegistry {
   private async attach(
     sessionId: string,
     mode: 'create' | 'resume',
+    developer?: DeveloperRuntimeConfiguration,
   ): Promise<void> {
     this.assertWritable();
     if (this.runtimes.has(sessionId)) {
@@ -138,35 +153,39 @@ export class SessionRegistry {
 
     const runtimeRef: { current?: SessionRuntime } = {};
     const onStopped = () => {
+      this.invalidateDeveloperCapability(sessionId);
       if (
         runtimeRef.current &&
         this.runtimes.get(sessionId) === runtimeRef.current
       )
         this.runtimes.delete(sessionId);
     };
-    const placeholder: DriverSession = await (mode === 'create'
-      ? this.dependencies.driver.create({
-          title: session.title,
-          workspacePath: workspace.path,
-          permissionMode: session.permissionMode,
-        })
-      : this.dependencies.driver.resume({
-          claudeResumeId: session.claudeResumeId!,
-          workspacePath: workspace.path,
-          permissionMode: session.permissionMode,
-        }));
-    const runtime = new SessionRuntime({
-      session,
-      driverSession: placeholder,
-      events: this.dependencies.events,
-      diagnostics: this.dependencies.diagnostics,
-      publisher: this.publisher,
-      onAuditFailure: (error) => this.tripAuditBarrier(error),
-      onStopped,
-    });
-    runtimeRef.current = runtime;
-    this.runtimes.set(sessionId, runtime);
+    let placeholder: DriverSession | undefined;
     try {
+      placeholder = await (mode === 'create'
+        ? this.dependencies.driver.create({
+            title: session.title,
+            workspacePath: workspace.path,
+            permissionMode: session.permissionMode,
+            developer,
+          })
+        : this.dependencies.driver.resume({
+            claudeResumeId: session.claudeResumeId!,
+            workspacePath: workspace.path,
+            permissionMode: session.permissionMode,
+            developer,
+          }));
+      const runtime = new SessionRuntime({
+        session,
+        driverSession: placeholder,
+        events: this.dependencies.events,
+        diagnostics: this.dependencies.diagnostics,
+        publisher: this.publisher,
+        onAuditFailure: (error) => this.tripAuditBarrier(error),
+        onStopped,
+      });
+      runtimeRef.current = runtime;
+      this.runtimes.set(sessionId, runtime);
       runtime.persistTransition({
         type: mode === 'create' ? 'start' : 'resume',
       });
@@ -178,8 +197,9 @@ export class SessionRegistry {
       runtime.startConsuming();
     } catch (error) {
       this.runtimes.delete(sessionId);
-      await placeholder.interrupt().catch(() => undefined);
-      await placeholder.close().catch(() => undefined);
+      this.invalidateDeveloperCapability(sessionId);
+      await placeholder?.interrupt().catch(() => undefined);
+      await placeholder?.close().catch(() => undefined);
       throw error;
     }
   }
@@ -210,6 +230,13 @@ export class SessionRegistry {
   private tripAuditBarrier(_error: unknown): void {
     if (this.unavailable) return;
     this.unavailable = true;
-    for (const runtime of this.runtimes.values()) runtime.emergencyInterrupt();
+    for (const [sessionId, runtime] of this.runtimes) {
+      this.invalidateDeveloperCapability(sessionId);
+      runtime.emergencyInterrupt();
+    }
+  }
+
+  private invalidateDeveloperCapability(sessionId: string): void {
+    this.dependencies.invalidateDeveloperCapability?.(sessionId);
   }
 }

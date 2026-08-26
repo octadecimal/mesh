@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  developerExecutionCycleSchema,
   rawDiagnosticSchema,
   sessionSchema,
   stableTaskErrorCodeSchema,
   taskActorSchema,
   workspaceSchema,
   type MutatingCommand,
+  type DeveloperExecutionCycle,
   type Project,
   type ProjectEvent,
   type Session,
@@ -16,6 +18,11 @@ import {
   type Workspace,
 } from '@mesh-session-platform/contracts';
 
+import type { DeveloperRuntimeConfiguration } from '../claude/driver.js';
+import {
+  composeDeveloperPrompt,
+  DEVELOPER_POLICY_VERSION,
+} from '../domain/developer-policy.js';
 import { authorizeTaskTransition } from '../domain/task-lifecycle.js';
 import type { GitAdapter } from '../platform/git.js';
 import {
@@ -28,6 +35,7 @@ import {
   type RepositoryIdentity,
 } from '../projects/repository-identity.js';
 import type { CommandRepository } from '../repositories/command-repository.js';
+import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
@@ -37,6 +45,8 @@ import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { Database } from '../db/database.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
+import type { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
+import type { DeveloperExecutionService } from './developer-execution-service.js';
 import {
   ProjectArchivedError,
   ProjectNotFoundError,
@@ -61,6 +71,10 @@ export type AttemptLaunchInput = {
   actor: AttemptActorInput;
 };
 
+export type DeveloperAttemptLaunchInput = Omit<AttemptLaunchInput, 'actor'> & {
+  actor: Omit<AttemptActorInput, 'type'> & { type: 'human' };
+};
+
 export type AttemptLinkInput = {
   commandId: string;
   taskId: string;
@@ -83,10 +97,14 @@ export type AttemptMutationResult = {
   attempt: TaskAttempt;
   event: ProjectEvent;
   session?: Session;
+  cycle?: DeveloperExecutionCycle;
 };
 
 type AttemptRegistry = {
-  create(sessionId: string): Promise<void>;
+  create(
+    sessionId: string,
+    developer?: DeveloperRuntimeConfiguration,
+  ): Promise<void>;
   interrupt(sessionId: string): Promise<void>;
   publisher: Pick<EventPublisher, 'publishProject'>;
 };
@@ -99,10 +117,13 @@ type AttemptServiceDependencies = {
   sessions: SessionRepository;
   workspaces: WorkspaceRepository;
   diagnostics: DiagnosticRepository;
+  developerExecutions: DeveloperExecutionRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
   taskService: TaskService;
   registry: AttemptRegistry;
+  capabilities: DeveloperCapabilityRegistry;
+  developerExecutionService: DeveloperExecutionService;
   git?: Pick<GitAdapter, 'createWorktree'>;
   pathOptions?: ResolveWorkspacePathOptions;
   billingConflicts?: readonly { variable: string }[];
@@ -214,6 +235,19 @@ export class AttemptService {
   }
 
   launch(input: AttemptLaunchInput): Promise<AttemptMutationResult> {
+    return this.launchAttempt(input, false);
+  }
+
+  launchDeveloper(
+    input: DeveloperAttemptLaunchInput,
+  ): Promise<AttemptMutationResult> {
+    return this.launchAttempt(input, true);
+  }
+
+  private launchAttempt(
+    input: AttemptLaunchInput,
+    developer: boolean,
+  ): Promise<AttemptMutationResult> {
     return this.dependencies.commands.executeOnce(input.commandId, async () => {
       this.assertBillingSafe();
       const actor = taskActorSchema.parse(input.actor);
@@ -280,6 +314,7 @@ export class AttemptService {
           session: Session;
           attempt: TaskAttempt;
           event: ProjectEvent;
+          cycle?: DeveloperExecutionCycle;
         };
         try {
           prepared = this.persistLaunchAudit(
@@ -291,6 +326,7 @@ export class AttemptService {
             session,
             occurredAt,
             hasWorktreeReservation,
+            developer,
           );
         } catch (error) {
           if (hasWorktreeReservation) {
@@ -308,9 +344,54 @@ export class AttemptService {
         }
         this.dependencies.registry.publisher.publishProject(prepared.event);
 
+        let developerRuntime: DeveloperRuntimeConfiguration | undefined;
+        let developerCycle: DeveloperExecutionCycle | undefined;
         try {
-          await this.dependencies.registry.create(prepared.session.id);
+          if (prepared.cycle) {
+            developerCycle = prepared.cycle;
+            const agentActor = taskActorSchema.parse({
+              type: 'agent',
+              id: `developer-${prepared.attempt.id}`,
+            });
+            const capability = this.dependencies.capabilities.issue({
+              sessionId: prepared.session.id,
+              attemptId: prepared.attempt.id,
+              taskId: task.id,
+              cycleId: developerCycle.id,
+              agentActor,
+            });
+            developerRuntime = {
+              initialPrompt: composeDeveloperPrompt(developerCycle),
+              controls: {
+                submitForReview: async (report) => {
+                  this.dependencies.developerExecutionService.submitForReview({
+                    commandId: report.id,
+                    capability,
+                    expectedRevision: input.expectedRevision + 1,
+                    report,
+                    actor: agentActor,
+                  });
+                },
+                markBlocked: async (report) => {
+                  this.dependencies.developerExecutionService.markBlocked({
+                    commandId: report.id,
+                    capability,
+                    expectedRevision: input.expectedRevision + 1,
+                    report,
+                    actor: agentActor,
+                  });
+                },
+              },
+            };
+          }
+          await this.dependencies.registry.create(
+            prepared.session.id,
+            developerRuntime,
+          );
         } catch (error) {
+          if (developerCycle) {
+            this.dependencies.capabilities.invalidateCycle(developerCycle.id);
+          }
           if (
             !this.recordDiagnostic(prepared.session.id, {
               kind: 'task_attempt_launch',
@@ -341,8 +422,12 @@ export class AttemptService {
             attempt: prepared.attempt,
             event: transition.event,
             session: this.dependencies.sessions.get(prepared.session.id),
+            ...(prepared.cycle ? { cycle: prepared.cycle } : {}),
           };
         } catch (error) {
+          if (prepared.cycle) {
+            this.dependencies.capabilities.invalidateCycle(prepared.cycle.id);
+          }
           let cleanup: 'interrupted' | 'unknown' = 'interrupted';
           try {
             await this.dependencies.registry.interrupt(prepared.session.id);
@@ -654,6 +739,7 @@ export class AttemptService {
     session: Session,
     occurredAt: string,
     hasWorktreeReservation: boolean,
+    developer: boolean,
   ) {
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
@@ -679,7 +765,47 @@ export class AttemptService {
         persistedSession.id,
         'launched',
         actor,
+        developer ? 'developer' : null,
       );
+      let cycle: DeveloperExecutionCycle | undefined;
+      if (developer) {
+        const project = this.requireActiveProject(current.projectId);
+        cycle = this.dependencies.developerExecutions.createCycle(
+          developerExecutionCycleSchema.parse({
+            id: this.createId(),
+            attemptId: attempt.id,
+            ordinal: 1,
+            mode: 'new',
+            authorizedBy: actor,
+            authorizationCommandId: commandId,
+            policyVersion: DEVELOPER_POLICY_VERSION,
+            projectInstructions: {
+              content: project.developerInstructions.content,
+              revision: project.developerInstructions.revision,
+            },
+            taskSnapshot: {
+              revision: current.revision,
+              title: current.title,
+              description: current.description,
+              acceptanceCriteria: current.acceptanceCriteria.map(
+                (text, index) => ({
+                  id: `criterion-${index + 1}`,
+                  text,
+                }),
+              ),
+            },
+            workspaceId: persistedSession.workspaceId,
+            permissionMode: persistedSession.permissionMode,
+            startedAt: occurredAt,
+            endedAt: null,
+            terminalDisposition: null,
+            completionReportId: null,
+            blockerReportId: null,
+            terminalCommandId: null,
+            terminalEventId: null,
+          }),
+        );
+      }
       const linkedReservation = this.dependencies.database
         .prepare(
           'UPDATE task_attempt_launch_reservations SET session_id = ? WHERE task_id = ? AND command_id = ?',
@@ -688,19 +814,43 @@ export class AttemptService {
       if (linkedReservation.changes !== 1) {
         throw new Error(`Launch reservation for task '${current.id}' was lost`);
       }
-      const event = this.dependencies.projectEvents.appendInTransaction(
-        current.projectId,
-        {
-          protocolVersion: 1,
-          id: this.createId(),
-          projectId: current.projectId,
-          occurredAt,
-          type: 'task.attempt_changed',
-          payload: { attempt },
-        },
-      );
+      const event = cycle
+        ? this.dependencies.projectEvents.appendInTransaction(
+            current.projectId,
+            {
+              protocolVersion: 1,
+              id: this.createId(),
+              projectId: current.projectId,
+              occurredAt,
+              type: 'task.developer_execution_changed',
+              payload: {
+                task: current,
+                attempt,
+                cycle,
+                completionReport: null,
+                blockerReport: null,
+                reviewFeedback: null,
+              },
+            },
+          )
+        : this.dependencies.projectEvents.appendInTransaction(
+            current.projectId,
+            {
+              protocolVersion: 1,
+              id: this.createId(),
+              projectId: current.projectId,
+              occurredAt,
+              type: 'task.attempt_changed',
+              payload: { attempt },
+            },
+          );
       this.dependencies.database.exec('COMMIT');
-      return { session: persistedSession, attempt, event };
+      return {
+        session: persistedSession,
+        attempt,
+        event,
+        ...(cycle ? { cycle } : {}),
+      };
     } catch (error) {
       if (this.dependencies.database.inTransaction) {
         this.dependencies.database.exec('ROLLBACK');

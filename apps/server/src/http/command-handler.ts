@@ -118,6 +118,33 @@ const requireAttemptService = (dependencies: CommandDependencies) => {
   return dependencies.attemptService;
 };
 
+type DeveloperLaunchCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'task.developer.launch' }
+>;
+
+const executeDeveloperLaunch = async (
+  command: DeveloperLaunchCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  if (command.payload.actor.type !== 'human') {
+    throw new CommandError(
+      'task_transition_unauthorized',
+      'Only a human may launch a Developer',
+    );
+  }
+  return response(
+    command.type,
+    attemptResponse(
+      await requireAttemptService(dependencies).launchDeveloper({
+        ...command.payload,
+        commandId: idempotencyKey,
+      }),
+    ),
+  );
+};
+
 const requireTaskCommandId = (commandId: string | undefined): string => {
   if (!commandId) {
     throw new CommandError(
@@ -923,6 +950,13 @@ export const executeCommand = async (
   if ('idempotencyKey' in command) {
     if (command.command.type === 'project.developer_instructions.update') {
       return executeDeveloperInstructionUpdate(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (command.command.type === 'task.developer.launch') {
+      return executeDeveloperLaunch(
         command.command,
         command.idempotencyKey,
         dependencies,

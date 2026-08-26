@@ -2,8 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  idSchema,
   projectSchema,
   sessionSchema,
   taskActorSchema,
@@ -22,10 +23,15 @@ import { SessionRegistry } from '../runtime/session-registry.js';
 import type { RepositoryIdentity } from '../projects/repository-identity.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { AttemptService } from './attempt-service.js';
+import { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
+import { DeveloperExecutionService } from './developer-execution-service.js';
 import { TaskService } from './task-service.js';
 
 const now = '2026-08-25T12:00:00.000Z';
-const actor = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
+const actor = taskActorSchema.parse({
+  type: 'human',
+  id: 'operator-1',
+}) as ReturnType<typeof taskActorSchema.parse> & { type: 'human' };
 
 describe('AttemptService', () => {
   const cleanups: Array<() => Promise<void> | void> = [];
@@ -43,9 +49,12 @@ describe('AttemptService', () => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-attempt-service-'));
     const repositories = createTestRepositories(options?.repositories);
     const driver = options?.driver ?? new FakeClaudeSessionDriver();
+    const capabilities = new DeveloperCapabilityRegistry();
     const registry = new SessionRegistry({
       ...repositories,
       driver,
+      invalidateDeveloperCapability: (sessionId) =>
+        capabilities.invalidateSession(sessionId),
       closeDatabase: () => undefined,
     });
     let nextId = 0;
@@ -55,11 +64,20 @@ describe('AttemptService', () => {
       now: () => now,
       createId,
     });
+    const developerExecutionService = new DeveloperExecutionService({
+      ...repositories,
+      capabilities,
+      publisher: registry.publisher,
+      now: () => now,
+      createId,
+    });
     const service = new AttemptService({
       ...repositories,
       taskService,
+      capabilities,
+      developerExecutionService,
       registry: {
-        create: (sessionId) => registry.create(sessionId),
+        create: (sessionId, developer) => registry.create(sessionId, developer),
         interrupt:
           options?.interrupt ?? ((sessionId) => registry.interrupt(sessionId)),
         publisher: registry.publisher,
@@ -93,7 +111,14 @@ describe('AttemptService', () => {
       repositories.dispose();
       rmSync(directory, { force: true, recursive: true });
     });
-    return { directory, driver, registry, repositories, service };
+    return {
+      capabilities,
+      directory,
+      driver,
+      registry,
+      repositories,
+      service,
+    };
   };
 
   const seedTask = (
@@ -128,6 +153,11 @@ describe('AttemptService', () => {
     permissionMode: 'interactive' as const,
     workspace: { type: 'shared' as const, path: directory },
     actor,
+  });
+
+  const developerLaunchInput = (directory: string) => ({
+    ...launchInput(directory),
+    commandId: 'developer-launch-1',
   });
 
   const worktreeLaunchInput = (directory: string) => ({
@@ -189,12 +219,260 @@ describe('AttemptService', () => {
       session: { lifecycleState: 'running' },
     });
     expect((driver as FakeClaudeSessionDriver).createdRequests).toHaveLength(1);
+    expect(
+      (driver as FakeClaudeSessionDriver).createdRequests[0]?.developer,
+    ).toBeUndefined();
+    expect(result.attempt.role).toBeNull();
     expect(repositories.attempts.listByTask('task-1')).toHaveLength(1);
     expect(
       repositories.projectEvents
         .after('project-1', 0)
         .map((event) => event.type),
     ).toEqual(['task.attempt_changed', 'task.transitioned']);
+  });
+
+  it('launches a Developer from an exact durable cycle before runtime start', async () => {
+    const driver = new FakeClaudeSessionDriver();
+    const create = driver.create.bind(driver);
+    let assertRuntimeOrdering = () => undefined;
+    vi.spyOn(driver, 'create').mockImplementation(async (request) => {
+      assertRuntimeOrdering();
+      return create(request);
+    });
+    const { capabilities, directory, repositories, service } = setup({
+      driver,
+    });
+    seedTask(repositories, {
+      acceptanceCriteria: [
+        'Persist the execution contract.',
+        'Install scoped controls.',
+      ],
+    });
+    const project = repositories.projects.updateDeveloperInstructions(
+      'project-1',
+      1,
+      {
+        content: 'Run the focused server tests.',
+        updatedAt: now,
+        updatedBy: actor,
+      },
+    );
+    expect(project?.developerInstructions.revision).toBe(2);
+    const issuedTokens: string[] = [];
+    const issue = capabilities.issue.bind(capabilities);
+    vi.spyOn(capabilities, 'issue').mockImplementation((binding) => {
+      const token = issue(binding);
+      issuedTokens.push(token);
+      return token;
+    });
+    assertRuntimeOrdering = () => {
+      const [cycle] = repositories.developerExecutions.listByTask('task-1');
+      expect(cycle).toBeDefined();
+      expect(repositories.tasks.get('task-1')?.lifecycleState).toBe('ready');
+      expect(issuedTokens).toHaveLength(1);
+      expect(capabilities.resolve(issuedTokens[0]!)).toMatchObject({
+        cycleId: cycle?.id,
+        taskId: 'task-1',
+      });
+    };
+
+    const result = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+
+    const [cycle] = repositories.developerExecutions.listByTask('task-1');
+    expect(result).toMatchObject({
+      task: { lifecycleState: 'in_progress', revision: 2 },
+      attempt: { role: 'developer', source: 'launched', ordinal: 1 },
+      cycle: { id: cycle?.id, ordinal: 1, mode: 'new' },
+      session: { lifecycleState: 'running' },
+    });
+    expect(repositories.attempts.listByTask('task-1')[0]?.role).toBe(
+      'developer',
+    );
+    expect(cycle).toMatchObject({
+      ordinal: 1,
+      mode: 'new',
+      authorizedBy: actor,
+      authorizationCommandId: 'developer-launch-1',
+      policyVersion: 'developer-policy-v1',
+      projectInstructions: {
+        content: 'Run the focused server tests.',
+        revision: 2,
+      },
+      taskSnapshot: {
+        revision: 1,
+        title: 'Implement attempt launch',
+        description: 'Compose the existing session boundary safely.',
+        acceptanceCriteria: [
+          { id: 'criterion-1', text: 'Persist the execution contract.' },
+          { id: 'criterion-2', text: 'Install scoped controls.' },
+        ],
+      },
+      workspaceId: result.session?.workspaceId,
+      permissionMode: 'interactive',
+      startedAt: now,
+      endedAt: null,
+      terminalDisposition: null,
+    });
+    const request = driver.createdRequests[0];
+    expect(request?.developer?.initialPrompt).toContain(
+      'Title: Implement attempt launch',
+    );
+    expect(request?.developer?.initialPrompt).toContain(
+      '[criterion-2] Install scoped controls.',
+    );
+    expect(request?.developer?.initialPrompt).toContain(
+      'Run the focused server tests.',
+    );
+    expect(request?.developer?.controls.submitForReview).toBeTypeOf('function');
+    expect(request?.developer?.controls.markBlocked).toBeTypeOf('function');
+    expect(
+      repositories.projectEvents
+        .after('project-1', 0)
+        .map((event) => event.type),
+    ).toEqual(['task.developer_execution_changed', 'task.transitioned']);
+    const serializedAudit = JSON.stringify({
+      result,
+      projectEvents: repositories.projectEvents.after('project-1', 0),
+      diagnostics: repositories.diagnostics.list(result.session!.id),
+      initialPrompt: request?.developer?.initialPrompt,
+    });
+    expect(serializedAudit).not.toContain(issuedTokens[0]);
+  });
+
+  it('retains failed Developer launch truth and invalidates its capability', async () => {
+    const unavailable = new Error('driver unavailable');
+    const driver: ClaudeSessionDriver = {
+      discover: async () => [],
+      create: async () => {
+        throw unavailable;
+      },
+      resume: async () => new FakeDriverSession('unused'),
+    };
+    const { capabilities, directory, repositories, service } = setup({
+      driver,
+    });
+    seedTask(repositories);
+    let issuedToken = '';
+    const issue = capabilities.issue.bind(capabilities);
+    vi.spyOn(capabilities, 'issue').mockImplementation((binding) => {
+      issuedToken = issue(binding);
+      return issuedToken;
+    });
+
+    await expect(
+      service.launchDeveloper(developerLaunchInput(directory)),
+    ).rejects.toMatchObject({ code: 'attempt_start_failed' });
+
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe('ready');
+    expect(repositories.attempts.listByTask('task-1')[0]?.role).toBe(
+      'developer',
+    );
+    expect(repositories.developerExecutions.listByTask('task-1')).toEqual([
+      expect.objectContaining({ ordinal: 1, terminalDisposition: null }),
+    ]);
+    expect(() => capabilities.resolve(issuedToken)).toThrowError(
+      expect.objectContaining({ code: 'developer_capability_invalid' }),
+    );
+  });
+
+  it('binds installed Developer controls to the launched task and cycle', async () => {
+    const { directory, driver, repositories, service } = setup();
+    seedTask(repositories);
+    const launched = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+    const cycle = launched.cycle;
+    if (!cycle) throw new Error('Expected a Developer execution cycle');
+
+    await (driver as FakeClaudeSessionDriver).submitForReview(0, {
+      id: idSchema.parse('developer-review-command'),
+      cycleId: cycle.id,
+      summary: 'Launch composition is complete.',
+      criterionResults: [
+        {
+          criterionId: idSchema.parse('criterion-1'),
+          status: 'met',
+          evidence: 'Focused tests pass.',
+        },
+      ],
+      verification: [
+        {
+          command: 'corepack pnpm nx test server',
+          outcome: 'passed',
+          output: 'Focused suite passed.',
+        },
+      ],
+      limitations: '',
+      workspaceState: {
+        summary: 'Committed implementation.',
+        hasUncommittedChanges: false,
+        commitsCreated: true,
+      },
+      reviewerNotes: null,
+      createdAt: now,
+    });
+
+    expect(repositories.tasks.get('task-1')).toMatchObject({
+      lifecycleState: 'review',
+      revision: 3,
+    });
+    expect(repositories.developerExecutions.getCycle(cycle.id)).toMatchObject({
+      terminalDisposition: 'submitted_for_review',
+      terminalCommandId: 'developer-review-command',
+    });
+  });
+
+  it('does not issue Developer controls when the launch audit fails', async () => {
+    const { capabilities, directory, driver, repositories, service } = setup({
+      repositories: { failProjectEventInsert: true },
+    });
+    seedTask(repositories);
+    const issue = vi.spyOn(capabilities, 'issue');
+
+    await expect(
+      service.launchDeveloper(developerLaunchInput(directory)),
+    ).rejects.toMatchObject({ code: 'audit_unavailable' });
+
+    expect(issue).not.toHaveBeenCalled();
+    expect(repositories.developerExecutions.listByTask('task-1')).toEqual([]);
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
+  });
+
+  it('interrupts a failed post-start Developer worktree and invalidates controls', async () => {
+    const { capabilities, directory, driver, repositories, service } = setup({
+      repositories: { failTaskTransitionInsert: true },
+      git: { createWorktree: async () => ({ created: true }) },
+    });
+    seedTask(repositories);
+    let issuedToken = '';
+    const issue = capabilities.issue.bind(capabilities);
+    vi.spyOn(capabilities, 'issue').mockImplementation((binding) => {
+      issuedToken = issue(binding);
+      return issuedToken;
+    });
+
+    await expect(
+      service.launchDeveloper({
+        ...developerLaunchInput(directory),
+        workspace: worktreeLaunchInput(directory).workspace,
+      }),
+    ).rejects.toMatchObject({ code: 'attempt_start_failed' });
+
+    expect(
+      (driver as FakeClaudeSessionDriver).createdSessions[0]?.interrupted,
+    ).toBe(true);
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe('ready');
+    expect(repositories.workspaces.listByProject('project-1')).toEqual([
+      expect.objectContaining({
+        owner: 'mesh',
+        cleanupState: 'active',
+      }),
+    ]);
+    expect(() => capabilities.resolve(issuedToken)).toThrowError(
+      expect.objectContaining({ code: 'developer_capability_invalid' }),
+    );
   });
 
   it('durably admits only one concurrent launch for a task revision', async () => {

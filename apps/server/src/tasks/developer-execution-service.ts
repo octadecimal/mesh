@@ -256,12 +256,7 @@ export class DeveloperExecutionService {
     const task = this.dependencies.tasks.get(binding.taskId);
     if (!task) throw new TaskNotFoundError(binding.taskId);
     this.requireActiveProject(task.projectId);
-    if (
-      task.revision !== input.expectedRevision ||
-      task.revision !==
-        this.dependencies.developerExecutions.getCycle(binding.cycleId)
-          ?.taskSnapshot.revision
-    ) {
+    if (task.revision !== input.expectedRevision) {
       throw new TaskRevisionConflictError(task);
     }
     const attempt = this.dependencies.attempts.getCurrentBySession(

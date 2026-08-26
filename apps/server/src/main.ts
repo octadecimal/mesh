@@ -25,6 +25,7 @@ import { GitAdapter } from './platform/git.js';
 import { NodeProcessRunner } from './platform/process-runner.js';
 import { CommandRepository } from './repositories/command-repository.js';
 import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
+import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
 import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
 import { ProjectEventRepository } from './repositories/project-event-repository.js';
@@ -37,6 +38,8 @@ import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { recoverInterruptedSessions } from './runtime/recovery.js';
 import { SessionRegistry } from './runtime/session-registry.js';
 import { AttemptService } from './tasks/attempt-service.js';
+import { DeveloperCapabilityRegistry } from './tasks/developer-capability-registry.js';
+import { DeveloperExecutionService } from './tasks/developer-execution-service.js';
 import {
   reconcileTaskAttemptLaunchReservations,
   reconcileTaskAttempts,
@@ -171,6 +174,7 @@ export const startServer = async (
   const workspaces = new WorkspaceRepository(database);
   const sessions = new SessionRepository(database);
   const diagnostics = new DiagnosticRepository(database);
+  const developerExecutions = new DeveloperExecutionRepository(database);
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
@@ -188,6 +192,7 @@ export const startServer = async (
     options.test?.driver,
     environment,
   );
+  const capabilities = new DeveloperCapabilityRegistry();
   const registry = new SessionRegistry({
     database,
     sessions,
@@ -195,6 +200,19 @@ export const startServer = async (
     events,
     diagnostics,
     driver,
+    invalidateDeveloperCapability: (sessionId) =>
+      capabilities.invalidateSession(sessionId),
+  });
+  const developerExecutionService = new DeveloperExecutionService({
+    projects,
+    tasks,
+    attempts,
+    developerExecutions,
+    transitions,
+    projectEvents,
+    commands,
+    capabilities,
+    publisher: registry.publisher,
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
   const git = new GitAdapter(new NodeProcessRunner(), pathOptions);
@@ -206,10 +224,13 @@ export const startServer = async (
     sessions,
     workspaces,
     diagnostics,
+    developerExecutions,
     projectEvents,
     commands,
     taskService,
     registry,
+    capabilities,
+    developerExecutionService,
     git,
     pathOptions,
     billingConflicts,

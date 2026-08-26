@@ -18,6 +18,8 @@ import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
 import { AttemptService } from '../tasks/attempt-service.js';
+import { DeveloperCapabilityRegistry } from '../tasks/developer-capability-registry.js';
+import { DeveloperExecutionService } from '../tasks/developer-execution-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
 import { toHttpError } from './errors.js';
@@ -62,9 +64,12 @@ describe('executeCommand', () => {
   ) => {
     const repositories = createTestRepositories();
     const driver = new FakeClaudeSessionDriver();
+    const capabilities = new DeveloperCapabilityRegistry();
     const registry = new SessionRegistry({
       ...repositories,
       driver,
+      invalidateDeveloperCapability: (sessionId) =>
+        capabilities.invalidateSession(sessionId),
       closeDatabase: () => undefined,
     });
     const taskService = new TaskService({
@@ -72,10 +77,19 @@ describe('executeCommand', () => {
       now: () => now,
       createId,
     });
+    const developerExecutionService = new DeveloperExecutionService({
+      ...repositories,
+      capabilities,
+      publisher: registry.publisher,
+      now: () => now,
+      createId,
+    });
     const pathOptions = { baseDirectory };
     const attemptService = new AttemptService({
       ...repositories,
       taskService,
+      capabilities,
+      developerExecutionService,
       registry,
       pathOptions,
       now: () => now,
@@ -91,6 +105,7 @@ describe('executeCommand', () => {
         ...repositories,
         taskService,
         attemptService,
+        developerExecutionService,
         registry,
         driver,
         pathOptions,
@@ -709,6 +724,88 @@ describe('executeCommand', () => {
     ).rejects.toMatchObject({ code: 'invalid_command' });
     expect(sessionId).toBeTruthy();
     expect(repositories.attempts.listByTask('t1')).toHaveLength(1);
+  });
+
+  it('routes only a human Developer launch through the audited launch service', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    let nextId = 0;
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => `developer-generated-${++nextId}`,
+    );
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath,
+        repositoryIdentity: repositoryPath,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    repositories.tasks.create(
+      taskSchema.parse({
+        id: 't1',
+        projectId: 'p1',
+        title: 'Launch a Developer',
+        description: 'Start one policy-constrained Developer.',
+        acceptanceCriteria: ['The execution cycle is durable.'],
+        priority: 'normal',
+        rank: 'm',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const launch = projectCommand('developer-launch-command', {
+      type: 'task.developer.launch',
+      payload: {
+        taskId: 't1',
+        expectedRevision: 1,
+        title: 'Developer attempt one',
+        permissionMode: 'interactive',
+        workspace: { type: 'shared', path: repositoryPath },
+        actor: { type: 'human', id: 'operator' },
+      },
+    });
+
+    await expect(
+      executeCommand(
+        projectCommand('developer-launch-agent', {
+          type: 'task.developer.launch',
+          payload: {
+            ...(
+              launch.command as {
+                payload: Record<string, unknown>;
+              }
+            ).payload,
+            actor: { type: 'agent', id: 'developer-agent' },
+          },
+        }),
+        dependencies,
+      ),
+    ).rejects.toBeDefined();
+    expect(repositories.attempts.listByTask('t1')).toEqual([]);
+
+    const launched = await executeCommand(launch, dependencies);
+    const duplicate = await executeCommand(launch, dependencies);
+
+    expect(duplicate).toEqual(launched);
+    expect(launched).toMatchObject({
+      commandType: 'task.developer.launch',
+      result: {
+        task: { id: 't1', lifecycleState: 'in_progress', revision: 2 },
+        attempt: { ordinal: 1, source: 'launched', role: 'developer' },
+        cycle: { ordinal: 1, mode: 'new' },
+        session: { lifecycleState: 'running' },
+        projectEventCursor: 2,
+      },
+    });
+    expect(repositories.developerExecutions.listByTask('t1')).toHaveLength(1);
   });
 
   it('does not decide an already-resolved permission request', async () => {
