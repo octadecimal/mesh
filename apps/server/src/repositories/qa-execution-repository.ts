@@ -71,6 +71,33 @@ type CompleteCycle = Pick<
   | 'terminalEventId'
 >;
 
+const assertDurableActionState = (
+  action: ReviewAutomationAction,
+): ReviewAutomationAction => {
+  if (action.status === 'pending') {
+    if (action.completedAt !== null || action.errorCode !== null) {
+      throw new TypeError(
+        'Pending automation actions may not have completion metadata',
+      );
+    }
+    return action;
+  }
+  if (action.status === 'completed') {
+    if (action.completedAt === null || action.errorCode !== null) {
+      throw new TypeError(
+        'Completed automation actions require a completion time and no error',
+      );
+    }
+    return action;
+  }
+  if (action.completedAt === null || action.errorCode === null) {
+    throw new TypeError(
+      'Failed automation actions require a completion time and error code',
+    );
+  }
+  return action;
+};
+
 const toCycle = (row: CycleRow): QaExecutionCycle => {
   const snapshot = JSON.parse(row.snapshot_json) as CycleSnapshot;
   return qaExecutionCycleSchema.parse({
@@ -126,6 +153,7 @@ export class QaExecutionRepository {
   private readonly completeActiveCycle;
   private readonly insertReportStatement;
   private readonly selectReport;
+  private readonly selectTerminalReport;
   private readonly selectActionByIdempotencyKey;
   private readonly insertAction;
   private readonly completeAction;
@@ -164,6 +192,13 @@ export class QaExecutionRepository {
     this.selectReport = database.prepare(
       'SELECT * FROM qa_reports WHERE id = ?',
     );
+    this.selectTerminalReport = database.prepare(`
+      SELECT *
+      FROM qa_reports
+      WHERE id = @id
+        AND cycle_id = @cycleId
+        AND json_extract(report_json, '$.disposition') = @disposition
+    `);
     this.selectActionByIdempotencyKey = database.prepare(
       'SELECT * FROM review_automation_actions WHERE idempotency_key = ?',
     );
@@ -225,6 +260,24 @@ export class QaExecutionRepository {
     const current = this.getCycle(id);
     if (!current || current.endedAt !== null) return undefined;
     const value = qaExecutionCycleSchema.parse({ ...current, ...update });
+    if (
+      value.terminalDisposition === null ||
+      value.reportId === null ||
+      value.endedAt === null
+    ) {
+      throw new TypeError('Terminal QA cycle metadata is required');
+    }
+    const terminalReport = this.selectTerminalReport.get({
+      id: value.reportId,
+      cycleId: value.id,
+      disposition: value.terminalDisposition,
+    }) as ReportRow | undefined;
+    if (!terminalReport) {
+      throw new Error(
+        'Terminal QA report must exist for the completed cycle and disposition',
+      );
+    }
+    toReport(terminalReport);
     const result = this.completeActiveCycle.run(value);
     return result.changes === 1 ? value : undefined;
   }
@@ -269,7 +322,9 @@ export class QaExecutionRepository {
   insertAutomationAction(
     action: ReviewAutomationAction,
   ): ReviewAutomationAction {
-    const value = reviewAutomationActionSchema.parse(action);
+    const value = assertDurableActionState(
+      reviewAutomationActionSchema.parse(action),
+    );
     const result = this.insertAction.run(value);
     if (result.changes === 1) return value;
     const existing = this.selectActionByIdempotencyKey.get(
@@ -290,13 +345,15 @@ export class QaExecutionRepository {
       | ActionRow
       | undefined;
     if (!current) return undefined;
-    const value = reviewAutomationActionSchema.parse({
-      ...toAction(current),
-      ...completion,
-    });
-    if (value.status === 'pending' || value.completedAt === null) {
+    const value = assertDurableActionState(
+      reviewAutomationActionSchema.parse({
+        ...toAction(current),
+        ...completion,
+      }),
+    );
+    if (value.status === 'pending') {
       throw new TypeError(
-        'Completed automation actions require a terminal status and completion time',
+        'Automation actions must complete with a terminal status',
       );
     }
     const result = this.completeAction.run(value);

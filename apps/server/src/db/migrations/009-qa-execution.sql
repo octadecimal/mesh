@@ -56,16 +56,37 @@ CREATE TABLE review_automation_actions (
   status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
   error_code TEXT,
   created_at TEXT NOT NULL,
-  completed_at TEXT
+  completed_at TEXT,
+  CHECK (
+    (status = 'pending' AND error_code IS NULL AND completed_at IS NULL)
+    OR (status = 'completed' AND error_code IS NULL AND completed_at IS NOT NULL)
+    OR (status = 'failed' AND error_code IS NOT NULL AND completed_at IS NOT NULL)
+  )
 );
 
 CREATE INDEX qa_execution_cycles_attempt_ordinal
   ON qa_execution_cycles(attempt_id, ordinal, id);
 CREATE INDEX qa_reports_cycle_id ON qa_reports(cycle_id);
+CREATE UNIQUE INDEX qa_execution_cycles_terminal_report
+  ON qa_execution_cycles(report_id)
+  WHERE report_id IS NOT NULL;
 CREATE INDEX review_automation_actions_pending
   ON review_automation_actions(status, created_at, id);
 CREATE INDEX review_automation_actions_attempt
   ON review_automation_actions(attempt_id, created_at, id);
+
+CREATE TRIGGER qa_execution_cycles_terminal_report_matches_cycle
+BEFORE UPDATE OF disposition, report_id ON qa_execution_cycles
+WHEN NEW.disposition IS NOT NULL
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1
+    FROM qa_reports
+    WHERE id = NEW.report_id
+      AND cycle_id = NEW.id
+      AND json_extract(report_json, '$.disposition') = NEW.disposition
+  ) THEN RAISE(ABORT, 'QA terminal report must match its cycle and disposition') END;
+END;
 
 CREATE TRIGGER qa_reports_immutable_update
 BEFORE UPDATE ON qa_reports

@@ -157,16 +157,17 @@ export class ProjectRepository {
     this.updateQaConfigurationByRevision = database.prepare(`
       UPDATE projects
       SET qa_instructions_content = @instructionsContent,
-          qa_instructions_revision = @revision,
+          qa_instructions_revision = qa_instructions_revision + 1,
           qa_instructions_updated_at = @updatedAt,
           qa_instructions_updated_by_json = @actorJson,
           qa_review_policy = @reviewPolicy,
-          qa_configuration_revision = @revision,
+          qa_configuration_revision = qa_configuration_revision + 1,
           qa_configuration_updated_at = @updatedAt,
           qa_configuration_updated_by_json = @actorJson,
-          revision = @revision,
+          revision = revision + 1,
           updated_at = @updatedAt
-      WHERE id = @projectId AND revision = @expectedRevision
+      WHERE id = @projectId
+        AND qa_configuration_revision = @expectedQaConfigurationRevision
     `);
   }
 
@@ -310,10 +311,9 @@ export class ProjectRepository {
     });
     const result = this.updateQaConfigurationByRevision.run({
       projectId: parsedProjectId,
-      expectedRevision,
+      expectedQaConfigurationRevision: expectedRevision,
       instructionsContent: configuration.instructions.content,
       reviewPolicy: configuration.reviewPolicy,
-      revision: configuration.revision,
       updatedAt: configuration.updatedAt,
       actorJson: JSON.stringify(parsedActor),
     });

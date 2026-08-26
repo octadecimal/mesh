@@ -63,4 +63,40 @@ describe('ProjectRepository QA configuration', () => {
       ),
     ).toBeUndefined();
   });
+
+  it('uses the QA configuration revision after an unrelated project update', () => {
+    const repo = createTestRepositories();
+    repositories.push(repo);
+    const initial = repo.projects.create(project());
+    const unrelated = repo.projects.update(
+      {
+        ...initial,
+        displayName: 'Renamed project',
+        updatedAt: '2026-08-26T00:00:01.000Z',
+      },
+      initial.revision,
+    );
+
+    expect(unrelated).toMatchObject({
+      revision: 2,
+      qaConfiguration: { revision: 1 },
+    });
+    expect(
+      repo.projects.updateQaConfiguration(
+        'project-1',
+        1,
+        {
+          instructions: { content: 'Still current QA configuration.' },
+          reviewPolicy: 'manual',
+        },
+        taskActorSchema.parse({ type: 'human', id: 'human-1' }),
+      ),
+    ).toMatchObject({
+      revision: 3,
+      qaConfiguration: {
+        revision: 2,
+        instructions: { revision: 2 },
+      },
+    });
+  });
 });

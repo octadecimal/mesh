@@ -175,7 +175,9 @@ describe('QaExecutionRepository', () => {
     expect(repo.qaExecutions.listReportsForAttempts(['attempt-1'])).toEqual([
       original,
     ]);
-    expect(() => repo.qaExecutions.insertReport(report())).toThrow();
+    expect(() =>
+      repo.qaExecutions.insertReport({ ...report(), id: 'report-conflict' }),
+    ).toThrow();
     expect(() =>
       repo.database
         .prepare('UPDATE qa_reports SET report_json = ? WHERE id = ?')
@@ -204,6 +206,46 @@ describe('QaExecutionRepository', () => {
     });
   });
 
+  it('rejects terminal reports that are missing, belong to another cycle, or disagree with the disposition', () => {
+    const repo = setup();
+    repositories.push(repo);
+    repo.qaExecutions.createCycle(cycle(1));
+    repo.qaExecutions.createCycle(cycle(2));
+
+    const terminal = {
+      endedAt: at,
+      terminalDisposition: 'verified' as const,
+      reportId: 'missing-report',
+      terminalCommandId: 'command-terminal-1',
+      terminalEventId: 'event-terminal-1',
+    };
+    expect(() => repo.qaExecutions.completeCycle('cycle-1', terminal)).toThrow(
+      'Terminal QA report must exist for the completed cycle and disposition',
+    );
+
+    const otherCycleReport = repo.qaExecutions.insertReport(report('cycle-1'));
+    expect(() =>
+      repo.qaExecutions.completeCycle('cycle-2', {
+        ...terminal,
+        reportId: otherCycleReport.id,
+      }),
+    ).toThrow(
+      'Terminal QA report must exist for the completed cycle and disposition',
+    );
+
+    const rejectedReport = repo.qaExecutions.insertReport(
+      qaReportSchema.parse({ ...report('cycle-2'), disposition: 'rejected' }),
+    );
+    expect(() =>
+      repo.qaExecutions.completeCycle('cycle-2', {
+        ...terminal,
+        reportId: rejectedReport.id,
+      }),
+    ).toThrow(
+      'Terminal QA report must exist for the completed cycle and disposition',
+    );
+  });
+
   it('returns the original action for a duplicate idempotency key', () => {
     const repo = setup();
     repositories.push(repo);
@@ -225,6 +267,65 @@ describe('QaExecutionRepository', () => {
       }),
     ).toMatchObject({ status: 'completed', completedAt: at });
     expect(repo.qaExecutions.listPendingAutomationActions()).toEqual([]);
+  });
+
+  it('enforces durable automation action states', () => {
+    const repo = setup();
+    repositories.push(repo);
+    repo.qaExecutions.createCycle(cycle(1));
+
+    expect(() =>
+      repo.qaExecutions.insertAutomationAction(
+        reviewAutomationActionSchema.parse({
+          ...action(),
+          id: 'invalid-pending',
+          idempotencyKey: 'invalid-pending-key',
+          errorCode: 'unexpected',
+        }),
+      ),
+    ).toThrow('Pending automation actions may not have completion metadata');
+    expect(() =>
+      repo.database
+        .prepare(
+          `INSERT INTO review_automation_actions (
+            id, idempotency_key, project_id, task_id, attempt_id, source_cycle_id,
+            action_kind, generation, status, error_code, created_at, completed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'invalid-durable-action',
+          'invalid-durable-action-key',
+          'project-1',
+          'task-1',
+          'attempt-1',
+          'cycle-1',
+          'launch_qa',
+          0,
+          'completed',
+          'unexpected',
+          at,
+          null,
+        ),
+    ).toThrow();
+
+    const failed = repo.qaExecutions.insertAutomationAction(
+      reviewAutomationActionSchema.parse({
+        ...action(),
+        id: 'failed-action',
+        idempotencyKey: 'failed-action-key',
+      }),
+    );
+    expect(
+      repo.qaExecutions.completeAutomationAction(failed.id, {
+        status: 'failed',
+        errorCode: 'launch_failed',
+        completedAt: at,
+      }),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'launch_failed',
+      completedAt: at,
+    });
   });
 
   it('rolls back a report when a later project event insertion fails', () => {
