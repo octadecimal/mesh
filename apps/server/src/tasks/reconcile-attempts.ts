@@ -10,6 +10,7 @@ import {
 
 import type { Database } from '../db/database.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
+import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
@@ -33,6 +34,7 @@ type ReconciliationDependencies = {
   projects: Pick<ProjectRepository, 'list'>;
   tasks: Pick<TaskRepository, 'listByProject'>;
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
+  developerExecutions: Pick<DeveloperExecutionRepository, 'listByTask'>;
   sessions: Pick<SessionRepository, 'get'>;
   diagnostics: Pick<DiagnosticRepository, 'insert' | 'list'>;
   projectEvents: Pick<ProjectEventRepository, 'after' | 'appendInTransaction'>;
@@ -154,6 +156,33 @@ const repairFor = (
     : undefined;
 };
 
+const developerRepairFor = (
+  dependencies: Pick<
+    ReconciliationDependencies,
+    'developerExecutions' | 'sessions'
+  >,
+  taskId: string,
+  attempts: TaskAttempt[],
+): AttemptRepair | undefined => {
+  for (const cycle of dependencies.developerExecutions.listByTask(taskId)) {
+    if (cycle.endedAt !== null) continue;
+    const attempt = attempts.find(
+      (candidate) => candidate.id === cycle.attemptId,
+    );
+    if (!attempt) continue;
+    const session = dependencies.sessions.get(attempt.sessionId);
+    if (session && liveSessionStates.has(session.lifecycleState)) continue;
+
+    return attemptRepairSchema.parse({
+      taskId: attempt.taskId,
+      attemptId: attempt.id,
+      sessionId: attempt.sessionId,
+      reason: 'developer_cycle_without_live_session',
+    });
+  }
+  return undefined;
+};
+
 const persistRepair = (
   dependencies: ReconciliationDependencies,
   projectId: Project['id'],
@@ -201,8 +230,8 @@ export const reconcileTaskAttempts = (
   for (const project of dependencies.projects.list()) {
     const recordedEvents = dependencies.projectEvents.after(project.id, 0);
     for (const task of dependencies.tasks.listByProject(project.id)) {
-      const attempts = dependencies.attempts
-        .listByTask(task.id)
+      const taskAttempts = dependencies.attempts.listByTask(task.id);
+      const attempts = taskAttempts
         .filter((candidate) => candidate.unlinkedAt === null)
         .flatMap((attempt) => {
           const session = dependencies.sessions.get(attempt.sessionId);
@@ -216,7 +245,9 @@ export const reconcileTaskAttempts = (
               ]
             : [];
         });
-      const repair = repairFor(task.lifecycleState, attempts);
+      const repair =
+        developerRepairFor(dependencies, task.id, taskAttempts) ??
+        repairFor(task.lifecycleState, attempts);
       if (!repair) continue;
       repairs.push(repair);
       const diagnostics =

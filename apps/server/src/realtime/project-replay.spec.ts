@@ -8,6 +8,23 @@ import {
 
 import { ProjectReplayService } from './project-replay.js';
 
+const task = (projectId: string) => ({
+  id: idSchema.parse(`task-${projectId}`),
+  projectId: idSchema.parse(projectId),
+  title: 'Task',
+  description: '',
+  acceptanceCriteria: [],
+  priority: 'normal' as const,
+  rank: 'a',
+  lifecycleState: 'backlog' as const,
+  labels: [],
+  notes: '',
+  blocked: null,
+  revision: 1,
+  createdAt: '2026-08-24T00:00:00.000Z',
+  updatedAt: '2026-08-24T00:00:00.000Z',
+});
+
 const event = (projectId: string, sequence: number): ProjectEvent => ({
   protocolVersion: 1,
   id: idSchema.parse(`event-${projectId}-${sequence}`),
@@ -15,24 +32,7 @@ const event = (projectId: string, sequence: number): ProjectEvent => ({
   sequence,
   occurredAt: '2026-08-24T00:00:00.000Z',
   type: 'task.changed',
-  payload: {
-    task: {
-      id: idSchema.parse(`task-${projectId}`),
-      projectId: idSchema.parse(projectId),
-      title: 'Task',
-      description: '',
-      acceptanceCriteria: [],
-      priority: 'normal',
-      rank: 'a',
-      lifecycleState: 'backlog',
-      labels: [],
-      notes: '',
-      blocked: null,
-      revision: 1,
-      createdAt: '2026-08-24T00:00:00.000Z',
-      updatedAt: '2026-08-24T00:00:00.000Z',
-    },
-  },
+  payload: { task: task(projectId) },
 });
 
 const repairEvent = projectEventSchema.parse({
@@ -52,6 +52,77 @@ const repairEvent = projectEventSchema.parse({
   },
 });
 
+const developerEvent = projectEventSchema.parse({
+  protocolVersion: 1,
+  id: 'developer-event-1',
+  projectId: 'project-1',
+  sequence: 2,
+  occurredAt: '2026-08-24T00:02:00.000Z',
+  type: 'task.developer_execution_changed',
+  payload: {
+    task: task('project-1'),
+    attempt: {
+      id: 'attempt-1',
+      taskId: 'task-project-1',
+      sessionId: 'session-1',
+      ordinal: 1,
+      source: 'launched',
+      actor: { type: 'human', id: 'operator' },
+      createdAt: '2026-08-24T00:00:00.000Z',
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+      role: 'developer',
+    },
+    cycle: {
+      id: 'cycle-1',
+      attemptId: 'attempt-1',
+      ordinal: 1,
+      mode: 'new',
+      authorizedBy: { type: 'human', id: 'operator' },
+      authorizationCommandId: 'launch-1',
+      policyVersion: 'developer-policy-v1',
+      projectInstructions: { content: '', revision: 1 },
+      taskSnapshot: {
+        revision: 1,
+        title: 'Task',
+        description: '',
+        acceptanceCriteria: [
+          { id: 'criterion-1', text: 'History reconnects.' },
+        ],
+      },
+      workspaceId: 'workspace-1',
+      permissionMode: 'interactive',
+      startedAt: '2026-08-24T00:00:00.000Z',
+      endedAt: '2026-08-24T00:02:00.000Z',
+      terminalDisposition: 'submitted_for_review',
+      completionReportId: 'completion-1',
+      blockerReportId: null,
+      terminalCommandId: 'submit-1',
+      terminalEventId: 'developer-event-1',
+    },
+    completionReport: {
+      id: 'completion-1',
+      cycleId: 'cycle-1',
+      summary: 'Ready for review.',
+      criterionResults: [
+        { criterionId: 'criterion-1', status: 'met', evidence: 'Passed.' },
+      ],
+      verification: [],
+      limitations: '',
+      workspaceState: {
+        summary: 'Clean.',
+        hasUncommittedChanges: false,
+        commitsCreated: true,
+      },
+      reviewerNotes: null,
+      createdAt: '2026-08-24T00:02:00.000Z',
+    },
+    blockerReport: null,
+    reviewFeedback: null,
+  },
+});
+
 describe('ProjectReplayService', () => {
   it('replays repair-bearing project events without losing repair data', () => {
     const replay = new ProjectReplayService({
@@ -63,6 +134,25 @@ describe('ProjectReplayService', () => {
     });
 
     expect(replay.after({ 'project-1': 0 }).events).toEqual([repairEvent]);
+  });
+
+  it('replays Developer events unchanged without capability material', () => {
+    const replay = new ProjectReplayService({
+      retainedAfter: () => ({
+        events: [developerEvent],
+        lowWater: 2,
+        highWater: 2,
+      }),
+    });
+
+    expect(replay.after({ 'project-1': 1 })).toEqual({
+      events: [developerEvent],
+      highWaterByProject: { 'project-1': 2 },
+      resyncProjectIds: [],
+    });
+    expect(JSON.stringify(replay.after({ 'project-1': 1 }))).not.toContain(
+      'capability',
+    );
   });
 
   it('replays retained project events after independent cursors', () => {

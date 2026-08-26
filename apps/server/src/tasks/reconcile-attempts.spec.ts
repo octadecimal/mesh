@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  developerExecutionCycleSchema,
   projectSchema,
   rawDiagnosticSchema,
   sessionSchema,
@@ -262,6 +263,85 @@ describe('reconcileTaskAttempts', () => {
     expect(repositories.projectEvents.after('project-1', 0)).toEqual(
       first.events,
     );
+  });
+
+  it('records one repair for an open Developer cycle with a non-live canonical session', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'completed',
+    });
+    const cycle = repositories.developerExecutions.createCycle(
+      developerExecutionCycleSchema.parse({
+        id: 'cycle-1',
+        attemptId: 'attempt-1',
+        ordinal: 1,
+        mode: 'new',
+        authorizedBy: actor,
+        authorizationCommandId: 'launch-1',
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Recover attempt state',
+          description: 'Keep task outcomes under human control.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Restart state is explicit.' },
+          ],
+        },
+        workspaceId: 'workspace-1',
+        permissionMode: 'interactive',
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        completionReportId: null,
+        blockerReportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+
+    const first = reconcile(repositories);
+    const second = reconcile(repositories);
+
+    expect(first.repairs).toEqual([
+      {
+        taskId: 'task-1',
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+        reason: 'developer_cycle_without_live_session',
+      },
+    ]);
+    expect(first.events).toHaveLength(1);
+    expect(first.events[0]).toMatchObject({
+      type: 'task.attempt_repair_detected',
+      payload: { repair: first.repairs[0] },
+    });
+    expect(second).toEqual({ repairs: first.repairs, events: [] });
+    expect(repositories.tasks.get('task-1')?.lifecycleState).toBe(
+      'in_progress',
+    );
+    expect(repositories.developerExecutions.getCycle(cycle.id)).toEqual(cycle);
+    expect(
+      repositories.database
+        .prepare('SELECT COUNT(*) AS count FROM developer_completion_reports')
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      repositories.database
+        .prepare('SELECT COUNT(*) AS count FROM developer_blocker_reports')
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      repositories.diagnostics
+        .list('session-1')
+        .filter(
+          ({ payload }) =>
+            typeof payload === 'object' &&
+            payload !== null &&
+            'kind' in payload &&
+            payload.kind === 'attempt_repair',
+        ),
+    ).toHaveLength(1);
   });
 
   it('reports an unknown startup after recovery while retaining the ready task', () => {

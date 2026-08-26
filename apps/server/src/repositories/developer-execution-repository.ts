@@ -38,6 +38,40 @@ type CycleRow = {
   terminal_event_id: string | null;
 };
 
+type CompletionReportRow = {
+  id: string;
+  cycle_id: string;
+  summary: string;
+  criterion_results_json: string;
+  verification_json: string;
+  limitations: string;
+  workspace_state_json: string;
+  reviewer_notes: string | null;
+  created_at: string;
+};
+
+type BlockerReportRow = {
+  id: string;
+  cycle_id: string;
+  reason: string;
+  evidence: string;
+  attempted_work: string;
+  suggested_human_action: string;
+  preserve_workspace: number;
+  created_at: string;
+};
+
+type FeedbackRow = {
+  id: string;
+  cycle_id: string;
+  task_id: string;
+  kind: string;
+  feedback: string;
+  actor_json: string;
+  command_id: string;
+  created_at: string;
+};
+
 type CloseCycle = Pick<
   DeveloperExecutionCycle,
   | 'endedAt'
@@ -80,6 +114,45 @@ const toCycle = (row: CycleRow): DeveloperExecutionCycle =>
     terminalEventId: row.terminal_event_id,
   });
 
+const toCompletionReport = (
+  row: CompletionReportRow,
+): DeveloperCompletionReport =>
+  developerCompletionReportSchema.parse({
+    id: row.id,
+    cycleId: row.cycle_id,
+    summary: row.summary,
+    criterionResults: JSON.parse(row.criterion_results_json),
+    verification: JSON.parse(row.verification_json),
+    limitations: row.limitations,
+    workspaceState: JSON.parse(row.workspace_state_json),
+    reviewerNotes: row.reviewer_notes,
+    createdAt: row.created_at,
+  });
+
+const toBlockerReport = (row: BlockerReportRow): DeveloperBlockerReport =>
+  developerBlockerReportSchema.parse({
+    id: row.id,
+    cycleId: row.cycle_id,
+    reason: row.reason,
+    evidence: row.evidence,
+    attemptedWork: row.attempted_work,
+    suggestedHumanAction: row.suggested_human_action,
+    preserveWorkspace: row.preserve_workspace === 1,
+    createdAt: row.created_at,
+  });
+
+const toFeedback = (row: FeedbackRow): DeveloperReviewFeedback =>
+  developerReviewFeedbackSchema.parse({
+    id: row.id,
+    cycleId: row.cycle_id,
+    taskId: row.task_id,
+    kind: row.kind,
+    feedback: row.feedback,
+    actor: JSON.parse(row.actor_json),
+    commandId: row.command_id,
+    createdAt: row.created_at,
+  });
+
 export class DeveloperExecutionRepository {
   private readonly insertCycle;
   private readonly selectCycle;
@@ -89,6 +162,9 @@ export class DeveloperExecutionRepository {
   private readonly insertCompletionReport;
   private readonly insertBlockerReport;
   private readonly insertFeedback;
+  private readonly selectCompletionReportsByTask;
+  private readonly selectBlockerReportsByTask;
+  private readonly selectFeedbackByTask;
 
   constructor(private readonly database: Database) {
     this.insertCycle = database.prepare(`
@@ -160,6 +236,30 @@ export class DeveloperExecutionRepository {
       ) VALUES (
         @id, @cycleId, @taskId, @kind, @feedback, @actorJson, @commandId, @createdAt
       )
+    `);
+    this.selectCompletionReportsByTask = database.prepare(`
+      SELECT report.*
+      FROM developer_completion_reports AS report
+      JOIN developer_execution_cycles AS cycle ON cycle.id = report.cycle_id
+      JOIN task_attempts AS attempt ON attempt.id = cycle.attempt_id
+      WHERE attempt.task_id = ?
+      ORDER BY attempt.ordinal, cycle.ordinal, report.created_at, report.id
+    `);
+    this.selectBlockerReportsByTask = database.prepare(`
+      SELECT report.*
+      FROM developer_blocker_reports AS report
+      JOIN developer_execution_cycles AS cycle ON cycle.id = report.cycle_id
+      JOIN task_attempts AS attempt ON attempt.id = cycle.attempt_id
+      WHERE attempt.task_id = ?
+      ORDER BY attempt.ordinal, cycle.ordinal, report.created_at, report.id
+    `);
+    this.selectFeedbackByTask = database.prepare(`
+      SELECT feedback.*
+      FROM developer_review_feedback AS feedback
+      JOIN developer_execution_cycles AS cycle ON cycle.id = feedback.cycle_id
+      JOIN task_attempts AS attempt ON attempt.id = cycle.attempt_id
+      WHERE attempt.task_id = ?
+      ORDER BY attempt.ordinal, cycle.ordinal, feedback.created_at, feedback.id
     `);
   }
 
@@ -242,6 +342,28 @@ export class DeveloperExecutionRepository {
     return (this.selectByTask.all(idSchema.parse(taskId)) as CycleRow[]).map(
       toCycle,
     );
+  }
+
+  listCompletionReportsByTask(taskId: string): DeveloperCompletionReport[] {
+    return (
+      this.selectCompletionReportsByTask.all(
+        idSchema.parse(taskId),
+      ) as CompletionReportRow[]
+    ).map(toCompletionReport);
+  }
+
+  listBlockerReportsByTask(taskId: string): DeveloperBlockerReport[] {
+    return (
+      this.selectBlockerReportsByTask.all(
+        idSchema.parse(taskId),
+      ) as BlockerReportRow[]
+    ).map(toBlockerReport);
+  }
+
+  listFeedbackByTask(taskId: string): DeveloperReviewFeedback[] {
+    return (
+      this.selectFeedbackByTask.all(idSchema.parse(taskId)) as FeedbackRow[]
+    ).map(toFeedback);
   }
 
   private toCycleParameters(cycle: DeveloperExecutionCycle) {

@@ -6,6 +6,7 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
+import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
@@ -20,6 +21,13 @@ export interface ProjectSnapshotDependencies {
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
   transitions: TaskTransitionRepository;
   projectEvents: ProjectEventRepository;
+  developerExecutions: Pick<
+    DeveloperExecutionRepository,
+    | 'listByTask'
+    | 'listCompletionReportsByTask'
+    | 'listBlockerReportsByTask'
+    | 'listFeedbackByTask'
+  >;
   repairs?: readonly AttemptRepair[];
 }
 
@@ -61,6 +69,18 @@ export const buildProjectSnapshot = (
       ),
       repairs: (dependencies.repairs ?? []).filter((repair) =>
         tasks.some((task) => task.id === repair.taskId),
+      ),
+      developerCycles: tasks.flatMap((task) =>
+        dependencies.developerExecutions.listByTask(task.id),
+      ),
+      developerCompletionReports: tasks.flatMap((task) =>
+        dependencies.developerExecutions.listCompletionReportsByTask(task.id),
+      ),
+      developerBlockerReports: tasks.flatMap((task) =>
+        dependencies.developerExecutions.listBlockerReportsByTask(task.id),
+      ),
+      developerReviewFeedback: tasks.flatMap((task) =>
+        dependencies.developerExecutions.listFeedbackByTask(task.id),
       ),
       cursor: dependencies.projectEvents.latestSequence(project.id),
     });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   idSchema,
+  projectEventSchema,
   type ProjectEvent,
   type ServerMessage,
   type SessionEvent,
@@ -24,6 +25,23 @@ const event = (sequence: number): SessionEvent => ({
   payload: { text: String(sequence) },
 });
 
+const projectTask = (projectId: string) => ({
+  id: idSchema.parse(`task-${projectId}`),
+  projectId: idSchema.parse(projectId),
+  title: 'Task',
+  description: '',
+  acceptanceCriteria: [],
+  priority: 'normal' as const,
+  rank: 'a',
+  lifecycleState: 'backlog' as const,
+  labels: [],
+  notes: '',
+  blocked: null,
+  revision: 1,
+  createdAt: '2026-08-24T00:00:00.000Z',
+  updatedAt: '2026-08-24T00:00:00.000Z',
+});
+
 const projectEvent = (projectId: string, sequence: number): ProjectEvent => ({
   protocolVersion: 1,
   id: idSchema.parse(`project-event-${projectId}-${sequence}`),
@@ -31,23 +49,59 @@ const projectEvent = (projectId: string, sequence: number): ProjectEvent => ({
   sequence,
   occurredAt: '2026-08-24T00:00:00.000Z',
   type: 'task.changed',
+  payload: { task: projectTask(projectId) },
+});
+
+const developerEvent = projectEventSchema.parse({
+  protocolVersion: 1,
+  id: 'developer-event-p1-2',
+  projectId: 'p1',
+  sequence: 2,
+  occurredAt: '2026-08-24T00:02:00.000Z',
+  type: 'task.developer_execution_changed',
   payload: {
-    task: {
-      id: idSchema.parse(`task-${projectId}`),
-      projectId: idSchema.parse(projectId),
-      title: 'Task',
-      description: '',
-      acceptanceCriteria: [],
-      priority: 'normal',
-      rank: 'a',
-      lifecycleState: 'backlog',
-      labels: [],
-      notes: '',
-      blocked: null,
-      revision: 1,
+    task: projectTask('p1'),
+    attempt: {
+      id: 'attempt-1',
+      taskId: 'task-p1',
+      sessionId: 'session-1',
+      ordinal: 1,
+      source: 'launched',
+      actor: { type: 'human', id: 'operator' },
       createdAt: '2026-08-24T00:00:00.000Z',
-      updatedAt: '2026-08-24T00:00:00.000Z',
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+      role: 'developer',
     },
+    cycle: {
+      id: 'cycle-1',
+      attemptId: 'attempt-1',
+      ordinal: 1,
+      mode: 'new',
+      authorizedBy: { type: 'human', id: 'operator' },
+      authorizationCommandId: 'launch-1',
+      policyVersion: 'developer-policy-v1',
+      projectInstructions: { content: '', revision: 1 },
+      taskSnapshot: {
+        revision: 1,
+        title: 'Task',
+        description: '',
+        acceptanceCriteria: [],
+      },
+      workspaceId: 'workspace-1',
+      permissionMode: 'interactive',
+      startedAt: '2026-08-24T00:00:00.000Z',
+      endedAt: null,
+      terminalDisposition: null,
+      completionReportId: null,
+      blockerReportId: null,
+      terminalCommandId: null,
+      terminalEventId: null,
+    },
+    completionReport: null,
+    blockerReport: null,
+    reviewFeedback: null,
   },
 });
 
@@ -285,6 +339,40 @@ describe('SocketHub', () => {
       ['p1', 3],
       ['p1', 4],
     ]);
+  });
+
+  it('streams a Developer event unchanged and without capability material', () => {
+    const publisher = new EventPublisher();
+    const hub = new SocketHub({
+      publisher,
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({
+          events: [projectEvent('p1', 1)],
+          lowWater: 1,
+          highWater: 1,
+        }),
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 0 });
+    publisher.publishProject(developerEvent);
+
+    const message = socket.messages.find(
+      (candidate) =>
+        candidate.type === 'project.event' &&
+        candidate.payload.event.type === 'task.developer_execution_changed',
+    );
+    expect(message).toEqual({
+      protocolVersion: 1,
+      type: 'project.event',
+      payload: { event: developerEvent },
+    });
+    expect(JSON.stringify(message)).not.toContain('capability');
   });
 
   it('emits project resync without replaying an unavailable suffix', () => {

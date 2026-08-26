@@ -259,6 +259,7 @@ export const startServer = async (
     attempts,
     sessions,
     diagnostics,
+    developerExecutions,
     projectEvents,
   });
   reconcileTaskAttemptLaunchReservations(database);
@@ -273,6 +274,7 @@ export const startServer = async (
     attempts,
     transitions,
     projectEvents,
+    developerExecutions,
     repairs: reconciliation.repairs,
     workspaces,
     sessions,
