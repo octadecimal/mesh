@@ -462,6 +462,71 @@ describe('AttemptService', () => {
     );
   });
 
+  it('restores review truth when resume command completion cannot persist', async () => {
+    const resumedSession = new FakeDriverSession('claude-resume-1');
+    const driver: ClaudeSessionDriver = {
+      discover: async () => [],
+      create: async () => new FakeDriverSession('unused'),
+      resume: async () => resumedSession,
+    };
+    const { capabilities, directory, repositories, service } = setup({
+      driver,
+      repositories: {
+        failCommandCompleteFor: 'command-reject-resume-complete-failed',
+      },
+    });
+    const prior = seedRecovery(repositories, directory, 'rejection');
+    let issuedToken = '';
+    const issue = capabilities.issue.bind(capabilities);
+    vi.spyOn(capabilities, 'issue').mockImplementation((binding) => {
+      issuedToken = issue(binding);
+      return issuedToken;
+    });
+    const input = {
+      commandId: 'command-reject-resume-complete-failed',
+      taskId: prior.task.id,
+      expectedRevision: prior.task.revision,
+      kind: 'rejection' as const,
+      feedback: 'Preserve review if command completion fails.',
+      actor,
+    };
+
+    await expect(service.resumeDeveloper(input)).rejects.toMatchObject({
+      code: 'attempt_reconciliation_required',
+    });
+
+    expect(repositories.tasks.get(prior.task.id)).toMatchObject({
+      lifecycleState: 'review',
+      blocked: null,
+    });
+    expect(repositories.developerExecutions.listByTask(prior.task.id)).toEqual([
+      prior.cycle,
+      expect.objectContaining({
+        mode: 'resume',
+        endedAt: now,
+        terminalDisposition: null,
+      }),
+    ]);
+    expect(resumedSession.interrupted).toBe(true);
+    expect(() => capabilities.resolve(issuedToken)).toThrow();
+    expect(
+      repositories.diagnostics.list(prior.attempt.sessionId),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'developer_recovery',
+          stage: 'command_completion',
+          cleanup: 'interrupted',
+          reconciliationRequired: true,
+        }),
+      }),
+    );
+    await expect(service.resumeDeveloper(input)).rejects.toMatchObject({
+      code: 'command_reconciliation_required',
+      state: 'pending',
+    });
+  });
+
   it('starts fresh rework without replacing prior attempt history', async () => {
     const { directory, driver, repositories, service } = setup();
     const prior = seedRecovery(repositories, directory, 'rejection');
@@ -494,6 +559,51 @@ describe('AttemptService', () => {
     expect(cycles[0]).toEqual(prior.cycle);
     expect((driver as FakeClaudeSessionDriver).createdRequests).toHaveLength(1);
   });
+
+  it.each([
+    ['reject-new', 'rejection'],
+    ['unblock-new', 'unblock'],
+  ] as const)(
+    'starts %s recovery in a reserved worktree',
+    async (name, kind) => {
+      const createWorktree = vi.fn(async () => ({ created: true as const }));
+      const { directory, repositories, service } = setup({
+        git: { createWorktree },
+      });
+      const prior = seedRecovery(repositories, directory, kind);
+
+      const result = await service.reworkDeveloperNew({
+        commandId: `command-${name}-worktree`,
+        taskId: prior.task.id,
+        expectedRevision: prior.task.revision,
+        kind,
+        feedback:
+          kind === 'rejection'
+            ? 'Address the review feedback in a fresh worktree.'
+            : 'The dependency is available in a fresh worktree.',
+        title: `Fresh ${name} worktree`,
+        permissionMode: 'interactive',
+        workspace: worktreeLaunchInput(directory).workspace,
+        actor,
+      });
+
+      expect(result).toMatchObject({
+        task: { lifecycleState: 'in_progress', blocked: null },
+        cycle: { mode: 'new' },
+        feedback: { kind },
+      });
+      expect(createWorktree).toHaveBeenCalledOnce();
+      expect(
+        repositories.workspaces.listByProject(prior.task.projectId),
+      ).toContainEqual(
+        expect.objectContaining({
+          type: 'worktree',
+          owner: 'mesh',
+          cleanupState: 'active',
+        }),
+      );
+    },
+  );
 
   it('keeps blocker truth and closes the fresh cycle when startup fails', async () => {
     const unavailable = new Error('startup unavailable');
@@ -536,6 +646,72 @@ describe('AttemptService', () => {
         .prepare('SELECT kind, feedback FROM developer_review_feedback')
         .all(),
     ).toEqual([{ kind: 'unblock', feedback: 'Dependency restored.' }]);
+  });
+
+  it('restores blocker truth when fresh command completion cannot persist', async () => {
+    const { capabilities, directory, driver, repositories, service } = setup({
+      repositories: {
+        failCommandCompleteFor: 'command-unblock-new-complete-failed',
+      },
+    });
+    const prior = seedRecovery(repositories, directory, 'unblock');
+    let issuedToken = '';
+    const issue = capabilities.issue.bind(capabilities);
+    vi.spyOn(capabilities, 'issue').mockImplementation((binding) => {
+      issuedToken = issue(binding);
+      return issuedToken;
+    });
+    const input = {
+      commandId: 'command-unblock-new-complete-failed',
+      taskId: prior.task.id,
+      expectedRevision: prior.task.revision,
+      kind: 'unblock' as const,
+      feedback: 'Preserve the blocker if command completion fails.',
+      title: 'Fresh unblock command-completion failure',
+      permissionMode: 'interactive' as const,
+      workspace: { type: 'shared' as const, path: directory },
+      actor,
+    };
+
+    await expect(service.reworkDeveloperNew(input)).rejects.toMatchObject({
+      code: 'attempt_reconciliation_required',
+    });
+
+    expect(repositories.tasks.get(prior.task.id)).toMatchObject({
+      lifecycleState: 'in_progress',
+      blocked: expect.objectContaining({
+        reason: prior.task.blocked?.reason,
+      }),
+    });
+    expect(repositories.developerExecutions.listByTask(prior.task.id)).toEqual([
+      prior.cycle,
+      expect.objectContaining({
+        mode: 'new',
+        endedAt: now,
+        terminalDisposition: null,
+      }),
+    ]);
+    expect(
+      (driver as FakeClaudeSessionDriver).createdSessions[0]?.interrupted,
+    ).toBe(true);
+    expect(() => capabilities.resolve(issuedToken)).toThrow();
+    const attempts = repositories.attempts.listByTask(prior.task.id);
+    expect(
+      repositories.diagnostics.list(attempts[1]?.sessionId ?? ''),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'developer_recovery',
+          stage: 'command_completion',
+          cleanup: 'interrupted',
+          reconciliationRequired: true,
+        }),
+      }),
+    );
+    await expect(service.reworkDeveloperNew(input)).rejects.toMatchObject({
+      code: 'command_reconciliation_required',
+      state: 'pending',
+    });
   });
 
   it('launches a Developer from an exact durable cycle before runtime start', async () => {

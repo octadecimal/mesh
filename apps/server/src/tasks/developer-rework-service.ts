@@ -149,7 +149,10 @@ export class DeveloperReworkService {
     input: DeveloperAttemptResumeInput,
   ): Promise<DeveloperRecoveryResult> {
     let completedResume:
-      | { sessionId: string; developerCycleId: string }
+      | {
+          prepared: PreparedDeveloperRecovery;
+          actor: TaskActor;
+        }
       | undefined;
     const executeResume = async () => {
       const actor = taskActorSchema.parse(input.actor);
@@ -208,10 +211,7 @@ export class DeveloperReworkService {
           event: transition.event,
           session: this.dependencies.sessions.get(session.id),
         };
-        completedResume = {
-          sessionId: session.id,
-          developerCycleId: prepared.cycle.id,
-        };
+        completedResume = { prepared, actor };
         return result;
       } catch (error) {
         this.dependencies.capabilities.invalidateCycle(prepared.cycle.id);
@@ -239,7 +239,12 @@ export class DeveloperReworkService {
       );
     } catch (error) {
       if (completedResume) {
-        await this.cleanupCommandCompletionFailure(completedResume, error);
+        await this.reconcileCommandCompletionFailure(
+          completedResume.prepared,
+          input,
+          completedResume.actor,
+          error,
+        );
       }
       throw error;
     }
@@ -409,7 +414,7 @@ export class DeveloperReworkService {
 
   closeFailed(
     prepared: PreparedDeveloperRecovery,
-    stage: 'startup' | 'resume' | 'task_transition',
+    stage: 'startup' | 'resume' | 'task_transition' | 'command_completion',
     error: unknown,
     cleanup?: 'interrupted' | 'unknown',
   ): void {
@@ -470,6 +475,9 @@ export class DeveloperReworkService {
         stage,
         outcome: 'failed',
         ...(cleanup ? { cleanup } : {}),
+        ...(stage === 'command_completion'
+          ? { reconciliationRequired: true }
+          : {}),
         error: errorDetails(error),
       })
     ) {
@@ -478,6 +486,43 @@ export class DeveloperReworkService {
         error,
       );
     }
+  }
+
+  async reconcileCommandCompletionFailure(
+    prepared: PreparedDeveloperRecovery,
+    input: Pick<
+      DeveloperAttemptResumeInput,
+      'commandId' | 'taskId' | 'expectedRevision' | 'kind' | 'feedback'
+    >,
+    actor: TaskActor,
+    error: unknown,
+  ): Promise<never> {
+    this.dependencies.capabilities.invalidateCycle(prepared.cycle.id);
+    let cleanup: 'interrupted' | 'unknown' = 'interrupted';
+    try {
+      await this.dependencies.registry.interrupt(prepared.attempt.sessionId);
+    } catch {
+      cleanup = 'unknown';
+    }
+
+    let restorationError: unknown;
+    try {
+      const restored = await this.restorePriorTruth(prepared, input, actor);
+      this.dependencies.registry.publisher.publishProject(restored.event);
+    } catch (restoreError) {
+      restorationError = restoreError;
+    }
+
+    this.closeFailed(
+      prepared,
+      'command_completion',
+      restorationError ?? error,
+      cleanup,
+    );
+    throw new DeveloperRecoveryReconciliationRequiredError(
+      prepared.attempt.sessionId,
+      restorationError ?? error,
+    );
   }
 
   private persistResumeAudit(
@@ -619,23 +664,45 @@ export class DeveloperReworkService {
     return session;
   }
 
-  private async cleanupCommandCompletionFailure(
-    recovery: { sessionId: string; developerCycleId: string },
-    error: unknown,
-  ): Promise<void> {
-    this.dependencies.capabilities.invalidateCycle(recovery.developerCycleId);
-    let cleanup: 'interrupted' | 'unknown' = 'interrupted';
-    try {
-      await this.dependencies.registry.interrupt(recovery.sessionId);
-    } catch {
-      cleanup = 'unknown';
+  private async restorePriorTruth(
+    prepared: PreparedDeveloperRecovery,
+    input: Pick<
+      DeveloperAttemptResumeInput,
+      'commandId' | 'taskId' | 'expectedRevision' | 'kind'
+    >,
+    actor: TaskActor,
+  ) {
+    const current = this.requireTask(input.taskId, input.expectedRevision + 1);
+    if (current.lifecycleState !== 'in_progress' || current.blocked !== null) {
+      throw new DeveloperRecoveryReconciliationRequiredError(
+        prepared.attempt.sessionId,
+        new Error('Developer recovery task truth changed before restoration'),
+      );
     }
-    this.recordDiagnostic(recovery.sessionId, {
-      kind: 'developer_recovery',
-      stage: 'command_completion',
-      cleanup,
-      reconciliationRequired: true,
-      error: errorDetails(error),
+    const commandId = `${input.commandId}:command-completion-recovery`;
+    if (input.kind === 'rejection') {
+      return this.dependencies.taskService.transition({
+        commandId,
+        taskId: input.taskId,
+        expectedRevision: current.revision,
+        nextState: 'review',
+        reason: 'Restore review after recovery command completion failed',
+        actor,
+      });
+    }
+    const blockerReason = prepared.task.blocked?.reason;
+    if (!blockerReason) {
+      throw new DeveloperRecoveryReconciliationRequiredError(
+        prepared.attempt.sessionId,
+        new Error('Developer recovery has no prior blocker to restore'),
+      );
+    }
+    return this.dependencies.taskService.block({
+      commandId,
+      taskId: input.taskId,
+      expectedRevision: current.revision,
+      reason: blockerReason,
+      actor,
     });
   }
 

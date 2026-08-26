@@ -44,7 +44,10 @@ import type { WorkspaceRepository } from '../repositories/workspace-repository.j
 import type { Database } from '../db/database.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
-import type { DeveloperReworkService } from './developer-rework-service.js';
+import type {
+  DeveloperReworkService,
+  PreparedDeveloperRecovery,
+} from './developer-rework-service.js';
 import {
   ProjectArchivedError,
   ProjectNotFoundError,
@@ -278,7 +281,15 @@ export class AttemptService {
     recovery?: DeveloperAttemptReworkInput,
   ): Promise<AttemptMutationResult> {
     let completedLaunch:
-      | { sessionId: string; developerCycleId?: string }
+      | {
+          sessionId: string;
+          developerCycleId?: string;
+          recovery?: {
+            prepared: PreparedDeveloperRecovery;
+            input: DeveloperAttemptReworkInput;
+            actor: TaskActor;
+          };
+        }
       | undefined;
     const executeLaunch = async () => {
       this.assertBillingSafe();
@@ -325,6 +336,7 @@ export class AttemptService {
               actor,
               workspace,
               session,
+              recovery,
             );
           } catch (error) {
             if (isStableLaunchConflict(error)) throw error;
@@ -458,6 +470,21 @@ export class AttemptService {
           completedLaunch = {
             sessionId: prepared.session.id,
             ...(prepared.cycle ? { developerCycleId: prepared.cycle.id } : {}),
+            ...(recovery && prepared.cycle && prepared.feedback
+              ? {
+                  recovery: {
+                    prepared: {
+                      task,
+                      attempt: prepared.attempt,
+                      cycle: prepared.cycle,
+                      feedback: prepared.feedback,
+                      event: prepared.event,
+                    },
+                    input: recovery,
+                    actor,
+                  },
+                }
+              : {}),
           };
           return result;
         } catch (error) {
@@ -508,6 +535,14 @@ export class AttemptService {
         executeLaunch,
       );
     } catch (error) {
+      if (completedLaunch?.recovery) {
+        await this.dependencies.developerReworkService.reconcileCommandCompletionFailure(
+          completedLaunch.recovery.prepared,
+          completedLaunch.recovery.input,
+          completedLaunch.recovery.actor,
+          error,
+        );
+      }
       if (completedLaunch) {
         await this.cleanupCommandCompletionFailure(completedLaunch, error);
       }
@@ -798,10 +833,18 @@ export class AttemptService {
     actor: TaskActor,
     workspace: Workspace,
     session: Session,
+    recovery?: DeveloperAttemptReworkInput,
   ): void {
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
-      this.requireLaunchableTask(task.id, expectedRevision, actor);
+      if (recovery) {
+        this.dependencies.developerReworkService.requireRecovery(
+          recovery,
+          actor,
+        );
+      } else {
+        this.requireLaunchableTask(task.id, expectedRevision, actor);
+      }
       this.dependencies.workspaces.create(workspace);
       this.dependencies.sessions.create(session);
       this.dependencies.database.exec('COMMIT');
