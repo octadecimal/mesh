@@ -226,6 +226,15 @@ export class QaExecutionRepository {
 
   createCycle(cycle: QaExecutionCycle): QaExecutionCycle {
     const value = qaExecutionCycleSchema.parse(cycle);
+    if (
+      value.endedAt !== null ||
+      value.terminalDisposition !== null ||
+      value.reportId !== null ||
+      value.terminalCommandId !== null ||
+      value.terminalEventId !== null
+    ) {
+      throw new TypeError('QA cycles must be created active');
+    }
     this.insertCycle.run({
       ...value,
       snapshotJson: JSON.stringify(this.cycleSnapshot(value)),

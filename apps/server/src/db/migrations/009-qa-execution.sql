@@ -88,6 +88,19 @@ BEGIN
   ) THEN RAISE(ABORT, 'QA terminal report must match its cycle and disposition') END;
 END;
 
+CREATE TRIGGER qa_execution_cycles_terminal_report_matches_insert
+BEFORE INSERT ON qa_execution_cycles
+WHEN NEW.disposition IS NOT NULL
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1
+    FROM qa_reports
+    WHERE id = NEW.report_id
+      AND cycle_id = NEW.id
+      AND json_extract(report_json, '$.disposition') = NEW.disposition
+  ) THEN RAISE(ABORT, 'QA terminal report must match its cycle and disposition') END;
+END;
+
 CREATE TRIGGER qa_reports_immutable_update
 BEFORE UPDATE ON qa_reports
 BEGIN

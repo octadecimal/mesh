@@ -165,6 +165,50 @@ describe('QaExecutionRepository', () => {
     ]);
   });
 
+  it('creates only active cycles and rejects direct terminal-cycle inserts', () => {
+    const repo = setup();
+    repositories.push(repo);
+    const terminalCycle = qaExecutionCycleSchema.parse({
+      ...cycle(1),
+      endedAt: at,
+      terminalDisposition: 'verified',
+      reportId: 'report-cycle-1',
+      terminalCommandId: 'command-terminal-1',
+      terminalEventId: 'event-terminal-1',
+    });
+
+    expect(() => repo.qaExecutions.createCycle(terminalCycle)).toThrow(
+      'QA cycles must be created active',
+    );
+    expect(() =>
+      repo.database
+        .prepare(
+          `INSERT INTO qa_execution_cycles (
+            id, task_id, attempt_id, session_id, ordinal, snapshot_json,
+            review_policy, automation_generation, rejection_ordinal, disposition,
+            started_at, terminal_at, report_id, terminal_command_id, terminal_event_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'terminal-cycle-sql',
+          'task-1',
+          'attempt-1',
+          'session-1',
+          1,
+          '{}',
+          'manual',
+          0,
+          0,
+          'verified',
+          at,
+          at,
+          'report-cycle-1',
+          'command-terminal-1',
+          'event-terminal-1',
+        ),
+    ).toThrow('QA terminal report must match its cycle and disposition');
+  });
+
   it('persists immutable terminal reports', () => {
     const repo = setup();
     repositories.push(repo);
