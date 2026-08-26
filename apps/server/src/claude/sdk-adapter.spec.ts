@@ -176,6 +176,37 @@ describe('createClaudeSdkFacade', () => {
     expect(JSON.stringify(failed)).toContain('developer_capability_invalid');
     expect(JSON.stringify(failed)).not.toContain(capability);
   });
+
+  it('sanitizes a capability-like callback error code before returning MCP content', async () => {
+    const capability = 'capability_secret_Bs3Qp7wK9x';
+    const controls = {
+      submitForReview: vi.fn(async () => undefined),
+      markBlocked: vi.fn(async () => {
+        const error = new Error('Developer control failed') as Error & {
+          code: string;
+        };
+        error.code = capability;
+        throw error;
+      }),
+    };
+    createClaudeSdkFacade().startQuery({
+      developer: { initialPrompt: 'Execute.', controls },
+    });
+
+    const failed =
+      await developerTools().mark_blocked?.handler(blockerReport());
+
+    expect(failed).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: '{"status":"error","code":"developer_control_failed"}',
+        },
+      ],
+      isError: true,
+    });
+    expect(JSON.stringify(failed)).not.toContain(capability);
+  });
 });
 
 const developerTools = (): Record<string, ToolDefinition> => {

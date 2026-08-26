@@ -82,14 +82,33 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
     ? (value as Record<string, unknown>)
     : undefined;
 
+const safeDeveloperControlErrorCodes = new Set([
+  'invalid_input',
+  'developer_control_failed',
+  'developer_capability_invalid',
+  'developer_execution_outcome_invalid',
+  'project_not_found',
+  'project_archived',
+  'task_not_found',
+  'task_revision_conflict',
+  'task_blocked',
+  'task_transition_invalid',
+  'task_transition_unauthorized',
+  'command_reconciliation_required',
+]);
+
 const developerControlFailure = (error: unknown) => {
   const record = asRecord(error);
-  const code =
+  const candidate =
     typeof record?.code === 'string'
       ? record.code
-      : error === 'invalid_input'
+      : typeof error === 'string'
         ? error
-        : 'developer_control_failed';
+        : undefined;
+  const code =
+    candidate && safeDeveloperControlErrorCodes.has(candidate)
+      ? candidate
+      : 'developer_control_failed';
   return {
     content: [
       {
