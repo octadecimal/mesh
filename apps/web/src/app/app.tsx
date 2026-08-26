@@ -540,6 +540,9 @@ function ConnectedApp({
               onCommand={submitTaskCommand}
               onSelectTask={onSelectTask}
               onOpenSession={openSession}
+              connected={
+                projection.connectionHealth === 'connected' && Boolean(api)
+              }
             />
           </section>
         ) : null}

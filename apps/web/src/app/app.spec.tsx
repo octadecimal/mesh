@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   taskActorSchema,
@@ -259,8 +259,66 @@ describe('App', () => {
       ),
     );
 
-    store.setConnectionHealth('disconnected');
+    act(() => store.setConnectionHealth('disconnected'));
     await waitFor(() => expect(instructions).toBeDisabled());
+  });
+
+  it('routes Developer launch through MeshApi and disables it after disconnect', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    const readyDeveloperTask = taskSchema.parse({
+      ...boardTask,
+      lifecycleState: 'ready',
+      revision: 3,
+    });
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [readyDeveloperTask],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(
+      await screen.findByRole('button', { name: 'Open Board task' }),
+    );
+    await user.selectOptions(
+      screen.getByLabelText('Developer permission mode'),
+      'interactive',
+    );
+    await user.click(screen.getByRole('button', { name: 'Start Developer' }));
+
+    expect(api.command).toHaveBeenCalledWith({
+      type: 'task.developer.launch',
+      payload: {
+        taskId: readyDeveloperTask.id,
+        expectedRevision: 3,
+        title: readyDeveloperTask.title,
+        permissionMode: 'interactive',
+        workspace: { type: 'shared', path: project.repositoryPath },
+        actor: taskActorSchema.parse({
+          type: 'human',
+          id: 'operator',
+          displayName: 'Operator',
+        }),
+      },
+    });
+
+    act(() => store.setConnectionHealth('disconnected'));
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Start Developer' }),
+      ).toBeDisabled(),
+    );
+    expect(
+      screen.getByText(/Developer actions are disconnected/i),
+    ).toBeDefined();
   });
 
   it('does not carry a pending developer-instruction save into a switched project', async () => {

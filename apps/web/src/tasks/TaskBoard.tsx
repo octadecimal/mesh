@@ -25,6 +25,7 @@ type TaskBoardProps = {
   onCommand: (command: MutatingCommand) => Promise<unknown> | void;
   onSelectTask?: (taskId: string) => void;
   onOpenSession?: (sessionId: string) => void;
+  connected?: boolean;
 };
 
 type BoardView = 'active' | 'done' | 'cancelled';
@@ -116,6 +117,7 @@ export function TaskBoard({
   onCommand,
   onSelectTask,
   onOpenSession,
+  connected = true,
 }: TaskBoardProps) {
   const [view, setView] = useState<BoardView>('active');
   const [draggedTaskId, setDraggedTaskId] = useState<string>();
@@ -139,6 +141,22 @@ export function TaskBoard({
       ? selectedDrawerTask
       : undefined;
   const creatingTaskForProject = creatingTask && drawerProjectId === project.id;
+  const drawerAttempts = drawerTask
+    ? selectTaskAttempts(projection, drawerTask.id)
+    : [];
+  const drawerCycles = drawerAttempts.flatMap(
+    ({ attempt }) => projection.developerCyclesByAttemptId[attempt.id] ?? [],
+  );
+  const drawerCycleIds = new Set(drawerCycles.map((cycle) => cycle.id));
+  const drawerCompletionReports = Object.values(
+    projection.developerCompletionReportsByCycleId,
+  ).filter((report) => drawerCycleIds.has(report.cycleId));
+  const drawerBlockerReports = Object.values(
+    projection.developerBlockerReportsByCycleId,
+  ).filter((report) => drawerCycleIds.has(report.cycleId));
+  const drawerReviewFeedback = Object.values(
+    projection.developerReviewFeedbackByCycleId,
+  ).filter((entry) => drawerCycleIds.has(entry.cycleId));
   const terminalTasks = useMemo(() => {
     const tasks = Object.values(projection.tasksById).filter(
       (task) => task.projectId === project.id,
@@ -488,14 +506,17 @@ export function TaskBoard({
           open
           project={project}
           task={drawerTask}
-          attempts={
-            drawerTask ? selectTaskAttempts(projection, drawerTask.id) : []
-          }
+          attempts={drawerAttempts}
           transitions={
             drawerTask ? selectTaskTransitions(projection, drawerTask.id) : []
           }
           repairs={selectProjectRepairConditions(projection, project.id)}
           sessions={projection.sessions}
+          developerCycles={drawerCycles}
+          developerCompletionReports={drawerCompletionReports}
+          developerBlockerReports={drawerBlockerReports}
+          developerReviewFeedback={drawerReviewFeedback}
+          connected={connected}
           onCommand={onCommand}
           onOpenSession={onOpenSession}
           onOpenChange={(open) => {
