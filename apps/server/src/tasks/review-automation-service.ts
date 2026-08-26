@@ -426,10 +426,7 @@ export class ReviewAutomationService {
               reviewAutomation: {
                 status,
                 generation: task.reviewAutomation.generation + 1,
-                rejectionCount:
-                  status === 'enabled'
-                    ? 0
-                    : task.reviewAutomation.rejectionCount,
+                rejectionCount: task.reviewAutomation.rejectionCount,
                 pauseReason:
                   status === 'paused' ? `Paused by ${actor.id}.` : null,
                 updatedAt: occurredAt,
@@ -468,7 +465,22 @@ export class ReviewAutomationService {
     return outcome;
   }
 
-  afterQaVerdict(input: SourceInput): Promise<ReviewAutomationAction> {
+  async afterQaVerdict(
+    input: SourceInput,
+  ): Promise<ReviewAutomationAction | undefined> {
+    const cycle = this.dependencies.qaExecutions.getCycle(input.cycleId);
+    if (!cycle || cycle.taskId !== input.taskId) return undefined;
+    const action =
+      this.dependencies.qaExecutions.getAutomationActionByIdempotencyKey(
+        this.actionKey(
+          cycle.taskId,
+          cycle.attemptId,
+          cycle.id,
+          'resume_developer',
+          cycle.automationGeneration,
+        ),
+      );
+    if (action?.status !== 'pending') return undefined;
     return this.continueRejectedVerdict(input);
   }
 

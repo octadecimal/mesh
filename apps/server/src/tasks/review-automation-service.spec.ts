@@ -14,7 +14,10 @@ import {
 
 import { EventPublisher } from '../runtime/event-publisher.js';
 import { createTestRepositories } from '../test/create-test-database.js';
-import { ReviewAutomationService } from './review-automation-service.js';
+import {
+  planQaVerdict,
+  ReviewAutomationService,
+} from './review-automation-service.js';
 
 const now = '2026-08-26T16:00:00.000Z';
 const human = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
@@ -27,6 +30,7 @@ describe('ReviewAutomationService', () => {
   const setup = (options?: {
     policy?: 'manual' | 'autonomous_review';
     automationStatus?: 'disabled' | 'enabled' | 'paused';
+    rejectionCount?: number;
     resumeFailure?: Error;
   }) => {
     const repositories = createTestRepositories();
@@ -71,7 +75,7 @@ describe('ReviewAutomationService', () => {
         reviewAutomation: {
           status: options?.automationStatus ?? 'enabled',
           generation: 2,
-          rejectionCount: 0,
+          rejectionCount: options?.rejectionCount ?? 0,
           pauseReason: null,
           updatedAt: now,
         },
@@ -183,7 +187,10 @@ describe('ReviewAutomationService', () => {
       createId: () => `automation-${++nextId}`,
     });
 
-    const rejectedCycle = () => {
+    const rejectedCycle = (options?: {
+      automationGeneration?: number;
+      rejectionOrdinal?: number;
+    }) => {
       repositories.sessions.create(
         sessionSchema.parse({
           id: 'qa-session-1',
@@ -212,8 +219,8 @@ describe('ReviewAutomationService', () => {
           workspaceId: workspace.id,
           reviewPolicy: 'autonomous_review',
           reviewPolicyRevision: 1,
-          automationGeneration: 2,
-          rejectionOrdinal: 0,
+          automationGeneration: options?.automationGeneration ?? 2,
+          rejectionOrdinal: options?.rejectionOrdinal ?? 0,
           startedAt: now,
           endedAt: null,
           terminalDisposition: null,
@@ -381,7 +388,7 @@ describe('ReviewAutomationService', () => {
     const cycle = context.rejectedCycle();
     context.pendingResumeAction(cycle);
 
-    const first = await context.service.continueRejectedVerdict({
+    const first = await context.service.afterQaVerdict({
       taskId: context.task.id,
       cycleId: cycle.id,
     });
@@ -403,6 +410,19 @@ describe('ReviewAutomationService', () => {
     expect(
       context.repositories.qaExecutions.listPendingAutomationActions(),
     ).toEqual([]);
+  });
+
+  it('does nothing after a QA verdict without a pending Developer resume action', async () => {
+    const context = setup();
+    const cycle = context.rejectedCycle();
+
+    await expect(
+      context.service.afterQaVerdict({
+        taskId: context.task.id,
+        cycleId: cycle.id,
+      }),
+    ).resolves.toBeUndefined();
+    expect(context.resumeStarts()).toBe(0);
   });
 
   it('fails the durable action and pauses after resume failure', async () => {
@@ -527,6 +547,71 @@ describe('ReviewAutomationService', () => {
     expect(
       context.repositories.projectEvents.after(context.project.id, 0),
     ).toContainEqual(enabled.event);
+  });
+
+  it('preserves the rejection ceiling across a human pause and re-enable', () => {
+    const context = setup({ rejectionCount: 2 });
+    const paused = context.service.pause({
+      commandId: 'pause-at-ceiling',
+      taskId: context.task.id,
+      expectedRevision: context.task.revision,
+      actor: human,
+    });
+    const enabled = context.service.enable({
+      commandId: 'enable-at-ceiling',
+      taskId: context.task.id,
+      expectedRevision: paused.task.revision,
+      actor: human,
+    });
+
+    expect(enabled.task.reviewAutomation.rejectionCount).toBe(2);
+
+    const cycle = context.rejectedCycle({
+      automationGeneration: enabled.task.reviewAutomation.generation,
+      rejectionOrdinal: 2,
+    });
+    const report = context.repositories.qaExecutions.getReport(
+      cycle.reportId ?? '',
+    );
+    if (!report) throw new Error('Expected rejected QA report');
+    const ids = ['ceiling-action', 'ceiling-event'];
+    context.repositories.database.exec('BEGIN IMMEDIATE');
+    let plan: ReturnType<typeof planQaVerdict>;
+    try {
+      plan = planQaVerdict(
+        {
+          task: enabled.task,
+          attempt: context.attempt,
+          cycle,
+          report,
+          commandId: 'third-rejection',
+          occurredAt: now,
+        },
+        {
+          projects: context.repositories.projects,
+          tasks: context.repositories.tasks,
+          qaExecutions: context.repositories.qaExecutions,
+          transitions: context.repositories.transitions,
+          projectEvents: context.repositories.projectEvents,
+          createId: () => ids.shift() ?? 'unexpected-id',
+        },
+      );
+      context.repositories.database.exec('COMMIT');
+    } catch (error) {
+      context.repositories.database.exec('ROLLBACK');
+      throw error;
+    }
+
+    expect(plan.task.reviewAutomation).toMatchObject({
+      status: 'paused',
+      rejectionCount: 3,
+      pauseReason: 'Three autonomous QA rejections require a human decision.',
+    });
+    expect(plan.action).toMatchObject({
+      actionKind: 'pause_automation',
+      status: 'completed',
+    });
+    expect(context.resumeStarts()).toBe(0);
   });
 
   it('pauses future automation without interrupting the active session', async () => {

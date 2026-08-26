@@ -329,7 +329,7 @@ describe('executeCommand', () => {
     });
   });
 
-  it('returns the committed rejection with durable pause truth when Developer resume fails', async () => {
+  it('delegates verdict follow-up ownership and returns durable pause truth on failure', async () => {
     const { directory } = await createRepository();
     const { repositories, dependencies } = commandDependencies(directory);
     repositories.projects.create(
@@ -371,7 +371,7 @@ describe('executeCommand', () => {
       attempt: { id: 'attempt-1' },
       cycle: {
         id: 'qa-cycle-rejected',
-        reviewPolicy: 'autonomous_review',
+        reviewPolicy: 'manual',
         rejectionOrdinal: 0,
       },
       report: { disposition: 'rejected' },
@@ -385,7 +385,7 @@ describe('executeCommand', () => {
     (
       dependencies as { reviewAutomationService: unknown }
     ).reviewAutomationService = {
-      continueRejectedVerdict: async () => {
+      afterQaVerdict: async () => {
         const current = repositories.tasks.get(task.id);
         if (!current) throw new Error('Expected current task');
         repositories.tasks.update(

@@ -87,7 +87,7 @@ export interface CommandDependencies {
   qaExecutionService?: Pick<QaExecutionService, 'launch' | 'submitVerdict'>;
   reviewAutomationService?: Pick<
     ReviewAutomationService,
-    'afterDeveloperSubmission' | 'continueRejectedVerdict' | 'enable' | 'pause'
+    'afterDeveloperSubmission' | 'afterQaVerdict' | 'enable' | 'pause'
   >;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
@@ -335,34 +335,25 @@ const executeQaCommand = async (
   let outcome = committed;
   let projectEventCursor =
     committed.events.at(-1)?.sequence ?? committed.event.sequence;
-  if (
-    committed.report.disposition === 'rejected' &&
-    committed.cycle.reviewPolicy === 'autonomous_review' &&
-    committed.cycle.rejectionOrdinal < 2 &&
-    committed.task.reviewAutomation.status === 'enabled'
-  ) {
-    try {
-      await requireReviewAutomationService(
-        dependencies,
-      ).continueRejectedVerdict({
-        taskId: committed.task.id,
-        cycleId: committed.cycle.id,
-      });
-    } catch (error) {
-      outcome = {
-        ...committed,
-        task: dependencies.tasks.get(committed.task.id) ?? committed.task,
-      };
-      projectEventCursor = Math.max(
-        projectEventCursor,
-        dependencies.projectEvents.latestSequence(outcome.task.projectId),
-      );
-      warnings.push({
-        code: safeErrorCode(error, 'review_automation_paused'),
-        message:
-          'QA verdict was committed; Developer resume failed and automation paused.',
-      });
-    }
+  try {
+    await requireReviewAutomationService(dependencies).afterQaVerdict({
+      taskId: committed.task.id,
+      cycleId: committed.cycle.id,
+    });
+  } catch (error) {
+    outcome = {
+      ...committed,
+      task: dependencies.tasks.get(committed.task.id) ?? committed.task,
+    };
+    projectEventCursor = Math.max(
+      projectEventCursor,
+      dependencies.projectEvents.latestSequence(outcome.task.projectId),
+    );
+    warnings.push({
+      code: safeErrorCode(error, 'review_automation_paused'),
+      message:
+        'QA verdict was committed; Developer resume failed and automation paused.',
+    });
   }
   return response(
     command.type,
