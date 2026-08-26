@@ -1679,4 +1679,26 @@ describe('AttemptService', () => {
       repositories.attempts.listByTask('task-1')[0]?.unlinkedAt,
     ).toBeNull();
   });
+
+  it('verifies the current Developer attempt workspace without creating another workspace', async () => {
+    const { directory, repositories, service } = setup();
+    seedTask(repositories);
+    const launched = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+    if (!launched.session) throw new Error('Expected Developer session');
+
+    const verified = await service.requireQaWorkspace({
+      taskId: launched.task.id,
+      attemptId: launched.attempt.id,
+      workspaceId: launched.session.workspaceId,
+    });
+
+    expect(verified).toEqual({
+      attempt: launched.attempt,
+      session: launched.session,
+      workspace: repositories.workspaces.get(launched.session.workspaceId),
+    });
+    expect(repositories.workspaces.listByProject('project-1')).toHaveLength(1);
+  });
 });
