@@ -1,5 +1,11 @@
 import type {
+  DeveloperBlockerReport,
+  DeveloperCompletionReport,
+} from '@mesh-session-platform/contracts';
+
+import type {
   ClaudeSessionDriver,
+  DeveloperRuntimeConfiguration,
   DiscoverClaudeSessionsRequest,
   DiscoveredClaudeSession,
   DriverEvent,
@@ -96,6 +102,9 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
   readonly createdRequests: StartClaudeSessionRequest[] = [];
   readonly createdSessions: FakeDriverSession[] = [];
   readonly resumedRequests: ResumeClaudeSessionRequest[] = [];
+  private readonly developerConfigurations: Array<
+    DeveloperRuntimeConfiguration | undefined
+  > = [];
   private createdCount = 0;
 
   constructor(
@@ -120,7 +129,11 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
     }
     this.createdCount += 1;
     this.createdRequests.push({ ...request });
+    this.developerConfigurations.push(request.developer);
     const session = new FakeDriverSession(`fake-resume-${this.createdCount}`);
+    if (request.developer) {
+      await session.sendPrompt(request.developer.initialPrompt);
+    }
     this.createdSessions.push(session);
     return session;
   }
@@ -129,6 +142,32 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
     request: ResumeClaudeSessionRequest,
   ): Promise<FakeDriverSession> {
     this.resumedRequests.push({ ...request });
-    return new FakeDriverSession(request.claudeResumeId);
+    this.developerConfigurations.push(request.developer);
+    const session = new FakeDriverSession(request.claudeResumeId);
+    if (request.developer) {
+      await session.sendPrompt(request.developer.initialPrompt);
+    }
+    return session;
+  }
+
+  async submitForReview(
+    index: number,
+    report: DeveloperCompletionReport,
+  ): Promise<void> {
+    await this.developerConfiguration(index).controls.submitForReview(report);
+  }
+
+  async markBlocked(
+    index: number,
+    report: DeveloperBlockerReport,
+  ): Promise<void> {
+    await this.developerConfiguration(index).controls.markBlocked(report);
+  }
+
+  private developerConfiguration(index: number): DeveloperRuntimeConfiguration {
+    const configuration = this.developerConfigurations[index];
+    if (!configuration)
+      throw new Error(`No Developer runtime configuration at index ${index}`);
+    return configuration;
   }
 }
