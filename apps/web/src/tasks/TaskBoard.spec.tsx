@@ -264,7 +264,7 @@ describe('TaskBoard', () => {
     ).toBeDefined();
   });
 
-  it('keeps a reorder pending through an unrelated revision until its stale rejection arrives', async () => {
+  it('keeps a reorder pending through another rank change until its stale rejection arrives', async () => {
     const command = deferred<unknown>();
     const onCommand = vi.fn().mockReturnValue(command.promise);
     const user = userEvent.setup();
@@ -286,7 +286,7 @@ describe('TaskBoard', () => {
           task({
             id: 'first',
             title: 'First task',
-            rank: 'a',
+            rank: 'z',
             lifecycleState: 'backlog',
             revision: 2,
           }),
@@ -311,6 +311,92 @@ describe('TaskBoard', () => {
     expect(
       screen.getByRole('article', { name: 'First task task card' }),
     ).not.toHaveAttribute('data-pending');
+  });
+
+  it('settles a reorder after its result when the projection arrived first', async () => {
+    const command = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(command.promise);
+    const user = userEvent.setup();
+    const rendered = render(
+      <TaskBoard
+        project={project}
+        projection={boardProjection()}
+        onCommand={onCommand}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: 'Move First task down' }),
+    );
+    rendered.rerender(
+      <TaskBoard
+        project={project}
+        projection={boardProjection([
+          task({ id: 'first', title: 'First task', rank: 'b', revision: 2 }),
+        ])}
+        onCommand={onCommand}
+      />,
+    );
+    expect(
+      screen.getByRole('article', { name: 'First task task card' }),
+    ).toHaveAttribute('data-pending', 'true');
+
+    await act(async () =>
+      command.resolve(
+        commandResult(
+          task({ id: 'first', title: 'First task', rank: 'b', revision: 2 }),
+        ),
+      ),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('article', { name: 'First task task card' }),
+      ).not.toHaveAttribute('data-pending'),
+    );
+  });
+
+  it('settles a reorder after its projection when the result arrived first', async () => {
+    const command = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(command.promise);
+    const user = userEvent.setup();
+    const rendered = render(
+      <TaskBoard
+        project={project}
+        projection={boardProjection()}
+        onCommand={onCommand}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: 'Move First task down' }),
+    );
+    await act(async () =>
+      command.resolve(
+        commandResult(
+          task({ id: 'first', title: 'First task', rank: 'b', revision: 2 }),
+        ),
+      ),
+    );
+    expect(
+      screen.getByRole('article', { name: 'First task task card' }),
+    ).toHaveAttribute('data-pending', 'true');
+
+    rendered.rerender(
+      <TaskBoard
+        project={project}
+        projection={boardProjection([
+          task({ id: 'first', title: 'First task', rank: 'b', revision: 2 }),
+        ])}
+        onCommand={onCommand}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('article', { name: 'First task task card' }),
+      ).not.toHaveAttribute('data-pending'),
+    );
   });
 
   it('ignores a delayed rejection after a newer move starts', async () => {
@@ -603,6 +689,13 @@ const deferred = <Value,>() => {
   });
   return { promise, resolve, reject };
 };
+
+const commandResult = (authoritativeTask: Task) => ({
+  protocolVersion: 1,
+  commandType: 'task.reorder',
+  result: { task: authoritativeTask },
+  warnings: [],
+});
 
 const dataTransfer = () => {
   const values = new Map<string, string>();

@@ -1,5 +1,6 @@
 import {
   taskActorSchema,
+  taskSchema,
   type MutatingCommand,
   type Project,
   type Task,
@@ -41,6 +42,8 @@ type PendingMove =
       sourceRank: string;
       nextState: TaskLifecycleState;
       nextRank: string;
+      authoritativeRevision?: number;
+      authoritativeRank?: string;
     };
 type PendingMoveInput =
   | Omit<Extract<PendingMove, { kind: 'transition' }>, 'id'>
@@ -93,6 +96,20 @@ const formattedMoveError = (caught: unknown): string => {
   return failure.message ?? 'The task could not be moved.';
 };
 
+const authoritativeTaskFrom = (response: unknown): Task | undefined => {
+  if (
+    typeof response !== 'object' ||
+    response === null ||
+    !('result' in response)
+  )
+    return undefined;
+  const result = response.result;
+  if (typeof result !== 'object' || result === null || !('task' in result))
+    return undefined;
+  const task = taskSchema.safeParse(result.task);
+  return task.success ? task.data : undefined;
+};
+
 export function TaskBoard({
   project,
   projection,
@@ -139,10 +156,15 @@ export function TaskBoard({
   useEffect(() => {
     const settled = Object.entries(pendingMoves).filter(([taskId, move]) => {
       const task = projection.tasksById[taskId];
-      return Boolean(
-        task &&
-          task.revision > move.sourceRevision &&
-          (move.kind === 'transition' || task.rank !== move.sourceRank),
+      if (!task) return false;
+      if (move.kind === 'transition') {
+        return task.revision > move.sourceRevision;
+      }
+      if (move.authoritativeRevision === undefined) return false;
+      return (
+        task.revision > move.authoritativeRevision ||
+        (task.revision === move.authoritativeRevision &&
+          task.rank === move.authoritativeRank)
       );
     });
     if (settled.length === 0) return;
@@ -200,20 +222,37 @@ export function TaskBoard({
     } catch (caught) {
       result = Promise.reject(caught);
     }
-    void result.catch((caught: unknown) => {
-      if (activeMoveIds.current[task.id] !== pendingMove.id) return;
-      delete activeMoveIds.current[task.id];
-      setPendingMoves((current) => {
-        if (current[task.id]?.id !== pendingMove.id) return current;
-        const next = { ...current };
-        delete next[task.id];
-        return next;
+    void result
+      .then((response) => {
+        if (pendingMove.kind !== 'reorder') return;
+        const authoritativeTask = authoritativeTaskFrom(response);
+        if (!authoritativeTask || authoritativeTask.id !== task.id) return;
+        setPendingMoves((current) => {
+          if (current[task.id]?.id !== pendingMove.id) return current;
+          return {
+            ...current,
+            [task.id]: {
+              ...pendingMove,
+              authoritativeRevision: authoritativeTask.revision,
+              authoritativeRank: authoritativeTask.rank,
+            },
+          };
+        });
+      })
+      .catch((caught: unknown) => {
+        if (activeMoveIds.current[task.id] !== pendingMove.id) return;
+        delete activeMoveIds.current[task.id];
+        setPendingMoves((current) => {
+          if (current[task.id]?.id !== pendingMove.id) return current;
+          const next = { ...current };
+          delete next[task.id];
+          return next;
+        });
+        setMoveErrors((current) => ({
+          ...current,
+          [task.id]: formattedMoveError(caught),
+        }));
       });
-      setMoveErrors((current) => ({
-        ...current,
-        [task.id]: formattedMoveError(caught),
-      }));
-    });
   };
 
   const moveTask = (
