@@ -56,36 +56,29 @@ describe('QaCapabilityRegistry', () => {
     });
   });
 
+  it('resolves a token only for its complete server-owned execution context', () => {
+    const registry = new QaCapabilityRegistry();
+    const token = registry.issue(binding);
+
+    expect(registry.resolveForContext(token, binding)).toEqual(binding);
+  });
+
   it.each([
+    ['session', { sessionId: 'qa-session-2' }],
     ['task', { taskId: 'task-2' }],
     ['attempt', { attemptId: 'attempt-2' }],
     ['cycle', { cycleId: 'qa-cycle-2' }],
   ] as const)(
-    'keeps a token bound to its issued %s instead of a model-supplied alternative',
+    'rejects a token presented for the wrong %s context',
     (_name, override) => {
       const registry = new QaCapabilityRegistry();
       const token = registry.issue(binding);
 
-      expect(registry.resolve(token)).toEqual(binding);
-      expect(registry.resolve(token)).not.toMatchObject(override);
+      expect(() =>
+        registry.resolveForContext(token, { ...binding, ...override }),
+      ).toThrow(QaCapabilityInvalidError);
     },
   );
-
-  it('rejects cross-session, wrong-task, wrong-attempt, and wrong-cycle tokens after their own invalidation', () => {
-    const registry = new QaCapabilityRegistry();
-    const tokens = [
-      registry.issue({ ...binding, sessionId: 'qa-session-2' }),
-      registry.issue({ ...binding, taskId: 'task-2' }),
-      registry.issue({ ...binding, attemptId: 'attempt-2' }),
-      registry.issue({ ...binding, cycleId: 'qa-cycle-2' }),
-    ];
-
-    for (const token of tokens) registry.invalidate(token);
-
-    for (const token of tokens) {
-      expect(() => registry.resolve(token)).toThrow(QaCapabilityInvalidError);
-    }
-  });
 
   it('starts empty after a restart represented by a fresh registry', () => {
     const registry = new QaCapabilityRegistry();

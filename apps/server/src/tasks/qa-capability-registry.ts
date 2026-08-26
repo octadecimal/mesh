@@ -33,6 +33,23 @@ export class QaCapabilityRegistry {
     return { ...binding };
   }
 
+  resolveForContext(
+    token: QaCapabilityToken,
+    expectedBinding: QaCapabilityBinding,
+  ): QaCapabilityBinding {
+    const binding = this.resolve(token);
+    if (
+      binding.sessionId !== expectedBinding.sessionId ||
+      binding.taskId !== expectedBinding.taskId ||
+      binding.attemptId !== expectedBinding.attemptId ||
+      binding.cycleId !== expectedBinding.cycleId
+    ) {
+      throw new QaCapabilityInvalidError();
+    }
+
+    return binding;
+  }
+
   invalidate(token: QaCapabilityToken): void {
     const binding = this.bindings.get(token);
     if (!binding) return;
