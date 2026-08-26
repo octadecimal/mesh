@@ -41,7 +41,8 @@ type ActionRow = {
   project_id: string;
   task_id: string;
   attempt_id: string;
-  source_cycle_id: string;
+  source_developer_cycle_id: string | null;
+  source_qa_cycle_id: string | null;
   action_kind: string;
   generation: number;
   status: string;
@@ -138,7 +139,12 @@ const toAction = (row: ActionRow): ReviewAutomationAction =>
     projectId: row.project_id,
     taskId: row.task_id,
     attemptId: row.attempt_id,
-    sourceCycleId: row.source_cycle_id,
+    sourceCycleId:
+      row.source_developer_cycle_id ??
+      row.source_qa_cycle_id ??
+      (() => {
+        throw new Error('Automation action source cycle is missing');
+      })(),
     actionKind: row.action_kind,
     generation: row.generation,
     status: row.status,
@@ -155,6 +161,7 @@ export class QaExecutionRepository {
   private readonly selectReport;
   private readonly selectTerminalReport;
   private readonly selectActionByIdempotencyKey;
+  private readonly selectActionBySource;
   private readonly insertAction;
   private readonly completeAction;
   private readonly selectAction;
@@ -200,27 +207,37 @@ export class QaExecutionRepository {
         AND json_extract(report_json, '$.disposition') = @disposition
     `);
     this.selectActionByIdempotencyKey = database.prepare(
-      'SELECT * FROM review_automation_actions WHERE idempotency_key = ?',
+      'SELECT * FROM review_automation_actions_v2 WHERE idempotency_key = ?',
     );
+    this.selectActionBySource = database.prepare(`
+      SELECT *
+      FROM review_automation_actions_v2
+      WHERE COALESCE(source_developer_cycle_id, source_qa_cycle_id) = @sourceCycleId
+        AND action_kind = @actionKind
+      ORDER BY generation DESC, created_at DESC, id DESC
+      LIMIT 1
+    `);
     this.insertAction = database.prepare(`
-      INSERT INTO review_automation_actions (
-        id, idempotency_key, project_id, task_id, attempt_id, source_cycle_id,
+      INSERT INTO review_automation_actions_v2 (
+        id, idempotency_key, project_id, task_id, attempt_id,
+        source_developer_cycle_id, source_qa_cycle_id,
         action_kind, generation, status, error_code, created_at, completed_at
       ) VALUES (
-        @id, @idempotencyKey, @projectId, @taskId, @attemptId, @sourceCycleId,
+        @id, @idempotencyKey, @projectId, @taskId, @attemptId,
+        @sourceDeveloperCycleId, @sourceQaCycleId,
         @actionKind, @generation, @status, @errorCode, @createdAt, @completedAt
       ) ON CONFLICT(idempotency_key) DO NOTHING
     `);
     this.completeAction = database.prepare(`
-      UPDATE review_automation_actions
+      UPDATE review_automation_actions_v2
       SET status = @status, error_code = @errorCode, completed_at = @completedAt
       WHERE id = @id AND status = 'pending'
     `);
     this.selectAction = database.prepare(
-      'SELECT * FROM review_automation_actions WHERE id = ?',
+      'SELECT * FROM review_automation_actions_v2 WHERE id = ?',
     );
     this.selectPendingActions = database.prepare(
-      "SELECT * FROM review_automation_actions WHERE status = 'pending' ORDER BY created_at, id",
+      "SELECT * FROM review_automation_actions_v2 WHERE status = 'pending' ORDER BY created_at, id",
     );
   }
 
@@ -309,6 +326,33 @@ export class QaExecutionRepository {
     return row ? toReport(row) : undefined;
   }
 
+  getAutomationAction(id: string): ReviewAutomationAction | undefined {
+    const row = this.selectAction.get(idSchema.parse(id)) as
+      | ActionRow
+      | undefined;
+    return row ? toAction(row) : undefined;
+  }
+
+  getAutomationActionByIdempotencyKey(
+    idempotencyKey: string,
+  ): ReviewAutomationAction | undefined {
+    const row = this.selectActionByIdempotencyKey.get(
+      idSchema.parse(idempotencyKey),
+    ) as ActionRow | undefined;
+    return row ? toAction(row) : undefined;
+  }
+
+  getAutomationActionBySource(
+    sourceCycleId: string,
+    actionKind: ReviewAutomationAction['actionKind'],
+  ): ReviewAutomationAction | undefined {
+    const row = this.selectActionBySource.get({
+      sourceCycleId: idSchema.parse(sourceCycleId),
+      actionKind,
+    }) as ActionRow | undefined;
+    return row ? toAction(row) : undefined;
+  }
+
   listReportsForAttempts(attemptIds: readonly string[]): QaReport[] {
     const ids = attemptIds.map((id) => idSchema.parse(id));
     if (ids.length === 0) return [];
@@ -334,7 +378,13 @@ export class QaExecutionRepository {
     const value = assertDurableActionState(
       reviewAutomationActionSchema.parse(action),
     );
-    const result = this.insertAction.run(value);
+    const result = this.insertAction.run({
+      ...value,
+      sourceDeveloperCycleId:
+        value.actionKind === 'launch_qa' ? value.sourceCycleId : null,
+      sourceQaCycleId:
+        value.actionKind === 'launch_qa' ? null : value.sourceCycleId,
+    });
     if (result.changes === 1) return value;
     const existing = this.selectActionByIdempotencyKey.get(
       value.idempotencyKey,

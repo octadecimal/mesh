@@ -9,6 +9,9 @@ import {
   developerExecutionCycleSchema,
   idSchema,
   projectSchema,
+  qaExecutionCycleSchema,
+  qaReportSchema,
+  reviewAutomationActionSchema,
   sessionSchema,
   taskActorSchema,
   taskSchema,
@@ -393,7 +396,16 @@ describe('AttemptService', () => {
     const cycles = repositories.developerExecutions.listByTask(prior.task.id);
 
     expect(resumed).toMatchObject({
-      task: { lifecycleState: 'in_progress', blocked: null, revision: 4 },
+      task: {
+        lifecycleState: 'in_progress',
+        blocked: null,
+        revision: 4,
+        reviewAutomation: {
+          generation: 1,
+          rejectionCount: 0,
+          pauseReason: null,
+        },
+      },
       attempt: { id: prior.attempt.id, sessionId: prior.attempt.sessionId },
       cycle: {
         ordinal: 2,
@@ -416,6 +428,135 @@ describe('AttemptService', () => {
       (driver as FakeClaudeSessionDriver).resumedRequests[0]?.developer
         ?.initialPrompt,
     ).toContain(input.feedback);
+  });
+
+  it('resumes the same Claude session for an authorized autonomous rejection', async () => {
+    const { directory, driver, repositories, service } = setup();
+    const prior = seedRecovery(repositories, directory, 'rejection');
+    const project = repositories.projects.get(prior.task.projectId);
+    if (!project) throw new Error('Expected project');
+    repositories.projects.updateQaConfiguration(
+      project.id,
+      project.qaConfiguration.revision,
+      {
+        instructions: { content: 'Run focused verification.' },
+        reviewPolicy: 'autonomous_review',
+      },
+      actor,
+    );
+    const automatedTask = repositories.tasks.update(
+      {
+        ...prior.task,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 1,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+      prior.task.revision,
+    );
+    if (!automatedTask) throw new Error('Expected automation task update');
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'qa-session-rejected',
+        projectId: prior.task.projectId,
+        workspaceId: 'workspace-recovery',
+        title: 'QA rejected',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const qaCycle = repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'qa-cycle-rejected',
+        taskId: prior.task.id,
+        attemptId: prior.attempt.id,
+        sessionId: 'qa-session-rejected',
+        ordinal: 1,
+        authorizedBy: { type: 'system', id: 'review-loop' },
+        authorizationCommandId: 'qa-launch-rejected',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: prior.cycle.taskSnapshot,
+        developerCompletionReportId: 'report-prior',
+        workspaceId: 'workspace-recovery',
+        reviewPolicy: 'autonomous_review',
+        reviewPolicyRevision: 2,
+        automationGeneration: 2,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    const report = repositories.qaExecutions.insertReport(
+      qaReportSchema.parse({
+        id: 'qa-report-rejected',
+        cycleId: qaCycle.id,
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Regression failed.',
+          },
+        ],
+        verificationCommands: [],
+        limitations: [],
+        residualRisks: [],
+        workspaceBefore: 'state-1',
+        workspaceAfter: 'state-1',
+        createdAt: now,
+      }),
+    );
+    repositories.qaExecutions.completeCycle(qaCycle.id, {
+      endedAt: now,
+      terminalDisposition: 'rejected',
+      reportId: report.id,
+      terminalCommandId: 'qa-verdict-rejected',
+      terminalEventId: 'qa-event-rejected',
+    });
+    const commandId = `${prior.task.id}:${prior.attempt.id}:${qaCycle.id}:resume_developer:2`;
+    repositories.qaExecutions.insertAutomationAction(
+      reviewAutomationActionSchema.parse({
+        id: 'resume-action-rejected',
+        idempotencyKey: commandId,
+        projectId: prior.task.projectId,
+        taskId: prior.task.id,
+        attemptId: prior.attempt.id,
+        sourceCycleId: qaCycle.id,
+        actionKind: 'resume_developer',
+        generation: 2,
+        status: 'pending',
+        errorCode: null,
+        createdAt: now,
+        completedAt: null,
+      }),
+    );
+
+    const resumed = await service.resumeDeveloper({
+      commandId,
+      taskId: prior.task.id,
+      expectedRevision: automatedTask.revision,
+      kind: 'rejection',
+      feedback: 'criterion-1: Regression failed.',
+      actor: taskActorSchema.parse({ type: 'system', id: 'review-loop' }),
+      automation: { sourceCycleId: qaCycle.id, generation: 2 },
+    });
+
+    expect(resumed.task).toMatchObject({ lifecycleState: 'in_progress' });
+    expect(
+      (driver as FakeClaudeSessionDriver).resumedRequests.at(-1)
+        ?.claudeResumeId,
+    ).toBe('claude-resume-1');
+    expect(repositories.attempts.listByTask(prior.task.id)).toHaveLength(1);
   });
 
   it('closes a failed resume cycle and retains the prior review truth', async () => {
@@ -560,7 +701,11 @@ describe('AttemptService', () => {
     const cycles = repositories.developerExecutions.listByTask(prior.task.id);
 
     expect(fresh).toMatchObject({
-      task: { lifecycleState: 'in_progress', revision: 4 },
+      task: {
+        lifecycleState: 'in_progress',
+        revision: 4,
+        reviewAutomation: { generation: 1, rejectionCount: 0 },
+      },
       attempt: { ordinal: 2, role: 'developer' },
       cycle: { ordinal: 1, mode: 'new', taskSnapshot: { revision: 3 } },
       feedback: { kind: 'rejection', feedback: input.feedback },

@@ -121,20 +121,31 @@ export const developerBlockerReportInputSchema = developerBlockerReportSchema
   .omit({ id: true, cycleId: true, createdAt: true })
   .extend({ idempotencyKey: idSchema });
 
-const humanTaskActorSchema = taskActorSchema.extend({
-  type: z.literal('human'),
-});
-
-export const developerReviewFeedbackSchema = z.object({
-  id: idSchema,
-  cycleId: idSchema,
-  taskId: idSchema,
-  kind: z.enum(['rejection', 'unblock']),
-  feedback: z.string().trim().min(1),
-  actor: humanTaskActorSchema,
-  commandId: idSchema,
-  createdAt: isoTimestampSchema,
-});
+export const developerReviewFeedbackSchema = z
+  .object({
+    id: idSchema,
+    cycleId: idSchema,
+    taskId: idSchema,
+    kind: z.enum(['rejection', 'unblock']),
+    feedback: z.string().trim().min(1),
+    actor: taskActorSchema,
+    commandId: idSchema,
+    createdAt: isoTimestampSchema,
+  })
+  .superRefine(({ actor, kind }, context) => {
+    const boundedPolicyFeedback =
+      actor.type === 'system' &&
+      actor.id === 'review-loop' &&
+      kind === 'rejection';
+    if (actor.type !== 'human' && !boundedPolicyFeedback) {
+      context.addIssue({
+        code: 'custom',
+        message:
+          'Developer review feedback requires a human or bounded review policy actor.',
+        path: ['actor'],
+      });
+    }
+  });
 
 export type DeveloperCycleMode = z.infer<typeof developerCycleModeSchema>;
 export type DeveloperCycleDisposition = z.infer<

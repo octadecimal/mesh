@@ -1,4 +1,5 @@
 import {
+  developerExecutionCycleSchema,
   projectSchema,
   projectChangedEventSchema,
   qaExecutionCycleSchema,
@@ -132,15 +133,18 @@ const report = (cycleId = 'cycle-1'): QaReport =>
     createdAt: at,
   });
 
-const action = (): ReviewAutomationAction =>
+const action = (
+  sourceCycleId = 'cycle-1',
+  actionKind: ReviewAutomationAction['actionKind'] = 'resume_developer',
+): ReviewAutomationAction =>
   reviewAutomationActionSchema.parse({
     id: 'action-1',
     idempotencyKey: 'action-key-1',
     projectId: 'project-1',
     taskId: 'task-1',
     attemptId: 'attempt-1',
-    sourceCycleId: 'cycle-1',
-    actionKind: 'launch_qa',
+    sourceCycleId,
+    actionKind,
     generation: 0,
     status: 'pending',
     errorCode: null,
@@ -311,6 +315,96 @@ describe('QaExecutionRepository', () => {
       }),
     ).toMatchObject({ status: 'completed', completedAt: at });
     expect(repo.qaExecutions.listPendingAutomationActions()).toEqual([]);
+  });
+
+  it('persists automation actions sourced by Developer and QA cycles', () => {
+    const repo = setup();
+    repositories.push(repo);
+    repo.developerExecutions.createCycle(
+      developerExecutionCycleSchema.parse({
+        id: 'developer-cycle-1',
+        attemptId: 'attempt-1',
+        ordinal: 1,
+        mode: 'new',
+        authorizedBy: { type: 'human', id: 'human-1' },
+        authorizationCommandId: 'developer-command-1',
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Task',
+          description: 'Verify persistence.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Persist QA records' },
+          ],
+        },
+        workspaceId: 'workspace-1',
+        permissionMode: 'interactive',
+        startedAt: at,
+        endedAt: at,
+        terminalDisposition: 'submitted_for_review',
+        completionReportId: 'developer-report-1',
+        blockerReportId: null,
+        terminalCommandId: 'developer-terminal-1',
+        terminalEventId: 'developer-event-1',
+      }),
+    );
+    repo.qaExecutions.createCycle(cycle(1));
+
+    expect(
+      repo.qaExecutions.insertAutomationAction(
+        action('developer-cycle-1', 'launch_qa'),
+      ),
+    ).toMatchObject({ sourceCycleId: 'developer-cycle-1' });
+    expect(
+      repo.qaExecutions.insertAutomationAction({
+        ...action('cycle-1', 'resume_developer'),
+        id: 'action-qa',
+        idempotencyKey: 'action-qa-key',
+      }),
+    ).toMatchObject({ sourceCycleId: 'cycle-1' });
+  });
+
+  it('rejects missing Developer and QA action source cycles through foreign keys', () => {
+    const repo = setup();
+    repositories.push(repo);
+
+    expect(() =>
+      repo.qaExecutions.insertAutomationAction(
+        action('missing-developer-cycle', 'launch_qa'),
+      ),
+    ).toThrow('FOREIGN KEY constraint failed');
+    expect(() =>
+      repo.qaExecutions.insertAutomationAction({
+        ...action('missing-qa-cycle', 'resume_developer'),
+        id: 'missing-qa-action',
+        idempotencyKey: 'missing-qa-action-key',
+      }),
+    ).toThrow('FOREIGN KEY constraint failed');
+  });
+
+  it('persists review automation state with the task revision', () => {
+    const repo = setup();
+    repositories.push(repo);
+    const task = repo.tasks.get('task-1');
+    if (!task) throw new Error('Expected task');
+    const updated = repo.tasks.update(
+      {
+        ...task,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 4,
+          rejectionCount: 2,
+          pauseReason: null,
+          updatedAt: at,
+        },
+      },
+      task.revision,
+    );
+
+    expect(repo.tasks.get(task.id)?.reviewAutomation).toEqual(
+      updated?.reviewAutomation,
+    );
   });
 
   it('enforces durable automation action states', () => {

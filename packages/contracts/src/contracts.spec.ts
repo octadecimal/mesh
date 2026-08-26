@@ -510,6 +510,26 @@ describe('session platform contracts', () => {
         createdAt: now,
       }),
     ).toThrow();
+    const policyFeedback = {
+      id: 'feedback-policy-1',
+      cycleId: 'developer-cycle-1',
+      taskId: 'task-1',
+      kind: 'rejection' as const,
+      feedback: 'criterion-1: Regression failed.',
+      actor: { type: 'system' as const, id: 'review-loop' },
+      commandId: 'command-policy-reject-1',
+      createdAt: now,
+    };
+    expect(developerReviewFeedbackSchema.parse(policyFeedback)).toMatchObject({
+      actor: { type: 'system', id: 'review-loop' },
+      kind: 'rejection',
+    });
+    expect(() =>
+      developerReviewFeedbackSchema.parse({
+        ...policyFeedback,
+        kind: 'unblock',
+      }),
+    ).toThrow();
   });
 
   it('requires each snapshotted criterion exactly once at the Developer event boundary', () => {

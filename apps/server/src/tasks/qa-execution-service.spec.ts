@@ -109,18 +109,6 @@ describe('QaExecutionService', () => {
         ...options?.task,
       }),
     );
-    if (options?.reviewPolicy === 'autonomous_review') {
-      const getPersistedTask = repositories.tasks.get.bind(repositories.tasks);
-      vi.spyOn(repositories.tasks, 'get').mockImplementation((taskId) => {
-        const persistedTask = getPersistedTask(taskId);
-        return persistedTask?.id === task.id
-          ? taskSchema.parse({
-              ...persistedTask,
-              reviewAutomation: task.reviewAutomation,
-            })
-          : persistedTask;
-      });
-    }
     const workspacePath =
       options?.workspaceType === 'worktree'
         ? join(directory, 'developer-worktree')
@@ -372,8 +360,8 @@ describe('QaExecutionService', () => {
           workspaceId: context.workspace.id,
           reviewPolicy: 'manual',
           reviewPolicyRevision: 4,
-          automationGeneration: 0,
-          rejectionOrdinal: 0,
+          automationGeneration: context.task.reviewAutomation.generation,
+          rejectionOrdinal: context.task.reviewAutomation.rejectionCount,
         },
         session: {
           workspaceId: context.developerSession.workspaceId,
@@ -841,8 +829,9 @@ describe('QaExecutionService', () => {
     expect(context.repositories.tasks.get(context.task.id)).toEqual(taskBefore);
   });
 
-  it('does not close an autonomous-review cycle before follow-up planning exists', async () => {
-    const context = setup({ reviewPolicy: 'autonomous_review' });
+  const launchAutonomousForVerdict = async (
+    context: ReturnType<typeof setup>,
+  ) => {
     const launch = await context.service.launch({
       ...launchInput(context.task),
       actor: policyActor,
@@ -850,20 +839,245 @@ describe('QaExecutionService', () => {
     });
     const start = context.starts.at(-1);
     if (!start) throw new Error('Expected QA startup request');
-    const launched = { launch, capability: start.configuration.capability };
+    return { launch, capability: start.configuration.capability };
+  };
+
+  it('atomically completes a verified autonomous-review task', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      task: {
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 0,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+    });
+    const launched = await launchAutonomousForVerdict(context);
+    context.publicationSnapshots.splice(0);
+
+    const outcome = context.service.submitVerdict(
+      verdictInput(context, launched),
+    );
+
+    expect(outcome.task).toMatchObject({
+      lifecycleState: 'done',
+      revision: context.task.revision + 1,
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toEqual(
+      outcome.task,
+    );
+    expect(
+      context.repositories.qaExecutions.listPendingAutomationActions(),
+    ).toEqual([]);
+    expect(
+      context.repositories.projectEvents
+        .after(context.project.id, 0)
+        .slice(-3)
+        .map(({ type }) => type),
+    ).toEqual([
+      'task.qa_execution_changed',
+      'task.transitioned',
+      'task.review_automation_changed',
+    ]);
+    expect(context.publicationSnapshots.map(({ type }) => type)).toEqual([
+      'task.qa_execution_changed',
+      'task.transitioned',
+      'task.review_automation_changed',
+    ]);
+  });
+
+  it.each([
+    [0, 1],
+    [1, 2],
+  ] as const)(
+    'records autonomous rejection %i and schedules same-session resume',
+    async (priorCount, expectedCount) => {
+      const context = setup({
+        reviewPolicy: 'autonomous_review',
+        task: {
+          reviewAutomation: {
+            status: 'enabled',
+            generation: 2,
+            rejectionCount: priorCount,
+            pauseReason: null,
+            updatedAt: now,
+          },
+        },
+      });
+      const launched = await launchAutonomousForVerdict(context);
+
+      const outcome = context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, {
+            disposition: 'rejected',
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status: 'failed',
+                evidence: 'Focused verification failed.',
+              },
+            ],
+          }),
+        }),
+      );
+
+      expect(outcome.task).toMatchObject({
+        lifecycleState: 'review',
+        reviewAutomation: {
+          status: 'enabled',
+          rejectionCount: expectedCount,
+        },
+      });
+      expect(
+        context.repositories.qaExecutions.listPendingAutomationActions(),
+      ).toEqual([
+        expect.objectContaining({
+          sourceCycleId: outcome.cycle.id,
+          actionKind: 'resume_developer',
+          generation: 2,
+        }),
+      ]);
+    },
+  );
+
+  it('pauses on the third autonomous rejection without scheduling resume', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      task: {
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 2,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+    });
+    const launched = await launchAutonomousForVerdict(context);
+
+    const outcome = context.service.submitVerdict(
+      verdictInput(context, launched, {
+        report: reportFor(launched.launch.cycle, {
+          disposition: 'rejected',
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: 'failed',
+              evidence: 'Third focused verification failed.',
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(outcome.task).toMatchObject({
+      lifecycleState: 'review',
+      reviewAutomation: {
+        status: 'paused',
+        rejectionCount: 3,
+        pauseReason: expect.stringContaining('Three'),
+      },
+    });
+    expect(
+      context.repositories.qaExecutions.listPendingAutomationActions(),
+    ).toEqual([]);
+  });
+
+  it('pauses an autonomous rejection when QA observes changed source state', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      task: {
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 0,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+    });
+    const launched = await launchAutonomousForVerdict(context);
+
+    const outcome = context.service.submitVerdict(
+      verdictInput(context, launched, {
+        report: reportFor(launched.launch.cycle, {
+          disposition: 'rejected',
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: 'failed',
+              evidence: 'Source changed during QA.',
+            },
+          ],
+          workspaceAfter: 'unexpected-source-state',
+        }),
+      }),
+    );
+
+    expect(outcome.task.reviewAutomation).toMatchObject({
+      status: 'paused',
+      rejectionCount: 1,
+      pauseReason: expect.stringContaining('source'),
+    });
+    expect(
+      context.repositories.qaExecutions.listPendingAutomationActions(),
+    ).toEqual([]);
+  });
+
+  it('rolls back an autonomous verdict when action persistence fails', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      task: {
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 0,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+    });
+    const launched = await launchAutonomousForVerdict(context);
+    context.repositories.database.exec(`
+      CREATE TRIGGER fail_automation_action
+      BEFORE INSERT ON review_automation_actions_v2
+      BEGIN
+        SELECT RAISE(FAIL, 'automation action insert failed');
+      END;
+    `);
 
     expect(() =>
-      context.service.submitVerdict(verdictInput(context, launched)),
-    ).toThrow(expect.objectContaining({ code: 'review_automation_paused' }));
+      context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, {
+            disposition: 'rejected',
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status: 'failed',
+                evidence: 'Focused verification failed.',
+              },
+            ],
+          }),
+        }),
+      ),
+    ).toThrow('automation action insert failed');
     expect(
-      context.repositories.qaExecutions.getCycle(launch.cycle.id),
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
     ).toMatchObject({ endedAt: null, reportId: null });
     expect(
       context.repositories.qaExecutions.listReportsForAttempts([
         context.attempt.id,
       ]),
     ).toEqual([]);
-    expect(context.qaCapabilities.resolve(launched.capability)).toBeDefined();
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      lifecycleState: 'review',
+      revision: context.task.revision,
+      reviewAutomation: { rejectionCount: 0, status: 'enabled' },
+    });
   });
 
   it.each([

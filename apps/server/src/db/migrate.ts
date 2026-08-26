@@ -63,6 +63,13 @@ const qaExecutionMigration = {
     'utf8',
   ),
 };
+const reviewAutomationStateMigration = {
+  id: '010-review-automation-state',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '010-review-automation-state.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -74,6 +81,7 @@ const migrations = [
   developerExecutionMigration,
   developerCycleTaskTitleMigration,
   qaExecutionMigration,
+  reviewAutomationStateMigration,
 ];
 
 export const migrate = (database: Database): void => {

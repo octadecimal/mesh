@@ -46,6 +46,7 @@ import type { Database } from '../db/database.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
 import type {
+  DeveloperAttemptResumeInput as DeveloperReworkResumeInput,
   DeveloperReworkService,
   PreparedDeveloperRecovery,
 } from './developer-rework-service.js';
@@ -79,14 +80,7 @@ export type DeveloperAttemptLaunchInput = Omit<AttemptLaunchInput, 'actor'> & {
 
 export type DeveloperRecoveryKind = 'rejection' | 'unblock';
 
-export type DeveloperAttemptResumeInput = {
-  commandId: string;
-  taskId: string;
-  expectedRevision: number;
-  kind: DeveloperRecoveryKind;
-  feedback: string;
-  actor: Omit<AttemptActorInput, 'type'> & { type: 'human' };
-};
+export type DeveloperAttemptResumeInput = DeveloperReworkResumeInput;
 
 export type DeveloperAttemptReworkInput = DeveloperAttemptLaunchInput & {
   kind: DeveloperRecoveryKind;

@@ -10,6 +10,7 @@ import {
   idSchema,
   projectSchema,
   sessionSchema,
+  taskActorSchema,
   taskAttemptSchema,
   taskSchema,
   workspaceSchema,
@@ -265,7 +266,10 @@ describe('executeCommand', () => {
           content: 'Run the narrowest relevant checks.',
           revision: 2,
           updatedAt: now,
-          updatedBy: { type: 'human', id: 'operator' },
+          updatedBy: taskActorSchema.parse({
+            type: 'human',
+            id: 'operator',
+          }),
         },
       },
     });
@@ -385,7 +389,10 @@ describe('executeCommand', () => {
         {
           content: 'The project revision can change independently.',
           updatedAt: now,
-          updatedBy: { type: 'human', id: 'operator' },
+          updatedBy: taskActorSchema.parse({
+            type: 'human',
+            id: 'operator',
+          }),
         },
       );
     if (!renamedInstructions) throw new Error('Expected project update');

@@ -18,6 +18,11 @@ type TaskRow = {
   labels_json: string;
   notes: string;
   blocked_json: string;
+  review_automation_status: string;
+  review_automation_generation: number;
+  review_automation_rejection_count: number;
+  review_automation_pause_reason: string | null;
+  review_automation_updated_at: string;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -36,6 +41,13 @@ const toTask = (row: TaskRow): Task =>
     labels: JSON.parse(row.labels_json),
     notes: row.notes,
     blocked: JSON.parse(row.blocked_json),
+    reviewAutomation: {
+      status: row.review_automation_status,
+      generation: row.review_automation_generation,
+      rejectionCount: row.review_automation_rejection_count,
+      pauseReason: row.review_automation_pause_reason,
+      updatedAt: row.review_automation_updated_at,
+    },
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -51,12 +63,16 @@ export class TaskRepository {
     this.insert = database.prepare(`
       INSERT INTO tasks (
         id, project_id, title, description, acceptance_criteria_json, priority,
-        rank, lifecycle_state, labels_json, notes, blocked_json, revision,
-        created_at, updated_at
+        rank, lifecycle_state, labels_json, notes, blocked_json,
+        review_automation_status, review_automation_generation,
+        review_automation_rejection_count, review_automation_pause_reason,
+        review_automation_updated_at, revision, created_at, updated_at
       ) VALUES (
         @id, @projectId, @title, @description, @acceptanceCriteriaJson, @priority,
-        @rank, @lifecycleState, @labelsJson, @notes, @blockedJson, @revision,
-        @createdAt, @updatedAt
+        @rank, @lifecycleState, @labelsJson, @notes, @blockedJson,
+        @reviewAutomationStatus, @reviewAutomationGeneration,
+        @reviewAutomationRejectionCount, @reviewAutomationPauseReason,
+        @reviewAutomationUpdatedAt, @revision, @createdAt, @updatedAt
       )
     `);
     this.selectById = database.prepare('SELECT * FROM tasks WHERE id = ?');
@@ -75,6 +91,11 @@ export class TaskRepository {
         labels_json = @labelsJson,
         notes = @notes,
         blocked_json = @blockedJson,
+        review_automation_status = @reviewAutomationStatus,
+        review_automation_generation = @reviewAutomationGeneration,
+        review_automation_rejection_count = @reviewAutomationRejectionCount,
+        review_automation_pause_reason = @reviewAutomationPauseReason,
+        review_automation_updated_at = @reviewAutomationUpdatedAt,
         revision = @revision,
         created_at = @createdAt,
         updated_at = @updatedAt
@@ -118,6 +139,11 @@ export class TaskRepository {
       acceptanceCriteriaJson: JSON.stringify(task.acceptanceCriteria),
       labelsJson: JSON.stringify(task.labels),
       blockedJson: JSON.stringify(task.blocked),
+      reviewAutomationStatus: task.reviewAutomation.status,
+      reviewAutomationGeneration: task.reviewAutomation.generation,
+      reviewAutomationRejectionCount: task.reviewAutomation.rejectionCount,
+      reviewAutomationPauseReason: task.reviewAutomation.pauseReason,
+      reviewAutomationUpdatedAt: task.reviewAutomation.updatedAt,
     };
   }
 }

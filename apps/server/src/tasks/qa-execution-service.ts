@@ -38,10 +38,12 @@ import type { QaExecutionRepository } from '../repositories/qa-execution-reposit
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
+import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { AttemptService } from './attempt-service.js';
 import type { QaCapabilityRegistry } from './qa-capability-registry.js';
+import { planQaVerdict } from './review-automation-service.js';
 import {
   ProjectArchivedError,
   ProjectNotFoundError,
@@ -93,6 +95,7 @@ export type QaVerdictOutcome = {
   cycle: QaExecutionCycle;
   report: QaReport;
   event: ProjectEvent;
+  events: ProjectEvent[];
 };
 
 type QaRegistry = {
@@ -108,6 +111,7 @@ type QaExecutionServiceDependencies = {
   database: Database;
   projects: ProjectRepository;
   tasks: TaskRepository;
+  transitions: TaskTransitionRepository;
   attempts: TaskAttemptRepository;
   sessions: SessionRepository;
   workspaces: WorkspaceRepository;
@@ -268,11 +272,6 @@ export class QaExecutionService {
         const reportInput = this.parseReport(input.report);
         const actor = taskActorSchema.parse(input.actor);
         const context = this.requireVerdictContext(input);
-        if (context.cycle.reviewPolicy !== 'manual') {
-          throw new ReviewAutomationPausedError(
-            'Autonomous QA verdict follow-up is not available.',
-          );
-        }
         authorizeQaVerdict({ task: context.task, actor });
         this.requireValidReport(context.cycle, reportInput);
 
@@ -317,17 +316,38 @@ export class QaExecutionService {
             },
           },
         );
+        const plan = planQaVerdict(
+          {
+            task: context.task,
+            attempt: context.attempt,
+            cycle,
+            report,
+            commandId,
+            occurredAt,
+          },
+          {
+            projects: this.dependencies.projects,
+            tasks: this.dependencies.tasks,
+            qaExecutions: this.dependencies.qaExecutions,
+            transitions: this.dependencies.transitions,
+            projectEvents: this.dependencies.projectEvents,
+            createId: this.createId,
+          },
+        );
         return {
-          task: context.task,
+          task: plan.task,
           attempt: context.attempt,
           cycle,
           report,
           event,
+          events: [event, ...plan.events],
         };
       },
     );
     this.dependencies.capabilities.invalidate(input.capability);
-    this.dependencies.registry.publisher.publishProject(result.event);
+    result.events.forEach((event) =>
+      this.dependencies.registry.publisher.publishProject(event),
+    );
     return result;
   }
 
