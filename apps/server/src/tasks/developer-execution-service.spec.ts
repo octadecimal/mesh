@@ -16,6 +16,7 @@ import { openDatabase } from '../db/database.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
 import { DeveloperExecutionService } from './developer-execution-service.js';
+import { TaskService } from './task-service.js';
 
 const now = '2026-08-25T12:00:00.000Z';
 const developer = taskActorSchema.parse({ type: 'agent', id: 'developer-1' });
@@ -23,6 +24,7 @@ const otherDeveloper = taskActorSchema.parse({
   type: 'agent',
   id: 'developer-2',
 });
+const human = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
 
 describe('DeveloperExecutionService', () => {
   const cleanups: Array<() => void> = [];
@@ -141,12 +143,19 @@ describe('DeveloperExecutionService', () => {
       agentActor: developer,
     });
     let nextId = 0;
+    const createId = () => `generated-${++nextId}`;
+    const taskService = new TaskService({
+      ...repositories,
+      now: () => now,
+      createId,
+    });
     const service = new DeveloperExecutionService({
       ...repositories,
+      taskService,
       capabilities,
       publisher: options?.publisher,
       now: () => now,
-      createId: () => `generated-${++nextId}`,
+      createId,
     });
     return {
       repositories,
@@ -525,5 +534,42 @@ describe('DeveloperExecutionService', () => {
     expect(service.submitForReview(input)).toEqual(
       service.submitForReview(input),
     );
+  });
+
+  it('lets only a human accept review and replays the audited transition', async () => {
+    const { service, repositories, task } = setup();
+    repositories.database
+      .prepare("UPDATE tasks SET lifecycle_state = 'review' WHERE id = ?")
+      .run(task.id);
+
+    await expect(
+      service.accept({
+        commandId: 'command-accept-agent',
+        taskId: task.id,
+        expectedRevision: 1,
+        actor: developer,
+      }),
+    ).rejects.toMatchObject({ code: 'task_transition_unauthorized' });
+
+    const input = {
+      commandId: 'command-accept',
+      taskId: task.id,
+      expectedRevision: 1,
+      actor: human,
+    };
+    const accepted = await service.accept(input);
+    const duplicate = await service.accept(input);
+
+    expect(accepted).toMatchObject({
+      task: { lifecycleState: 'done', revision: 2 },
+      transition: {
+        previousState: 'review',
+        nextState: 'done',
+        actor: human,
+      },
+      event: { type: 'task.transitioned' },
+    });
+    expect(duplicate).toEqual(accepted);
+    expect(repositories.transitions.listByTask(task.id)).toHaveLength(1);
   });
 });

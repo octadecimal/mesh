@@ -4,6 +4,7 @@ import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
   idSchema,
+  taskActorSchema,
   taskTransitionSchema,
   type DeveloperBlockerReport,
   type DeveloperCompletionReport,
@@ -29,6 +30,8 @@ import {
   ProjectNotFoundError,
   TaskNotFoundError,
   TaskRevisionConflictError,
+  type TaskMutationResult,
+  type TaskService,
 } from './task-service.js';
 import { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
 
@@ -48,6 +51,13 @@ export type DeveloperMarkBlockedInput = {
   actor: TaskActor;
 };
 
+export type DeveloperAcceptInput = {
+  commandId: string;
+  taskId: string;
+  expectedRevision: number;
+  actor: TaskActor;
+};
+
 export type DeveloperExecutionOutcome<Report> = {
   task: Task;
   cycle: DeveloperExecutionCycle;
@@ -64,6 +74,7 @@ type Dependencies = {
   transitions: TaskTransitionRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
+  taskService: Pick<TaskService, 'transition'>;
   capabilities: DeveloperCapabilityRegistry;
   publisher?: Pick<EventPublisher, 'publishProject'>;
   now?: () => string;
@@ -86,6 +97,18 @@ export class DeveloperExecutionService {
   constructor(private readonly dependencies: Dependencies) {
     this.now = dependencies.now ?? (() => new Date().toISOString());
     this.createId = dependencies.createId ?? randomUUID;
+  }
+
+  async accept(input: DeveloperAcceptInput): Promise<TaskMutationResult> {
+    const result = await this.dependencies.taskService.transition({
+      commandId: idSchema.parse(input.commandId),
+      taskId: idSchema.parse(input.taskId),
+      expectedRevision: input.expectedRevision,
+      nextState: 'done',
+      actor: taskActorSchema.parse(input.actor),
+    });
+    this.dependencies.publisher?.publishProject(result.event);
+    return result;
   }
 
   submitForReview(

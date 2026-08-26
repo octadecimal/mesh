@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  developerExecutionCycleSchema,
   idSchema,
   projectSchema,
   sessionSchema,
@@ -20,6 +21,7 @@ import { TaskService } from '../tasks/task-service.js';
 import { AttemptService } from '../tasks/attempt-service.js';
 import { DeveloperCapabilityRegistry } from '../tasks/developer-capability-registry.js';
 import { DeveloperExecutionService } from '../tasks/developer-execution-service.js';
+import { DeveloperReworkService } from '../tasks/developer-rework-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
 import { toHttpError } from './errors.js';
@@ -79,8 +81,18 @@ describe('executeCommand', () => {
     });
     const developerExecutionService = new DeveloperExecutionService({
       ...repositories,
+      taskService,
       capabilities,
       publisher: registry.publisher,
+      now: () => now,
+      createId,
+    });
+    const developerReworkService = new DeveloperReworkService({
+      ...repositories,
+      taskService,
+      capabilities,
+      developerExecutionService,
+      registry,
       now: () => now,
       createId,
     });
@@ -89,7 +101,7 @@ describe('executeCommand', () => {
       ...repositories,
       taskService,
       capabilities,
-      developerExecutionService,
+      developerReworkService,
       registry,
       pathOptions,
       now: () => now,
@@ -806,6 +818,169 @@ describe('executeCommand', () => {
       },
     });
     expect(repositories.developerExecutions.listByTask('t1')).toHaveLength(1);
+  });
+
+  it('routes human acceptance and both review and unblock recovery choices', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    let nextId = 0;
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => `review-generated-${++nextId}`,
+    );
+    const human = { type: 'human' as const, id: idSchema.parse('operator') };
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath,
+        repositoryIdentity: repositoryPath,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+
+    const seed = (taskId: string, kind: 'rejection' | 'unblock') => {
+      const task = repositories.tasks.create(
+        taskSchema.parse({
+          id: taskId,
+          projectId: 'p1',
+          title: `Recover ${taskId}`,
+          description: 'Exercise the human recovery boundary.',
+          acceptanceCriteria: ['Recovery remains audited.'],
+          priority: 'normal',
+          rank: taskId,
+          lifecycleState: kind === 'rejection' ? 'review' : 'in_progress',
+          labels: [],
+          notes: '',
+          blocked:
+            kind === 'unblock'
+              ? {
+                  reason: 'Dependency unavailable.',
+                  actor: human,
+                  blockedAt: now,
+                }
+              : null,
+          revision: 3,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+      const workspaceId = `workspace-${taskId}`;
+      const sessionId = `session-${taskId}`;
+      repositories.workspaces.create(
+        workspaceSchema.parse({
+          id: workspaceId,
+          projectId: task.projectId,
+          type: 'shared',
+          path: repositoryPath,
+          cleanupState: 'active',
+        }),
+      );
+      repositories.sessions.create(
+        sessionSchema.parse({
+          id: sessionId,
+          claudeResumeId: `claude-${taskId}`,
+          projectId: task.projectId,
+          workspaceId,
+          title: `Prior ${taskId}`,
+          permissionMode: 'safe_auto',
+          lifecycleState: 'completed',
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+      const attempt = repositories.attempts.createForTask(
+        task.id,
+        sessionId,
+        'launched',
+        human,
+        'developer',
+      );
+      repositories.developerExecutions.createCycle(
+        developerExecutionCycleSchema.parse({
+          id: `cycle-${taskId}`,
+          attemptId: attempt.id,
+          ordinal: 1,
+          mode: 'new',
+          authorizedBy: human,
+          authorizationCommandId: `launch-${taskId}`,
+          policyVersion: 'developer-policy-v1',
+          projectInstructions: { content: '', revision: 1 },
+          taskSnapshot: {
+            revision: 1,
+            title: task.title,
+            description: task.description,
+            acceptanceCriteria: [
+              { id: 'criterion-1', text: task.acceptanceCriteria[0] },
+            ],
+          },
+          workspaceId,
+          permissionMode: 'safe_auto',
+          startedAt: now,
+          endedAt: now,
+          terminalDisposition:
+            kind === 'rejection' ? 'submitted_for_review' : 'blocked',
+          completionReportId: kind === 'rejection' ? `report-${taskId}` : null,
+          blockerReportId: kind === 'unblock' ? `blocker-${taskId}` : null,
+          terminalCommandId: `terminal-${taskId}`,
+          terminalEventId: `event-${taskId}`,
+        }),
+      );
+      return task;
+    };
+
+    const acceptedTask = seed('accept', 'rejection');
+    const accepted = await executeCommand(
+      projectCommand('accept-command', {
+        type: 'task.developer.accept',
+        payload: {
+          taskId: acceptedTask.id,
+          expectedRevision: acceptedTask.revision,
+          actor: human,
+        },
+      }),
+      dependencies,
+    );
+    expect(accepted).toMatchObject({
+      commandType: 'task.developer.accept',
+      result: { task: { lifecycleState: 'done' } },
+    });
+
+    for (const [type, taskId, kind] of [
+      ['task.developer.reject_resume', 'reject-resume', 'rejection'],
+      ['task.developer.reject_new', 'reject-new', 'rejection'],
+      ['task.developer.unblock_resume', 'unblock-resume', 'unblock'],
+      ['task.developer.unblock_new', 'unblock-new', 'unblock'],
+    ] as const) {
+      const task = seed(taskId, kind);
+      const fresh = type.endsWith('_new');
+      const command = projectCommand(`${taskId}-command`, {
+        type,
+        payload: {
+          taskId: task.id,
+          expectedRevision: task.revision,
+          feedback: `Human feedback for ${taskId}.`,
+          ...(fresh
+            ? {
+                title: `Fresh ${taskId}`,
+                permissionMode: 'interactive',
+                workspace: { type: 'shared', path: repositoryPath },
+              }
+            : {}),
+          actor: human,
+        },
+      });
+
+      const result = await executeCommand(command, dependencies);
+      expect(result).toMatchObject({
+        commandType: type,
+        result: {
+          task: { lifecycleState: 'in_progress', blocked: null },
+          feedback: { kind },
+          cycle: { mode: fresh ? 'new' : 'resume' },
+        },
+      });
+    }
   });
 
   it('does not decide an already-resolved permission request', async () => {

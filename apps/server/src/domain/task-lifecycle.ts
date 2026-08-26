@@ -162,7 +162,7 @@ export const authorizeTaskTransition = (
     if (problems.length > 0) throw new TaskReadinessError(problems);
   }
 
-  if (nextState === 'in_progress' && task.blocked) {
+  if (nextState === 'in_progress' && task.blocked && blocked !== false) {
     throw new TaskBlockedError(task.id);
   }
 };

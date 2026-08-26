@@ -4,6 +4,9 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
   idSchema,
   projectSchema,
   sessionSchema,
@@ -25,6 +28,7 @@ import { createTestRepositories } from '../test/create-test-database.js';
 import { AttemptService } from './attempt-service.js';
 import { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
 import { DeveloperExecutionService } from './developer-execution-service.js';
+import { DeveloperReworkService } from './developer-rework-service.js';
 import { TaskService } from './task-service.js';
 
 const now = '2026-08-25T12:00:00.000Z';
@@ -66,8 +70,18 @@ describe('AttemptService', () => {
     });
     const developerExecutionService = new DeveloperExecutionService({
       ...repositories,
+      taskService,
       capabilities,
       publisher: registry.publisher,
+      now: () => now,
+      createId,
+    });
+    const developerReworkService = new DeveloperReworkService({
+      ...repositories,
+      taskService,
+      capabilities,
+      developerExecutionService,
+      registry,
       now: () => now,
       createId,
     });
@@ -75,7 +89,7 @@ describe('AttemptService', () => {
       ...repositories,
       taskService,
       capabilities,
-      developerExecutionService,
+      developerReworkService,
       registry: {
         create: (sessionId, developer) => registry.create(sessionId, developer),
         interrupt:
@@ -207,6 +221,120 @@ describe('AttemptService', () => {
     return attempt;
   };
 
+  const seedRecovery = (
+    repositories: ReturnType<typeof createTestRepositories>,
+    directory: string,
+    kind: 'rejection' | 'unblock',
+  ) => {
+    const task = seedTask(repositories, {
+      lifecycleState: kind === 'rejection' ? 'review' : 'in_progress',
+      blocked:
+        kind === 'unblock'
+          ? { reason: 'Dependency unavailable.', actor, blockedAt: now }
+          : null,
+      revision: 3,
+      title: 'Current task title',
+      description: 'Current task description.',
+      acceptanceCriteria: ['Current acceptance criterion.'],
+    });
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-recovery',
+        projectId: task.projectId,
+        type: 'shared',
+        path: directory,
+        cleanupState: 'active',
+      }),
+    );
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'session-recovery',
+        claudeResumeId: 'claude-resume-1',
+        projectId: task.projectId,
+        workspaceId: 'workspace-recovery',
+        title: 'Prior Developer attempt',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const attempt = repositories.attempts.createForTask(
+      task.id,
+      'session-recovery',
+      'launched',
+      actor,
+      'developer',
+    );
+    const cycle = repositories.developerExecutions.createCycle(
+      developerExecutionCycleSchema.parse({
+        id: 'cycle-prior',
+        attemptId: attempt.id,
+        ordinal: 1,
+        mode: 'new',
+        authorizedBy: actor,
+        authorizationCommandId: 'command-prior',
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: 'Prior instructions.', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Prior task title',
+          description: 'Prior task description.',
+          acceptanceCriteria: [{ id: 'criterion-1', text: 'Prior criterion.' }],
+        },
+        workspaceId: 'workspace-recovery',
+        permissionMode: 'safe_auto',
+        startedAt: now,
+        endedAt: now,
+        terminalDisposition:
+          kind === 'rejection' ? 'submitted_for_review' : 'blocked',
+        completionReportId: kind === 'rejection' ? 'report-prior' : null,
+        blockerReportId: kind === 'unblock' ? 'blocker-prior' : null,
+        terminalCommandId: 'command-terminal',
+        terminalEventId: 'event-terminal',
+      }),
+    );
+    if (kind === 'rejection') {
+      repositories.developerExecutions.appendCompletionReport(
+        developerCompletionReportSchema.parse({
+          id: 'report-prior',
+          cycleId: cycle.id,
+          summary: 'Prior submission.',
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: 'met',
+              evidence: 'Prior evidence.',
+            },
+          ],
+          verification: [],
+          limitations: '',
+          workspaceState: {
+            summary: 'Preserved.',
+            hasUncommittedChanges: true,
+            commitsCreated: false,
+          },
+          reviewerNotes: null,
+          createdAt: now,
+        }),
+      );
+    } else {
+      repositories.developerExecutions.appendBlockerReport(
+        developerBlockerReportSchema.parse({
+          id: 'blocker-prior',
+          cycleId: cycle.id,
+          reason: 'Dependency unavailable.',
+          evidence: 'Service returned 503.',
+          attemptedWork: 'Retried safely.',
+          suggestedHumanAction: 'Restore the dependency.',
+          preserveWorkspace: true,
+          createdAt: now,
+        }),
+      );
+    }
+    return { task, attempt, cycle };
+  };
+
   it('persists the launched attempt, starts its runtime, then audits in_progress', async () => {
     const { directory, driver, repositories, service } = setup();
     seedTask(repositories);
@@ -229,6 +357,185 @@ describe('AttemptService', () => {
         .after('project-1', 0)
         .map((event) => event.type),
     ).toEqual(['task.attempt_changed', 'task.transitioned']);
+  });
+
+  it('resumes the same Developer attempt with immutable feedback and current snapshots', async () => {
+    const { directory, driver, repositories, service } = setup();
+    const prior = seedRecovery(repositories, directory, 'rejection');
+    repositories.projects.updateDeveloperInstructions('project-1', 1, {
+      content: 'Current instructions.',
+      updatedAt: now,
+      updatedBy: actor,
+    });
+    const input = {
+      commandId: 'command-reject-resume',
+      taskId: prior.task.id,
+      expectedRevision: prior.task.revision,
+      kind: 'rejection' as const,
+      feedback: 'Add the missing regression proof.',
+      actor,
+    };
+
+    const resumed = await service.resumeDeveloper(input);
+    const duplicate = await service.resumeDeveloper(input);
+    const cycles = repositories.developerExecutions.listByTask(prior.task.id);
+
+    expect(resumed).toMatchObject({
+      task: { lifecycleState: 'in_progress', blocked: null, revision: 4 },
+      attempt: { id: prior.attempt.id, sessionId: prior.attempt.sessionId },
+      cycle: {
+        ordinal: 2,
+        mode: 'resume',
+        taskSnapshot: {
+          revision: 3,
+          title: 'Current task title',
+          description: 'Current task description.',
+        },
+        projectInstructions: { content: 'Current instructions.', revision: 2 },
+      },
+      feedback: { kind: 'rejection', feedback: input.feedback },
+      session: { id: 'session-recovery', lifecycleState: 'running' },
+    });
+    expect(duplicate).toEqual(resumed);
+    expect(cycles).toHaveLength(2);
+    expect(cycles[0]).toEqual(prior.cycle);
+    expect((driver as FakeClaudeSessionDriver).resumedRequests).toHaveLength(1);
+    expect(
+      (driver as FakeClaudeSessionDriver).resumedRequests[0]?.developer
+        ?.initialPrompt,
+    ).toContain(input.feedback);
+  });
+
+  it('closes a failed resume cycle and retains the prior review truth', async () => {
+    const unavailable = new Error('resume unavailable');
+    const driver: ClaudeSessionDriver = {
+      discover: async () => [],
+      create: async () => new FakeDriverSession('unused'),
+      resume: async () => {
+        throw unavailable;
+      },
+    };
+    const { capabilities, directory, repositories, service } = setup({
+      driver,
+    });
+    const prior = seedRecovery(repositories, directory, 'rejection');
+    let issuedToken = '';
+    const issue = capabilities.issue.bind(capabilities);
+    vi.spyOn(capabilities, 'issue').mockImplementation((binding) => {
+      issuedToken = issue(binding);
+      return issuedToken;
+    });
+
+    await expect(
+      service.resumeDeveloper({
+        commandId: 'command-reject-resume-failed',
+        taskId: prior.task.id,
+        expectedRevision: prior.task.revision,
+        kind: 'rejection',
+        feedback: 'Try the same session again.',
+        actor,
+      }),
+    ).rejects.toMatchObject({ code: 'attempt_start_failed' });
+
+    expect(repositories.tasks.get(prior.task.id)).toEqual(prior.task);
+    expect(repositories.developerExecutions.listByTask(prior.task.id)).toEqual([
+      prior.cycle,
+      expect.objectContaining({
+        ordinal: 2,
+        mode: 'resume',
+        endedAt: now,
+        terminalDisposition: null,
+      }),
+    ]);
+    expect(() => capabilities.resolve(issuedToken)).toThrow();
+    expect(
+      repositories.database
+        .prepare('SELECT feedback FROM developer_review_feedback')
+        .all(),
+    ).toEqual([{ feedback: 'Try the same session again.' }]);
+    expect(
+      repositories.diagnostics.list(prior.attempt.sessionId),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({ stage: 'resume' }),
+      }),
+    );
+  });
+
+  it('starts fresh rework without replacing prior attempt history', async () => {
+    const { directory, driver, repositories, service } = setup();
+    const prior = seedRecovery(repositories, directory, 'rejection');
+    const input = {
+      commandId: 'command-reject-new',
+      taskId: prior.task.id,
+      expectedRevision: prior.task.revision,
+      kind: 'rejection' as const,
+      feedback: 'Use a fresh context.',
+      title: 'Fresh Developer rework',
+      permissionMode: 'interactive' as const,
+      workspace: { type: 'shared' as const, path: directory },
+      actor,
+    };
+
+    const fresh = await service.reworkDeveloperNew(input);
+    const duplicate = await service.reworkDeveloperNew(input);
+    const attempts = repositories.attempts.listByTask(prior.task.id);
+    const cycles = repositories.developerExecutions.listByTask(prior.task.id);
+
+    expect(fresh).toMatchObject({
+      task: { lifecycleState: 'in_progress', revision: 4 },
+      attempt: { ordinal: 2, role: 'developer' },
+      cycle: { ordinal: 1, mode: 'new', taskSnapshot: { revision: 3 } },
+      feedback: { kind: 'rejection', feedback: input.feedback },
+    });
+    expect(duplicate).toEqual(fresh);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toEqual(prior.attempt);
+    expect(cycles[0]).toEqual(prior.cycle);
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toHaveLength(1);
+  });
+
+  it('keeps blocker truth and closes the fresh cycle when startup fails', async () => {
+    const unavailable = new Error('startup unavailable');
+    const driver: ClaudeSessionDriver = {
+      discover: async () => [],
+      create: async () => {
+        throw unavailable;
+      },
+      resume: async () => new FakeDriverSession('unused'),
+    };
+    const { directory, repositories, service } = setup({ driver });
+    const prior = seedRecovery(repositories, directory, 'unblock');
+
+    await expect(
+      service.reworkDeveloperNew({
+        commandId: 'command-unblock-new-failed',
+        taskId: prior.task.id,
+        expectedRevision: prior.task.revision,
+        kind: 'unblock',
+        feedback: 'Dependency restored.',
+        title: 'Fresh unblock attempt',
+        permissionMode: 'interactive',
+        workspace: { type: 'shared', path: directory },
+        actor,
+      }),
+    ).rejects.toMatchObject({ code: 'attempt_start_failed' });
+
+    expect(repositories.tasks.get(prior.task.id)).toEqual(prior.task);
+    expect(repositories.attempts.listByTask(prior.task.id)).toHaveLength(2);
+    expect(repositories.developerExecutions.listByTask(prior.task.id)).toEqual([
+      prior.cycle,
+      expect.objectContaining({
+        mode: 'new',
+        endedAt: now,
+        terminalDisposition: null,
+      }),
+    ]);
+    expect(
+      repositories.database
+        .prepare('SELECT kind, feedback FROM developer_review_feedback')
+        .all(),
+    ).toEqual([{ kind: 'unblock', feedback: 'Dependency restored.' }]);
   });
 
   it('launches a Developer from an exact durable cycle before runtime start', async () => {

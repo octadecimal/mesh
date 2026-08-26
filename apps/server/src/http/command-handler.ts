@@ -38,6 +38,7 @@ import type {
   AttemptMutationResult,
   AttemptService,
 } from '../tasks/attempt-service.js';
+import type { DeveloperExecutionService } from '../tasks/developer-execution-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
@@ -71,6 +72,7 @@ export interface CommandDependencies {
   commands: CommandRepository;
   taskService: TaskService;
   attemptService?: AttemptService;
+  developerExecutionService?: DeveloperExecutionService;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
@@ -118,6 +120,18 @@ const requireAttemptService = (dependencies: CommandDependencies) => {
   return dependencies.attemptService;
 };
 
+const requireDeveloperExecutionService = (
+  dependencies: CommandDependencies,
+) => {
+  if (!dependencies.developerExecutionService) {
+    throw new CommandError(
+      'invalid_command',
+      'Developer execution support is unavailable',
+    );
+  }
+  return dependencies.developerExecutionService;
+};
+
 type DeveloperLaunchCommand = Extract<
   Extract<Command, { idempotencyKey: string }>['command'],
   { type: 'task.developer.launch' }
@@ -139,6 +153,69 @@ const executeDeveloperLaunch = async (
     attemptResponse(
       await requireAttemptService(dependencies).launchDeveloper({
         ...command.payload,
+        commandId: idempotencyKey,
+      }),
+    ),
+  );
+};
+
+type DeveloperHumanCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  {
+    type:
+      | 'task.developer.accept'
+      | 'task.developer.reject_resume'
+      | 'task.developer.reject_new'
+      | 'task.developer.unblock_resume'
+      | 'task.developer.unblock_new';
+  }
+>;
+
+const executeDeveloperHumanCommand = async (
+  command: DeveloperHumanCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  if (command.payload.actor.type !== 'human') {
+    throw new CommandError(
+      'task_transition_unauthorized',
+      'Only a human may review or recover Developer work',
+    );
+  }
+  if (command.type === 'task.developer.accept') {
+    const result = await requireDeveloperExecutionService(dependencies).accept({
+      ...command.payload,
+      commandId: idempotencyKey,
+    });
+    return response(command.type, {
+      ...result,
+      projectEventCursor: result.event.sequence,
+    });
+  }
+  const kind = command.type.startsWith('task.developer.reject')
+    ? ('rejection' as const)
+    : ('unblock' as const);
+  if (
+    command.type === 'task.developer.reject_resume' ||
+    command.type === 'task.developer.unblock_resume'
+  ) {
+    return response(
+      command.type,
+      attemptResponse(
+        await requireAttemptService(dependencies).resumeDeveloper({
+          ...command.payload,
+          kind,
+          commandId: idempotencyKey,
+        }),
+      ),
+    );
+  }
+  return response(
+    command.type,
+    attemptResponse(
+      await requireAttemptService(dependencies).reworkDeveloperNew({
+        ...command.payload,
+        kind,
         commandId: idempotencyKey,
       }),
     ),
@@ -958,6 +1035,21 @@ export const executeCommand = async (
     if (command.command.type === 'task.developer.launch') {
       return executeDeveloperLaunch(
         command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (
+      [
+        'task.developer.accept',
+        'task.developer.reject_resume',
+        'task.developer.reject_new',
+        'task.developer.unblock_resume',
+        'task.developer.unblock_new',
+      ].includes(command.command.type)
+    ) {
+      return executeDeveloperHumanCommand(
+        command.command as DeveloperHumanCommand,
         command.idempotencyKey,
         dependencies,
       );

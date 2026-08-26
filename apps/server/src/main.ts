@@ -40,6 +40,7 @@ import { SessionRegistry } from './runtime/session-registry.js';
 import { AttemptService } from './tasks/attempt-service.js';
 import { DeveloperCapabilityRegistry } from './tasks/developer-capability-registry.js';
 import { DeveloperExecutionService } from './tasks/developer-execution-service.js';
+import { DeveloperReworkService } from './tasks/developer-rework-service.js';
 import {
   reconcileTaskAttemptLaunchReservations,
   reconcileTaskAttempts,
@@ -211,8 +212,24 @@ export const startServer = async (
     transitions,
     projectEvents,
     commands,
+    taskService,
     capabilities,
     publisher: registry.publisher,
+  });
+  const developerReworkService = new DeveloperReworkService({
+    database,
+    projects,
+    tasks,
+    attempts,
+    sessions,
+    diagnostics,
+    developerExecutions,
+    projectEvents,
+    commands,
+    taskService,
+    registry,
+    capabilities,
+    developerExecutionService,
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
   const git = new GitAdapter(new NodeProcessRunner(), pathOptions);
@@ -230,7 +247,7 @@ export const startServer = async (
     taskService,
     registry,
     capabilities,
-    developerExecutionService,
+    developerReworkService,
     git,
     pathOptions,
     billingConflicts,
@@ -252,6 +269,7 @@ export const startServer = async (
     tasks,
     taskService,
     attemptService,
+    developerExecutionService,
     attempts,
     transitions,
     projectEvents,
