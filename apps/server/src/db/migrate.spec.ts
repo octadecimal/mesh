@@ -149,6 +149,18 @@ describe('migrate', () => {
         'developer_review_feedback',
       ]),
     );
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM pragma_table_info('developer_execution_cycles') ORDER BY cid",
+        )
+        .all(),
+    ).toEqual(
+      expect.arrayContaining([
+        { name: 'task_snapshot_title' },
+        { name: 'task_snapshot_description' },
+      ]),
+    );
   });
 
   it('allows two connections to apply startup migrations without a duplicate ledger entry', () => {

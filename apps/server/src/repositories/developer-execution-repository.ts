@@ -24,6 +24,7 @@ type CycleRow = {
   project_instructions_content: string;
   project_instructions_revision: number;
   task_snapshot_revision: number;
+  task_snapshot_title: string;
   task_snapshot_description: string;
   task_snapshot_acceptance_criteria_json: string;
   workspace_id: string;
@@ -62,6 +63,7 @@ const toCycle = (row: CycleRow): DeveloperExecutionCycle =>
     },
     taskSnapshot: {
       revision: row.task_snapshot_revision,
+      title: row.task_snapshot_title,
       description: row.task_snapshot_description,
       acceptanceCriteria: JSON.parse(
         row.task_snapshot_acceptance_criteria_json,
@@ -94,7 +96,7 @@ export class DeveloperExecutionRepository {
         id, attempt_id, ordinal, mode, authorized_by_json,
         authorization_command_id, policy_version,
         project_instructions_content, project_instructions_revision,
-        task_snapshot_revision, task_snapshot_description,
+        task_snapshot_revision, task_snapshot_title, task_snapshot_description,
         task_snapshot_acceptance_criteria_json, workspace_id, permission_mode,
         started_at, ended_at, terminal_disposition, completion_report_id,
         blocker_report_id, terminal_command_id, terminal_event_id
@@ -102,7 +104,7 @@ export class DeveloperExecutionRepository {
         @id, @attemptId, @ordinal, @mode, @authorizedByJson,
         @authorizationCommandId, @policyVersion,
         @projectInstructionsContent, @projectInstructionsRevision,
-        @taskSnapshotRevision, @taskSnapshotDescription,
+        @taskSnapshotRevision, @taskSnapshotTitle, @taskSnapshotDescription,
         @taskSnapshotAcceptanceCriteriaJson, @workspaceId, @permissionMode,
         @startedAt, @endedAt, @terminalDisposition, @completionReportId,
         @blockerReportId, @terminalCommandId, @terminalEventId
@@ -249,6 +251,7 @@ export class DeveloperExecutionRepository {
       projectInstructionsContent: cycle.projectInstructions.content,
       projectInstructionsRevision: cycle.projectInstructions.revision,
       taskSnapshotRevision: cycle.taskSnapshot.revision,
+      taskSnapshotTitle: cycle.taskSnapshot.title,
       taskSnapshotDescription: cycle.taskSnapshot.description,
       taskSnapshotAcceptanceCriteriaJson: JSON.stringify(
         cycle.taskSnapshot.acceptanceCriteria,

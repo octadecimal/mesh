@@ -185,6 +185,7 @@ describe('repositories', () => {
       projectInstructions: { content: 'Preserve the worktree.', revision: 1 },
       taskSnapshot: {
         revision: 1,
+        title: 'Store board tasks',
         description: 'Store board tasks in SQLite.',
         acceptanceCriteria: [{ id: 'criterion-1', text: 'Task is persisted' }],
       },
@@ -230,6 +231,13 @@ describe('repositories', () => {
     repos.attempts.create(attempt());
 
     const first = repos.developerExecutions.createCycle(developerCycle());
+    expect(
+      repos.database
+        .prepare(
+          'SELECT task_snapshot_title FROM developer_execution_cycles WHERE id = ?',
+        )
+        .get('cycle-1'),
+    ).toEqual({ task_snapshot_title: 'Store board tasks' });
     expect(repos.developerExecutions.getActiveCycleBySession('s1')).toEqual(
       first,
     );

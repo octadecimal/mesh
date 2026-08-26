@@ -18,6 +18,7 @@ CREATE TABLE developer_execution_cycles (
   project_instructions_content TEXT NOT NULL,
   project_instructions_revision INTEGER NOT NULL CHECK (project_instructions_revision > 0),
   task_snapshot_revision INTEGER NOT NULL CHECK (task_snapshot_revision > 0),
+  task_snapshot_title TEXT NOT NULL,
   task_snapshot_description TEXT NOT NULL,
   task_snapshot_acceptance_criteria_json TEXT NOT NULL CHECK (json_valid(task_snapshot_acceptance_criteria_json)),
   workspace_id TEXT NOT NULL REFERENCES workspaces(id),

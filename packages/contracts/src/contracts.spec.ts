@@ -405,6 +405,7 @@ describe('session platform contracts', () => {
       projectInstructions: { content: 'Run focused tests.', revision: 2 },
       taskSnapshot: {
         revision: 3,
+        title: 'Implement the execution model',
         description: 'Implement the execution model.',
         acceptanceCriteria: [{ id: 'criterion-1', text: 'Contracts compile.' }],
       },
@@ -549,6 +550,7 @@ describe('session platform contracts', () => {
       projectInstructions: { content: '', revision: 1 },
       taskSnapshot: {
         revision: 3,
+        title: 'Implement the execution model',
         description: 'Add the Developer execution contracts.',
         acceptanceCriteria: [
           { id: 'criterion-1', text: 'Contracts compile.' },
