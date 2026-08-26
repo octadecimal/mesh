@@ -12,6 +12,7 @@ import {
   taskActorSchema,
   taskSchema,
   workspaceSchema,
+  type QaReportInput,
   type Task,
 } from '@mesh-session-platform/contracts';
 
@@ -35,8 +36,9 @@ const policyActor = taskActorSchema.parse({
   type: 'system',
   id: 'review-loop',
 });
+const qaActor = taskActorSchema.parse({ type: 'agent', id: 'qa-agent-1' });
 
-describe('QaExecutionService launch', () => {
+describe('QaExecutionService', () => {
   const cleanups: Array<() => void> = [];
 
   afterEach(() => {
@@ -226,6 +228,30 @@ describe('QaExecutionService launch', () => {
       createId,
     });
     const publisher = new EventPublisher();
+    const publicationSnapshots: Array<{
+      cycleEndedAt: string | null | undefined;
+      reportPersisted: boolean;
+      transactionOpen: boolean;
+      type: string;
+    }> = [];
+    const publishProject = publisher.publishProject.bind(publisher);
+    vi.spyOn(publisher, 'publishProject').mockImplementation((event) => {
+      const cycle =
+        event.type === 'task.qa_execution_changed'
+          ? repositories.qaExecutions.getCycle(event.payload.cycle.id)
+          : undefined;
+      publicationSnapshots.push({
+        cycleEndedAt: cycle?.endedAt,
+        reportPersisted:
+          event.type === 'task.qa_execution_changed' &&
+          event.payload.report !== null &&
+          repositories.qaExecutions.getReport(event.payload.report.id) !==
+            undefined,
+        transactionOpen: repositories.database.inTransaction,
+        type: event.type,
+      });
+      publishProject(event);
+    });
     const developerReworkService = new DeveloperReworkService({
       ...repositories,
       taskService,
@@ -312,6 +338,7 @@ describe('QaExecutionService launch', () => {
       directory,
       durableAtStart,
       project,
+      publicationSnapshots,
       qaCapabilities,
       repositories,
       service,
@@ -694,5 +721,374 @@ describe('QaExecutionService launch', () => {
         context.attempt.id,
       ]),
     ).toHaveLength(1);
+  });
+
+  const launchForVerdict = async (context: ReturnType<typeof setup>) => {
+    const launch = await context.service.launch(launchInput(context.task));
+    const start = context.starts.at(-1);
+    if (!start) throw new Error('Expected QA startup request');
+    return { launch, capability: start.configuration.capability };
+  };
+
+  const reportFor = (
+    cycle: { taskSnapshot: { acceptanceCriteria: { id: string }[] } },
+    overrides: Partial<QaReportInput> = {},
+  ): QaReportInput => ({
+    disposition: 'verified',
+    criterionResults: cycle.taskSnapshot.acceptanceCriteria.map(({ id }) => ({
+      criterionId: id,
+      status: 'passed' as const,
+      evidence: `${id} passed focused verification.`,
+    })),
+    verificationCommands: [
+      { command: 'corepack pnpm test', outcome: 'passed' },
+    ],
+    limitations: [],
+    residualRisks: [],
+    workspaceBefore: 'source-state-1',
+    workspaceAfter: 'source-state-1',
+    ...overrides,
+  });
+
+  const verdictInput = (
+    context: ReturnType<typeof setup>,
+    launched: Awaited<ReturnType<typeof launchForVerdict>>,
+    overrides: Partial<
+      Parameters<typeof context.service.submitVerdict>[0]
+    > = {},
+  ) => ({
+    commandId: 'qa-verdict-1',
+    capability: launched.capability,
+    expectedRevision: context.task.revision,
+    actor: qaActor,
+    report: reportFor(launched.launch.cycle),
+    ...overrides,
+  });
+
+  it('records a verified manual verdict atomically and publishes only after commit', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const taskBefore = context.repositories.tasks.get(context.task.id);
+    context.publicationSnapshots.splice(0);
+
+    const outcome = context.service.submitVerdict(
+      verdictInput(context, launched),
+    );
+
+    expect(outcome).toMatchObject({
+      task: {
+        id: context.task.id,
+        lifecycleState: 'review',
+        revision: context.task.revision,
+      },
+      attempt: { id: context.attempt.id },
+      cycle: {
+        id: launched.launch.cycle.id,
+        terminalDisposition: 'verified',
+        reportId: outcome.report.id,
+        terminalCommandId: 'qa-verdict-1',
+        terminalEventId: outcome.event.id,
+      },
+      report: {
+        cycleId: launched.launch.cycle.id,
+        disposition: 'verified',
+      },
+      event: {
+        type: 'task.qa_execution_changed',
+        payload: { report: { disposition: 'verified' } },
+      },
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toEqual(taskBefore);
+    expect(
+      context.repositories.qaExecutions.getReport(outcome.report.id),
+    ).toEqual(outcome.report);
+    expect(context.publicationSnapshots).toEqual([
+      {
+        cycleEndedAt: now,
+        reportPersisted: true,
+        transactionOpen: false,
+        type: 'task.qa_execution_changed',
+      },
+    ]);
+    expect(() => context.qaCapabilities.resolve(launched.capability)).toThrow();
+  });
+
+  it('records a rejected manual verdict without transitioning the task', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const taskBefore = context.repositories.tasks.get(context.task.id);
+
+    const outcome = context.service.submitVerdict(
+      verdictInput(context, launched, {
+        report: reportFor(launched.launch.cycle, {
+          disposition: 'rejected',
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: 'failed',
+              evidence: 'Focused verification failed.',
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      task: { lifecycleState: 'review', revision: context.task.revision },
+      cycle: { terminalDisposition: 'rejected' },
+      report: { disposition: 'rejected' },
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toEqual(taskBefore);
+  });
+
+  it('does not close an autonomous-review cycle before follow-up planning exists', async () => {
+    const context = setup({ reviewPolicy: 'autonomous_review' });
+    const launch = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const start = context.starts.at(-1);
+    if (!start) throw new Error('Expected QA startup request');
+    const launched = { launch, capability: start.configuration.capability };
+
+    expect(() =>
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).toThrow(expect.objectContaining({ code: 'review_automation_paused' }));
+    expect(
+      context.repositories.qaExecutions.getCycle(launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.qaCapabilities.resolve(launched.capability)).toBeDefined();
+  });
+
+  it.each([
+    [
+      'missing criterion',
+      [
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'First criterion passed.',
+        },
+      ],
+    ],
+    [
+      'duplicate criterion',
+      [
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'First result.',
+        },
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'Duplicate result.',
+        },
+      ],
+    ],
+    [
+      'unknown criterion',
+      [
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'First criterion passed.',
+        },
+        {
+          criterionId: 'criterion-3',
+          status: 'passed' as const,
+          evidence: 'Unknown criterion passed.',
+        },
+      ],
+    ],
+  ])('rejects a report with a %s', async (_name, criterionResults) => {
+    const context = setup({
+      task: {
+        acceptanceCriteria: ['First criterion.', 'Second criterion.'],
+      },
+    });
+    const launched = await launchForVerdict(context);
+
+    expect(() =>
+      context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, { criterionResults }),
+        }),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'qa_report_incomplete' }));
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+  });
+
+  it.each([
+    [
+      'verified with a failed criterion',
+      'verified' as const,
+      'failed' as const,
+    ],
+    [
+      'verified with a skipped criterion',
+      'verified' as const,
+      'skipped' as const,
+    ],
+    [
+      'rejected with every criterion passing',
+      'rejected' as const,
+      'passed' as const,
+    ],
+  ])('rejects an outcome that is %s', async (_name, disposition, status) => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+
+    expect(() =>
+      context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, {
+            disposition,
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status,
+                evidence: 'Observed criterion outcome.',
+              },
+            ],
+          }),
+        }),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'qa_report_incomplete' }));
+  });
+
+  it('rejects a capability whose binding does not match durable QA ownership', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const mismatchedCapability = context.qaCapabilities.issue({
+      sessionId: launched.launch.session.id,
+      taskId: context.task.id,
+      attemptId: 'other-attempt',
+      cycleId: launched.launch.cycle.id,
+    });
+
+    expect(() =>
+      context.service.submitVerdict(
+        verdictInput(context, launched, { capability: mismatchedCapability }),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
+  });
+
+  it('rejects a verdict when the bound Developer attempt is no longer current', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    context.repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'later-developer-session',
+        projectId: context.project.id,
+        workspaceId: context.workspace.id,
+        title: 'Later Developer',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'interrupted',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    context.repositories.attempts.createForTask(
+      context.task.id,
+      'later-developer-session',
+      'launched',
+      humanActor,
+      'developer',
+    );
+
+    expect(() =>
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
+  });
+
+  it('rejects a verdict when the task is no longer in review', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const changed = context.repositories.tasks.update(
+      { ...context.task, lifecycleState: 'done', updatedAt: now },
+      context.task.revision,
+    );
+    if (!changed) throw new Error('Expected task update');
+
+    expect(() =>
+      context.service.submitVerdict(
+        verdictInput(context, launched, { expectedRevision: changed.revision }),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'task_transition_invalid' }));
+  });
+
+  it('rejects verification when the reported workspace source state changed', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+
+    expect(() =>
+      context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, {
+            workspaceAfter: 'unexpected-source-change',
+          }),
+        }),
+      ),
+    ).toThrow(expect.objectContaining({ code: 'qa_report_incomplete' }));
+  });
+
+  it('rolls back report, cycle, and publication when audit persistence fails', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    context.publicationSnapshots.splice(0);
+    context.repositories.database.exec(`
+      CREATE TRIGGER fail_qa_verdict_event
+      BEFORE INSERT ON project_events
+      BEGIN
+        SELECT RAISE(FAIL, 'QA verdict event insert failed');
+      END;
+    `);
+
+    expect(() =>
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).toThrow('QA verdict event insert failed');
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(context.publicationSnapshots).toEqual([]);
+    expect(context.qaCapabilities.resolve(launched.capability)).toBeDefined();
+  });
+
+  it('returns the stored outcome for a duplicate terminal command without republishing', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const input = verdictInput(context, launched);
+    context.publicationSnapshots.splice(0);
+
+    const first = context.service.submitVerdict(input);
+    const duplicate = context.service.submitVerdict(input);
+
+    expect(duplicate).toEqual(first);
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([first.report]);
+    expect(context.publicationSnapshots).toHaveLength(1);
+    expect(() =>
+      context.service.submitVerdict({
+        ...input,
+        commandId: 'qa-verdict-replay',
+      }),
+    ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
   });
 });

@@ -2,8 +2,13 @@ import { randomUUID } from 'node:crypto';
 
 import {
   QaAlreadyActiveError,
+  QaCapabilityInvalidError,
+  QaReportIncompleteError,
   ReviewAutomationPausedError,
+  idSchema,
   qaExecutionCycleSchema,
+  qaReportInputSchema,
+  qaReportSchema,
   rawDiagnosticSchema,
   sessionSchema,
   taskActorSchema,
@@ -12,6 +17,8 @@ import {
   type Project,
   type ProjectEvent,
   type QaExecutionCycle,
+  type QaReport,
+  type QaReportInput,
   type Session,
   type Task,
   type TaskActor,
@@ -21,6 +28,7 @@ import {
 
 import type { Database } from '../db/database.js';
 import { QA_POLICY_VERSION, composeQaPrompt } from '../domain/qa-policy.js';
+import { authorizeQaVerdict } from '../domain/task-lifecycle.js';
 import type { CommandRepository } from '../repositories/command-repository.js';
 import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
@@ -68,6 +76,22 @@ export type QaLaunchResult = {
   attempt: TaskAttempt;
   session: Session;
   cycle: QaExecutionCycle;
+  event: ProjectEvent;
+};
+
+export type QaSubmitVerdictInput = {
+  commandId: string;
+  capability: string;
+  expectedRevision: number;
+  report: QaReportInput;
+  actor: TaskActor;
+};
+
+export type QaVerdictOutcome = {
+  task: Task;
+  attempt: TaskAttempt;
+  cycle: QaExecutionCycle;
+  report: QaReport;
   event: ProjectEvent;
 };
 
@@ -229,6 +253,179 @@ export class QaExecutionService {
     } catch (error) {
       if (started) await this.cleanupCommandCompletionFailure(started, error);
       throw error;
+    }
+  }
+
+  submitVerdict(input: QaSubmitVerdictInput): QaVerdictOutcome {
+    const commandId = idSchema.parse(input.commandId);
+    const existing =
+      this.dependencies.commands.getExisting<QaVerdictOutcome>(commandId);
+    if (existing.found) return existing.response;
+
+    const result = this.dependencies.commands.executeOnceInImmediateTransaction(
+      commandId,
+      () => {
+        const reportInput = this.parseReport(input.report);
+        const actor = taskActorSchema.parse(input.actor);
+        const context = this.requireVerdictContext(input);
+        if (context.cycle.reviewPolicy !== 'manual') {
+          throw new ReviewAutomationPausedError(
+            'Autonomous QA verdict follow-up is not available.',
+          );
+        }
+        authorizeQaVerdict({ task: context.task, actor });
+        this.requireValidReport(context.cycle, reportInput);
+
+        const occurredAt = this.now();
+        const eventId = idSchema.parse(this.createId());
+        const report = this.dependencies.qaExecutions.insertReport(
+          qaReportSchema.parse({
+            ...reportInput,
+            id: idSchema.parse(this.createId()),
+            cycleId: context.cycle.id,
+            createdAt: occurredAt,
+          }),
+        );
+        const cycle = this.dependencies.qaExecutions.completeCycle(
+          context.cycle.id,
+          {
+            endedAt: occurredAt,
+            terminalDisposition: report.disposition,
+            reportId: report.id,
+            terminalCommandId: commandId,
+            terminalEventId: eventId,
+          },
+        );
+        if (!cycle) {
+          throw new QaCapabilityInvalidError(
+            'The QA capability is bound to a terminal cycle.',
+          );
+        }
+        const event = this.dependencies.projectEvents.appendInTransaction(
+          context.task.projectId,
+          {
+            protocolVersion: 1,
+            id: eventId,
+            projectId: context.task.projectId,
+            occurredAt,
+            type: 'task.qa_execution_changed',
+            payload: {
+              task: context.task,
+              attempt: context.attempt,
+              cycle,
+              report,
+            },
+          },
+        );
+        return {
+          task: context.task,
+          attempt: context.attempt,
+          cycle,
+          report,
+          event,
+        };
+      },
+    );
+    this.dependencies.capabilities.invalidate(input.capability);
+    this.dependencies.registry.publisher.publishProject(result.event);
+    return result;
+  }
+
+  private parseReport(report: QaReportInput): QaReportInput {
+    const parsed = qaReportInputSchema.safeParse(report);
+    if (!parsed.success) {
+      throw new QaReportIncompleteError(
+        parsed.error.issues[0]?.message ?? 'The QA report is invalid.',
+      );
+    }
+    return parsed.data;
+  }
+
+  private requireVerdictContext(input: QaSubmitVerdictInput): {
+    task: Task;
+    attempt: TaskAttempt;
+    cycle: QaExecutionCycle;
+  } {
+    const binding = this.dependencies.capabilities.resolve(input.capability);
+    const task = this.dependencies.tasks.get(binding.taskId);
+    if (!task) throw new TaskNotFoundError(binding.taskId);
+    const project = this.dependencies.projects.get(task.projectId);
+    if (!project) throw new ProjectNotFoundError(task.projectId);
+    if (project.archivedAt) throw new ProjectArchivedError(project);
+    if (task.revision !== input.expectedRevision) {
+      throw new TaskRevisionConflictError(task);
+    }
+
+    const currentAttempt = this.dependencies.attempts
+      .listByTask(task.id)
+      .filter((attempt) => attempt.unlinkedAt === null)
+      .at(-1);
+    const cycle = this.dependencies.qaExecutions.getCycle(binding.cycleId);
+    const session = this.dependencies.sessions.get(binding.sessionId);
+    const developerCycleActive = this.dependencies.developerExecutions
+      .listByTask(task.id)
+      .some((candidate) => candidate.endedAt === null);
+    if (
+      !currentAttempt ||
+      currentAttempt.id !== binding.attemptId ||
+      currentAttempt.taskId !== binding.taskId ||
+      currentAttempt.role !== 'developer' ||
+      !cycle ||
+      cycle.endedAt !== null ||
+      cycle.taskId !== binding.taskId ||
+      cycle.attemptId !== binding.attemptId ||
+      cycle.sessionId !== binding.sessionId ||
+      !session ||
+      session.projectId !== task.projectId ||
+      session.workspaceId !== cycle.workspaceId ||
+      developerCycleActive
+    ) {
+      throw new QaCapabilityInvalidError(
+        'The QA capability does not match the active current task attempt.',
+      );
+    }
+    return { task, attempt: currentAttempt, cycle };
+  }
+
+  private requireValidReport(
+    cycle: QaExecutionCycle,
+    report: QaReportInput,
+  ): void {
+    const expected = new Set(
+      cycle.taskSnapshot.acceptanceCriteria.map(({ id }) => id),
+    );
+    const reported = new Set<string>();
+    for (const result of report.criterionResults) {
+      if (
+        !expected.has(result.criterionId) ||
+        reported.has(result.criterionId)
+      ) {
+        throw new QaReportIncompleteError(
+          'QA report criterion coverage is invalid.',
+        );
+      }
+      reported.add(result.criterionId);
+    }
+    if (reported.size !== expected.size) {
+      throw new QaReportIncompleteError(
+        'QA report must cover every snapshotted criterion.',
+      );
+    }
+    if (
+      report.disposition === 'rejected' &&
+      report.criterionResults.every(({ status }) => status === 'passed')
+    ) {
+      throw new QaReportIncompleteError(
+        'Rejected QA reports require a failed or skipped criterion.',
+      );
+    }
+    if (
+      report.disposition === 'verified' &&
+      report.workspaceBefore !== report.workspaceAfter
+    ) {
+      throw new QaReportIncompleteError(
+        'Verified QA reports may not contain unexpected source changes.',
+      );
     }
   }
 
