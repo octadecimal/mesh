@@ -156,32 +156,32 @@ const repairFor = (
     : undefined;
 };
 
-const developerRepairFor = (
+const developerRepairsFor = (
   dependencies: Pick<
     ReconciliationDependencies,
     'developerExecutions' | 'sessions'
   >,
   taskId: string,
   attempts: TaskAttempt[],
-): AttemptRepair | undefined => {
-  for (const cycle of dependencies.developerExecutions.listByTask(taskId)) {
-    if (cycle.endedAt !== null) continue;
+): AttemptRepair[] =>
+  dependencies.developerExecutions.listByTask(taskId).flatMap((cycle) => {
+    if (cycle.endedAt !== null) return [];
     const attempt = attempts.find(
       (candidate) => candidate.id === cycle.attemptId,
     );
-    if (!attempt) continue;
+    if (!attempt) return [];
     const session = dependencies.sessions.get(attempt.sessionId);
-    if (session && liveSessionStates.has(session.lifecycleState)) continue;
+    if (session && liveSessionStates.has(session.lifecycleState)) return [];
 
-    return attemptRepairSchema.parse({
-      taskId: attempt.taskId,
-      attemptId: attempt.id,
-      sessionId: attempt.sessionId,
-      reason: 'developer_cycle_without_live_session',
-    });
-  }
-  return undefined;
-};
+    return [
+      attemptRepairSchema.parse({
+        taskId: attempt.taskId,
+        attemptId: attempt.id,
+        sessionId: attempt.sessionId,
+        reason: 'developer_cycle_without_live_session',
+      }),
+    ];
+  });
 
 const persistRepair = (
   dependencies: ReconciliationDependencies,
@@ -245,28 +245,40 @@ export const reconcileTaskAttempts = (
               ]
             : [];
         });
-      const repair =
-        developerRepairFor(dependencies, task.id, taskAttempts) ??
-        repairFor(task.lifecycleState, attempts);
-      if (!repair) continue;
-      repairs.push(repair);
-      const diagnostics =
-        attempts.find(({ attempt }) => attempt.id === repair.attemptId)
-          ?.diagnostics ?? [];
-      if (
-        recordedEvents.some((event) => isRecordedRepairEvent(event, repair))
-      ) {
-        continue;
-      }
-      const event = persistRepair(
+      const developerRepairs = developerRepairsFor(
         dependencies,
-        project.id,
-        repair,
-        now(),
-        diagnostics.some((diagnostic) => isRecordedRepair(diagnostic, repair)),
+        task.id,
+        taskAttempts,
       );
-      recordedEvents.push(event);
-      events.push(event);
+      const taskRepair = repairFor(task.lifecycleState, attempts);
+      const taskRepairs =
+        developerRepairs.length > 0
+          ? developerRepairs
+          : taskRepair
+            ? [taskRepair]
+            : [];
+      for (const repair of taskRepairs) {
+        repairs.push(repair);
+        const diagnostics =
+          attempts.find(({ attempt }) => attempt.id === repair.attemptId)
+            ?.diagnostics ?? [];
+        if (
+          recordedEvents.some((event) => isRecordedRepairEvent(event, repair))
+        ) {
+          continue;
+        }
+        const event = persistRepair(
+          dependencies,
+          project.id,
+          repair,
+          now(),
+          diagnostics.some((diagnostic) =>
+            isRecordedRepair(diagnostic, repair),
+          ),
+        );
+        recordedEvents.push(event);
+        events.push(event);
+      }
     }
   }
 

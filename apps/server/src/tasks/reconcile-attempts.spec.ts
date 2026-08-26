@@ -344,6 +344,99 @@ describe('reconcileTaskAttempts', () => {
     ).toHaveLength(1);
   });
 
+  it('records every orphan Developer cycle once when a task has multiple attempts', () => {
+    const repositories = setup({
+      taskState: 'in_progress',
+      sessionState: 'completed',
+    });
+    addAttempt(repositories, {
+      ordinal: 2,
+      sessionId: 'session-2',
+      sessionState: 'failed',
+    });
+    const cycle = (
+      id: string,
+      attemptId: string,
+      ordinal: number,
+      workspaceId: string,
+    ) =>
+      developerExecutionCycleSchema.parse({
+        id,
+        attemptId,
+        ordinal,
+        mode: 'new',
+        authorizedBy: actor,
+        authorizationCommandId: `launch-${ordinal}`,
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Recover attempt state',
+          description: 'Keep task outcomes under human control.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Restart state is explicit.' },
+          ],
+        },
+        workspaceId,
+        permissionMode: 'interactive',
+        startedAt: `2026-08-25T12:0${ordinal}:00.000Z`,
+        endedAt: null,
+        terminalDisposition: null,
+        completionReportId: null,
+        blockerReportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      });
+    repositories.developerExecutions.createCycle(
+      cycle('cycle-1', 'attempt-1', 1, 'workspace-1'),
+    );
+    repositories.developerExecutions.createCycle(
+      cycle('cycle-2', 'attempt-2', 1, 'workspace-session-2'),
+    );
+
+    const first = reconcile(repositories);
+    const second = reconcile(repositories);
+
+    const expectedRepairs = [
+      {
+        taskId: 'task-1',
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+        reason: 'developer_cycle_without_live_session',
+      },
+      {
+        taskId: 'task-1',
+        attemptId: 'attempt-2',
+        sessionId: 'session-2',
+        reason: 'developer_cycle_without_live_session',
+      },
+    ] as const;
+    expect(first.repairs).toEqual(expectedRepairs);
+    expect(
+      first.events.map((event) =>
+        event.type === 'task.attempt_repair_detected'
+          ? event.payload.repair
+          : undefined,
+      ),
+    ).toEqual(expectedRepairs);
+    expect(second).toEqual({ repairs: expectedRepairs, events: [] });
+    expect(repositories.projectEvents.after('project-1', 0)).toHaveLength(2);
+    expect(
+      ['session-1', 'session-2'].map(
+        (sessionId) =>
+          repositories.diagnostics
+            .list(sessionId)
+            .filter(
+              ({ payload }) =>
+                typeof payload === 'object' &&
+                payload !== null &&
+                'kind' in payload &&
+                payload.kind === 'attempt_repair',
+            ).length,
+      ),
+    ).toEqual([1, 1]);
+  });
+
   it('reports an unknown startup after recovery while retaining the ready task', () => {
     const repositories = setup({
       taskState: 'ready',
