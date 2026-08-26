@@ -264,7 +264,7 @@ describe('TaskBoard', () => {
     ).toBeDefined();
   });
 
-  it('settles a move on any newer authoritative revision and reports a conflict', async () => {
+  it('keeps a reorder pending through an unrelated revision until its stale rejection arrives', async () => {
     const command = deferred<unknown>();
     const onCommand = vi.fn().mockReturnValue(command.promise);
     const user = userEvent.setup();
@@ -276,9 +276,8 @@ describe('TaskBoard', () => {
       />,
     );
 
-    await user.selectOptions(
-      screen.getByRole('combobox', { name: 'Move First task to' }),
-      'ready',
+    await user.click(
+      screen.getByRole('button', { name: 'Move First task down' }),
     );
     rendered.rerender(
       <TaskBoard
@@ -288,7 +287,7 @@ describe('TaskBoard', () => {
             id: 'first',
             title: 'First task',
             rank: 'a',
-            lifecycleState: 'in_progress',
+            lifecycleState: 'backlog',
             revision: 2,
           }),
         ])}
@@ -296,21 +295,22 @@ describe('TaskBoard', () => {
       />,
     );
 
-    await waitFor(() =>
-      expect(
-        screen.getByRole('article', { name: 'First task task card' }),
-      ).not.toHaveAttribute('data-pending'),
-    );
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      'Task changed before the requested move was applied.',
-    );
     expect(
-      within(
-        screen.getByRole('region', { name: 'In progress tasks' }),
-      ).getByText('First task'),
+      screen.getByRole('article', { name: 'First task task card' }),
+    ).toHaveAttribute('data-pending', 'true');
+    expect(
+      within(screen.getByRole('region', { name: 'Backlog tasks' })).getByText(
+        'First task',
+      ),
     ).toBeDefined();
 
-    await act(async () => command.resolve({}));
+    await act(async () => command.reject(new Error('Task revision conflict')));
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Task revision conflict',
+    );
+    expect(
+      screen.getByRole('article', { name: 'First task task card' }),
+    ).not.toHaveAttribute('data-pending');
   });
 
   it('ignores a delayed rejection after a newer move starts', async () => {

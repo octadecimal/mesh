@@ -283,6 +283,7 @@ export class AttemptService {
         try {
           prepared = this.persistLaunchAudit(
             task,
+            input.commandId,
             input.expectedRevision,
             actor,
             workspace,
@@ -636,6 +637,7 @@ export class AttemptService {
 
   private persistLaunchAudit(
     task: Task,
+    commandId: string,
     expectedRevision: number,
     actor: TaskActor,
     workspace: Workspace,
@@ -668,6 +670,14 @@ export class AttemptService {
         'launched',
         actor,
       );
+      const linkedReservation = this.dependencies.database
+        .prepare(
+          'UPDATE task_attempt_launch_reservations SET session_id = ? WHERE task_id = ? AND command_id = ?',
+        )
+        .run(persistedSession.id, current.id, commandId);
+      if (linkedReservation.changes !== 1) {
+        throw new Error(`Launch reservation for task '${current.id}' was lost`);
+      }
       const event = this.dependencies.projectEvents.appendInTransaction(
         current.projectId,
         {

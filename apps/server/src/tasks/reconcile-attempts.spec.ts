@@ -14,7 +14,10 @@ import {
 
 import { recoverInterruptedSessions } from '../runtime/recovery.js';
 import { createTestRepositories } from '../test/create-test-database.js';
-import { reconcileTaskAttempts } from './reconcile-attempts.js';
+import {
+  reconcileTaskAttemptLaunchReservations,
+  reconcileTaskAttempts,
+} from './reconcile-attempts.js';
 
 const now = '2026-08-25T12:00:00.000Z';
 const actor = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
@@ -155,6 +158,59 @@ describe('reconcileTaskAttempts', () => {
       ...repositories,
       now: () => '2026-08-25T12:01:00.000Z',
     });
+
+  it('releases a crash-stale reservation before attempt persistence', () => {
+    const repositories = setup({
+      taskState: 'ready',
+      sessionState: 'completed',
+    });
+    repositories.database
+      .prepare(
+        'INSERT INTO task_attempt_launch_reservations (task_id, command_id, created_at) VALUES (?, ?, ?)',
+      )
+      .run('task-1', 'crashed-command', now);
+
+    expect(reconcileTaskAttemptLaunchReservations(repositories.database)).toBe(
+      1,
+    );
+    expect(
+      repositories.database
+        .prepare('SELECT task_id FROM task_attempt_launch_reservations')
+        .all(),
+    ).toEqual([]);
+  });
+
+  it('releases a recovered reservation after attempt persistence but preserves a live launch', () => {
+    const repositories = setup({
+      taskState: 'ready',
+      sessionState: 'running',
+    });
+    repositories.database
+      .prepare(
+        'INSERT INTO task_attempt_launch_reservations (task_id, command_id, session_id, created_at) VALUES (?, ?, ?, ?)',
+      )
+      .run('task-1', 'active-command', 'session-1', now);
+
+    expect(reconcileTaskAttemptLaunchReservations(repositories.database)).toBe(
+      0,
+    );
+    expect(
+      repositories.database
+        .prepare('SELECT task_id FROM task_attempt_launch_reservations')
+        .all(),
+    ).toHaveLength(1);
+
+    recoverInterruptedSessions(repositories.database);
+
+    expect(reconcileTaskAttemptLaunchReservations(repositories.database)).toBe(
+      1,
+    );
+    expect(
+      repositories.database
+        .prepare('SELECT task_id FROM task_attempt_launch_reservations')
+        .all(),
+    ).toEqual([]);
+  });
 
   it('repairs a recovered in-progress attempt without moving the task or workspace', () => {
     const repositories = setup({

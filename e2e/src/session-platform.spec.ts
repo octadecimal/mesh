@@ -641,6 +641,20 @@ test('imports a project and preserves an attempted task across refresh', async (
   await expect(
     taskDialog.getByRole('article', { name: 'Attempt 1' }),
   ).toContainText('Running');
+  harness.driver.createdSessions[0].enqueue({
+    kind: 'text_completed',
+    text: 'Live after task launch',
+  });
+  const launchedSessionId = (await harness.snapshot()).sessions.at(-1)?.id;
+  if (!launchedSessionId) throw new Error('Expected launched task session');
+  await waitForHistory(harness, launchedSessionId, (events) =>
+    events.some(
+      ({ type, payload }) =>
+        type === 'message.assistant' &&
+        'text' in payload &&
+        payload.text === 'Live after task launch',
+    ),
+  );
   await taskDialog.getByRole('button', { name: 'Close' }).click();
   await expect(
     page
@@ -651,6 +665,7 @@ test('imports a project and preserves an attempted task across refresh', async (
 
   await taskDialog.getByRole('button', { name: `Open ${title}` }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeVisible();
+  await expect(page.getByText('Live after task launch')).toBeVisible();
   await page.getByRole('button', { name: 'Board' }).click();
   await page.getByRole('button', { name: `Open ${title}` }).click();
 

@@ -127,6 +127,7 @@ describe('migrate', () => {
       { id: '003-task-board-storage' },
       { id: '004-project-event-streams' },
       { id: '005-task-attempt-safety' },
+      { id: '006-task-attempt-launch-recovery' },
     ]);
     expect(
       database
@@ -164,6 +165,7 @@ describe('migrate', () => {
       { id: '003-task-board-storage' },
       { id: '004-project-event-streams' },
       { id: '005-task-attempt-safety' },
+      { id: '006-task-attempt-launch-recovery' },
     ]);
   });
 
@@ -193,6 +195,10 @@ describe('migrate', () => {
     copyFileSync(
       join(__dirname, 'migrations', '005-task-attempt-safety.sql'),
       join(directory, 'migrations', '005-task-attempt-safety.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '006-task-attempt-launch-recovery.sql'),
+      join(directory, 'migrations', '006-task-attempt-launch-recovery.sql'),
     );
     buildSync({
       bundle: true,
@@ -244,6 +250,7 @@ describe('migrate', () => {
         { id: '003-task-board-storage' },
         { id: '004-project-event-streams' },
         { id: '005-task-attempt-safety' },
+        { id: '006-task-attempt-launch-recovery' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -315,6 +322,7 @@ describe('migrate', () => {
       { id: '003-task-board-storage' },
       { id: '004-project-event-streams' },
       { id: '005-task-attempt-safety' },
+      { id: '006-task-attempt-launch-recovery' },
     ]);
   });
 
@@ -603,6 +611,7 @@ describe('migrate', () => {
         { id: '003-task-board-storage' },
         { id: '004-project-event-streams' },
         { id: '005-task-attempt-safety' },
+        { id: '006-task-attempt-launch-recovery' },
       ]);
       expect(
         database

@@ -37,7 +37,10 @@ import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { recoverInterruptedSessions } from './runtime/recovery.js';
 import { SessionRegistry } from './runtime/session-registry.js';
 import { AttemptService } from './tasks/attempt-service.js';
-import { reconcileTaskAttempts } from './tasks/reconcile-attempts.js';
+import {
+  reconcileTaskAttemptLaunchReservations,
+  reconcileTaskAttempts,
+} from './tasks/reconcile-attempts.js';
 import { TaskService } from './tasks/task-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
@@ -220,6 +223,7 @@ export const startServer = async (
     diagnostics,
     projectEvents,
   });
+  reconcileTaskAttemptLaunchReservations(database);
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
     database,

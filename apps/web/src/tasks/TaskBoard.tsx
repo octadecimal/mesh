@@ -38,6 +38,7 @@ type PendingMove =
       id: number;
       kind: 'reorder';
       sourceRevision: number;
+      sourceRank: string;
       nextState: TaskLifecycleState;
       nextRank: string;
     };
@@ -138,7 +139,11 @@ export function TaskBoard({
   useEffect(() => {
     const settled = Object.entries(pendingMoves).filter(([taskId, move]) => {
       const task = projection.tasksById[taskId];
-      return Boolean(task && task.revision > move.sourceRevision);
+      return Boolean(
+        task &&
+          task.revision > move.sourceRevision &&
+          (move.kind === 'transition' || task.rank !== move.sourceRank),
+      );
     });
     if (settled.length === 0) return;
     const conflicts: string[] = [];
@@ -232,6 +237,7 @@ export function TaskBoard({
         {
           kind: 'reorder',
           sourceRevision: task.revision,
+          sourceRank: task.rank,
           nextState: task.lifecycleState,
           nextRank: targetRank,
         },

@@ -39,6 +39,29 @@ type ReconciliationDependencies = {
   now?: () => string;
 };
 
+export const reconcileTaskAttemptLaunchReservations = (
+  database: Database,
+): number => {
+  const result = database
+    .prepare(
+      `
+        DELETE FROM task_attempt_launch_reservations
+        WHERE session_id IS NULL
+           OR session_id IN (
+             SELECT id FROM sessions
+             WHERE lifecycle_state NOT IN (
+               'starting',
+               'running',
+               'waiting_for_approval',
+               'interrupting'
+             )
+           )
+      `,
+    )
+    .run();
+  return result.changes;
+};
+
 const diagnosticPayload = (diagnostic: RawDiagnostic) =>
   typeof diagnostic.payload === 'object' && diagnostic.payload !== null
     ? (diagnostic.payload as Record<string, unknown>)
