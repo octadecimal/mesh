@@ -27,11 +27,21 @@ import { CommandRepository } from './repositories/command-repository.js';
 import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
 import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
+import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
+import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
+import { TaskRepository } from './repositories/task-repository.js';
+import { TaskTransitionRepository } from './repositories/task-transition-repository.js';
 import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { recoverInterruptedSessions } from './runtime/recovery.js';
 import { SessionRegistry } from './runtime/session-registry.js';
+import { AttemptService } from './tasks/attempt-service.js';
+import {
+  reconcileTaskAttemptLaunchReservations,
+  reconcileTaskAttempts,
+} from './tasks/reconcile-attempts.js';
+import { TaskService } from './tasks/task-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
   constructor(private readonly conflicts: readonly BillingConflict[]) {}
@@ -154,12 +164,24 @@ export const startServer = async (
   recoverInterruptedSessions(database);
 
   const projects = new ProjectRepository(database);
+  const tasks = new TaskRepository(database);
+  const attempts = new TaskAttemptRepository(database);
+  const transitions = new TaskTransitionRepository(database);
+  const projectEvents = new ProjectEventRepository(database);
   const workspaces = new WorkspaceRepository(database);
   const sessions = new SessionRepository(database);
   const diagnostics = new DiagnosticRepository(database);
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
+  const taskService = new TaskService({
+    database,
+    projects,
+    tasks,
+    transitions,
+    projectEvents,
+    commands,
+  });
   const driver = selectClaudeDriver(
     billingConflicts,
     () => new SdkClaudeSessionDriver(createClaudeSdkFacade()),
@@ -175,9 +197,44 @@ export const startServer = async (
     driver,
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
+  const git = new GitAdapter(new NodeProcessRunner(), pathOptions);
+  const attemptService = new AttemptService({
+    database,
+    projects,
+    tasks,
+    attempts,
+    sessions,
+    workspaces,
+    diagnostics,
+    projectEvents,
+    commands,
+    taskService,
+    registry,
+    git,
+    pathOptions,
+    billingConflicts,
+  });
+  const reconciliation = reconcileTaskAttempts({
+    database,
+    projects,
+    tasks,
+    attempts,
+    sessions,
+    diagnostics,
+    projectEvents,
+  });
+  reconcileTaskAttemptLaunchReservations(database);
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const app = buildApp({
+    database,
     projects,
+    tasks,
+    taskService,
+    attemptService,
+    attempts,
+    transitions,
+    projectEvents,
+    repairs: reconciliation.repairs,
     workspaces,
     sessions,
     diagnostics,
@@ -186,7 +243,7 @@ export const startServer = async (
     commands,
     registry,
     driver,
-    git: new GitAdapter(new NodeProcessRunner(), pathOptions),
+    git,
     pathOptions,
     billingConflicts,
     originPolicy,

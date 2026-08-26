@@ -2,14 +2,17 @@ import websocket from '@fastify/websocket';
 import type { FastifyInstance } from 'fastify';
 import {
   idSchema,
+  type ProjectEvent,
   type ServerMessage,
   type SessionEvent,
 } from '@mesh-session-platform/contracts';
 import { subscribeFrameSchema } from '@mesh-session-platform/contracts';
 
 import type { EventRepository } from '../repositories/event-repository.js';
+import type { RetainedProjectEventWindow } from '../repositories/project-event-repository.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { OriginPolicy } from '../app.js';
+import { ProjectReplayService } from './project-replay.js';
 import { ReplayService } from './replay.js';
 
 const DEFAULT_MAX_SUBSCRIPTIONS = 100;
@@ -24,9 +27,16 @@ type SocketConnection = {
 };
 
 type EventHistory = Pick<EventRepository, 'after'>;
+type ProjectEventHistory = {
+  retainedAfter(
+    projectId: string,
+    sequence: number,
+  ): RetainedProjectEventWindow;
+};
 
 export type SocketHubOptions = {
   events: EventHistory;
+  projectEvents?: ProjectEventHistory;
   publisher: EventPublisher;
   now?: () => string;
   heartbeatIntervalMs?: number;
@@ -37,6 +47,7 @@ export type SocketHubOptions = {
 type SubscribeFrame = {
   type: 'subscribe';
   cursors: Record<string, number>;
+  projectCursors: Record<string, number>;
 };
 
 const frameText = (data: unknown): string | undefined => {
@@ -59,9 +70,11 @@ const parseSubscribeFrame = (
     if (!parsed.success) return undefined;
     const candidate = parsed.data;
     const entries = Object.entries(candidate.cursors);
-    if (entries.length > maxSubscriptions) return undefined;
+    const projectEntries = Object.entries(candidate.projectCursors ?? {});
+    if (entries.length + projectEntries.length > maxSubscriptions)
+      return undefined;
     if (
-      entries.some(
+      [...entries, ...projectEntries].some(
         ([sessionId, cursor]) =>
           !idSchema.safeParse(sessionId).success ||
           typeof cursor !== 'number' ||
@@ -71,7 +84,11 @@ const parseSubscribeFrame = (
     ) {
       return undefined;
     }
-    return { type: 'subscribe', cursors: Object.fromEntries(entries) };
+    return {
+      type: 'subscribe',
+      cursors: Object.fromEntries(entries),
+      projectCursors: Object.fromEntries(projectEntries),
+    };
   } catch {
     return undefined;
   }
@@ -98,6 +115,7 @@ export const isAllowedSocketUpgrade = (
 
 export class SocketHub {
   private readonly replay: ReplayService;
+  private readonly projectReplay?: ProjectReplayService;
   private readonly now: () => string;
   private readonly heartbeatIntervalMs: number;
   private readonly maxSubscriptions: number;
@@ -105,6 +123,9 @@ export class SocketHub {
 
   constructor(private readonly options: SocketHubOptions) {
     this.replay = new ReplayService(options.events);
+    this.projectReplay = options.projectEvents
+      ? new ProjectReplayService(options.projectEvents)
+      : undefined;
     this.now = options.now ?? (() => new Date().toISOString());
     this.heartbeatIntervalMs =
       options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
@@ -137,18 +158,29 @@ export class SocketHub {
         return;
       }
 
-      this.startSubscription(socket, subscription.cursors, cleanups);
+      this.startSubscription(
+        socket,
+        subscription.cursors,
+        subscription.projectCursors,
+        cleanups,
+      );
     });
   }
 
   private startSubscription(
     socket: SocketConnection,
     cursors: Record<string, number>,
+    projectCursors: Record<string, number>,
     cleanups: Array<() => void>,
   ): void {
     const buffered: SessionEvent[] = [];
+    const bufferedProjectEvents: ProjectEvent[] = [];
     const delivered = new Set<string>();
+    const deliveredProjectEvents = new Set<string>();
     const resyncRequired = new Set<string>();
+    const projectResyncRequired = new Set<string>();
+    const subscribedProjectIds = new Set(Object.keys(projectCursors));
+    const projectCursorById = { ...projectCursors };
     let replaying = true;
 
     const deliver = (events: SessionEvent[]) => {
@@ -165,6 +197,38 @@ export class SocketHub {
           protocolVersion: 1,
           type: 'events',
           payload: { events: unique },
+        });
+      }
+    };
+
+    const requireProjectResync = (projectId: string, reason: string) => {
+      if (projectResyncRequired.has(projectId)) return;
+      projectResyncRequired.add(projectId);
+      this.send(socket, {
+        protocolVersion: 1,
+        type: 'project.resync_required',
+        payload: { projectId: idSchema.parse(projectId), reason },
+      });
+    };
+
+    const deliverProjectEvents = (events: ProjectEvent[]) => {
+      for (const event of events) {
+        if (!subscribedProjectIds.has(event.projectId)) continue;
+        if (projectResyncRequired.has(event.projectId)) continue;
+        const cursor = projectCursorById[event.projectId] ?? 0;
+        if (event.sequence <= cursor) continue;
+        if (event.sequence !== cursor + 1) {
+          requireProjectResync(event.projectId, 'event_sequence_gap');
+          continue;
+        }
+        const key = `${event.projectId}\u0000${event.sequence}`;
+        if (deliveredProjectEvents.has(key)) continue;
+        deliveredProjectEvents.add(key);
+        projectCursorById[event.projectId] = event.sequence;
+        this.send(socket, {
+          protocolVersion: 1,
+          type: 'project.event',
+          payload: { event },
         });
       }
     };
@@ -186,6 +250,14 @@ export class SocketHub {
         }),
       );
     }
+    for (const projectId of Object.keys(projectCursors)) {
+      cleanups.push(
+        this.options.publisher.subscribeProject(projectId, (event) => {
+          if (replaying) bufferedProjectEvents.push(event);
+          else deliverProjectEvents([event]);
+        }),
+      );
+    }
 
     try {
       const result = this.replay.after(cursors);
@@ -202,6 +274,28 @@ export class SocketHub {
       }
       for (const batch of result.batches) deliver(batch.events);
 
+      if (this.projectReplay) {
+        const projectResult = this.projectReplay.after(projectCursors);
+        for (const projectId of projectResult.resyncProjectIds) {
+          requireProjectResync(projectId, 'requested_history_unavailable');
+        }
+        deliverProjectEvents(projectResult.events);
+        for (const [projectId, highWater] of Object.entries(
+          projectResult.highWaterByProject,
+        )) {
+          if (
+            !projectResyncRequired.has(projectId) &&
+            projectCursorById[projectId] !== highWater
+          ) {
+            requireProjectResync(projectId, 'event_sequence_gap');
+          }
+        }
+      } else {
+        for (const projectId of Object.keys(projectCursors)) {
+          requireProjectResync(projectId, 'requested_history_unavailable');
+        }
+      }
+
       while (buffered.length > 0) {
         const pending = buffered.splice(0);
         deliver(
@@ -211,6 +305,9 @@ export class SocketHub {
               (result.highWaterBySession[event.sessionId] ?? 0),
           ),
         );
+      }
+      while (bufferedProjectEvents.length > 0) {
+        deliverProjectEvents(bufferedProjectEvents.splice(0));
       }
       replaying = false;
       this.sendHealth(socket, 'connected');

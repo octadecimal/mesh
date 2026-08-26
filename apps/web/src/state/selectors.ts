@@ -1,4 +1,12 @@
-import type { SavedLayout, Session } from '@mesh-session-platform/contracts';
+import type {
+  AttemptRepair,
+  Project,
+  SavedLayout,
+  Session,
+  Task,
+  TaskAttempt,
+  TaskTransition,
+} from '@mesh-session-platform/contracts';
 
 import type { MeshProjection, PendingApproval } from './reducer';
 
@@ -7,6 +15,63 @@ export const selectWorkspaces = (state: MeshProjection) => state.workspaces;
 export const selectSessions = (state: MeshProjection) => state.sessions;
 export const selectSelectedSessionId = (state: MeshProjection) =>
   state.selectedSessionId;
+
+export type BoardColumn = 'backlog' | 'ready' | 'in_progress' | 'review';
+
+export const selectProject = (
+  state: MeshProjection,
+  projectId: string,
+): Project | undefined => state.projectsById[projectId];
+
+export const selectBoardTasks = (
+  state: MeshProjection,
+  projectId: string,
+): Record<BoardColumn, Task[]> => {
+  const columns: Record<BoardColumn, Task[]> = {
+    backlog: [],
+    ready: [],
+    in_progress: [],
+    review: [],
+  };
+  for (const task of Object.values(state.tasksById)) {
+    if (task.projectId !== projectId) continue;
+    if (task.lifecycleState in columns)
+      columns[task.lifecycleState as BoardColumn].push(task);
+  }
+  for (const tasks of Object.values(columns)) {
+    tasks.sort((left, right) => left.rank.localeCompare(right.rank));
+  }
+  return columns;
+};
+
+export const selectTaskAttempts = (
+  state: MeshProjection,
+  taskId: string,
+): Array<{ attempt: TaskAttempt; session?: Session }> => {
+  const sessionsById = new Map(
+    state.sessions.map((session) => [session.id, session]),
+  );
+  return Object.values(state.attemptsById)
+    .filter((attempt) => attempt.taskId === taskId)
+    .sort((left, right) => left.ordinal - right.ordinal)
+    .map((attempt) => ({
+      attempt,
+      session: sessionsById.get(attempt.sessionId),
+    }));
+};
+
+export const selectTaskTransitions = (
+  state: MeshProjection,
+  taskId: string,
+): TaskTransition[] =>
+  [...(state.transitionsByTaskId[taskId] ?? [])].sort((left, right) =>
+    left.occurredAt.localeCompare(right.occurredAt),
+  );
+
+export const selectProjectRepairConditions = (
+  state: MeshProjection,
+  projectId: string,
+): AttemptRepair[] => [...(state.repairsByProjectId[projectId] ?? [])];
 
 const layoutSpecificity = ({
   projectId,

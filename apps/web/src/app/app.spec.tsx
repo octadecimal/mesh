@@ -1,6 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { SessionSnapshot } from '@mesh-session-platform/contracts';
+import {
+  taskActorSchema,
+  taskAttemptSchema,
+  taskSchema,
+  type SessionSnapshot,
+} from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
 
 import { createMeshStore } from '../state/store';
@@ -154,7 +159,255 @@ describe('App', () => {
         ),
     ).toBe(true);
   });
+
+  it('opens a project board and keeps its session workspace reachable', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    render(<App store={store} api={createApi()} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+
+    expect(screen.getByRole('region', { name: 'Mesh board' })).toBeDefined();
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
+    expect(
+      screen.getByRole('main', { name: 'Session workspace' }),
+    ).toBeDefined();
+  });
+
+  it('renders the loaded task board, sends task commands, and forwards selection', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    const api = createApi();
+    const onSelectTask = vi.fn();
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [boardTask],
+      attempts: [boardAttempt],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} onSelectTask={onSelectTask} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(
+      await screen.findByRole('button', { name: 'Open Board task' }),
+    );
+    expect(onSelectTask).toHaveBeenCalledWith('board-task');
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Move Board task to' }),
+      'ready',
+    );
+    expect(api.command).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'task.transition',
+        payload: expect.objectContaining({
+          taskId: 'board-task',
+          expectedRevision: 1,
+          nextState: 'ready',
+        }),
+      }),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Open Board task' }));
+    await user.click(screen.getByRole('button', { name: 'Open Session A' }));
+    expect(
+      screen.getByRole('main', { name: 'Session workspace' }),
+    ).toBeDefined();
+  });
+
+  it('keeps an archived project board read-only and restores it explicitly', async () => {
+    const user = userEvent.setup();
+    const archivedStore = createMeshStore({
+      ...snapshot,
+      projects: [
+        {
+          ...project,
+          archivedAt: '2026-08-25T00:00:00.000Z',
+          revision: 2,
+        },
+      ],
+    });
+    const api = createApi();
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project: {
+        ...project,
+        archivedAt: '2026-08-25T00:00:00.000Z',
+        revision: 2,
+      },
+      tasks: [boardTask],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 0,
+    });
+    render(<App store={archivedStore} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    const board = screen.getByRole('region', { name: 'Mesh board' });
+    const readOnlyDescription = screen.getByText(/read-only until restored/i);
+    expect(board).toHaveAttribute('aria-describedby', readOnlyDescription.id);
+    expect(
+      within(board).queryByText('Board tasks will appear here.'),
+    ).toBeNull();
+    expect(
+      within(board).getByRole('combobox', { name: 'Move Board task to' }),
+    ).toBeDisabled();
+    expect(
+      within(board).getByRole('button', { name: 'Restore project' }),
+    ).toBeDefined();
+
+    await user.click(screen.getByRole('button', { name: 'Restore project' }));
+    await waitFor(() =>
+      expect(api.command).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'project.restore',
+          payload: expect.objectContaining({
+            projectId: 'p1',
+            expectedRevision: 2,
+          }),
+        }),
+      ),
+    );
+    archivedStore.replaceProjectSnapshot({
+      protocolVersion: 1,
+      project: { ...project, revision: 3 },
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole('region', { name: 'Mesh board' }),
+      ).not.toHaveAttribute('aria-describedby'),
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Restore project' }),
+    ).toBeNull();
+  });
+
+  it('loads the selected project snapshot before showing its board', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(crossProjectSnapshot);
+    const api = createApi();
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project: projectB,
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 3,
+    });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+
+    await waitFor(() => expect(api.projectSnapshot).toHaveBeenCalledWith('p2'));
+    expect(screen.getByRole('region', { name: 'Other board' })).toBeDefined();
+  });
+
+  it('keeps the current board visible until a switched project snapshot resolves', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(crossProjectSnapshot);
+    const api = createApi();
+    const nextProject = deferred<{
+      protocolVersion: 1;
+      project: typeof projectB;
+      tasks: [];
+      attempts: [];
+      transitions: [];
+      repairs: [];
+      cursor: number;
+    }>();
+    api.projectSnapshot
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        project,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 1,
+      })
+      .mockImplementationOnce(() => nextProject.promise);
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    expect(
+      await screen.findByRole('region', { name: 'Mesh board' }),
+    ).toBeDefined();
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Loading Other project…',
+    );
+    expect(screen.getByRole('region', { name: 'Mesh board' })).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'Other board' })).toBeNull();
+
+    nextProject.resolve({
+      protocolVersion: 1,
+      project: projectB,
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 2,
+    });
+    expect(
+      await screen.findByRole('region', { name: 'Other board' }),
+    ).toBeDefined();
+    expect(api.projectSnapshot).toHaveBeenLastCalledWith('p2');
+  });
+
+  it('shows a retryable board-local error when a project snapshot rejects', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(crossProjectSnapshot);
+    const api = createApi();
+    api.projectSnapshot
+      .mockRejectedValueOnce(new Error('Project snapshot is unavailable'))
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        project: projectB,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 2,
+      });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Project snapshot is unavailable',
+    );
+    expect(screen.queryByRole('region', { name: 'Other board' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Retry project' }));
+
+    expect(
+      await screen.findByRole('region', { name: 'Other board' }),
+    ).toBeDefined();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(api.projectSnapshot).toHaveBeenCalledTimes(2);
+  });
 });
+
+const deferred = <Value,>() => {
+  let resolve!: (value: Value | PromiseLike<Value>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<Value>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
 
 const project = {
   id: 'p1',
@@ -179,6 +432,35 @@ const session = {
   createdAt: '2026-08-24T00:00:00.000Z',
   updatedAt: '2026-08-24T00:00:00.000Z',
 };
+
+const boardTask = taskSchema.parse({
+  id: 'board-task',
+  projectId: 'p1',
+  title: 'Board task',
+  description: 'Render the task board.',
+  acceptanceCriteria: ['The board is visible.'],
+  priority: 'high',
+  rank: 'a',
+  lifecycleState: 'backlog',
+  labels: ['web'],
+  notes: '',
+  blocked: null,
+  revision: 1,
+  createdAt: '2026-08-24T00:00:00.000Z',
+  updatedAt: '2026-08-24T00:00:00.000Z',
+});
+const boardAttempt = taskAttemptSchema.parse({
+  id: 'board-attempt',
+  taskId: boardTask.id,
+  sessionId: session.id,
+  ordinal: 1,
+  source: 'linked',
+  actor: taskActorSchema.parse({ type: 'human', id: 'operator' }),
+  createdAt: '2026-08-24T00:00:00.000Z',
+  unlinkedAt: null,
+  unlinkedBy: null,
+  unlinkReason: null,
+});
 
 const snapshot: SessionSnapshot = {
   protocolVersion: 1,
@@ -270,4 +552,14 @@ const createApi = () => ({
     result: {},
     warnings: [],
   }),
+  projectSnapshot: vi.fn().mockResolvedValue({
+    protocolVersion: 1,
+    project,
+    tasks: [],
+    attempts: [],
+    transitions: [],
+    repairs: [],
+    cursor: 0,
+  }),
+  discover: vi.fn(),
 });

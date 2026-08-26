@@ -11,12 +11,17 @@ import {
   rawDiagnosticSchema,
   savedLayoutSchema,
   sessionSchema,
+  taskAttemptSchema,
+  taskSchema,
+  taskTransitionSchema,
+  taskActorSchema,
   workspaceSchema,
 } from '@mesh-session-platform/contracts';
 
 import { createTestRepositories } from '../test/create-test-database.js';
 import { waitForWorkerMessage } from '../test/wait-for-worker-message.js';
 import { CommandReconciliationRequiredError } from './command-repository.js';
+import { TaskAttemptRepository } from './task-attempt-repository.js';
 
 const project = () =>
   projectSchema.parse({
@@ -101,6 +106,359 @@ describe('repositories', () => {
     ]);
   });
 
+  it('activates a durable pending workspace reservation without replacing it', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const reserved = repos.workspaces.create(
+      workspaceSchema.parse({ ...workspace(), cleanupState: 'pending' }),
+    );
+
+    const active = repos.workspaces.markActive(reserved.id);
+
+    expect(active).toEqual({ ...reserved, cleanupState: 'active' });
+    expect(repos.workspaces.listByProject('p1')).toEqual([active]);
+  });
+
+  const actor = () => taskActorSchema.parse({ type: 'human', id: 'user-1' });
+
+  const task = (overrides: Record<string, unknown> = {}) =>
+    taskSchema.parse({
+      id: 'task-1',
+      projectId: 'p1',
+      title: 'Persist tasks',
+      description: 'Store board tasks in SQLite.',
+      acceptanceCriteria: ['Task is persisted'],
+      priority: 'normal',
+      rank: 'b',
+      lifecycleState: 'backlog',
+      labels: ['persistence'],
+      notes: '',
+      blocked: null,
+      revision: 1,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+      ...overrides,
+    });
+
+  const attempt = (overrides: Record<string, unknown> = {}) =>
+    taskAttemptSchema.parse({
+      id: 'attempt-1',
+      taskId: 'task-1',
+      sessionId: 's1',
+      ordinal: 1,
+      source: 'linked',
+      actor: actor(),
+      createdAt: '2026-08-24T00:00:00.000Z',
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+      ...overrides,
+    });
+
+  const transition = (overrides: Record<string, unknown> = {}) =>
+    taskTransitionSchema.parse({
+      id: 'transition-1',
+      taskId: 'task-1',
+      commandId: 'command-1',
+      previousState: 'backlog',
+      nextState: 'ready',
+      actor: actor(),
+      reason: 'Ready to start',
+      occurredAt: '2026-08-24T00:01:00.000Z',
+      ...overrides,
+    });
+
+  it('persists additive project metadata for new project records', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+
+    repos.projects.create(project());
+
+    expect(
+      repos.database
+        .prepare(
+          `SELECT repository_identity, revision, created_at, updated_at, archived_at
+           FROM projects WHERE id = ?`,
+        )
+        .get('p1'),
+    ).toEqual({
+      repository_identity: 'C:/code/platform',
+      revision: 1,
+      created_at: '2026-08-24T00:00:00.000Z',
+      updated_at: '2026-08-24T00:00:00.000Z',
+      archived_at: null,
+    });
+  });
+
+  it('finds projects by repository identity and guards updates by revision', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+
+    expect(
+      repos.projects.getByRepositoryIdentity('C:/code/platform'),
+    ).toMatchObject({
+      id: 'p1',
+    });
+    expect(
+      repos.projects.update(
+        {
+          ...project(),
+          displayName: 'Renamed',
+          updatedAt: '2026-08-24T00:03:00.000Z',
+        },
+        1,
+      ),
+    ).toMatchObject({ displayName: 'Renamed', revision: 2 });
+    expect(
+      repos.projects.update({ ...project(), displayName: 'Stale' }, 1),
+    ).toBeUndefined();
+    expect(
+      repos.projects.archive('p1', '2026-08-24T00:04:00.000Z'),
+    ).toMatchObject({
+      archivedAt: '2026-08-24T00:04:00.000Z',
+      revision: 3,
+    });
+    expect(
+      repos.projects.restore('p1', '2026-08-24T00:05:00.000Z'),
+    ).toMatchObject({
+      archivedAt: null,
+      revision: 4,
+    });
+  });
+
+  it('orders project tasks for the board and guards task updates by revision', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    repos.tasks.create(
+      task({ id: 'task-ready', lifecycleState: 'ready', rank: 'a' }),
+    );
+    repos.tasks.create(task({ id: 'task-backlog-later', rank: 'c' }));
+    repos.tasks.create(task({ id: 'task-backlog-first', rank: 'a' }));
+
+    expect(repos.tasks.listByProject('p1').map((value) => value.id)).toEqual([
+      'task-backlog-first',
+      'task-backlog-later',
+      'task-ready',
+    ]);
+    const stored = repos.tasks.get('task-backlog-first');
+    expect(stored).toBeDefined();
+    if (!stored) throw new Error('Expected stored task');
+    expect(
+      repos.tasks.update(
+        {
+          ...stored,
+          title: 'Updated task',
+          updatedAt: '2026-08-24T00:04:00.000Z',
+        },
+        1,
+      ),
+    ).toMatchObject({ title: 'Updated task', revision: 2 });
+    expect(
+      repos.tasks.update({ ...stored, title: 'Stale task' }, 1),
+    ).toBeUndefined();
+  });
+
+  it('creates monotonic task attempts and preserves unlink history', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    repos.tasks.create(task());
+
+    const first = repos.attempts.createForTask(
+      'task-1',
+      's1',
+      'linked',
+      actor(),
+    );
+    const unlinked = repos.attempts.unlink(
+      first.id,
+      actor(),
+      'Session completed',
+      '2026-08-24T00:02:00.000Z',
+    );
+    const second = repos.attempts.create(
+      attempt({
+        id: 'attempt-2',
+        ordinal: 2,
+        createdAt: '2026-08-24T00:03:00.000Z',
+      }),
+    );
+
+    expect(unlinked).toMatchObject({
+      unlinkedAt: '2026-08-24T00:02:00.000Z',
+      unlinkReason: 'Session completed',
+    });
+    expect(first.ordinal).toBe(1);
+    expect(second.ordinal).toBe(2);
+    expect(
+      repos.attempts.listByTask('task-1').map((value) => value.ordinal),
+    ).toEqual([1, 2]);
+    expect(repos.attempts.getCurrentBySession('s1')).toMatchObject({
+      id: 'attempt-2',
+    });
+    expect(() =>
+      repos.attempts.create(attempt({ id: 'attempt-3', ordinal: 3 })),
+    ).toThrow();
+  });
+
+  it('preserves current and historical attempt rows when session deletion is attempted', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    repos.tasks.create(task());
+    const linked = repos.attempts.createForTask(
+      'task-1',
+      's1',
+      'linked',
+      actor(),
+    );
+    repos.attempts.unlink(
+      linked.id,
+      actor(),
+      'Historical association',
+      '2026-08-24T00:02:00.000Z',
+    );
+
+    expect(() => repos.sessions.remove('s1')).toThrow(
+      'session has task attempt history',
+    );
+    expect(repos.sessions.get('s1')).toBeDefined();
+    expect(repos.attempts.listBySession('s1')).toHaveLength(1);
+  });
+
+  it('allocates a generated attempt ordinal after beginning its write transaction', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    seedSession(repos);
+    repos.tasks.create(task());
+    let inImmediateTransaction = false;
+    const database = new Proxy(repos.database, {
+      get(target, property, receiver) {
+        if (property === 'exec') {
+          return (sql: string) => {
+            if (sql === 'BEGIN IMMEDIATE') inImmediateTransaction = true;
+            try {
+              return target.exec(sql);
+            } finally {
+              if (sql === 'COMMIT' || sql === 'ROLLBACK') {
+                inImmediateTransaction = false;
+              }
+            }
+          };
+        }
+        if (property === 'prepare') {
+          return (sql: string) => {
+            const statement = target.prepare(sql);
+            if (!sql.includes('MAX(ordinal)')) return statement;
+            return new Proxy(statement, {
+              get(statementTarget, statementProperty, statementReceiver) {
+                const value = Reflect.get(
+                  statementTarget,
+                  statementProperty,
+                  statementReceiver,
+                );
+                if (statementProperty !== 'get') return value;
+                return (...args: unknown[]) => {
+                  expect(inImmediateTransaction).toBe(true);
+                  return Reflect.apply(value, statementTarget, args);
+                };
+              },
+            });
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const attempts = new TaskAttemptRepository(database);
+
+    expect(() =>
+      attempts.createForTask('task-1', 's1', 'linked', actor()),
+    ).not.toThrow();
+    expect(attempts.getCurrentBySession('s1')).toMatchObject({ ordinal: 1 });
+  });
+
+  it('appends immutable task transitions and rejects duplicate commands', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    repos.tasks.create(task());
+    repos.transitions.append(transition());
+
+    expect(repos.transitions.listByTask('task-1')).toEqual([transition()]);
+    expect(() =>
+      repos.transitions.append(transition({ id: 'transition-2' })),
+    ).toThrow();
+  });
+
+  it('appends project events with monotonic cursor sequences and rejects duplicate ids', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const first = repos.projectEvents.append('p1', {
+      protocolVersion: 1,
+      id: 'project-event-1',
+      projectId: project().id,
+      occurredAt: '2026-08-24T00:01:00.000Z',
+      type: 'project.changed',
+      payload: { project: project() },
+    });
+    const second = repos.projectEvents.append('p1', {
+      protocolVersion: 1,
+      id: 'project-event-2',
+      projectId: project().id,
+      occurredAt: '2026-08-24T00:02:00.000Z',
+      type: 'project.changed',
+      payload: { project: project() },
+    });
+
+    expect([first.sequence, second.sequence]).toEqual([1, 2]);
+    expect(
+      repos.projectEvents.after('p1', 0).map((event) => event.sequence),
+    ).toEqual([1, 2]);
+    expect(repos.projectEvents.latestSequence('p1')).toBe(2);
+    expect(() =>
+      repos.projectEvents.append('p1', {
+        protocolVersion: 1,
+        id: 'project-event-2',
+        projectId: project().id,
+        occurredAt: '2026-08-24T00:03:00.000Z',
+        type: 'project.changed',
+        payload: { project: project() },
+      }),
+    ).toThrow();
+  });
+
+  it('retains durable project stream watermarks after all events are purged', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const append = (id: string) =>
+      repos.projectEvents.append('p1', {
+        protocolVersion: 1,
+        id,
+        projectId: project().id,
+        occurredAt: '2026-08-24T00:01:00.000Z',
+        type: 'project.changed',
+        payload: { project: project() },
+      });
+    append('project-event-1');
+    append('project-event-2');
+
+    repos.database
+      .prepare('DELETE FROM project_events WHERE project_id = ?')
+      .run('p1');
+
+    expect(repos.projectEvents.retainedAfter('p1', 0)).toEqual({
+      events: [],
+      lowWater: 3,
+      highWater: 2,
+    });
+    expect(append('project-event-3').sequence).toBe(3);
+  });
+
   it('omits archived sessions unless requested', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
@@ -167,13 +525,14 @@ describe('repositories', () => {
     expect(repos.diagnostics.list('s1')).toEqual([]);
   });
 
-  it('cascades a deleted project through its session records', () => {
+  it('keeps cascade coverage in raw fixture SQL without exposing project removal', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
     seedSession(repos);
     repos.events.append('s1', userMessage('one'), diagnostic('d1', 'user'));
 
-    repos.projects.remove('p1');
+    expect('remove' in repos.projects).toBe(false);
+    repos.database.prepare('DELETE FROM projects WHERE id = ?').run('p1');
 
     expect(repos.sessions.get('s1')).toBeUndefined();
     expect(repos.events.after('s1', 0)).toEqual([]);
@@ -219,6 +578,30 @@ describe('repositories', () => {
     expect(executions).toBe(1);
   });
 
+  it('reads completed and failed command history before application preconditions', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    const response = repos.commands.executeOnce('command-complete', () => ({
+      accepted: true,
+    }));
+    expect(() =>
+      repos.commands.executeOnce('command-failed', () => {
+        throw new Error('failed once');
+      }),
+    ).toThrow('failed once');
+
+    expect(repos.commands.getExisting('command-missing')).toEqual({
+      found: false,
+    });
+    expect(repos.commands.getExisting('command-complete')).toEqual({
+      found: true,
+      response,
+    });
+    expect(() => repos.commands.getExisting('command-failed')).toThrow(
+      CommandReconciliationRequiredError,
+    );
+  });
+
   it('marks a throwing command as failed and blocks automatic retry', () => {
     const repos = createTestRepositories();
     disposers.push(repos.dispose);
@@ -238,6 +621,38 @@ describe('repositories', () => {
     expect(() =>
       repos.commands.executeOnce('command-fails', () => ({ accepted: true })),
     ).toThrow(CommandReconciliationRequiredError);
+  });
+
+  it('keeps a failed atomic command while rolling back its application writes', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const original = repos.tasks.create(task());
+    let executions = 0;
+
+    expect(() =>
+      repos.commands.executeOnceInImmediateTransaction('atomic-failure', () => {
+        executions += 1;
+        repos.tasks.update({ ...original, notes: 'Must roll back' }, 1);
+        throw new Error('atomic mutation failed');
+      }),
+    ).toThrow('atomic mutation failed');
+
+    expect(repos.tasks.get(original.id)).toEqual(original);
+    expect(
+      repos.database
+        .prepare(
+          'SELECT state FROM processed_commands WHERE idempotency_key = ?',
+        )
+        .get('atomic-failure'),
+    ).toEqual({ state: 'failed' });
+    expect(() =>
+      repos.commands.executeOnceInImmediateTransaction('atomic-failure', () => {
+        executions += 1;
+        return { accepted: true };
+      }),
+    ).toThrow(CommandReconciliationRequiredError);
+    expect(executions).toBe(1);
   });
 
   it('marks an unserializable response indeterminate and blocks automatic retry', () => {

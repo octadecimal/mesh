@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { FakeClaudeSessionDriver } from './claude/fake-driver.js';
 import { buildApp, createOriginPolicy } from './app.js';
 import { SessionRegistry } from './runtime/session-registry.js';
+import { TaskService } from './tasks/task-service.js';
 import { createTestRepositories } from './test/create-test-database.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -24,9 +25,11 @@ const setup = (options?: { webRoot?: string; developmentOrigin?: string }) => {
     closeDatabase: () => undefined,
   });
   const originPolicy = createOriginPolicy(options?.developmentOrigin);
+  const taskService = new TaskService(repositories);
   originPolicy.setServedOrigin('http://127.0.0.1:3737');
   const app = buildApp({
     ...repositories,
+    taskService,
     registry,
     driver,
     pathOptions: { baseDirectory: process.cwd() },

@@ -32,6 +32,7 @@ export class WorkspaceRepository {
   private readonly insert;
   private readonly selectByProject;
   private readonly selectById;
+  private readonly markActiveById;
   private readonly markCleanedById;
 
   constructor(private readonly database: Database) {
@@ -46,6 +47,9 @@ export class WorkspaceRepository {
       'SELECT * FROM workspaces WHERE project_id = ? ORDER BY id',
     );
     this.selectById = database.prepare('SELECT * FROM workspaces WHERE id = ?');
+    this.markActiveById = database.prepare(
+      "UPDATE workspaces SET cleanup_state = 'active' WHERE id = ? AND cleanup_state = 'pending'",
+    );
     this.markCleanedById = database.prepare(
       "UPDATE workspaces SET cleanup_state = 'cleaned' WHERE id = ?",
     );
@@ -71,6 +75,11 @@ export class WorkspaceRepository {
     return (this.selectByProject.all(projectId) as WorkspaceRow[]).map(
       toWorkspace,
     );
+  }
+
+  markActive(id: string): Workspace | undefined {
+    const result = this.markActiveById.run(id);
+    return result.changes === 1 ? this.get(id) : undefined;
   }
 
   markCleaned(id: string): Workspace | undefined {

@@ -1,17 +1,394 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  blockedConditionSchema,
   commandSchema,
   commandEnvelopeSchema,
+  projectEventSchema,
+  projectHistorySchema,
+  projectSchema,
+  projectSnapshotSchema,
   serverMessageSchema,
   sessionDiagnosticsSchema,
   sessionEventSchema,
   sessionHistorySchema,
   sessionSnapshotSchema,
   sessionSchema,
+  taskActorSchema,
+  taskAttemptSchema,
+  taskCommandSchema,
+  taskSchema,
+  taskTransitionSchema,
 } from './index.js';
 
 describe('session platform contracts', () => {
+  const now = '2026-08-25T00:00:00.000Z';
+  const actor = { type: 'human' as const, id: 'operator-1' };
+
+  it('accepts lightweight backlog tasks and rejects an empty blocked reason', () => {
+    expect(
+      taskSchema.parse({
+        id: 'task-1',
+        projectId: 'project-1',
+        title: 'Add retry controls',
+        description: '',
+        acceptanceCriteria: [],
+        priority: 'normal',
+        rank: 'm',
+        lifecycleState: 'backlog',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    ).toMatchObject({ lifecycleState: 'backlog', revision: 1 });
+
+    expect(() =>
+      blockedConditionSchema.parse({ reason: ' ', actor, blockedAt: now }),
+    ).toThrow();
+  });
+
+  it('limits task priority, attempt sources, and transition audit fields', () => {
+    expect(() =>
+      taskSchema.parse({
+        id: 'task-1',
+        projectId: 'project-1',
+        title: 'Add retry controls',
+        description: '',
+        acceptanceCriteria: [],
+        priority: 'immediate',
+        rank: 'm',
+        lifecycleState: 'backlog',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    ).toThrow();
+    expect(
+      taskAttemptSchema.parse({
+        id: 'attempt-1',
+        taskId: 'task-1',
+        sessionId: 'session-1',
+        ordinal: 1,
+        source: 'launched',
+        actor,
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+      }).source,
+    ).toBe('launched');
+    expect(() =>
+      taskAttemptSchema.parse({
+        id: 'attempt-1',
+        taskId: 'task-1',
+        sessionId: 'session-1',
+        ordinal: 1,
+        source: 'automatic',
+        actor,
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+      }),
+    ).toThrow();
+    expect(
+      taskTransitionSchema.parse({
+        id: 'transition-1',
+        taskId: 'task-1',
+        commandId: 'command-1',
+        previousState: 'ready',
+        nextState: 'in_progress',
+        actor,
+        reason: null,
+        occurredAt: now,
+      }),
+    ).toMatchObject({
+      commandId: 'command-1',
+      previousState: 'ready',
+      nextState: 'in_progress',
+    });
+  });
+
+  it('decodes legacy projects while extending project metadata', () => {
+    const legacy = projectSchema.parse({
+      id: 'project-1',
+      displayName: 'Mesh',
+      repositoryPath: 'C:/code/mesh',
+      discoveredAt: now,
+    });
+
+    expect(legacy).toMatchObject({
+      repositoryIdentity: 'C:/code/mesh',
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+    });
+  });
+
+  it('accepts task, project, and attempt command variants with revision and actor metadata', () => {
+    expect(
+      taskCommandSchema.parse({
+        type: 'task.transition',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 3,
+          nextState: 'review',
+          reason: 'Acceptance criteria implemented',
+          actor,
+        },
+      }),
+    ).toMatchObject({ type: 'task.transition' });
+
+    for (const command of [
+      {
+        type: 'project.import',
+        payload: { repositoryPath: 'C:/code/mesh', actor },
+      },
+      {
+        type: 'project.archive',
+        payload: { projectId: 'project-1', expectedRevision: 1, actor },
+      },
+      {
+        type: 'project.restore',
+        payload: { projectId: 'project-1', expectedRevision: 2, actor },
+      },
+      {
+        type: 'task.create',
+        payload: { projectId: 'project-1', title: 'Draft', actor },
+      },
+      {
+        type: 'task.edit',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 1,
+          patch: { description: 'Ready to describe.' },
+          actor,
+        },
+      },
+      {
+        type: 'task.reorder',
+        payload: { taskId: 'task-1', expectedRevision: 1, rank: 'n', actor },
+      },
+      {
+        type: 'task.block',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 1,
+          reason: 'Waiting on a decision',
+          actor,
+        },
+      },
+      {
+        type: 'task.unblock',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 2,
+          reason: 'Dependency delivered',
+          actor,
+        },
+      },
+      {
+        type: 'task.attempt.launch',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 2,
+          title: 'Implement retry controls',
+          permissionMode: 'interactive',
+          workspace: { type: 'shared', path: 'C:/code/mesh' },
+          actor,
+        },
+      },
+      {
+        type: 'task.attempt.link',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 2,
+          sessionId: 'session-1',
+          actor,
+        },
+      },
+      {
+        type: 'task.attempt.unlink',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 2,
+          attemptId: 'attempt-1',
+          reason: 'Linked to the wrong task',
+          actor,
+        },
+      },
+    ]) {
+      expect(() =>
+        commandSchema.parse({ protocolVersion: 1, ...command }),
+      ).toThrow();
+      expect(
+        commandEnvelopeSchema.parse({
+          protocolVersion: 1,
+          idempotencyKey: 'command-1',
+          command,
+        }).command.type,
+      ).toBe(command.type);
+    }
+  });
+
+  it('requires a non-empty reason when unblocking a task', () => {
+    const envelope = (reason: string | undefined) => ({
+      protocolVersion: 1,
+      idempotencyKey: 'unblock-command-1',
+      command: {
+        type: 'task.unblock' as const,
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 2,
+          reason,
+          actor,
+        },
+      },
+    });
+
+    expect(
+      commandEnvelopeSchema.parse(envelope('Dependency delivered')),
+    ).toMatchObject({
+      command: { payload: { reason: 'Dependency delivered' } },
+    });
+    expect(() => commandEnvelopeSchema.parse(envelope(undefined))).toThrow();
+    expect(() => commandEnvelopeSchema.parse(envelope('  '))).toThrow();
+  });
+
+  it('parses ordered project events, snapshots, history, and project realtime messages', () => {
+    const project = projectSchema.parse({
+      id: 'project-1',
+      displayName: 'Mesh',
+      repositoryPath: 'C:/code/mesh',
+      repositoryIdentity: 'repo:mesh',
+      discoveredAt: now,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+      archivedAt: null,
+    });
+    const task = taskSchema.parse({
+      id: 'task-1',
+      projectId: 'project-1',
+      title: 'Add retry controls',
+      description: '',
+      acceptanceCriteria: [],
+      priority: 'normal',
+      rank: 'm',
+      lifecycleState: 'backlog',
+      labels: [],
+      notes: '',
+      blocked: null,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const event = projectEventSchema.parse({
+      protocolVersion: 1,
+      id: 'project-event-1',
+      projectId: 'project-1',
+      sequence: 1,
+      occurredAt: now,
+      type: 'task.changed',
+      payload: { task },
+    });
+
+    expect(
+      projectSnapshotSchema.parse({
+        protocolVersion: 1,
+        project,
+        tasks: [task],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 1,
+      }).cursor,
+    ).toBe(1);
+    expect(
+      projectHistorySchema.parse({
+        protocolVersion: 1,
+        projectId: 'project-1',
+        events: [event],
+        cursor: 1,
+      }).cursor,
+    ).toBe(1);
+    expect(() =>
+      projectHistorySchema.parse({
+        protocolVersion: 1,
+        projectId: 'project-2',
+        events: [event],
+        cursor: 1,
+      }),
+    ).toThrow();
+    expect(() =>
+      projectHistorySchema.parse({
+        protocolVersion: 1,
+        projectId: 'project-1',
+        events: [{ ...event, id: 'project-event-2', sequence: 2 }, event],
+        cursor: 2,
+      }),
+    ).toThrow();
+    expect(
+      serverMessageSchema.parse({
+        protocolVersion: 1,
+        type: 'project.event',
+        payload: { event },
+      }).type,
+    ).toBe('project.event');
+    expect(
+      serverMessageSchema.parse({
+        protocolVersion: 1,
+        type: 'project.resync_required',
+        payload: { projectId: 'project-1', reason: 'cursor gap' },
+      }).type,
+    ).toBe('project.resync_required');
+    expect(taskActorSchema.parse(actor)).toEqual(actor);
+  });
+
+  it('parses durable attempt repair project events', () => {
+    const event = projectEventSchema.parse({
+      protocolVersion: 1,
+      id: 'project-event-repair-1',
+      projectId: 'project-1',
+      sequence: 4,
+      occurredAt: now,
+      type: 'task.attempt_repair_detected',
+      payload: {
+        repair: {
+          taskId: 'task-1',
+          attemptId: 'attempt-1',
+          sessionId: 'session-1',
+          reason: 'startup_outcome_unknown',
+        },
+      },
+    });
+
+    expect(event).toMatchObject({
+      type: 'task.attempt_repair_detected',
+      payload: {
+        repair: {
+          attemptId: 'attempt-1',
+          reason: 'startup_outcome_unknown',
+        },
+      },
+    });
+    expect(
+      projectHistorySchema.parse({
+        protocolVersion: 1,
+        projectId: 'project-1',
+        events: [event],
+        cursor: 4,
+      }).events[0],
+    ).toEqual(event);
+  });
+
   it('rejects a mutating command without an idempotency key', () => {
     expect(() =>
       commandEnvelopeSchema.parse({

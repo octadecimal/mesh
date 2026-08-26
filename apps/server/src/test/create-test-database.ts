@@ -10,10 +10,16 @@ import { EventRepository } from '../repositories/event-repository.js';
 import { LayoutRepository } from '../repositories/layout-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
 import { SessionRepository } from '../repositories/session-repository.js';
+import { ProjectEventRepository } from '../repositories/project-event-repository.js';
+import { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
+import { TaskRepository } from '../repositories/task-repository.js';
+import { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
 import { WorkspaceRepository } from '../repositories/workspace-repository.js';
 
 export const createTestRepositories = (options?: {
   failDiagnosticInsert?: boolean;
+  failProjectEventInsert?: boolean;
+  failTaskTransitionInsert?: boolean;
 }) => {
   const directory = mkdtempSync(join(tmpdir(), 'mesh-session-platform-'));
   const path = join(directory, 'test.sqlite');
@@ -30,10 +36,34 @@ export const createTestRepositories = (options?: {
     `);
   }
 
+  if (options?.failProjectEventInsert) {
+    database.exec(`
+      CREATE TRIGGER fail_project_event_insert
+      BEFORE INSERT ON project_events
+      BEGIN
+        SELECT RAISE(FAIL, 'project event insert failed');
+      END;
+    `);
+  }
+
+  if (options?.failTaskTransitionInsert) {
+    database.exec(`
+      CREATE TRIGGER fail_task_transition_insert
+      BEFORE INSERT ON task_transitions
+      BEGIN
+        SELECT RAISE(FAIL, 'task transition insert failed');
+      END;
+    `);
+  }
+
   return {
     path,
     database,
     projects: new ProjectRepository(database),
+    tasks: new TaskRepository(database),
+    attempts: new TaskAttemptRepository(database),
+    transitions: new TaskTransitionRepository(database),
+    projectEvents: new ProjectEventRepository(database),
     workspaces: new WorkspaceRepository(database),
     sessions: new SessionRepository(database),
     diagnostics: new DiagnosticRepository(database),

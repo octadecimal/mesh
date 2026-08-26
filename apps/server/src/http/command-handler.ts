@@ -15,6 +15,7 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import type { ClaudeSessionDriver } from '../claude/driver.js';
+import type { Database } from '../db/database.js';
 import type { GitAdapter } from '../platform/git.js';
 import {
   resolveWorkspacePath,
@@ -26,9 +27,20 @@ import type { DiagnosticRepository } from '../repositories/diagnostic-repository
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { LayoutRepository } from '../repositories/layout-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
+import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
+import type { TaskMutationResult, TaskService } from '../tasks/task-service.js';
+import type {
+  AttemptMutationResult,
+  AttemptService,
+} from '../tasks/attempt-service.js';
+import {
+  RepositoryIdentityError,
+  resolveRepositoryIdentity,
+} from '../projects/repository-identity.js';
 import { CommandError } from './errors.js';
 
 const commandResponseSchema = z.object({
@@ -43,13 +55,21 @@ const commandResponseSchema = z.object({
 export type CommandResponse = z.infer<typeof commandResponseSchema>;
 
 export interface CommandDependencies {
+  database: Database;
   projects: ProjectRepository;
+  attempts: Pick<
+    TaskAttemptRepository,
+    'getCurrentBySession' | 'listBySession'
+  >;
+  projectEvents: ProjectEventRepository;
   workspaces: WorkspaceRepository;
   sessions: SessionRepository;
   events: EventRepository;
   diagnostics: DiagnosticRepository;
   layouts: LayoutRepository;
   commands: CommandRepository;
+  taskService: TaskService;
+  attemptService?: AttemptService;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
@@ -70,6 +90,42 @@ const response = (
     result: JSON.parse(JSON.stringify(result)),
     warnings,
   });
+
+const taskResponse = (
+  result: TaskMutationResult,
+  dependencies: CommandDependencies,
+) => {
+  dependencies.registry.publisher.publishProject(result.event);
+  return {
+    ...result,
+    projectEventCursor: result.event.sequence,
+  };
+};
+
+const attemptResponse = (result: AttemptMutationResult) => ({
+  ...result,
+  projectEventCursor: result.event.sequence,
+});
+
+const requireAttemptService = (dependencies: CommandDependencies) => {
+  if (!dependencies.attemptService) {
+    throw new CommandError(
+      'invalid_command',
+      'Task attempt support is unavailable',
+    );
+  }
+  return dependencies.attemptService;
+};
+
+const requireTaskCommandId = (commandId: string | undefined): string => {
+  if (!commandId) {
+    throw new CommandError(
+      'invalid_command',
+      'Task commands require an idempotency key',
+    );
+  }
+  return commandId;
+};
 
 const requireProject = (dependencies: CommandDependencies, id: string) => {
   const project = dependencies.projects.get(id);
@@ -163,48 +219,349 @@ const discoverSessions = async (
 
 const discoverProjects = async (dependencies: CommandDependencies) => {
   const known = dependencies.projects.list();
-  if (known.length > 0 || !dependencies.pathOptions) return known;
+  if (!dependencies.pathOptions) return { projects: known, suggestions: [] };
 
   const baseDirectory = await resolveWorkspacePath(
     dependencies.pathOptions.baseDirectory,
     dependencies.pathOptions,
   );
   const entries = await readdir(baseDirectory, { withFileTypes: true });
-  let repositoryPath = baseDirectory;
-  for (const entry of entries.sort((left, right) =>
-    left.name.localeCompare(right.name),
-  )) {
-    if (!entry.isDirectory()) continue;
-    const candidate = join(baseDirectory, entry.name);
+  const candidates = [
+    baseDirectory,
+    ...entries
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(baseDirectory, entry.name)),
+  ];
+  const suggestions: Array<{ displayName: string; repositoryPath: string }> =
+    [];
+  for (const candidate of candidates) {
     try {
       const marker = await stat(join(candidate, '.git'));
       if (marker.isDirectory() || marker.isFile()) {
-        repositoryPath = await resolveWorkspacePath(
+        const repositoryPath = await resolveWorkspacePath(
           candidate,
           dependencies.pathOptions,
         );
-        break;
+        suggestions.push({
+          displayName: basename(repositoryPath) || 'Mesh workspace',
+          repositoryPath,
+        });
       }
     } catch {
       // Not a Git repository candidate.
     }
   }
-  const project = projectSchema.parse({
-    id: (dependencies.createId ?? randomUUID)(),
-    displayName: basename(repositoryPath) || 'Mesh workspace',
-    repositoryPath,
-    discoveredAt: (dependencies.now ?? (() => new Date().toISOString()))(),
-    discoveryMetadata: { source: 'workspace_root' },
-  });
-  dependencies.projects.create(project);
-  return [project];
+  return { projects: known, suggestions };
+};
+
+const requireActiveProject = (
+  dependencies: CommandDependencies,
+  id: string,
+) => {
+  const project = requireProject(dependencies, id);
+  if (project.archivedAt) {
+    throw new CommandError('project_archived', `Project '${id}' is archived`, {
+      project,
+    });
+  }
+  return project;
+};
+
+const updateProject = (
+  dependencies: CommandDependencies,
+  project: ReturnType<typeof requireProject>,
+  expectedRevision: number,
+  patch: Partial<
+    Pick<ReturnType<typeof requireProject>, 'displayName' | 'archivedAt'>
+  >,
+) => {
+  const now = (dependencies.now ?? (() => new Date().toISOString()))();
+  dependencies.database.exec('BEGIN IMMEDIATE');
+  try {
+    const updated = dependencies.projects.update(
+      { ...project, ...patch, updatedAt: now },
+      expectedRevision,
+    );
+    if (!updated)
+      throw new CommandError(
+        'task_revision_conflict',
+        `Project '${project.id}' has changed`,
+        { project: dependencies.projects.get(project.id) },
+      );
+    const event = dependencies.projectEvents.appendInTransaction(project.id, {
+      protocolVersion: 1,
+      id: (dependencies.createId ?? randomUUID)(),
+      projectId: project.id,
+      occurredAt: now,
+      type: 'project.changed',
+      payload: { project: updated },
+    });
+    dependencies.database.exec('COMMIT');
+    dependencies.registry.publisher.publishProject(event);
+    return updated;
+  } catch (error) {
+    if (dependencies.database.inTransaction)
+      dependencies.database.exec('ROLLBACK');
+    throw error;
+  }
+};
+
+const assertMilestoneTwoHumanActor = (
+  command: Extract<Command, { idempotencyKey: string }>['command'],
+) => {
+  if (
+    (command.type.startsWith('project.') || command.type.startsWith('task.')) &&
+    'actor' in command.payload &&
+    command.payload.actor.type !== 'human'
+  ) {
+    throw new CommandError(
+      'task_transition_unauthorized',
+      'Milestone 2 mutations require a human actor',
+    );
+  }
+};
+
+const hasRunningTaskAttempt = (
+  dependencies: CommandDependencies,
+  projectId: string,
+) =>
+  dependencies.sessions
+    .listByProject(projectId, { includeArchived: true })
+    .some(
+      (session) =>
+        isLive(session) &&
+        dependencies.attempts.getCurrentBySession(session.id),
+    );
+
+const reconcileLegacyProjectIdentities = async (
+  dependencies: CommandDependencies,
+) => {
+  const pathOptions = dependencies.pathOptions;
+  if (!pathOptions) return;
+  const now = (dependencies.now ?? (() => new Date().toISOString()))();
+  for (const project of dependencies.projects.list()) {
+    if (project.repositoryIdentity !== project.repositoryPath) continue;
+    let identity;
+    try {
+      identity = await resolveRepositoryIdentity(
+        project.repositoryPath,
+        pathOptions,
+      );
+    } catch (error) {
+      if (
+        error instanceof RepositoryIdentityError &&
+        error.code === 'repository_invalid'
+      ) {
+        continue;
+      }
+      throw error;
+    }
+    const reconciled = dependencies.projects.update(
+      {
+        ...project,
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        updatedAt: now,
+      },
+      project.revision,
+    );
+    if (!reconciled) {
+      throw new CommandError(
+        'task_revision_conflict',
+        `Project '${project.id}' changed while reconciling its repository identity`,
+        { project: dependencies.projects.get(project.id) },
+      );
+    }
+  }
 };
 
 const executeMutation = async (
   command: Extract<Command, { idempotencyKey: string }>['command'],
   dependencies: CommandDependencies,
+  commandId?: string,
 ): Promise<CommandResponse> => {
+  assertMilestoneTwoHumanActor(command);
   switch (command.type) {
+    case 'task.create':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.create({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+          dependencies,
+        ),
+      );
+    case 'task.edit':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.edit({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+          dependencies,
+        ),
+      );
+    case 'task.reorder':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.reorder({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+          dependencies,
+        ),
+      );
+    case 'task.block':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.block({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+          dependencies,
+        ),
+      );
+    case 'task.unblock':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.unblock({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+          dependencies,
+        ),
+      );
+    case 'task.transition':
+      return response(
+        command.type,
+        taskResponse(
+          await dependencies.taskService.transition({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+          dependencies,
+        ),
+      );
+    case 'task.attempt.launch':
+      return response(
+        command.type,
+        attemptResponse(
+          await requireAttemptService(dependencies).launch({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.attempt.link':
+      return response(
+        command.type,
+        attemptResponse(
+          await requireAttemptService(dependencies).link({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'task.attempt.unlink':
+      return response(
+        command.type,
+        attemptResponse(
+          await requireAttemptService(dependencies).unlink({
+            ...command.payload,
+            commandId: requireTaskCommandId(commandId),
+          }),
+        ),
+      );
+    case 'project.import': {
+      if (!dependencies.pathOptions) {
+        throw new CommandError(
+          'repository_invalid',
+          'Workspace path configuration is unavailable',
+        );
+      }
+      const identity = await resolveRepositoryIdentity(
+        command.payload.repositoryPath,
+        dependencies.pathOptions,
+      );
+      await reconcileLegacyProjectIdentities(dependencies);
+      const existing = dependencies.projects.getByRepositoryIdentity(
+        identity.repositoryIdentity,
+      );
+      if (existing) {
+        throw new CommandError(
+          'repository_already_imported',
+          'This Git repository is already imported',
+          { project: existing },
+        );
+      }
+      const now = (dependencies.now ?? (() => new Date().toISOString()))();
+      return response(
+        command.type,
+        dependencies.projects.create(
+          projectSchema.parse({
+            id: (dependencies.createId ?? randomUUID)(),
+            displayName:
+              command.payload.displayName ??
+              basename(identity.canonicalPath) ??
+              'Git repository',
+            repositoryPath: identity.canonicalPath,
+            repositoryIdentity: identity.repositoryIdentity,
+            discoveredAt: now,
+            discoveryMetadata: { source: 'explicit_import' },
+            createdAt: now,
+            updatedAt: now,
+          }),
+        ),
+      );
+    }
+    case 'project.rename': {
+      const project = requireActiveProject(
+        dependencies,
+        command.payload.projectId,
+      );
+      return response(
+        command.type,
+        updateProject(dependencies, project, command.payload.expectedRevision, {
+          displayName: command.payload.displayName,
+        }),
+      );
+    }
+    case 'project.archive': {
+      const project = requireActiveProject(
+        dependencies,
+        command.payload.projectId,
+      );
+      if (hasRunningTaskAttempt(dependencies, project.id)) {
+        throw new CommandError(
+          'project_has_running_attempt',
+          'A project with a running task attempt cannot be archived',
+          { project },
+        );
+      }
+      const now = (dependencies.now ?? (() => new Date().toISOString()))();
+      return response(
+        command.type,
+        updateProject(dependencies, project, command.payload.expectedRevision, {
+          archivedAt: now,
+        }),
+      );
+    }
+    case 'project.restore': {
+      const project = requireProject(dependencies, command.payload.projectId);
+      return response(
+        command.type,
+        updateProject(dependencies, project, command.payload.expectedRevision, {
+          archivedAt: null,
+        }),
+      );
+    }
     case 'session.create': {
       assertBillingSafe(dependencies);
       const project = requireProject(dependencies, command.payload.projectId);
@@ -439,6 +796,12 @@ const executeMutation = async (
           'A live session cannot be deleted',
         );
       }
+      if (dependencies.attempts.listBySession(session.id).length > 0) {
+        throw new CommandError(
+          'invalid_session_state',
+          'A session with task attempt history cannot be deleted',
+        );
+      }
       const workspace = requireWorkspace(dependencies, session.workspaceId);
       const warnings: Array<{ code: string; message: string }> = [];
       if (workspace.type === 'worktree') {
@@ -502,6 +865,25 @@ export const executeCommand = async (
 ): Promise<CommandResponse> => {
   const command = commandSchema.parse(input);
   if ('idempotencyKey' in command) {
+    if (
+      [
+        'task.create',
+        'task.edit',
+        'task.reorder',
+        'task.block',
+        'task.unblock',
+        'task.transition',
+        'task.attempt.launch',
+        'task.attempt.link',
+        'task.attempt.unlink',
+      ].includes(command.command.type)
+    ) {
+      return executeMutation(
+        command.command,
+        dependencies,
+        command.idempotencyKey,
+      );
+    }
     return dependencies.commands.executeOnce(command.idempotencyKey, () =>
       executeMutation(command.command, dependencies),
     );
@@ -509,9 +891,7 @@ export const executeCommand = async (
 
   switch (command.type) {
     case 'projects.discover':
-      return response(command.type, {
-        projects: await discoverProjects(dependencies),
-      });
+      return response(command.type, await discoverProjects(dependencies));
     case 'sessions.discover':
       return response(command.type, {
         sessions: await discoverSessions(

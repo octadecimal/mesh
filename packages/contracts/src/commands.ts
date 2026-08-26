@@ -1,6 +1,13 @@
 import { z } from 'zod';
 
-import { idSchema, permissionModeSchema, savedLayoutSchema } from './domain.js';
+import {
+  idSchema,
+  permissionModeSchema,
+  savedLayoutSchema,
+  taskActorSchema,
+  taskLifecycleStateSchema,
+  taskPrioritySchema,
+} from './domain.js';
 import { protocolVersionSchema } from './protocol.js';
 
 export const discoveryCommandSchema = z.discriminatedUnion('type', [
@@ -13,6 +20,20 @@ export const discoveryCommandSchema = z.discriminatedUnion('type', [
     protocolVersion: protocolVersionSchema,
     type: z.literal('sessions.discover'),
     payload: z.object({ projectId: idSchema.optional() }),
+  }),
+]);
+
+const sessionWorkspaceSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('shared'),
+    path: z.string().trim().min(1),
+  }),
+  z.object({
+    type: z.literal('worktree'),
+    repositoryPath: z.string().trim().min(1),
+    path: z.string().trim().min(1),
+    branch: z.string().trim().min(1),
+    startPoint: z.string().trim().min(1),
   }),
 ]);
 
@@ -46,7 +67,147 @@ const sessionCreatePayloadSchema = z.union([
   }),
 ]);
 
-const mutatingCommandSchema = z.discriminatedUnion('type', [
+const expectedRevisionSchema = z.number().int().positive();
+const taskPatchSchema = z
+  .object({
+    title: z.string().trim().min(1).optional(),
+    description: z.string().optional(),
+    acceptanceCriteria: z.array(z.string().trim().min(1)).optional(),
+    priority: taskPrioritySchema.optional(),
+    labels: z.array(z.string().trim().min(1)).optional(),
+    notes: z.string().optional(),
+  })
+  .refine((patch) => Object.keys(patch).length > 0);
+
+export const projectCommandSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('project.import'),
+    payload: z.object({
+      repositoryPath: z.string().trim().min(1),
+      displayName: z.string().trim().min(1).optional(),
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.rename'),
+    payload: z.object({
+      projectId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      displayName: z.string().trim().min(1),
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.archive'),
+    payload: z.object({
+      projectId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.restore'),
+    payload: z.object({
+      projectId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: taskActorSchema,
+    }),
+  }),
+]);
+
+export const taskCommandSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('task.create'),
+    payload: z.object({
+      projectId: idSchema,
+      title: z.string().trim().min(1),
+      description: z.string().optional(),
+      acceptanceCriteria: z.array(z.string().trim().min(1)).optional(),
+      priority: taskPrioritySchema.optional(),
+      labels: z.array(z.string().trim().min(1)).optional(),
+      notes: z.string().optional(),
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.edit'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      patch: taskPatchSchema,
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.reorder'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      rank: z.string().trim().min(1),
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.block'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      reason: z.string().trim().min(1),
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.unblock'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      reason: z.string().trim().min(1),
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.transition'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      nextState: taskLifecycleStateSchema,
+      reason: z.string().trim().min(1).optional(),
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.attempt.launch'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      title: z.string().trim().min(1),
+      permissionMode: permissionModeSchema,
+      workspace: sessionWorkspaceSchema,
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.attempt.link'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      sessionId: idSchema,
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.attempt.unlink'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      attemptId: idSchema,
+      reason: z.string().trim().min(1),
+      actor: taskActorSchema,
+    }),
+  }),
+]);
+
+export const mutatingCommandSchema = z.union([
   z.object({
     type: z.literal('session.create'),
     payload: sessionCreatePayloadSchema,
@@ -83,6 +244,8 @@ const mutatingCommandSchema = z.discriminatedUnion('type', [
     payload: z.object({ sessionId: idSchema, confirmed: z.literal(true) }),
   }),
   z.object({ type: z.literal('layout.save'), payload: savedLayoutSchema }),
+  projectCommandSchema,
+  taskCommandSchema,
 ]);
 
 export const readCommandSchema = z.discriminatedUnion('type', [

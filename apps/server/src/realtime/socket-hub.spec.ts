@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   idSchema,
+  type ProjectEvent,
   type ServerMessage,
   type SessionEvent,
 } from '@mesh-session-platform/contracts';
@@ -21,6 +22,33 @@ const event = (sequence: number): SessionEvent => ({
   occurredAt: '2026-08-24T00:00:00.000Z',
   type: 'message.user',
   payload: { text: String(sequence) },
+});
+
+const projectEvent = (projectId: string, sequence: number): ProjectEvent => ({
+  protocolVersion: 1,
+  id: idSchema.parse(`project-event-${projectId}-${sequence}`),
+  projectId: idSchema.parse(projectId),
+  sequence,
+  occurredAt: '2026-08-24T00:00:00.000Z',
+  type: 'task.changed',
+  payload: {
+    task: {
+      id: idSchema.parse(`task-${projectId}`),
+      projectId: idSchema.parse(projectId),
+      title: 'Task',
+      description: '',
+      acceptanceCriteria: [],
+      priority: 'normal',
+      rank: 'a',
+      lifecycleState: 'backlog',
+      labels: [],
+      notes: '',
+      blocked: null,
+      revision: 1,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+    },
+  },
 });
 
 class TestSocket {
@@ -50,10 +78,18 @@ class TestSocket {
     this.emit('close');
   }
 
-  subscribe(cursors: Record<string, number>): void {
+  subscribe(
+    cursors: Record<string, number>,
+    projectCursors?: Record<string, number>,
+  ): void {
     this.emit(
       'message',
-      JSON.stringify({ protocolVersion: 1, type: 'subscribe', cursors }),
+      JSON.stringify({
+        protocolVersion: 1,
+        type: 'subscribe',
+        cursors,
+        ...(projectCursors === undefined ? {} : { projectCursors }),
+      }),
     );
   }
 
@@ -205,6 +241,157 @@ describe('SocketHub', () => {
     expect(socket.closes).toEqual([
       { code: 1008, reason: 'Invalid subscription' },
     ]);
+  });
+
+  it('replays and streams only subscribed project events with independent cursors', () => {
+    const publisher = new EventPublisher();
+    let publishedDuringReplay = false;
+    const hub = new SocketHub({
+      publisher,
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => {
+          if (!publishedDuringReplay) {
+            publishedDuringReplay = true;
+            publisher.publishProject(projectEvent('p1', 3));
+          }
+          return {
+            events: [projectEvent('p1', 2)],
+            lowWater: 1,
+            highWater: 2,
+          };
+        },
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 1 });
+    publisher.publishProject(projectEvent('p2', 1));
+    publisher.publishProject(projectEvent('p1', 3));
+    publisher.publishProject(projectEvent('p1', 4));
+
+    expect(
+      socket.messages
+        .filter((message) => message.type === 'project.event')
+        .map((message) => [
+          message.payload.event.projectId,
+          message.payload.event.sequence,
+        ]),
+    ).toEqual([
+      ['p1', 2],
+      ['p1', 3],
+      ['p1', 4],
+    ]);
+  });
+
+  it('emits project resync without replaying an unavailable suffix', () => {
+    const hub = new SocketHub({
+      publisher: new EventPublisher(),
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({
+          events: [projectEvent('p1', 4), projectEvent('p1', 5)],
+          lowWater: 4,
+          highWater: 5,
+        }),
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 1 });
+
+    expect(socket.messages).toContainEqual({
+      protocolVersion: 1,
+      type: 'project.resync_required',
+      payload: { projectId: 'p1', reason: 'requested_history_unavailable' },
+    });
+    expect(
+      socket.messages.some((message) => message.type === 'project.event'),
+    ).toBe(false);
+  });
+
+  it('stops project delivery on browser disconnect without affecting publication', () => {
+    const publisher = new EventPublisher();
+    const hub = new SocketHub({
+      publisher,
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({ events: [], lowWater: 1, highWater: 0 }),
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 0 });
+    socket.close();
+    publisher.publishProject(projectEvent('p1', 1));
+
+    expect(
+      socket.messages.some((message) => message.type === 'project.event'),
+    ).toBe(false);
+  });
+
+  it('requires project resync instead of streaming across a live sequence gap', () => {
+    const publisher = new EventPublisher();
+    const hub = new SocketHub({
+      publisher,
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({
+          events: [projectEvent('p1', 1)],
+          lowWater: 1,
+          highWater: 1,
+        }),
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 0 });
+    publisher.publishProject(projectEvent('p1', 3));
+
+    expect(socket.messages).toContainEqual({
+      protocolVersion: 1,
+      type: 'project.resync_required',
+      payload: { projectId: 'p1', reason: 'event_sequence_gap' },
+    });
+    expect(
+      socket.messages
+        .filter((message) => message.type === 'project.event')
+        .map((message) => message.payload.event.sequence),
+    ).toEqual([1]);
+  });
+
+  it('requires project resync when subscribed history was fully purged', () => {
+    const hub = new SocketHub({
+      publisher: new EventPublisher(),
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({ events: [], lowWater: 6, highWater: 5 }),
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 0 });
+
+    expect(socket.messages).toContainEqual({
+      protocolVersion: 1,
+      type: 'project.resync_required',
+      payload: { projectId: 'p1', reason: 'requested_history_unavailable' },
+    });
   });
 });
 

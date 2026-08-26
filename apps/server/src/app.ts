@@ -82,6 +82,7 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
   );
   registerSocketHub(app, {
     events: dependencies.events,
+    projectEvents: dependencies.projectEvents,
     publisher: dependencies.registry.publisher,
     originPolicy,
   });

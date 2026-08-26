@@ -121,7 +121,29 @@ describe('migrate', () => {
     ).toEqual([{ name: 'sessions' }]);
     expect(
       database.prepare('SELECT id FROM schema_migrations ORDER BY id').all(),
-    ).toEqual([{ id: '001-initial' }, { id: '002-command-state' }]);
+    ).toEqual([
+      { id: '001-initial' },
+      { id: '002-command-state' },
+      { id: '003-task-board-storage' },
+      { id: '004-project-event-streams' },
+      { id: '005-task-attempt-safety' },
+      { id: '006-task-attempt-launch-recovery' },
+    ]);
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        'tasks',
+        'task_attempts',
+        'task_transitions',
+        'project_events',
+      ]),
+    );
   });
 
   it('allows two connections to apply startup migrations without a duplicate ledger entry', () => {
@@ -137,7 +159,14 @@ describe('migrate', () => {
 
     expect(
       second.prepare('SELECT id FROM schema_migrations ORDER BY id').all(),
-    ).toEqual([{ id: '001-initial' }, { id: '002-command-state' }]);
+    ).toEqual([
+      { id: '001-initial' },
+      { id: '002-command-state' },
+      { id: '003-task-board-storage' },
+      { id: '004-project-event-streams' },
+      { id: '005-task-attempt-safety' },
+      { id: '006-task-attempt-launch-recovery' },
+    ]);
   });
 
   it('serializes simultaneous startup migration attempts from two worker connections', async () => {
@@ -154,6 +183,22 @@ describe('migrate', () => {
     copyFileSync(
       join(__dirname, 'migrations', '002-command-state.sql'),
       join(directory, 'migrations', '002-command-state.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '003-task-board-storage.sql'),
+      join(directory, 'migrations', '003-task-board-storage.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '004-project-event-streams.sql'),
+      join(directory, 'migrations', '004-project-event-streams.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '005-task-attempt-safety.sql'),
+      join(directory, 'migrations', '005-task-attempt-safety.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '006-task-attempt-launch-recovery.sql'),
+      join(directory, 'migrations', '006-task-attempt-launch-recovery.sql'),
     );
     buildSync({
       bundle: true,
@@ -199,7 +244,14 @@ describe('migrate', () => {
       databases.push(database);
       expect(
         database.prepare('SELECT id FROM schema_migrations ORDER BY id').all(),
-      ).toEqual([{ id: '001-initial' }, { id: '002-command-state' }]);
+      ).toEqual([
+        { id: '001-initial' },
+        { id: '002-command-state' },
+        { id: '003-task-board-storage' },
+        { id: '004-project-event-streams' },
+        { id: '005-task-attempt-safety' },
+        { id: '006-task-attempt-launch-recovery' },
+      ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
       Atomics.notify(new Int32Array(barrier), 0, 2);
@@ -264,7 +316,187 @@ describe('migrate', () => {
     migrate(database);
     expect(
       database.prepare('SELECT id FROM schema_migrations ORDER BY id').all(),
-    ).toEqual([{ id: '001-initial' }, { id: '002-command-state' }]);
+    ).toEqual([
+      { id: '001-initial' },
+      { id: '002-command-state' },
+      { id: '003-task-board-storage' },
+      { id: '004-project-event-streams' },
+      { id: '005-task-attempt-safety' },
+      { id: '006-task-attempt-launch-recovery' },
+    ]);
+  });
+
+  it('upgrades discovered projects in place while preserving related records', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-task-board-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const repositoryPath = 'C:/code/existing-project';
+    const discoveredAt = '2026-08-24T00:00:00.000Z';
+
+    database.exec(
+      readFileSync(join(__dirname, 'migrations', '001-initial.sql'), 'utf8'),
+    );
+    database.exec(
+      readFileSync(
+        join(__dirname, 'migrations', '002-command-state.sql'),
+        'utf8',
+      ),
+    );
+    database
+      .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+      .run('001-initial', discoveredAt);
+    database
+      .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+      .run('002-command-state', discoveredAt);
+    database
+      .prepare(
+        `INSERT INTO projects (
+          id, display_name, repository_path, discovered_at, discovery_metadata_json
+        ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'project-existing',
+        'Existing project',
+        repositoryPath,
+        discoveredAt,
+        '{"source":"discovery"}',
+      );
+    database
+      .prepare(
+        `INSERT INTO projects (
+          id, display_name, repository_path, discovered_at, discovery_metadata_json
+        ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'project-same-path',
+        'Same path project',
+        repositoryPath,
+        discoveredAt,
+        '{"source":"discovery"}',
+      );
+    database
+      .prepare(
+        `INSERT INTO workspaces (
+          id, project_id, type, path, git_branch, git_worktree_path, owner, cleanup_state
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'workspace-existing',
+        'project-existing',
+        'shared',
+        repositoryPath,
+        null,
+        null,
+        null,
+        'active',
+      );
+    database
+      .prepare(
+        `INSERT INTO sessions (
+          id, claude_resume_id, project_id, workspace_id, title, permission_mode,
+          lifecycle_state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'session-existing',
+        null,
+        'project-existing',
+        'workspace-existing',
+        'Existing session',
+        'interactive',
+        'running',
+        discoveredAt,
+        discoveredAt,
+      );
+    database
+      .prepare(
+        `INSERT INTO saved_layouts (
+          id, project_id, session_id, workspace_id, dockview_json, sidebar_json,
+          visible_panels_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'layout-existing',
+        'project-existing',
+        'session-existing',
+        'workspace-existing',
+        '{}',
+        null,
+        '[]',
+        discoveredAt,
+      );
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare('SELECT * FROM projects WHERE id = ?')
+        .get('project-existing'),
+    ).toMatchObject({
+      id: 'project-existing',
+      repository_path: repositoryPath,
+      repository_identity: repositoryPath,
+      revision: 1,
+      created_at: discoveredAt,
+      updated_at: discoveredAt,
+      archived_at: null,
+    });
+    expect(
+      database
+        .prepare(
+          'SELECT id, repository_identity FROM projects WHERE repository_path = ? ORDER BY id',
+        )
+        .all(repositoryPath),
+    ).toEqual([
+      { id: 'project-existing', repository_identity: repositoryPath },
+      { id: 'project-same-path', repository_identity: repositoryPath },
+    ]);
+    expect(
+      database
+        .prepare('SELECT id, project_id FROM workspaces WHERE id = ?')
+        .get('workspace-existing'),
+    ).toEqual({ id: 'workspace-existing', project_id: 'project-existing' });
+    expect(
+      database
+        .prepare(
+          'SELECT id, project_id, workspace_id FROM sessions WHERE id = ?',
+        )
+        .get('session-existing'),
+    ).toEqual({
+      id: 'session-existing',
+      project_id: 'project-existing',
+      workspace_id: 'workspace-existing',
+    });
+    expect(
+      database
+        .prepare(
+          'SELECT id, project_id, session_id, workspace_id FROM saved_layouts WHERE id = ?',
+        )
+        .get('layout-existing'),
+    ).toEqual({
+      id: 'layout-existing',
+      project_id: 'project-existing',
+      session_id: 'session-existing',
+      workspace_id: 'workspace-existing',
+    });
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        'tasks',
+        'task_attempts',
+        'task_transitions',
+        'project_events',
+      ]),
+    );
   });
 
   it('rolls a failed 002 upgrade back to the intact 001 table and data', () => {
@@ -298,6 +530,62 @@ describe('migrate', () => {
     ]);
   });
 
+  it('backfills durable project event high-water marks on upgrade', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-project-stream-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    for (const [id, file] of [
+      ['001-initial', '001-initial.sql'],
+      ['002-command-state', '002-command-state.sql'],
+      ['003-task-board-storage', '003-task-board-storage.sql'],
+    ] as const) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(id, '2026-08-24T00:00:00.000Z');
+    }
+    database
+      .prepare(
+        `INSERT INTO projects (
+          id, display_name, repository_path, discovered_at,
+          discovery_metadata_json, repository_identity, revision, created_at,
+          updated_at, archived_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'p1',
+        'Mesh',
+        'C:/code/mesh',
+        '2026-08-24T00:00:00.000Z',
+        '{}',
+        'C:/code/mesh',
+        1,
+        '2026-08-24T00:00:00.000Z',
+        '2026-08-24T00:00:00.000Z',
+        null,
+      );
+    const insert = database.prepare(
+      `INSERT INTO project_events (
+        id, project_id, sequence, occurred_at, type, payload_json
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    insert.run('event-1', 'p1', 1, '2026-08-24T00:00:00.000Z', 'x', '{}');
+    insert.run('event-2', 'p1', 2, '2026-08-24T00:00:00.000Z', 'x', '{}');
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare(
+          'SELECT project_id, high_water FROM project_event_streams WHERE project_id = ?',
+        )
+        .get('p1'),
+    ).toEqual({ project_id: 'p1', high_water: 2 });
+  });
+
   it('loads the built migration registry and applies every migration from a fresh production output', () => {
     const workspaceRoot = join(__dirname, '..', '..', '..', '..');
     const directory = mkdtempSync(
@@ -317,7 +605,14 @@ describe('migrate', () => {
 
       expect(
         database.prepare('SELECT id FROM schema_migrations ORDER BY id').all(),
-      ).toEqual([{ id: '001-initial' }, { id: '002-command-state' }]);
+      ).toEqual([
+        { id: '001-initial' },
+        { id: '002-command-state' },
+        { id: '003-task-board-storage' },
+        { id: '004-project-event-streams' },
+        { id: '005-task-attempt-safety' },
+        { id: '006-task-attempt-launch-recovery' },
+      ]);
       expect(
         database
           .prepare(

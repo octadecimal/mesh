@@ -13,6 +13,36 @@ corepack pnpm nx dev web
 
 The server listens only on a loopback address. Its default origin is `http://127.0.0.1:3737`; the development web origin is exactly `http://127.0.0.1:4200`. Runtime data defaults to `~/.mesh-session-platform/session-platform.sqlite`. Override the directory with `MESH_DATA_DIR` or the database filename with `MESH_DATABASE_PATH`.
 
+## Project and task operation
+
+Use **Import repository** to create a durable project from a local Git
+repository. Repository discovery only supplies suggestions; it never creates a
+project. A project owns its tasks and ordered project-event stream. Each task
+attempt remains in immutable history and links the task to one session, while
+the session keeps its own lifecycle and event stream.
+
+To run a task, give it a title, description, at least one acceptance criterion,
+and a priority, then move it to `ready`. Launch chooses the existing shared or
+isolated-worktree workspace composition and a permission mode. Mesh persists the
+session and attempt before starting the fake or real driver, and moves the task
+to `in_progress` only after startup succeeds. A startup failure leaves the task
+`ready`, keeps the failed launch's attempt visible, and allows a later explicit
+attempt. For overlapping work, prefer an isolated worktree and inspect any
+preserved worktree before cleanup.
+
+Milestone 2 completion is human-only. An agent session can do the work, but only
+a human actor may move a task to `review` or `done`. Do not automate those
+transitions; the actor and policy contracts exist so a later milestone can add
+authority explicitly.
+
+On restart, Mesh reconciles attempts against durable session truth. It reports
+`startup_outcome_unknown` when a retained launch has no trustworthy startup
+outcome, and `task_in_progress_without_live_session` when an in-progress task no
+longer has a live current session. These repair conditions are operator-visible;
+do not delete history or guess the missing outcome. Inspect the task, attempt,
+session diagnostics, and preserved workspace before choosing a human recovery
+action.
+
 ## Subscription-only operation
 
 Mesh uses the installed Claude subscription through the Claude Agent SDK. It does not support an API-key or pay-per-token fallback. If `ANTHROPIC_API_KEY` is present, new and resumed sessions are refused. Remove the variable outside Mesh, verify the intended Claude subscription is active, and restart Mesh.
@@ -29,7 +59,7 @@ The normal local and CI gate is:
 corepack pnpm verify
 ```
 
-It runs formatting, lint, type checking, unit tests, builds, and deterministic Chromium acceptance tests. The acceptance fixture uses the production-built server and web assets, a temporary SQLite database and temporary Git repositories, and an in-process fake Claude driver available only under explicit test configuration. Failure traces and screenshots are retained under `tmp/playwright/session-platform`.
+It runs formatting, lint, type checking, unit tests, builds, and deterministic Chromium acceptance tests. The acceptance fixture uses the production-built server and web assets, a temporary SQLite database and temporary Git repositories, and an in-process fake Claude driver available only under explicit test configuration. It covers explicit import, task launch and failure retention, human review/completion, and refresh recovery without contacting Claude. Failure traces and screenshots are retained under `tmp/playwright/session-platform`.
 
 Windows Chromium is the required acceptance environment. The same test suite is the portable basis for future macOS/Linux matrix entries.
 

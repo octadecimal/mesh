@@ -14,8 +14,43 @@ const commandStateMigration = {
     'utf8',
   ),
 };
+const taskBoardStorageMigration = {
+  id: '003-task-board-storage',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '003-task-board-storage.sql'),
+    'utf8',
+  ),
+};
+const projectEventStreamsMigration = {
+  id: '004-project-event-streams',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '004-project-event-streams.sql'),
+    'utf8',
+  ),
+};
+const taskAttemptSafetyMigration = {
+  id: '005-task-attempt-safety',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '005-task-attempt-safety.sql'),
+    'utf8',
+  ),
+};
+const taskAttemptLaunchRecoveryMigration = {
+  id: '006-task-attempt-launch-recovery',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '006-task-attempt-launch-recovery.sql'),
+    'utf8',
+  ),
+};
 
-const migrations = [initialMigration, commandStateMigration];
+const migrations = [
+  initialMigration,
+  commandStateMigration,
+  taskBoardStorageMigration,
+  projectEventStreamsMigration,
+  taskAttemptSafetyMigration,
+  taskAttemptLaunchRecoveryMigration,
+];
 
 export const migrate = (database: Database): void => {
   database.exec('BEGIN IMMEDIATE');

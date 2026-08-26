@@ -1,9 +1,21 @@
 import type {
+  AttemptRepair,
+  ProjectEvent,
+  ProjectSnapshot,
   SessionEvent,
   SessionSnapshot,
+  Task,
+  TaskAttempt,
+  TaskTransition,
 } from '@mesh-session-platform/contracts';
 
-import { applyEvent, createProjection, replaceSnapshot } from './reducer';
+import {
+  applyEvent,
+  applyProjectEvent,
+  createProjection,
+  replaceProjectSnapshot,
+  replaceSnapshot,
+} from './reducer';
 import { createResyncCoordinator } from './resync';
 import { createMeshStore } from './store';
 
@@ -28,6 +40,91 @@ const snapshot = (sequence = 3): SessionSnapshot => ({
   pendingApprovals: [],
   lastSequenceBySession: { 'session-1': sequence },
   layouts: [],
+});
+
+const project = {
+  id: 'project-1',
+  displayName: 'Project one',
+  repositoryPath: 'C:/code/project-one',
+  repositoryIdentity: 'project-one',
+  discoveredAt: timestamp,
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  archivedAt: null,
+  discoveryMetadata: {},
+  revision: 1,
+};
+
+const task = (overrides: Partial<Task> = {}): Task => ({
+  id: 'task-1',
+  projectId: project.id,
+  title: 'Task one',
+  description: '',
+  acceptanceCriteria: [],
+  priority: 'normal',
+  rank: 'a',
+  lifecycleState: 'backlog',
+  labels: [],
+  notes: '',
+  blocked: null,
+  revision: 1,
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  ...overrides,
+});
+
+const attempt: TaskAttempt = {
+  id: 'attempt-1',
+  taskId: 'task-1',
+  sessionId: 'session-1',
+  ordinal: 1,
+  source: 'launched',
+  actor: { type: 'human', id: 'operator' },
+  createdAt: timestamp,
+  unlinkedAt: null,
+  unlinkedBy: null,
+  unlinkReason: null,
+};
+
+const transition: TaskTransition = {
+  id: 'transition-1',
+  taskId: 'task-1',
+  commandId: 'command-1',
+  previousState: 'backlog',
+  nextState: 'ready',
+  actor: { type: 'human', id: 'operator' },
+  reason: null,
+  occurredAt: timestamp,
+};
+
+const repair: AttemptRepair = {
+  taskId: 'task-1',
+  attemptId: 'attempt-1',
+  sessionId: 'session-1',
+  reason: 'startup_outcome_unknown',
+};
+
+const projectSnapshot = (
+  overrides: Partial<ProjectSnapshot> = {},
+): ProjectSnapshot => ({
+  protocolVersion: 1,
+  project,
+  tasks: [task()],
+  attempts: [attempt],
+  transitions: [transition],
+  repairs: [repair],
+  cursor: 3,
+  ...overrides,
+});
+
+const projectEvent = (sequence: number): ProjectEvent => ({
+  protocolVersion: 1,
+  id: `project-event-${sequence}`,
+  projectId: project.id,
+  sequence,
+  occurredAt: timestamp,
+  type: 'task.rank_changed',
+  payload: { task: task({ rank: `rank-${sequence}` }) },
 });
 
 describe('applyEvent', () => {
@@ -134,6 +231,98 @@ describe('replaceSnapshot', () => {
   });
 });
 
+describe('project projection', () => {
+  it('replaces only one project snapshot while retaining session projection data', () => {
+    const current = {
+      ...createProjection(snapshot(3)),
+      promptDrafts: { 'session-1': 'keep this draft' },
+    };
+
+    const next = replaceProjectSnapshot(current, projectSnapshot());
+
+    expect(next.projectsById[project.id]).toEqual(project);
+    expect(next.tasksById[task().id]).toEqual(task());
+    expect(next.attemptsById[attempt.id]).toEqual(attempt);
+    expect(next.transitionsByTaskId[task().id]).toEqual([transition]);
+    expect(next.repairsByProjectId[project.id]).toEqual([repair]);
+    expect(next.projectCursors[project.id]).toBe(3);
+    expect(next.lastSequenceBySession).toEqual({ 'session-1': 3 });
+    expect(next.events).toEqual([event(3)]);
+    expect(next.promptDrafts).toEqual({ 'session-1': 'keep this draft' });
+  });
+
+  it('orders project events and projects task, transition, attempt, and repair updates', () => {
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot(),
+    );
+    const rankChanged = applyProjectEvent(starting, projectEvent(4));
+
+    expect(rankChanged.kind).toBe('applied');
+    if (rankChanged.kind !== 'applied') return;
+
+    const projected = rankChanged.state;
+    expect(projected.projectCursors[project.id]).toBe(4);
+    expect(projected.tasksById[task().id].rank).toBe('rank-4');
+    expect(applyProjectEvent(rankChanged.state, projectEvent(4))).toEqual({
+      kind: 'duplicate',
+    });
+    expect(applyProjectEvent(rankChanged.state, projectEvent(6))).toEqual({
+      kind: 'gap',
+      expected: 5,
+      received: 6,
+    });
+
+    const transitioned = applyProjectEvent(rankChanged.state, {
+      protocolVersion: 1,
+      id: 'project-event-5',
+      projectId: project.id,
+      sequence: 5,
+      occurredAt: timestamp,
+      type: 'task.transitioned',
+      payload: { task: task({ lifecycleState: 'ready' }), transition },
+    });
+    expect(transitioned.kind).toBe('applied');
+    if (transitioned.kind !== 'applied') return;
+    const transitionProjection = transitioned.state;
+    expect(transitionProjection.transitionsByTaskId[task().id]).toEqual([
+      transition,
+    ]);
+
+    const attemptChanged = applyProjectEvent(transitioned.state, {
+      protocolVersion: 1,
+      id: 'project-event-6',
+      projectId: project.id,
+      sequence: 6,
+      occurredAt: timestamp,
+      type: 'task.attempt_changed',
+      payload: { attempt: { ...attempt, unlinkedAt: timestamp } },
+    });
+    expect(attemptChanged.kind).toBe('applied');
+    if (attemptChanged.kind !== 'applied') return;
+    const attemptProjection = attemptChanged.state;
+    expect(attemptProjection.attemptsById[attempt.id].unlinkedAt).toBe(
+      timestamp,
+    );
+
+    const repairDetected = applyProjectEvent(attemptChanged.state, {
+      protocolVersion: 1,
+      id: 'project-event-7',
+      projectId: project.id,
+      sequence: 7,
+      occurredAt: timestamp,
+      type: 'task.attempt_repair_detected',
+      payload: { repair },
+    });
+    expect(repairDetected.kind).toBe('applied');
+    if (repairDetected.kind === 'applied') {
+      expect(repairDetected.state.repairsByProjectId[project.id]).toEqual([
+        repair,
+      ]);
+    }
+  });
+});
+
 describe('createResyncCoordinator', () => {
   it('refreshes a gap from one snapshot fetch and retains the prompt draft', async () => {
     const store = createMeshStore(snapshot());
@@ -157,5 +346,31 @@ describe('createResyncCoordinator', () => {
     expect(requests).toBe(1);
     expect(store.state.lastSequenceBySession['session-1'].get()).toBe(7);
     expect(store.state.promptDrafts['session-1'].get()).toBe('keep this draft');
+  });
+
+  it('refreshes only the project that has an event gap', async () => {
+    const store = createMeshStore(snapshot());
+    const coordinator = createResyncCoordinator(
+      {
+        snapshot: async () => snapshot(9),
+        projectSnapshot: async (projectId: string) =>
+          projectSnapshot({
+            project: { ...project, id: projectId },
+            cursor: 7,
+          }),
+      },
+      store,
+    );
+
+    await coordinator.applyProjectEvent(projectEvent(2));
+
+    expect(store.state.lastSequenceBySession['session-1'].get()).toBe(3);
+    expect(
+      (
+        store.state.get({ noproxy: true }) as unknown as {
+          projectCursors: Record<string, number>;
+        }
+      ).projectCursors[project.id],
+    ).toBe(7);
   });
 });
