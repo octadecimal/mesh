@@ -185,8 +185,17 @@ export class PlanningRepository {
     if (value.currentBaseId !== initialBase.id) {
       throw new TypeError('The initial base must be the plan current base');
     }
-    if (value.currentSessionId !== null && value.currentSessionId !== sessionId) {
+    if (value.currentSessionId !== sessionId) {
       throw new TypeError('The initial session must be the plan current session');
+    }
+    if (value.revision !== 1) {
+      throw new TypeError('A planning cycle must begin at revision one');
+    }
+    if (value.latestProposalOrdinal !== 0) {
+      throw new TypeError('A planning cycle cannot have an initial proposal');
+    }
+    if (value.feedback.length !== 0) {
+      throw new TypeError('A planning cycle cannot have initial feedback');
     }
 
     this.database.prepare(`

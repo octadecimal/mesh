@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   projectPlanBaseSchema,
+  projectPlanFeedbackSchema,
   projectPlanSchema,
   projectSchema,
   sessionSchema,
@@ -138,6 +139,51 @@ describe('PlanningRepository', () => {
       feedback: [],
     });
   });
+
+  it.each([
+    ['a missing current session', { currentSessionId: null }],
+    [
+      'pre-existing feedback',
+      {
+        feedback: [
+          projectPlanFeedbackSchema.parse({
+            id: 'feedback-1',
+            planId: 'plan-1',
+            proposalId: null,
+            content: 'This cannot predate the cycle.',
+            actor: actor(),
+            createdAt: '2026-08-27T00:00:00.000Z',
+          }),
+        ],
+      },
+    ],
+    ['a nonzero proposal ordinal', { latestProposalOrdinal: 1 }],
+  ] as const)(
+    'rejects a planning cycle with %s before persisting any rows',
+    (_reason, invalidState) => {
+      const repos = createTestRepositories();
+      repositories.push(repos);
+      seedSession(repos);
+      const repository = new PlanningRepository(repos.database);
+
+      expect(() =>
+        repository.create({
+          plan: plan(invalidState),
+          base: base(),
+          sessionId: 'pm-session-1',
+        }),
+      ).toThrow();
+      expect(
+        repos.database.prepare('SELECT id FROM project_plans').all(),
+      ).toEqual([]);
+      expect(
+        repos.database.prepare('SELECT id FROM project_plan_bases').all(),
+      ).toEqual([]);
+      expect(
+        repos.database.prepare('SELECT session_id FROM project_plan_sessions').all(),
+      ).toEqual([]);
+    },
+  );
 
   it('lets SQLite reject a second active plan for the project without changing the first', () => {
     const repos = createTestRepositories();
@@ -376,7 +422,7 @@ describe('PlanningRepository', () => {
         }),
       );
       repository.create({
-        plan: plan({ id, status: 'approved', currentBaseId: `base-${id}`, currentSessionId: null, createdAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, updatedAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, terminalAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, terminalBy: actor(), terminalReason: 'Approved' }),
+        plan: plan({ id, status: 'approved', currentBaseId: `base-${id}`, currentSessionId: sessionId, createdAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, updatedAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, terminalAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, terminalBy: actor(), terminalReason: 'Approved' }),
         base: base({ id: `base-${id}`, planId: id, createdAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z` }),
         sessionId,
       });
