@@ -118,6 +118,7 @@ type QaRegistry = {
     configuration: QaRuntimeConfiguration,
   ): Promise<void>;
   interrupt(sessionId: string): Promise<void>;
+  reserveRepair(sessionId: string): (() => void) | undefined;
   publisher: Pick<EventPublisher, 'publishProject'>;
 };
 
@@ -149,6 +150,7 @@ type QaExecutionServiceDependencies = {
     taskId: string;
     cycleId: string;
   }) => Promise<void>;
+  afterInterruptedRepair?: () => void;
   now?: () => string;
   createId?: () => string;
 };
@@ -167,6 +169,14 @@ type VerificationState = {
   latest: string;
   commands: Array<{ command: string; outcome: string }>;
   mutationDetected: boolean;
+  operation: 'idle' | 'verifying' | 'submitting';
+};
+
+type SourceMutationContext = {
+  taskId: string;
+  cycleId: string;
+  sessionId: string;
+  workspaceBaseline: string;
 };
 
 const verificationCommandSchema = z.object({
@@ -205,6 +215,24 @@ class QaLaunchInvalidError extends Error {
   ) {
     super(message);
     this.name = 'QaLaunchInvalidError';
+  }
+}
+
+class QaControlBusyError extends Error {
+  readonly code = 'qa_control_busy';
+
+  constructor() {
+    super('Another QA control is already running for this cycle.');
+    this.name = 'QaControlBusyError';
+  }
+}
+
+class QaSourceMutationDetectedError extends Error {
+  readonly code = 'qa_source_mutation_detected';
+
+  constructor() {
+    super('Tracked source changed during QA verification.');
+    this.name = 'QaSourceMutationDetectedError';
   }
 }
 
@@ -250,6 +278,7 @@ const safeQaControlErrorCodes = new Set([
   'review_automation_paused',
   'qa_verification_command_rejected',
   'qa_source_mutation_detected',
+  'qa_control_busy',
 ]);
 
 const qaControlFailure = (error: unknown) => {
@@ -364,98 +393,129 @@ export class QaExecutionService {
     }
   }
 
-  submitVerdict(input: QaSubmitVerdictInput): QaVerdictOutcome {
+  async submitVerdict(input: QaSubmitVerdictInput): Promise<QaVerdictOutcome> {
     const commandId = idSchema.parse(input.commandId);
     const existing =
       this.dependencies.commands.getExisting<QaVerdictOutcome>(commandId);
     if (existing.found) return existing.response;
 
-    const result = this.dependencies.commands.executeOnceInImmediateTransaction(
-      commandId,
-      () => {
-        const reportInput = this.parseReport(input.report);
-        const actor = taskActorSchema.parse(input.actor);
-        const context = this.requireVerdictContext(input);
-        authorizeQaVerdict({ task: context.task, actor });
-        this.requireValidReport(context.cycle, reportInput);
+    const reportInput = this.parseReport(input.report);
+    const actor = taskActorSchema.parse(input.actor);
+    const initialContext = this.requireVerdictContext(input);
+    authorizeQaVerdict({ task: initialContext.task, actor });
+    this.requireValidReport(initialContext.cycle, reportInput);
+    const verification = initialContext.verification;
+    if (verification.operation !== 'idle') throw new QaControlBusyError();
+    verification.operation = 'submitting';
 
-        const occurredAt = this.now();
-        const eventId = idSchema.parse(this.createId());
-        const report = this.dependencies.qaExecutions.insertReport(
-          qaReportSchema.parse({
-            ...reportInput,
-            verificationCommands: context.verification.commands,
-            workspaceBefore: context.verification.baseline,
-            workspaceAfter: context.verification.latest,
-            id: idSchema.parse(this.createId()),
-            cycleId: context.cycle.id,
-            createdAt: occurredAt,
-          }),
+    try {
+      verification.latest =
+        await this.dependencies.verificationRunner.captureTrackedSource(
+          verification.workspacePath,
         );
-        const cycle = this.dependencies.qaExecutions.completeCycle(
-          context.cycle.id,
+      if (verification.latest !== verification.baseline) {
+        verification.mutationDetected = true;
+        await this.pauseForSourceMutation(
           {
-            endedAt: occurredAt,
-            terminalDisposition: report.disposition,
-            reportId: report.id,
-            terminalCommandId: commandId,
-            terminalEventId: eventId,
+            taskId: initialContext.task.id,
+            cycleId: initialContext.cycle.id,
+            sessionId: initialContext.cycle.sessionId,
+            workspaceBaseline: initialContext.cycle.workspaceBaseline,
           },
+          input.capability,
         );
-        if (!cycle) {
-          throw new QaCapabilityInvalidError(
-            'The QA capability is bound to a terminal cycle.',
-          );
-        }
-        const event = this.dependencies.projectEvents.appendInTransaction(
-          context.task.projectId,
-          {
-            protocolVersion: 1,
-            id: eventId,
-            projectId: context.task.projectId,
-            occurredAt,
-            type: 'task.qa_execution_changed',
-            payload: {
-              task: context.task,
+        throw new QaSourceMutationDetectedError();
+      }
+
+      const result =
+        this.dependencies.commands.executeOnceInImmediateTransaction(
+          commandId,
+          () => {
+            const context = this.requireVerdictContext(input);
+            authorizeQaVerdict({ task: context.task, actor });
+
+            const occurredAt = this.now();
+            const eventId = idSchema.parse(this.createId());
+            const report = this.dependencies.qaExecutions.insertReport(
+              qaReportSchema.parse({
+                ...reportInput,
+                verificationCommands: context.verification.commands,
+                workspaceBefore: context.verification.baseline,
+                workspaceAfter: context.verification.latest,
+                id: idSchema.parse(this.createId()),
+                cycleId: context.cycle.id,
+                createdAt: occurredAt,
+              }),
+            );
+            const cycle = this.dependencies.qaExecutions.completeCycle(
+              context.cycle.id,
+              {
+                endedAt: occurredAt,
+                terminalDisposition: report.disposition,
+                reportId: report.id,
+                terminalCommandId: commandId,
+                terminalEventId: eventId,
+              },
+            );
+            if (!cycle) {
+              throw new QaCapabilityInvalidError(
+                'The QA capability is bound to a terminal cycle.',
+              );
+            }
+            const event = this.dependencies.projectEvents.appendInTransaction(
+              context.task.projectId,
+              {
+                protocolVersion: 1,
+                id: eventId,
+                projectId: context.task.projectId,
+                occurredAt,
+                type: 'task.qa_execution_changed',
+                payload: {
+                  task: context.task,
+                  attempt: context.attempt,
+                  cycle,
+                  report,
+                },
+              },
+            );
+            const plan = planQaVerdict(
+              {
+                task: context.task,
+                attempt: context.attempt,
+                cycle,
+                report,
+                commandId,
+                occurredAt,
+              },
+              {
+                projects: this.dependencies.projects,
+                tasks: this.dependencies.tasks,
+                qaExecutions: this.dependencies.qaExecutions,
+                transitions: this.dependencies.transitions,
+                projectEvents: this.dependencies.projectEvents,
+                createId: this.createId,
+              },
+            );
+            return {
+              task: plan.task,
               attempt: context.attempt,
               cycle,
               report,
-            },
+              event,
+              events: [event, ...plan.events],
+            };
           },
         );
-        const plan = planQaVerdict(
-          {
-            task: context.task,
-            attempt: context.attempt,
-            cycle,
-            report,
-            commandId,
-            occurredAt,
-          },
-          {
-            projects: this.dependencies.projects,
-            tasks: this.dependencies.tasks,
-            qaExecutions: this.dependencies.qaExecutions,
-            transitions: this.dependencies.transitions,
-            projectEvents: this.dependencies.projectEvents,
-            createId: this.createId,
-          },
-        );
-        return {
-          task: plan.task,
-          attempt: context.attempt,
-          cycle,
-          report,
-          event,
-          events: [event, ...plan.events],
-        };
-      },
-    );
-    this.dependencies.capabilities.invalidate(input.capability);
-    result.events.forEach((event) =>
-      this.dependencies.registry.publisher.publishProject(event),
-    );
-    return result;
+      this.dependencies.capabilities.invalidate(input.capability);
+      result.events.forEach((event) =>
+        this.dependencies.registry.publisher.publishProject(event),
+      );
+      return result;
+    } finally {
+      if (verification.operation === 'submitting') {
+        verification.operation = 'idle';
+      }
+    }
   }
 
   repairInterrupted(
@@ -466,130 +526,160 @@ export class QaExecutionService {
       this.dependencies.commands.getExisting<QaRepairInterruptedOutcome>(
         commandId,
       );
-    if (existing.found) return existing.response;
+    if (existing.found) {
+      this.dependencies.afterInterruptedRepair?.();
+      return existing.response;
+    }
 
-    const result = this.dependencies.commands.executeOnceInImmediateTransaction(
-      commandId,
-      () => {
-        const actor = taskActorSchema.parse(input.actor);
-        if (actor.type !== 'human') {
-          throw new QaLaunchInvalidError(
-            'task_transition_unauthorized',
-            'Only a human may repair an interrupted QA cycle',
-          );
-        }
-        const task = this.dependencies.tasks.get(idSchema.parse(input.taskId));
-        if (!task) throw new TaskNotFoundError(input.taskId);
-        const project = this.dependencies.projects.get(task.projectId);
-        if (!project) throw new ProjectNotFoundError(task.projectId);
-        if (project.archivedAt) throw new ProjectArchivedError(project);
-        if (task.revision !== input.expectedRevision) {
-          throw new TaskRevisionConflictError(task);
-        }
-        const current = this.dependencies.qaExecutions.getCycle(
-          idSchema.parse(input.cycleId),
-        );
-        if (
-          !current ||
-          current.taskId !== task.id ||
-          current.endedAt !== null
-        ) {
-          throw new QaLaunchInvalidError(
-            'qa_cycle_invalid',
-            'The QA cycle is not an active cycle for this task',
-          );
-        }
-        const session = this.dependencies.sessions.get(current.sessionId);
-        if (
-          session &&
-          ['starting', 'running', 'waiting_for_input', 'interrupting'].includes(
-            session.lifecycleState,
-          )
-        ) {
-          throw new QaLaunchInvalidError(
-            'qa_cycle_active',
-            'A live QA runtime cannot be repaired as interrupted',
-          );
-        }
-        const attempt = this.dependencies.attempts
-          .listByTask(task.id)
-          .find(({ id }) => id === current.attemptId);
-        if (!attempt) {
-          throw new QaLaunchInvalidError(
-            'qa_cycle_invalid',
-            'The QA cycle no longer has its owning attempt',
-          );
-        }
-        const occurredAt = this.now();
-        const eventId = idSchema.parse(this.createId());
-        const cycle = this.dependencies.qaExecutions.interruptCycle(
-          current.id,
-          {
-            endedAt: occurredAt,
-            terminalCommandId: commandId,
-            terminalEventId: eventId,
-          },
-        );
-        if (!cycle) {
-          throw new QaLaunchInvalidError(
-            'qa_cycle_invalid',
-            'The QA cycle became terminal before repair completed',
-          );
-        }
-        const event = this.dependencies.projectEvents.appendInTransaction(
-          task.projectId,
-          {
-            protocolVersion: 1,
-            id: eventId,
-            projectId: task.projectId,
-            occurredAt,
-            type: 'task.qa_execution_changed',
-            payload: { task, attempt, cycle, report: null },
-          },
-        );
-        const events = [event];
-        for (const action of this.dependencies.qaExecutions
-          .listPendingAutomationActions()
-          .filter(
-            (candidate) =>
-              candidate.taskId === task.id &&
-              candidate.attemptId === attempt.id &&
-              (candidate.sourceCycleId === current.id ||
-                candidate.actionKind === 'launch_qa'),
-          )) {
-          const completed =
-            this.dependencies.qaExecutions.completeAutomationAction(action.id, {
-              status: 'failed',
-              errorCode: 'qa_cycle_interrupted',
-              completedAt: occurredAt,
-            });
-          if (!completed) continue;
-          events.push(
-            this.dependencies.projectEvents.appendInTransaction(
+    const candidate = this.dependencies.qaExecutions.getCycle(
+      idSchema.parse(input.cycleId),
+    );
+    const releaseRepair = candidate
+      ? this.dependencies.registry.reserveRepair(candidate.sessionId)
+      : () => undefined;
+    if (!releaseRepair) {
+      throw new QaLaunchInvalidError(
+        'qa_cycle_active',
+        'A live or attaching QA runtime cannot be repaired as interrupted',
+      );
+    }
+
+    try {
+      const result =
+        this.dependencies.commands.executeOnceInImmediateTransaction(
+          commandId,
+          () => {
+            const actor = taskActorSchema.parse(input.actor);
+            if (actor.type !== 'human') {
+              throw new QaLaunchInvalidError(
+                'task_transition_unauthorized',
+                'Only a human may repair an interrupted QA cycle',
+              );
+            }
+            const task = this.dependencies.tasks.get(
+              idSchema.parse(input.taskId),
+            );
+            if (!task) throw new TaskNotFoundError(input.taskId);
+            const project = this.dependencies.projects.get(task.projectId);
+            if (!project) throw new ProjectNotFoundError(task.projectId);
+            if (project.archivedAt) throw new ProjectArchivedError(project);
+            if (task.revision !== input.expectedRevision) {
+              throw new TaskRevisionConflictError(task);
+            }
+            const current = this.dependencies.qaExecutions.getCycle(
+              idSchema.parse(input.cycleId),
+            );
+            if (
+              !current ||
+              current.taskId !== task.id ||
+              current.endedAt !== null
+            ) {
+              throw new QaLaunchInvalidError(
+                'qa_cycle_invalid',
+                'The QA cycle is not an active cycle for this task',
+              );
+            }
+            const session = this.dependencies.sessions.get(current.sessionId);
+            if (
+              session &&
+              [
+                'starting',
+                'running',
+                'waiting_for_input',
+                'interrupting',
+              ].includes(session.lifecycleState)
+            ) {
+              throw new QaLaunchInvalidError(
+                'qa_cycle_active',
+                'A live QA runtime cannot be repaired as interrupted',
+              );
+            }
+            const attempt = this.dependencies.attempts
+              .listByTask(task.id)
+              .find(({ id }) => id === current.attemptId);
+            if (!attempt) {
+              throw new QaLaunchInvalidError(
+                'qa_cycle_invalid',
+                'The QA cycle no longer has its owning attempt',
+              );
+            }
+            const occurredAt = this.now();
+            const eventId = idSchema.parse(this.createId());
+            const cycle = this.dependencies.qaExecutions.interruptCycle(
+              current.id,
+              {
+                endedAt: occurredAt,
+                terminalCommandId: commandId,
+                terminalEventId: eventId,
+              },
+            );
+            if (!cycle) {
+              throw new QaLaunchInvalidError(
+                'qa_cycle_invalid',
+                'The QA cycle became terminal before repair completed',
+              );
+            }
+            const event = this.dependencies.projectEvents.appendInTransaction(
               task.projectId,
               {
                 protocolVersion: 1,
-                id: idSchema.parse(this.createId()),
+                id: eventId,
                 projectId: task.projectId,
                 occurredAt,
-                type: 'task.review_automation_changed',
-                payload: {
-                  task,
-                  automation: task.reviewAutomation,
-                  action: completed,
-                },
+                type: 'task.qa_execution_changed',
+                payload: { task, attempt, cycle, report: null },
               },
-            ),
-          );
-        }
-        return { task, attempt, cycle, event, events };
-      },
-    );
-    this.dependencies.capabilities.invalidateSession(result.cycle.sessionId);
-    result.events.forEach((event) =>
-      this.dependencies.registry.publisher.publishProject(event),
-    );
-    return result;
+            );
+            const events = [event];
+            for (const action of this.dependencies.qaExecutions
+              .listPendingAutomationActions()
+              .filter(
+                (candidate) =>
+                  candidate.taskId === task.id &&
+                  candidate.attemptId === attempt.id &&
+                  (candidate.sourceCycleId === current.id ||
+                    candidate.actionKind === 'launch_qa'),
+              )) {
+              const completed =
+                this.dependencies.qaExecutions.completeAutomationAction(
+                  action.id,
+                  {
+                    status: 'failed',
+                    errorCode: 'qa_cycle_interrupted',
+                    completedAt: occurredAt,
+                  },
+                );
+              if (!completed) continue;
+              events.push(
+                this.dependencies.projectEvents.appendInTransaction(
+                  task.projectId,
+                  {
+                    protocolVersion: 1,
+                    id: idSchema.parse(this.createId()),
+                    projectId: task.projectId,
+                    occurredAt,
+                    type: 'task.review_automation_changed',
+                    payload: {
+                      task,
+                      automation: task.reviewAutomation,
+                      action: completed,
+                    },
+                  },
+                ),
+              );
+            }
+            return { task, attempt, cycle, event, events };
+          },
+        );
+      this.dependencies.capabilities.invalidateSession(result.cycle.sessionId);
+      result.events.forEach((event) =>
+        this.dependencies.registry.publisher.publishProject(event),
+      );
+      this.dependencies.afterInterruptedRepair?.();
+      return result;
+    } finally {
+      releaseRepair();
+    }
   }
 
   private parseReport(report: QaReportInput): QaReportInput {
@@ -946,6 +1036,7 @@ export class QaExecutionService {
       latest: prepared.cycle.workspaceBaseline,
       commands: [],
       mutationDetected: false,
+      operation: 'idle',
     };
     this.verificationStates.set(prepared.cycle.id, verification);
     return {
@@ -982,6 +1073,10 @@ export class QaExecutionService {
               if (verification.mutationDetected) {
                 return qaControlFailure('qa_source_mutation_detected');
               }
+              if (verification.operation !== 'idle') {
+                return qaControlFailure('qa_control_busy');
+              }
+              verification.operation = 'verifying';
               try {
                 const result = await this.dependencies.verificationRunner.run(
                   verification.workspacePath,
@@ -1000,7 +1095,15 @@ export class QaExecutionService {
                   );
                 if (verification.latest !== verification.baseline) {
                   verification.mutationDetected = true;
-                  await this.pauseForSourceMutation(prepared, capability);
+                  await this.pauseForSourceMutation(
+                    {
+                      taskId: prepared.task.id,
+                      cycleId: prepared.cycle.id,
+                      sessionId: prepared.session.id,
+                      workspaceBaseline: prepared.cycle.workspaceBaseline,
+                    },
+                    capability,
+                  );
                   return qaControlFailure('qa_source_mutation_detected');
                 }
                 return {
@@ -1019,6 +1122,10 @@ export class QaExecutionService {
                 };
               } catch (error) {
                 return qaControlFailure(error);
+              } finally {
+                if (verification.operation === 'verifying') {
+                  verification.operation = 'idle';
+                }
               }
             },
           },
@@ -1031,16 +1138,7 @@ export class QaExecutionService {
               const parsed = qaReportInputSchema.safeParse(input);
               if (!parsed.success) return qaControlFailure('invalid_input');
               try {
-                verification.latest =
-                  await this.dependencies.verificationRunner.captureTrackedSource(
-                    verification.workspacePath,
-                  );
-                if (verification.latest !== verification.baseline) {
-                  verification.mutationDetected = true;
-                  await this.pauseForSourceMutation(prepared, capability);
-                  return qaControlFailure('qa_source_mutation_detected');
-                }
-                const outcome = this.submitVerdict({
+                const outcome = await this.submitVerdict({
                   commandId,
                   capability,
                   expectedRevision: prepared.task.revision,
@@ -1088,14 +1186,14 @@ export class QaExecutionService {
   }
 
   private async pauseForSourceMutation(
-    prepared: QaLaunchResult,
+    context: SourceMutationContext,
     capability: string,
   ): Promise<void> {
     let event: ProjectEvent | undefined;
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
-      const task = this.dependencies.tasks.get(prepared.task.id);
-      if (!task) throw new TaskNotFoundError(prepared.task.id);
+      const task = this.dependencies.tasks.get(context.taskId);
+      if (!task) throw new TaskNotFoundError(context.taskId);
       const occurredAt = this.now();
       const paused = this.dependencies.tasks.update(
         {
@@ -1115,13 +1213,13 @@ export class QaExecutionService {
       this.dependencies.diagnostics.insert(
         rawDiagnosticSchema.parse({
           id: this.createId(),
-          sessionId: prepared.session.id,
+          sessionId: context.sessionId,
           capturedAt: occurredAt,
           payload: {
             kind: 'qa_source_mutation',
-            cycleId: prepared.cycle.id,
-            workspaceBefore: prepared.cycle.workspaceBaseline,
-            workspaceAfter: this.verificationStates.get(prepared.cycle.id)
+            cycleId: context.cycleId,
+            workspaceBefore: context.workspaceBaseline,
+            workspaceAfter: this.verificationStates.get(context.cycleId)
               ?.latest,
           },
         }),
@@ -1150,7 +1248,7 @@ export class QaExecutionService {
     }
     if (event) this.dependencies.registry.publisher.publishProject(event);
     this.dependencies.capabilities.invalidate(capability);
-    await this.dependencies.registry.interrupt(prepared.session.id);
+    await this.dependencies.registry.interrupt(context.sessionId);
   }
 
   private recordStartupFailure(sessionId: string, error: unknown): boolean {

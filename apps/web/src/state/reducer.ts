@@ -593,6 +593,7 @@ export const applyProjectEvent = (
                     [
                       'qa_cycle_without_trustworthy_outcome',
                       'qa_session_workspace_mismatch',
+                      'review_automation_action_incomplete',
                     ].includes(repair.reason)
                   ),
               ),

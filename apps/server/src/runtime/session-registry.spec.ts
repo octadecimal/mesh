@@ -338,6 +338,49 @@ describe('SessionRegistry Developer attachment', () => {
     );
   });
 
+  it('keeps repair authority unavailable while an attach is pending or live', async () => {
+    const repositories = createTestRepositories();
+    const pendingDriver = deferred<DriverSession>();
+    const driver: ClaudeSessionDriver = {
+      discover: async () => [],
+      create: async () => pendingDriver.promise,
+      resume: async () => new FakeDriverSession('unused'),
+    };
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'pending-qa-repair');
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    const attached = registry.create('pending-qa-repair');
+    let cycleEndedAt: string | null = null;
+
+    const pendingReservation = registry.reserveRepair('pending-qa-repair');
+    if (pendingReservation) {
+      cycleEndedAt = now;
+      pendingReservation();
+    }
+
+    expect(pendingReservation).toBeUndefined();
+    expect(cycleEndedAt).toBeNull();
+
+    const session = new ControlledDriverSession('pending-qa-resume');
+    pendingDriver.resolve(session);
+    await attached;
+
+    const liveReservation = registry.reserveRepair('pending-qa-repair');
+    if (liveReservation) {
+      cycleEndedAt = now;
+      liveReservation();
+    }
+    expect(liveReservation).toBeUndefined();
+    expect(cycleEndedAt).toBeNull();
+  });
+
   it('cancels a pending attach when another runtime trips the audit barrier', async () => {
     const repositories = createTestRepositories();
     const activeSession = new FakeDriverSession('active-resume-id');

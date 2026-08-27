@@ -352,7 +352,7 @@ const executeQaCommand = async (
     });
   }
 
-  const committed = service.submitVerdict({
+  const committed = await service.submitVerdict({
     ...command.payload,
     commandId: idempotencyKey,
   });

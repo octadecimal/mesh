@@ -43,6 +43,62 @@ describe('QaVerificationRunner', () => {
     },
     { executable: 'npm', args: ['explore', 'dep', '--', 'cmd.exe'] },
     { executable: 'pnpm', args: ['run', 'rewrite-source'] },
+    {
+      executable: 'npm',
+      args: ['--prefix=C:\\other', 'test'],
+    },
+    {
+      executable: 'npm',
+      args: ['--prefix', 'C:\\other', 'test'],
+    },
+    {
+      executable: 'git',
+      args: ['--git-dir=C:\\other\\.git', 'show', 'HEAD:file'],
+    },
+    {
+      executable: 'git',
+      args: ['--work-tree=C:\\other', 'status'],
+    },
+    {
+      executable: 'git',
+      args: ['-c', 'core.pager=writer', 'show', 'HEAD:file'],
+    },
+    {
+      executable: 'git',
+      args: ['-ccore.pager=writer', 'show', 'HEAD:file'],
+    },
+    {
+      executable: 'git',
+      args: ['-CC:\\other', 'show', 'HEAD:file'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['nx', 'test', 'server', '--', '-u'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', '--', '--updateSnapshot'],
+    },
+    {
+      executable: 'corepack',
+      args: ['pnpm', 'test', '--', '--update-snapshots=all'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['nx', 'test', 'server', '--outputFile=..\\outside.json'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', 'C:\\other\\test.spec.ts'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', 'C:..\\other\\test.spec.ts'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', '--', '-uall'],
+    },
   ])(
     'rejects source-authoring command authority: $executable $args',
     async (input) => {
@@ -57,6 +113,26 @@ describe('QaVerificationRunner', () => {
       expect(run).not.toHaveBeenCalled();
     },
   );
+
+  it('resolves direct execution to the assigned workspace', async () => {
+    const run = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: 'passed',
+      stderr: '',
+    }));
+    const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+    await runner.run('C:\\repo\\nested\\..', {
+      executable: 'pnpm',
+      args: ['test'],
+    });
+
+    expect(run).toHaveBeenCalledWith(
+      'pnpm',
+      ['test'],
+      expect.objectContaining({ cwd: 'C:\\repo' }),
+    );
+  });
 
   it('derives an opaque tracked-source state from Git rather than agent input', async () => {
     const run = vi.fn(async () => ({

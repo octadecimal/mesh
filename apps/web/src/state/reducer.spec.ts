@@ -926,6 +926,60 @@ describe('project projection', () => {
       }),
     ).toEqual({ kind: 'gap', expected: 9, received: 10 });
   });
+
+  it('clears every repaired QA warning and keeps it cleared after reconnect', () => {
+    const qaRepairs: AttemptRepair[] = [
+      'qa_cycle_without_trustworthy_outcome',
+      'qa_session_workspace_mismatch',
+      'review_automation_action_incomplete',
+    ].map((reason) => ({
+      taskId: task().id,
+      attemptId: attempt.id,
+      sessionId: qaCycle.sessionId,
+      reason: reason as AttemptRepair['reason'],
+    }));
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({ repairs: qaRepairs }),
+    );
+    const interruptedCycle: QaExecutionCycle = {
+      ...qaCycle,
+      endedAt: timestamp,
+      terminalDisposition: 'interrupted',
+      terminalCommandId: 'repair-qa-cycle-1',
+      terminalEventId: 'project-event-4',
+    };
+
+    const repaired = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'task.qa_execution_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        attempt,
+        cycle: interruptedCycle,
+        report: null,
+      },
+    });
+
+    expect(repaired.kind).toBe('applied');
+    if (repaired.kind !== 'applied') return;
+    expect(repaired.state.repairsByProjectId[project.id]).toEqual([]);
+
+    const reconnected = replaceProjectSnapshot(
+      repaired.state,
+      projectSnapshot({
+        repairs: [],
+        qaCycles: [interruptedCycle],
+        qaReports: [],
+        cursor: 4,
+      }),
+    );
+    expect(reconnected.repairsByProjectId[project.id]).toEqual([]);
+  });
 });
 
 describe('createResyncCoordinator', () => {

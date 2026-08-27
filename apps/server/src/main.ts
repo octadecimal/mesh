@@ -224,19 +224,7 @@ export const startServer = async (
       qaCapabilities,
       projectEvents,
     });
-    for (const repair of result.repairs) {
-      if (
-        !runtimeRepairs.some(
-          (current) =>
-            current.taskId === repair.taskId &&
-            current.attemptId === repair.attemptId &&
-            current.sessionId === repair.sessionId &&
-            current.reason === repair.reason,
-        )
-      ) {
-        runtimeRepairs.push(repair);
-      }
-    }
+    runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
     for (const event of result.events)
       activeRegistry.publisher.publishProject(event);
   };
@@ -328,6 +316,7 @@ export const startServer = async (
     afterRejectedVerdict: async (input) => {
       await requireReviewAutomation().afterQaVerdict(input);
     },
+    afterInterruptedRepair: () => reconcileStoppedRuntime(registry),
   });
   roleServices.reviewAutomation = new ReviewAutomationService({
     database,

@@ -70,6 +70,7 @@ describe('QaExecutionService', () => {
         input: { executable: string; args: string[] },
       ): Promise<QaVerificationResult>;
     };
+    reserveRepair?: (sessionId: string) => (() => void) | undefined;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-qa-launch-'));
     const repositories = createTestRepositories();
@@ -340,11 +341,17 @@ describe('QaExecutionService', () => {
       captureTrackedSource,
       run: runVerification,
     };
+    const registry = {
+      create,
+      interrupt,
+      publisher,
+      reserveRepair: options?.reserveRepair ?? (() => () => undefined),
+    };
     const service = new QaExecutionService({
       ...repositories,
       attemptService,
       capabilities: qaCapabilities,
-      registry: { create, interrupt, publisher },
+      registry,
       afterRejectedVerdict: options?.afterRejectedVerdict,
       billingConflicts: options?.billingConflict
         ? [{ variable: 'ANTHROPIC_API_KEY' }]
@@ -535,6 +542,71 @@ describe('QaExecutionService', () => {
       reviewAutomation: { status: 'paused' },
     });
     expect(context.interrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a parallel verdict and catches post-verification mutation before commit', async () => {
+    let markRunStarted!: () => void;
+    const runStarted = new Promise<void>((resolve) => {
+      markRunStarted = resolve;
+    });
+    let finishRun!: (result: QaVerificationResult) => void;
+    const runFinished = new Promise<QaVerificationResult>((resolve) => {
+      finishRun = resolve;
+    });
+    const sourceStates = ['sha256:before', 'sha256:before', 'sha256:after'];
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      verificationRunner: {
+        captureTrackedSource: async () =>
+          sourceStates.shift() ?? 'sha256:after',
+        run: async () => {
+          markRunStarted();
+          return runFinished;
+        },
+      },
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const controls = context.starts[0]?.configuration.controlServer.tools;
+    const verification = controls?.find(
+      ({ name }) => name === 'run_verification',
+    );
+    const verdict = controls?.find(({ name }) => name === 'submit_qa_verdict');
+    if (!verification || !verdict) throw new Error('Expected QA controls');
+
+    const running = verification.execute({
+      executable: 'pnpm',
+      args: ['test'],
+    });
+    await runStarted;
+
+    const parallelVerdict = await verdict.execute(reportFor(launched.cycle));
+
+    expect(parallelVerdict).toMatchObject({ isError: true });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+
+    finishRun({
+      command: 'pnpm test',
+      exitCode: 0,
+      stdout: 'passed',
+      stderr: '',
+    });
+    await expect(running).resolves.not.toMatchObject({ isError: true });
+
+    const finalVerdict = await verdict.execute(reportFor(launched.cycle));
+
+    expect(finalVerdict).toMatchObject({ isError: true });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
   });
 
   it('binds the only QA control to server-owned cycle context and closes the runtime after one verdict', async () => {
@@ -881,6 +953,31 @@ describe('QaExecutionService', () => {
     ).toThrow(expect.objectContaining({ code: 'qa_cycle_active' }));
   });
 
+  it('keeps a QA cycle active when runtime ownership refuses repair reservation', async () => {
+    const reserveRepair = vi.fn(() => undefined);
+    const context = setup({ reserveRepair });
+    const launched = await context.service.launch(launchInput(context.task));
+    context.repositories.database
+      .prepare(
+        "UPDATE sessions SET lifecycle_state = 'failed', updated_at = ? WHERE id = ?",
+      )
+      .run(now, launched.session.id);
+
+    expect(() =>
+      context.service.repairInterrupted({
+        commandId: 'repair-pending-attach',
+        taskId: context.task.id,
+        cycleId: launched.cycle.id,
+        expectedRevision: context.task.revision,
+        actor: humanActor,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'qa_cycle_active' }));
+    expect(reserveRepair).toHaveBeenCalledWith(launched.session.id);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ endedAt: null, terminalDisposition: null });
+  });
+
   it.each([
     ['manual', policyActor],
     ['autonomous_policy', humanActor],
@@ -1195,7 +1292,7 @@ describe('QaExecutionService', () => {
     const taskBefore = context.repositories.tasks.get(context.task.id);
     context.publicationSnapshots.splice(0);
 
-    const outcome = context.service.submitVerdict(
+    const outcome = await context.service.submitVerdict(
       verdictInput(context, launched),
     );
 
@@ -1237,12 +1334,33 @@ describe('QaExecutionService', () => {
     expect(() => context.qaCapabilities.resolve(launched.capability)).toThrow();
   });
 
+  it('rechecks tracked source for direct verdict submission before persistence', async () => {
+    const context = setup({
+      trackedSourceStates: ['sha256:before', 'sha256:after'],
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_source_mutation_detected' });
+
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.launch.session.id);
+  });
+
   it('records a rejected manual verdict without transitioning the task', async () => {
     const context = setup();
     const launched = await launchForVerdict(context);
     const taskBefore = context.repositories.tasks.get(context.task.id);
 
-    const outcome = context.service.submitVerdict(
+    const outcome = await context.service.submitVerdict(
       verdictInput(context, launched, {
         report: reportFor(launched.launch.cycle, {
           disposition: 'rejected',
@@ -1294,7 +1412,7 @@ describe('QaExecutionService', () => {
     const launched = await launchAutonomousForVerdict(context);
     context.publicationSnapshots.splice(0);
 
-    const outcome = context.service.submitVerdict(
+    const outcome = await context.service.submitVerdict(
       verdictInput(context, launched),
     );
 
@@ -1345,7 +1463,7 @@ describe('QaExecutionService', () => {
       });
       const launched = await launchAutonomousForVerdict(context);
 
-      const outcome = context.service.submitVerdict(
+      const outcome = await context.service.submitVerdict(
         verdictInput(context, launched, {
           report: reportFor(launched.launch.cycle, {
             disposition: 'rejected',
@@ -1394,7 +1512,7 @@ describe('QaExecutionService', () => {
     });
     const launched = await launchAutonomousForVerdict(context);
 
-    const outcome = context.service.submitVerdict(
+    const outcome = await context.service.submitVerdict(
       verdictInput(context, launched, {
         report: reportFor(launched.launch.cycle, {
           disposition: 'rejected',
@@ -1444,7 +1562,7 @@ describe('QaExecutionService', () => {
       END;
     `);
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict(
         verdictInput(context, launched, {
           report: reportFor(launched.launch.cycle, {
@@ -1459,7 +1577,7 @@ describe('QaExecutionService', () => {
           }),
         }),
       ),
-    ).toThrow('automation action insert failed');
+    ).rejects.toThrow('automation action insert failed');
     expect(
       context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
     ).toMatchObject({ endedAt: null, reportId: null });
@@ -1524,13 +1642,13 @@ describe('QaExecutionService', () => {
     });
     const launched = await launchForVerdict(context);
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict(
         verdictInput(context, launched, {
           report: reportFor(launched.launch.cycle, { criterionResults }),
         }),
       ),
-    ).toThrow(expect.objectContaining({ code: 'qa_report_incomplete' }));
+    ).rejects.toMatchObject({ code: 'qa_report_incomplete' });
     expect(
       context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
     ).toMatchObject({ endedAt: null, reportId: null });
@@ -1556,7 +1674,7 @@ describe('QaExecutionService', () => {
     const context = setup();
     const launched = await launchForVerdict(context);
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict(
         verdictInput(context, launched, {
           report: reportFor(launched.launch.cycle, {
@@ -1571,7 +1689,7 @@ describe('QaExecutionService', () => {
           }),
         }),
       ),
-    ).toThrow(expect.objectContaining({ code: 'qa_report_incomplete' }));
+    ).rejects.toMatchObject({ code: 'qa_report_incomplete' });
   });
 
   it('rejects a capability whose binding does not match durable QA ownership', async () => {
@@ -1584,11 +1702,11 @@ describe('QaExecutionService', () => {
       cycleId: launched.launch.cycle.id,
     });
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict(
         verdictInput(context, launched, { capability: mismatchedCapability }),
       ),
-    ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
+    ).rejects.toMatchObject({ code: 'qa_capability_invalid' });
   });
 
   it('rejects a verdict when the bound Developer attempt is no longer current', async () => {
@@ -1614,9 +1732,9 @@ describe('QaExecutionService', () => {
       'developer',
     );
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict(verdictInput(context, launched)),
-    ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
+    ).rejects.toMatchObject({ code: 'qa_capability_invalid' });
   });
 
   it('rejects a verdict when the task is no longer in review', async () => {
@@ -1628,11 +1746,11 @@ describe('QaExecutionService', () => {
     );
     if (!changed) throw new Error('Expected task update');
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict(
         verdictInput(context, launched, { expectedRevision: changed.revision }),
       ),
-    ).toThrow(expect.objectContaining({ code: 'task_transition_invalid' }));
+    ).rejects.toMatchObject({ code: 'task_transition_invalid' });
   });
 
   it('rejects a verdict after a material task edit despite the bound cycle', async () => {
@@ -1646,9 +1764,9 @@ describe('QaExecutionService', () => {
     );
     if (!changed) throw new Error('Expected task update');
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict(verdictInput(context, launched)),
-    ).toThrow(expect.objectContaining({ code: 'task_revision_conflict' }));
+    ).rejects.toMatchObject({ code: 'task_revision_conflict' });
   });
 
   it('rolls back report, cycle, and publication when audit persistence fails', async () => {
@@ -1663,9 +1781,9 @@ describe('QaExecutionService', () => {
       END;
     `);
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict(verdictInput(context, launched)),
-    ).toThrow('QA verdict event insert failed');
+    ).rejects.toThrow('QA verdict event insert failed');
     expect(
       context.repositories.qaExecutions.listReportsForAttempts([
         context.attempt.id,
@@ -1684,8 +1802,8 @@ describe('QaExecutionService', () => {
     const input = verdictInput(context, launched);
     context.publicationSnapshots.splice(0);
 
-    const first = context.service.submitVerdict(input);
-    const duplicate = context.service.submitVerdict(input);
+    const first = await context.service.submitVerdict(input);
+    const duplicate = await context.service.submitVerdict(input);
 
     expect(duplicate).toEqual(first);
     expect(
@@ -1694,19 +1812,19 @@ describe('QaExecutionService', () => {
       ]),
     ).toEqual([first.report]);
     expect(context.publicationSnapshots).toHaveLength(1);
-    expect(() =>
+    await expect(
       context.service.submitVerdict({
         ...input,
         commandId: 'qa-verdict-replay',
       }),
-    ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
+    ).rejects.toMatchObject({ code: 'qa_capability_invalid' });
   });
 
   it('rejects a fresh capability bound to a durably closed cycle before persistence', async () => {
     const context = setup();
     const launched = await launchForVerdict(context);
     context.publicationSnapshots.splice(0);
-    const first = context.service.submitVerdict(
+    const first = await context.service.submitVerdict(
       verdictInput(context, launched),
     );
     const eventsBeforeReplay = context.repositories.projectEvents.after(
@@ -1727,13 +1845,13 @@ describe('QaExecutionService', () => {
       cycleId: first.cycle.id,
     });
 
-    expect(() =>
+    await expect(
       context.service.submitVerdict({
         ...verdictInput(context, launched),
         commandId: 'qa-verdict-closed-cycle-replay',
         capability: freshCapability,
       }),
-    ).toThrow(expect.objectContaining({ code: 'qa_capability_invalid' }));
+    ).rejects.toMatchObject({ code: 'qa_capability_invalid' });
     expect(
       context.repositories.qaExecutions.listReportsForAttempts([
         context.attempt.id,

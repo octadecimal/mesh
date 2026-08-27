@@ -62,6 +62,39 @@ const gitWriteArguments = [
   '--output',
   '--textconv',
 ];
+const workspaceRedirectArguments = new Set([
+  '-c',
+  '--config-env',
+  '--cwd',
+  '--dir',
+  '--exec-path',
+  '--git-dir',
+  '--prefix',
+  '--work-tree',
+]);
+const sourceUpdatingArguments = new Set([
+  '-o',
+  '-u',
+  '--fix',
+  '--fix-dry-run',
+  '--json-output',
+  '--json-output-file',
+  '--out-dir',
+  '--outdir',
+  '--output',
+  '--output-file',
+  '--output-path',
+  '--outputfile',
+  '--outputpath',
+  '--reporter-output',
+  '--reporter-output-file',
+  '--snapshot-output',
+  '--update',
+  '--update-snapshot',
+  '--update-snapshots',
+  '--updatesnapshot',
+  '--write',
+]);
 
 const executableName = (value: string) =>
   value
@@ -127,6 +160,64 @@ const assertPackageManagerCommand = (args: readonly string[]) => {
 const quote = (value: string) =>
   /\s/.test(value) ? JSON.stringify(value) : value;
 
+const optionName = (argument: string) =>
+  argument.split('=', 1)[0]?.toLowerCase() ?? '';
+
+const escapesWorkspace = (workspacePath: string, candidate: string) => {
+  if (!candidate) return false;
+  const pathLike =
+    isAbsolute(candidate) ||
+    /^[a-z]:/i.test(candidate) ||
+    candidate === '..' ||
+    candidate.startsWith('../') ||
+    candidate.startsWith('..\\');
+  if (!pathLike) return false;
+  const withinWorkspace = relative(
+    workspacePath,
+    resolve(workspacePath, candidate),
+  );
+  return (
+    isAbsolute(withinWorkspace) ||
+    withinWorkspace === '..' ||
+    withinWorkspace.startsWith('../') ||
+    withinWorkspace.startsWith('..\\')
+  );
+};
+
+const assertWorkspaceBoundArguments = (
+  workspacePath: string,
+  args: readonly string[],
+) => {
+  for (const argument of args) {
+    const name = optionName(argument);
+    const shortOption =
+      argument.startsWith('-') && !argument.startsWith('--')
+        ? (argument[1] ?? '')
+        : '';
+    if (
+      workspaceRedirectArguments.has(name) ||
+      ['c', 'C'].includes(shortOption)
+    ) {
+      throw new QaVerificationCommandRejectedError(
+        'Verification commands may not redirect their assigned workspace.',
+      );
+    }
+    if (sourceUpdatingArguments.has(name) || ['o', 'u'].includes(shortOption)) {
+      throw new QaVerificationCommandRejectedError(
+        'Verification commands may not update source or select output destinations.',
+      );
+    }
+    const assignedValue = argument.includes('=')
+      ? argument.slice(argument.indexOf('=') + 1)
+      : argument;
+    if (escapesWorkspace(workspacePath, assignedValue)) {
+      throw new QaVerificationCommandRejectedError(
+        'Verification command paths must remain inside the assigned workspace.',
+      );
+    }
+  }
+};
+
 export class QaVerificationRunner {
   constructor(
     private readonly processes: ProcessRunner,
@@ -136,10 +227,11 @@ export class QaVerificationRunner {
   ) {}
 
   async captureTrackedSource(workspacePath: string): Promise<string> {
+    const assignedWorkspace = resolve(workspacePath);
     const result = await this.processes.run(
       'git',
-      ['-C', workspacePath, 'ls-files', '-z'],
-      { cwd: workspacePath },
+      ['-C', assignedWorkspace, 'ls-files', '-z'],
+      { cwd: assignedWorkspace },
     );
     if (result.exitCode !== 0) {
       throw new Error(
@@ -149,8 +241,8 @@ export class QaVerificationRunner {
     const hash = createHash('sha256');
     const trackedPaths = result.stdout.split('\0').filter(Boolean).sort();
     for (const trackedPath of trackedPaths) {
-      const absolutePath = resolve(workspacePath, trackedPath);
-      const withinWorkspace = relative(workspacePath, absolutePath);
+      const absolutePath = resolve(assignedWorkspace, trackedPath);
+      const withinWorkspace = relative(assignedWorkspace, absolutePath);
       if (
         isAbsolute(withinWorkspace) ||
         withinWorkspace === '..' ||
@@ -171,6 +263,7 @@ export class QaVerificationRunner {
     workspacePath: string,
     input: QaVerificationCommand,
   ): Promise<QaVerificationResult> {
+    const assignedWorkspace = resolve(workspacePath);
     const executable = executableName(input.executable);
     if (!allowedExecutables.has(executable)) {
       throw new QaVerificationCommandRejectedError(
@@ -185,6 +278,7 @@ export class QaVerificationRunner {
         'Verification arguments are empty or malformed.',
       );
     }
+    assertWorkspaceBoundArguments(assignedWorkspace, input.args);
 
     if (executable === 'git') {
       const command = input.args.find((argument) => !argument.startsWith('-'));
@@ -217,7 +311,7 @@ export class QaVerificationRunner {
     }
 
     const result = await this.processes.run(executable, input.args, {
-      cwd: workspacePath,
+      cwd: assignedWorkspace,
     });
     return {
       ...result,

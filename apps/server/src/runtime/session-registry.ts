@@ -41,6 +41,7 @@ export class SessionRegistry {
   readonly publisher: EventPublisher;
   private readonly runtimes = new Map<string, SessionRuntime>();
   private readonly pendingAttaches = new Map<string, PendingAttach>();
+  private readonly repairReservations = new Set<string>();
   private unavailable = false;
   private shuttingDown = false;
 
@@ -95,6 +96,24 @@ export class SessionRegistry {
     if (!runtime) return;
     runtime.emergencyInterrupt();
     await runtime.forceClose();
+  }
+
+  reserveRepair(sessionId: string): (() => void) | undefined {
+    this.assertWritable();
+    if (
+      this.runtimes.has(sessionId) ||
+      this.pendingAttaches.has(sessionId) ||
+      this.repairReservations.has(sessionId)
+    ) {
+      return undefined;
+    }
+    this.repairReservations.add(sessionId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.repairReservations.delete(sessionId);
+    };
   }
 
   async resolvePermission(
@@ -159,7 +178,11 @@ export class SessionRegistry {
     configuration?: AgentRuntimeConfiguration,
   ): Promise<void> {
     this.assertWritable();
-    if (this.runtimes.has(sessionId) || this.pendingAttaches.has(sessionId)) {
+    if (
+      this.runtimes.has(sessionId) ||
+      this.pendingAttaches.has(sessionId) ||
+      this.repairReservations.has(sessionId)
+    ) {
       const state =
         this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
       throw { code: 'invalid_session_state', from: state, trigger: mode };

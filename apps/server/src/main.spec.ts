@@ -481,7 +481,8 @@ describe('production composition', () => {
         url: '/api/projects/project-qa-main/snapshot',
       });
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toMatchObject({
+      const snapshot = response.json();
+      expect(snapshot).toMatchObject({
         tasks: [
           {
             id: 'task-qa-main',
@@ -497,6 +498,40 @@ describe('production composition', () => {
             reason: 'qa_cycle_without_trustworthy_outcome',
           },
         ],
+      });
+
+      const repair = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: 'repair-qa-main',
+          command: {
+            type: 'task.qa.repair_interrupted',
+            payload: {
+              taskId: 'task-qa-main',
+              cycleId: 'qa-cycle-main',
+              expectedRevision: snapshot.tasks[0].revision,
+              actor,
+            },
+          },
+        },
+      });
+      expect(repair.statusCode).toBe(200);
+
+      const reconnected = await running.app.inject({
+        method: 'GET',
+        url: '/api/projects/project-qa-main/snapshot',
+      });
+      expect(reconnected.statusCode).toBe(200);
+      expect(reconnected.json()).toMatchObject({
+        qaCycles: [
+          {
+            id: 'qa-cycle-main',
+            terminalDisposition: 'interrupted',
+          },
+        ],
+        repairs: [],
       });
     } finally {
       await running.close();
