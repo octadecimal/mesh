@@ -23,7 +23,9 @@ import {
   reviewAutomationStateSchema,
 } from './qa-execution.js';
 import { projectRunSchema } from './project-runs.js';
+import { projectPlanSchema } from './planning.js';
 import { protocolVersionSchema } from './protocol.js';
+import { taskDependencySchema } from './task-dependencies.js';
 
 const projectEvent = <Type extends string, Payload extends z.ZodType>(
   type: Type,
@@ -85,6 +87,38 @@ export const projectRunChangedEventSchema = projectEvent(
     message: 'Project run events must belong to their enclosing project.',
     path: ['payload', 'run', 'projectId'],
   });
+});
+export const projectPlanChangedEventSchema = projectEvent(
+  'project.plan_changed',
+  z.object({ plan: projectPlanSchema }),
+).superRefine(({ projectId, payload }, context) => {
+  if (payload.plan.projectId === projectId) return;
+  context.addIssue({
+    code: 'custom',
+    message: 'Project plan events must belong to their enclosing project.',
+    path: ['payload', 'plan', 'projectId'],
+  });
+});
+export const taskDependenciesChangedEventSchema = projectEvent(
+  'task.dependencies_changed',
+  z.object({ taskId: idSchema, dependencies: z.array(taskDependencySchema) }),
+).superRefine(({ projectId, payload }, context) => {
+  for (const [index, dependency] of payload.dependencies.entries()) {
+    if (dependency.projectId !== projectId) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Task dependencies must belong to their enclosing project.',
+        path: ['payload', 'dependencies', index, 'projectId'],
+      });
+    }
+    if (dependency.taskId !== payload.taskId) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Task dependency events must contain one dependent task.',
+        path: ['payload', 'dependencies', index, 'taskId'],
+      });
+    }
+  }
 });
 const taskQaExecutionChangedPayloadSchema = z
   .object({
@@ -211,6 +245,8 @@ export const projectEventSchema = z.discriminatedUnion('type', [
   projectDeveloperInstructionsChangedEventSchema,
   projectQaConfigurationChangedEventSchema,
   projectRunChangedEventSchema,
+  projectPlanChangedEventSchema,
+  taskDependenciesChangedEventSchema,
   taskDeveloperExecutionChangedEventSchema,
   taskQaExecutionChangedEventSchema,
   taskReviewAutomationChangedEventSchema,

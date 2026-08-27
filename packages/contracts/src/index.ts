@@ -7,6 +7,8 @@ export * from './ordering.js';
 export * from './events.js';
 export * from './project-events.js';
 export * from './project-runs.js';
+export * from './planning.js';
+export * from './task-dependencies.js';
 export * from './commands.js';
 export * from './http.js';
 export * from './realtime.js';

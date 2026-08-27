@@ -14,6 +14,11 @@ import {
   projectRunChangedEventSchema,
   projectRunItemSchema,
   projectRunSchema,
+  projectPlanDetailsSchema,
+  projectPlanHistoryPageSchema,
+  projectPlanProposalSchema,
+  projectPlanSchema,
+  projectPlanSummarySchema,
   projectSchema,
   projectSnapshotSchema,
   qaExecutionCycleSchema,
@@ -27,12 +32,15 @@ import {
   sessionSnapshotSchema,
   sessionSchema,
   stableTaskErrorCodeSchema,
+  taskDependencySchema,
+  taskReadinessProblemSchema,
   taskActorSchema,
   taskAttemptSourceSchema,
   taskAttemptSchema,
   taskCommandSchema,
   taskSchema,
   taskTransitionSchema,
+  mutatingCommandSchema,
 } from './index.js';
 
 describe('session platform contracts', () => {
@@ -1643,6 +1651,491 @@ describe('session platform contracts', () => {
           cursor: 0,
         }),
       ).toMatchObject({ runs: [], projectRunLimits: { maxConcurrency: 1 } });
+    });
+  });
+
+  describe('project planning and dependency contracts', () => {
+    const planningNow = '2026-08-27T12:00:00.000Z';
+    const planningActor = { type: 'human' as const, id: 'operator-1' };
+    const proposedTask = {
+      key: 'contracts',
+      title: 'Add contracts',
+      description: 'Define the public planning boundary.',
+      acceptanceCriteria: ['All new payloads parse through Zod.'],
+      priority: 'high' as const,
+      labels: ['planning'],
+      rationale: 'Consumers need stable types.',
+      goalMapping: 'Enables durable planning.',
+    };
+    const proposal = {
+      id: 'proposal-1',
+      planId: 'plan-1',
+      baseId: 'base-2',
+      ordinal: 2,
+      planRevision: 4,
+      capabilityGeneration: 2,
+      sessionId: 'session-1',
+      tasks: [proposedTask],
+      dependencies: [],
+      assumptions: ['The repository is already imported.'],
+      risks: ['Board state may change during planning.'],
+      exclusions: ['No continuous scheduling.'],
+      submittedAt: planningNow,
+    };
+
+    it.each([
+      'planning',
+      'awaiting_review',
+      'revising',
+      'attention_required',
+      'approved',
+      'rejected',
+      'cancelled',
+    ] as const)('parses the %s planning lifecycle status', (status) => {
+      expect(
+        projectPlanSchema.parse({
+          id: 'plan-1',
+          projectId: 'project-1',
+          goal: 'Add proposal-only planning.',
+          constraints: [],
+          nonGoals: [],
+          policyVersion: 'pm-policy-v1',
+          status,
+          revision: 1,
+          currentBaseId: 'base-1',
+          currentSessionId: 'session-1',
+          latestProposalOrdinal: 0,
+          feedback: [],
+          attention: null,
+          createdBy: planningActor,
+          createdAt: planningNow,
+          updatedAt: planningNow,
+          terminalAt: null,
+          terminalBy: null,
+          terminalReason: null,
+        }).status,
+      ).toBe(status);
+    });
+
+    it('parses immutable planning bases, proposal-local references, feedback, and full plan details', () => {
+      const base = {
+        id: 'base-2',
+        planId: 'plan-1',
+        ordinal: 2,
+        repositoryIdentity: 'C:/code/mesh',
+        tasks: [
+          {
+            id: 'task-existing-1',
+            revision: 3,
+            lifecycleState: 'ready',
+            blocked: null,
+          },
+        ],
+        dependencies: [
+          {
+            projectId: 'project-1',
+            taskId: 'task-existing-2',
+            prerequisiteTaskId: 'task-existing-1',
+            createdBy: planningActor,
+            createdAt: planningNow,
+          },
+        ],
+        projectArchivedAt: null,
+        projectRevision: 7,
+        policyRevision: 3,
+        createdAt: planningNow,
+      };
+      const fullProposal = {
+        ...proposal,
+        dependencies: [
+          {
+            dependentTaskKey: 'contracts',
+            prerequisite: {
+              type: 'existing_task' as const,
+              taskId: 'task-existing-1',
+            },
+          },
+        ],
+      };
+      const plan = {
+        id: 'plan-1',
+        projectId: 'project-1',
+        goal: 'Add proposal-only planning.',
+        constraints: ['Keep canonical tasks unchanged until approval.'],
+        nonGoals: ['Do not create a scheduler.'],
+        policyVersion: 'pm-policy-v1',
+        status: 'awaiting_review' as const,
+        revision: 4,
+        currentBaseId: 'base-2',
+        currentSessionId: 'session-1',
+        latestProposalOrdinal: 2,
+        feedback: [
+          {
+            id: 'feedback-1',
+            planId: 'plan-1',
+            proposalId: 'proposal-1',
+            content: 'Separate planning state from canonical tasks.',
+            actor: planningActor,
+            createdAt: planningNow,
+          },
+        ],
+        attention: {
+          type: 'stale_board',
+          addedTaskIds: ['task-added-1'],
+          addedTaskTotal: 1,
+          addedTaskIdsTruncated: false,
+          removedTaskIds: [],
+          removedTaskTotal: 0,
+          removedTaskIdsTruncated: false,
+          changedTaskIds: ['task-existing-1'],
+          changedTaskTotal: 1,
+          changedTaskIdsTruncated: false,
+          dependenciesChanged: true,
+          policyChanged: false,
+        },
+        createdBy: planningActor,
+        createdAt: planningNow,
+        updatedAt: planningNow,
+        terminalAt: null,
+        terminalBy: null,
+        terminalReason: null,
+      };
+
+      expect(
+        projectPlanProposalSchema.parse(fullProposal).dependencies[0],
+      ).toEqual({
+        dependentTaskKey: 'contracts',
+        prerequisite: { type: 'existing_task', taskId: 'task-existing-1' },
+      });
+      expect(
+        projectPlanProposalSchema.parse({
+          ...proposal,
+          dependencies: [
+            {
+              dependentTaskKey: 'contracts',
+              prerequisite: { type: 'proposal_task', taskKey: 'contracts' },
+            },
+          ],
+        }).dependencies[0],
+      ).toEqual({
+        dependentTaskKey: 'contracts',
+        prerequisite: { type: 'proposal_task', taskKey: 'contracts' },
+      });
+      expect(projectPlanSchema.parse(plan)).toMatchObject({
+        status: 'awaiting_review',
+        currentBaseId: base.id,
+      });
+      expect(
+        projectPlanDetailsSchema.parse({
+          plan,
+          bases: [base],
+          proposals: [fullProposal],
+          feedback: plan.feedback,
+        }),
+      ).toMatchObject({ proposals: [{ baseId: base.id }] });
+    });
+
+    it('accepts exactly fifty proposal tasks and two hundred proposal edges', () => {
+      const tasks = Array.from({ length: 50 }, (_, index) => ({
+        ...proposedTask,
+        key: `task-${index + 1}`,
+      }));
+      const dependencies = Array.from({ length: 200 }, (_, index) => ({
+        dependentTaskKey: 'task-1',
+        prerequisite: {
+          type: 'existing_task' as const,
+          taskId: `existing-${index + 1}`,
+        },
+      }));
+
+      expect(
+        projectPlanProposalSchema.parse({ ...proposal, tasks, dependencies }),
+      ).toMatchObject({ tasks, dependencies });
+      expect(() =>
+        projectPlanProposalSchema.parse({
+          ...proposal,
+          tasks: [...tasks, { ...proposedTask, key: 'task-51' }],
+        }),
+      ).toThrow();
+      expect(() =>
+        projectPlanProposalSchema.parse({
+          ...proposal,
+          dependencies: [
+            ...dependencies,
+            {
+              dependentTaskKey: 'task-1',
+              prerequisite: { type: 'proposal_task', taskKey: 'task-2' },
+            },
+          ],
+        }),
+      ).toThrow();
+    });
+
+    it('preserves bounded stale evidence and stable planning error codes', () => {
+      expect(() =>
+        projectPlanSchema.parse({
+          id: 'plan-1',
+          projectId: 'project-1',
+          goal: 'Add proposal-only planning.',
+          constraints: [],
+          nonGoals: [],
+          policyVersion: 'pm-policy-v1',
+          status: 'attention_required',
+          revision: 1,
+          currentBaseId: 'base-1',
+          currentSessionId: null,
+          latestProposalOrdinal: 0,
+          feedback: [],
+          attention: {
+            type: 'stale_board',
+            addedTaskIds: Array.from(
+              { length: 51 },
+              (_, index) => `task-${index}`,
+            ),
+            addedTaskTotal: 51,
+            addedTaskIdsTruncated: true,
+            removedTaskIds: [],
+            removedTaskTotal: 0,
+            removedTaskIdsTruncated: false,
+            changedTaskIds: [],
+            changedTaskTotal: 0,
+            changedTaskIdsTruncated: false,
+            dependenciesChanged: false,
+            policyChanged: false,
+          },
+          createdBy: planningActor,
+          createdAt: planningNow,
+          updatedAt: planningNow,
+          terminalAt: null,
+          terminalBy: null,
+          terminalReason: null,
+        }),
+      ).toThrow();
+      expect(stableTaskErrorCodeSchema.parse('project_plan_stale')).toBe(
+        'project_plan_stale',
+      );
+      expect(stableTaskErrorCodeSchema.parse('task_dependency_cycle')).toBe(
+        'task_dependency_cycle',
+      );
+    });
+
+    it('requires revision-checked human planning and dependency commands', () => {
+      const commands = [
+        {
+          type: 'project.plan.start',
+          payload: {
+            projectId: 'project-1',
+            expectedProjectRevision: 7,
+            goal: 'Add proposal-only planning.',
+            constraints: [],
+            nonGoals: [],
+            actor: planningActor,
+          },
+        },
+        {
+          type: 'project.plan.request_revision',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 4,
+            feedback: 'Clarify dependency readiness.',
+            actor: planningActor,
+          },
+        },
+        {
+          type: 'project.plan.approve',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            proposalId: 'proposal-1',
+            expectedPlanRevision: 4,
+            actor: planningActor,
+          },
+        },
+        {
+          type: 'project.plan.reject',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 4,
+            reason: 'Not enough implementation detail.',
+            actor: planningActor,
+          },
+        },
+        {
+          type: 'project.plan.cancel',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 4,
+            reason: 'The goal changed.',
+            actor: planningActor,
+          },
+        },
+        {
+          type: 'project.plan.resume',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 4,
+            actor: planningActor,
+          },
+        },
+        {
+          type: 'project.plan.retry',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 4,
+            actor: planningActor,
+          },
+        },
+        {
+          type: 'task.dependency.add',
+          payload: {
+            taskId: 'task-2',
+            prerequisiteTaskId: 'task-1',
+            expectedRevision: 3,
+            actor: planningActor,
+          },
+        },
+        {
+          type: 'task.dependency.remove',
+          payload: {
+            taskId: 'task-2',
+            prerequisiteTaskId: 'task-1',
+            expectedRevision: 3,
+            actor: planningActor,
+          },
+        },
+      ] as const;
+
+      for (const command of commands) {
+        expect(mutatingCommandSchema.parse(command).type).toBe(command.type);
+      }
+      expect(() =>
+        mutatingCommandSchema.parse({
+          ...commands[2],
+          payload: {
+            ...commands[2].payload,
+            actor: { type: 'agent', id: 'agent-1' },
+          },
+        }),
+      ).toThrow();
+      expect(() =>
+        mutatingCommandSchema.parse({
+          ...commands[0],
+          payload: {
+            ...commands[0].payload,
+            expectedProjectRevision: undefined,
+          },
+        }),
+      ).toThrow();
+    });
+
+    it('round trips plan and dependency events, snapshots, summaries, and readiness evidence', () => {
+      const plan = projectPlanSchema.parse({
+        id: 'plan-1',
+        projectId: 'project-1',
+        goal: 'Add proposal-only planning.',
+        constraints: [],
+        nonGoals: [],
+        policyVersion: 'pm-policy-v1',
+        status: 'approved',
+        revision: 5,
+        currentBaseId: 'base-2',
+        currentSessionId: 'session-1',
+        latestProposalOrdinal: 2,
+        feedback: [],
+        attention: null,
+        createdBy: planningActor,
+        createdAt: planningNow,
+        updatedAt: planningNow,
+        terminalAt: planningNow,
+        terminalBy: planningActor,
+        terminalReason: null,
+      });
+      const dependency = taskDependencySchema.parse({
+        projectId: 'project-1',
+        taskId: 'task-2',
+        prerequisiteTaskId: 'task-1',
+        createdBy: planningActor,
+        createdAt: planningNow,
+      });
+      const planEvent = projectEventSchema.parse({
+        protocolVersion: 1,
+        id: 'project-event-plan-1',
+        projectId: 'project-1',
+        sequence: 1,
+        occurredAt: planningNow,
+        type: 'project.plan_changed',
+        payload: { plan },
+      });
+      const dependencyEvent = projectEventSchema.parse({
+        protocolVersion: 1,
+        id: 'project-event-dependencies-1',
+        projectId: 'project-1',
+        sequence: 2,
+        occurredAt: planningNow,
+        type: 'task.dependencies_changed',
+        payload: { taskId: 'task-2', dependencies: [dependency] },
+      });
+      const project = projectSchema.parse({
+        id: 'project-1',
+        displayName: 'Mesh',
+        repositoryPath: 'C:/code/mesh',
+        discoveredAt: planningNow,
+      });
+      const snapshot = projectSnapshotSchema.parse({
+        protocolVersion: 1,
+        project,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        activePlan: null,
+        terminalPlanSummaries: [
+          projectPlanSummarySchema.parse({
+            id: plan.id,
+            projectId: plan.projectId,
+            goal: plan.goal,
+            status: plan.status,
+            revision: plan.revision,
+            latestProposalOrdinal: plan.latestProposalOrdinal,
+            createdAt: plan.createdAt,
+            updatedAt: plan.updatedAt,
+            terminalAt: plan.terminalAt,
+          }),
+        ],
+        dependencies: [dependency],
+        cursor: 2,
+      });
+
+      expect(planEvent.type).toBe('project.plan_changed');
+      expect(dependencyEvent.type).toBe('task.dependencies_changed');
+      expect(snapshot.terminalPlanSummaries).toHaveLength(1);
+      expect(snapshot.dependencies).toEqual([dependency]);
+      expect(() =>
+        projectSnapshotSchema.parse({
+          ...snapshot,
+          terminalPlanSummaries: Array.from({ length: 21 }, (_, index) => ({
+            ...snapshot.terminalPlanSummaries[0],
+            id: `plan-${index}`,
+          })),
+        }),
+      ).toThrow();
+      expect(
+        taskReadinessProblemSchema.parse({
+          type: 'dependency_incomplete',
+          taskId: 'task-1',
+        }),
+      ).toEqual({ type: 'dependency_incomplete', taskId: 'task-1' });
+      expect(
+        projectPlanHistoryPageSchema.parse({
+          plans: snapshot.terminalPlanSummaries,
+          nextAfter: undefined,
+        }).plans,
+      ).toHaveLength(1);
     });
   });
 });

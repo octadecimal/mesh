@@ -186,6 +186,75 @@ export const projectCommandSchema = z.discriminatedUnion('type', [
       actor: humanActorSchema,
     }),
   }),
+  z.object({
+    type: z.literal('project.plan.start'),
+    payload: z.object({
+      projectId: idSchema,
+      expectedProjectRevision: expectedRevisionSchema,
+      goal: z.string().trim().min(1),
+      constraints: z.array(z.string().trim().min(1)),
+      nonGoals: z.array(z.string().trim().min(1)),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.plan.request_revision'),
+    payload: z.object({
+      projectId: idSchema,
+      planId: idSchema,
+      expectedPlanRevision: expectedRevisionSchema,
+      feedback: z.string().trim().min(1),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.plan.approve'),
+    payload: z.object({
+      projectId: idSchema,
+      planId: idSchema,
+      proposalId: idSchema,
+      expectedPlanRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.plan.reject'),
+    payload: z.object({
+      projectId: idSchema,
+      planId: idSchema,
+      expectedPlanRevision: expectedRevisionSchema,
+      reason: z.string().trim().min(1),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.plan.cancel'),
+    payload: z.object({
+      projectId: idSchema,
+      planId: idSchema,
+      expectedPlanRevision: expectedRevisionSchema,
+      reason: z.string().trim().min(1),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.plan.resume'),
+    payload: z.object({
+      projectId: idSchema,
+      planId: idSchema,
+      expectedPlanRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.plan.retry'),
+    payload: z.object({
+      projectId: idSchema,
+      planId: idSchema,
+      expectedPlanRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
 ]);
 
 export const taskCommandSchema = z.discriminatedUnion('type', [
@@ -395,6 +464,24 @@ export const taskCommandSchema = z.discriminatedUnion('type', [
     type: z.literal('task.review_automation.pause'),
     payload: z.object({
       taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.dependency.add'),
+    payload: z.object({
+      taskId: idSchema,
+      prerequisiteTaskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.dependency.remove'),
+    payload: z.object({
+      taskId: idSchema,
+      prerequisiteTaskId: idSchema,
       expectedRevision: expectedRevisionSchema,
       actor: humanActorSchema,
     }),
