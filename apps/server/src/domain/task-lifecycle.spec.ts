@@ -1,4 +1,5 @@
 import {
+  idSchema,
   taskActorSchema,
   taskSchema,
   type Task,
@@ -45,6 +46,15 @@ const taskIn = (
 const human = taskActorSchema.parse({ type: 'human', id: 'human-1' });
 const agent = taskActorSchema.parse({ type: 'agent', id: 'agent-1' });
 
+const capturedError = (operation: () => void): unknown => {
+  try {
+    operation();
+  } catch (error) {
+    return error;
+  }
+  throw new Error('Expected operation to throw');
+};
+
 describe('task lifecycle policy', () => {
   it.each([
     ['backlog', ['ready', 'cancelled']],
@@ -79,6 +89,24 @@ describe('task lifecycle policy', () => {
     ).toThrow(TaskReadinessError);
   });
 
+  it('reports incomplete prerequisites when moving from backlog to ready', () => {
+    expect(
+      capturedError(() =>
+        authorizeTaskTransition({
+          task: taskIn('backlog'),
+          nextState: 'ready',
+          actor: human,
+          incompletePrerequisiteIds: ['task-10', 'task-2'],
+        }),
+      ),
+    ).toMatchObject({
+      problems: [
+        { type: 'dependency_incomplete', taskId: 'task-10' },
+        { type: 'dependency_incomplete', taskId: 'task-2' },
+      ],
+    });
+  });
+
   it('rejects launching an incomplete or blocked task', () => {
     expect(() =>
       authorizeTaskTransition({
@@ -102,6 +130,28 @@ describe('task lifecycle policy', () => {
       }),
     ).toThrow(TaskBlockedError);
   });
+
+  it.each([
+    ['ready', undefined],
+    ['review', 'Acceptance criterion needs rework'],
+  ] as const)(
+    'rejects incomplete prerequisites for every legal transition from %s to in_progress',
+    (lifecycleState, reason) => {
+      expect(
+        capturedError(() =>
+          authorizeTaskTransition({
+            task: taskIn(lifecycleState),
+            nextState: 'in_progress',
+            actor: human,
+            reason,
+            incompletePrerequisiteIds: ['prerequisite'],
+          }),
+        ),
+      ).toMatchObject({
+        problems: [{ type: 'dependency_incomplete', taskId: 'prerequisite' }],
+      });
+    },
+  );
 
   it('rejects launching done and cancelled tasks', () => {
     for (const lifecycleState of ['done', 'cancelled'] as const) {
@@ -158,6 +208,24 @@ describe('task lifecycle policy', () => {
         reason: 'Work is relevant again',
       }),
     ).toBeUndefined();
+  });
+
+  it('does not mutate an already-active dependent when reopening its prerequisite', () => {
+    const activeDependent = taskIn('in_progress', {
+      id: idSchema.parse('dependent'),
+    });
+    const before = structuredClone(activeDependent);
+
+    expect(
+      authorizeTaskTransition({
+        task: taskIn('done', { id: idSchema.parse('prerequisite') }),
+        nextState: 'review',
+        actor: human,
+        reason: 'Reopen prerequisite for a correction',
+      }),
+    ).toBeUndefined();
+
+    expect(activeDependent).toEqual(before);
   });
 
   it('permits only humans to move work into review or done', () => {
