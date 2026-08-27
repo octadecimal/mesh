@@ -4,6 +4,7 @@ import {
   projectSchema,
   sessionSchema,
   taskActorSchema,
+  taskAttemptSourceSchema,
   taskSchema,
   workspaceSchema,
   type Project,
@@ -12,6 +13,11 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import { createTestRepositories } from '../test/create-test-database.js';
+import {
+  AttemptReconciliationRequiredError,
+  AttemptStartFailedError,
+  type ProjectRunAttemptLaunchInput,
+} from './attempt-service.js';
 import { ProjectRunService } from './project-run-service.js';
 
 const now = '2026-08-27T00:00:00.000Z';
@@ -79,6 +85,14 @@ const createTask = (
 const setup = (options?: {
   failProjectEventInsert?: boolean;
   maxConcurrency?: number;
+  launchAttempt?: (input: ProjectRunAttemptLaunchInput) => Promise<{
+    attempt: ReturnType<
+      ReturnType<typeof createTestRepositories>['attempts']['createForTask']
+    >;
+    session: ReturnType<
+      ReturnType<typeof createTestRepositories>['sessions']['create']
+    >;
+  }>;
 }) => {
   const repositories = createTestRepositories({
     failProjectEventInsert: options?.failProjectEventInsert,
@@ -87,14 +101,55 @@ const setup = (options?: {
   const project = repositories.projects.create(createProject());
   const publisher = { publishProject: vi.fn() };
   let id = 0;
+  let launch = 0;
+  const launchAttempt = vi.fn(
+    options?.launchAttempt ??
+      (async (input: ProjectRunAttemptLaunchInput) => {
+        const task = repositories.tasks.get(input.taskId);
+        if (!task) throw new Error('Expected launch task');
+        const ordinal = ++launch;
+        const workspace = repositories.workspaces.create(
+          workspaceSchema.parse({
+            id: `launch-workspace-${ordinal}`,
+            projectId: task.projectId,
+            type: 'shared',
+            path: input.workspace.path,
+          }),
+        );
+        const session = repositories.sessions.create(
+          sessionSchema.parse({
+            id: `launch-session-${ordinal}`,
+            projectId: task.projectId,
+            workspaceId: workspace.id,
+            title: input.title,
+            permissionMode: input.permissionMode,
+            lifecycleState: 'running',
+            createdAt: now,
+            updatedAt: now,
+          }),
+        );
+        const attempt = repositories.attempts.createForTask(
+          task.id,
+          session.id,
+          taskAttemptSourceSchema.parse(input.source),
+          taskActorSchema.parse({
+            type: 'system',
+            id: `project-run:${input.source.runId}:${input.source.runItemId}`,
+          }),
+          'developer',
+        );
+        return { attempt, session };
+      }),
+  );
   const service = new ProjectRunService({
     ...repositories,
+    attemptService: { launchAttempt },
     publisher,
     maxConcurrency: options?.maxConcurrency,
     now: () => now,
     createId: () => `generated-${++id}`,
   });
-  return { repositories, project, publisher, service };
+  return { launchAttempt, repositories, project, publisher, service };
 };
 
 const expectCode = (execute: () => unknown, code: string) => {
@@ -496,3 +551,347 @@ describe('ProjectRunService controls', () => {
     expect(publisher.publishProject).toHaveBeenCalledOnce();
   });
 });
+
+describe('ProjectRunService drainAvailableSlots', () => {
+  it('durably claims before launch and links the successful attempt and session', async () => {
+    let context: ReturnType<typeof setup>;
+    const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
+      expect(
+        context.repositories.projectRuns
+          .get(input.source.runId)
+          ?.items.find(({ id }) => id === input.source.runItemId),
+      ).toMatchObject({ status: 'launch_pending', attemptId: null });
+      return setupLaunchResult(context.repositories, input, 1);
+    });
+    context = setup({ launchAttempt });
+    context.repositories.tasks.create(createTask(context.project.id, 'task-a'));
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-launch',
+      1,
+    );
+
+    const run = await context.service.drainAvailableSlots(started.run.id);
+
+    expect(run.items[0]).toMatchObject({
+      status: 'active',
+      attemptId: expect.any(String),
+      sessionId: 'launch-session-1',
+    });
+    expect(launchAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        launchIdempotencyKey: started.run.items[0]?.launchIdempotencyKey,
+        source: {
+          type: 'project_run',
+          runId: started.run.id,
+          runItemId: started.run.items[0]?.id,
+        },
+      }),
+    );
+  });
+
+  it('counts launch_pending against capacity', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let context: ReturnType<typeof setup>;
+    const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
+      await pending;
+      return setupLaunchResult(context.repositories, input, 1);
+    });
+    context = setup({ launchAttempt });
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-a', { rank: 'a' }),
+    );
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-b', { rank: 'b' }),
+    );
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-capacity',
+      1,
+    );
+
+    const firstDrain = context.service.drainAvailableSlots(started.run.id);
+    await vi.waitFor(() => expect(launchAttempt).toHaveBeenCalledOnce());
+    const observed = await context.service.drainAvailableSlots(started.run.id);
+
+    expect(observed.items.map(({ status }) => status)).toEqual([
+      'launch_pending',
+      'queued',
+    ]);
+    const current = context.repositories.projectRuns.get(started.run.id)!;
+    context.service.pauseRun({
+      runId: current.id,
+      expectedRevision: current.revision,
+      actor: human,
+      idempotencyKey: 'pause-capacity',
+    });
+    release();
+    await firstDrain;
+    expect(launchAttempt).toHaveBeenCalledOnce();
+  });
+
+  it('terminalizes a known startup failure and continues independent queued work', async () => {
+    let context: ReturnType<typeof setup>;
+    const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
+      if (input.taskId === 'task-a') {
+        throw new AttemptStartFailedError(
+          'failed-session',
+          new Error('offline'),
+        );
+      }
+      return setupLaunchResult(context.repositories, input, 2);
+    });
+    context = setup({ launchAttempt });
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-a', { rank: 'a' }),
+    );
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-b', { rank: 'b' }),
+    );
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-failure',
+      1,
+    );
+
+    const run = await context.service.drainAvailableSlots(started.run.id);
+
+    expect(run.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: 'task-a',
+          status: 'attention_required',
+          outcomeReason: 'attempt_start_failed',
+        }),
+        expect.objectContaining({ taskId: 'task-b', status: 'active' }),
+      ]),
+    );
+  });
+
+  it.each(['task_revision_conflict', 'task_transition_invalid'])(
+    'treats the stable %s launch race as item-local',
+    async (code) => {
+      let context: ReturnType<typeof setup>;
+      const launchAttempt = vi.fn(
+        async (input: ProjectRunAttemptLaunchInput) => {
+          if (input.taskId === 'task-a') throw { code };
+          return setupLaunchResult(context.repositories, input, 2);
+        },
+      );
+      context = setup({ launchAttempt });
+      context.repositories.tasks.create(
+        createTask(context.project.id, 'task-a', { rank: 'a' }),
+      );
+      context.repositories.tasks.create(
+        createTask(context.project.id, 'task-b', { rank: 'b' }),
+      );
+      const started = startRun(
+        context.service,
+        context.project.id,
+        `start-${code}`,
+        1,
+      );
+
+      const run = await context.service.drainAvailableSlots(started.run.id);
+
+      expect(run.items.find(({ taskId }) => taskId === 'task-a')).toMatchObject(
+        {
+          status: 'attention_required',
+          outcomeReason: code,
+        },
+      );
+      expect(run.items.find(({ taskId }) => taskId === 'task-b')?.status).toBe(
+        'active',
+      );
+    },
+  );
+
+  it('pauses the run when launch outcome is ambiguous', async () => {
+    const context = setup({
+      launchAttempt: async () => {
+        throw new AttemptReconciliationRequiredError(
+          'unknown-session',
+          new Error('unknown'),
+        );
+      },
+    });
+    context.repositories.tasks.create(createTask(context.project.id, 'task-a'));
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-ambiguous',
+      1,
+    );
+
+    const run = await context.service.drainAvailableSlots(started.run.id);
+
+    expect(run.state).toBe('paused');
+    expect(run.items[0]?.status).toBe('launch_pending');
+  });
+
+  it('keeps duplicate concurrent drains within the authorized concurrency', async () => {
+    const context = setup();
+    for (const [id, rank] of [
+      ['task-a', 'a'],
+      ['task-b', 'b'],
+      ['task-c', 'c'],
+    ] as const) {
+      context.repositories.tasks.create(
+        createTask(context.project.id, id, { rank }),
+      );
+    }
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-concurrent',
+      2,
+    );
+
+    await Promise.all([
+      context.service.drainAvailableSlots(started.run.id),
+      context.service.drainAvailableSlots(started.run.id),
+    ]);
+
+    expect(context.repositories.attempts.listByTask('task-a')).toHaveLength(1);
+    expect(context.repositories.attempts.listByTask('task-b')).toHaveLength(1);
+    expect(context.repositories.attempts.listByTask('task-c')).toHaveLength(0);
+  });
+
+  it.each(['pause', 'stop'] as const)(
+    '%s racing an already claimed launch prevents only future claims',
+    async (control) => {
+      let release!: () => void;
+      const pending = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let context: ReturnType<typeof setup>;
+      const launchAttempt = vi.fn(
+        async (input: ProjectRunAttemptLaunchInput) => {
+          await pending;
+          return setupLaunchResult(context.repositories, input, 1);
+        },
+      );
+      context = setup({ launchAttempt });
+      context.repositories.tasks.create(
+        createTask(context.project.id, 'task-a', { rank: 'a' }),
+      );
+      context.repositories.tasks.create(
+        createTask(context.project.id, 'task-b', { rank: 'b' }),
+      );
+      const started = startRun(
+        context.service,
+        context.project.id,
+        `start-${control}`,
+        1,
+      );
+      const draining = context.service.drainAvailableSlots(started.run.id);
+      await vi.waitFor(() => expect(launchAttempt).toHaveBeenCalledOnce());
+      const current = context.repositories.projectRuns.get(started.run.id)!;
+      const outcome =
+        control === 'pause'
+          ? context.service.pauseRun({
+              runId: current.id,
+              expectedRevision: current.revision,
+              actor: human,
+              idempotencyKey: 'pause-race',
+            })
+          : context.service.stopRun({
+              runId: current.id,
+              expectedRevision: current.revision,
+              actor: human,
+              idempotencyKey: 'stop-race',
+            });
+      release();
+      const run = await draining;
+
+      expect(outcome.run.state).toBe(
+        control === 'pause' ? 'paused' : 'draining',
+      );
+      expect(run.items.find(({ taskId }) => taskId === 'task-a')?.status).toBe(
+        'active',
+      );
+      expect(run.items.find(({ taskId }) => taskId === 'task-b')?.status).toBe(
+        control === 'pause' ? 'queued' : 'not_started',
+      );
+      expect(launchAttempt).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('does not launch or claim another item when claim audit persistence fails', async () => {
+    const context = setup();
+    context.repositories.tasks.create(createTask(context.project.id, 'task-a'));
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-b', { rank: 'n' }),
+    );
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-audit',
+      1,
+    );
+    context.repositories.database.exec(`
+      CREATE TRIGGER fail_run_claim_event
+      BEFORE INSERT ON project_events
+      BEGIN
+        SELECT RAISE(FAIL, 'run claim event failed');
+      END;
+    `);
+
+    await expect(
+      context.service.drainAvailableSlots(started.run.id),
+    ).rejects.toThrow('run claim event failed');
+
+    expect(context.launchAttempt).not.toHaveBeenCalled();
+    expect(
+      context.repositories.projectRuns
+        .get(started.run.id)
+        ?.items.map(({ status }) => status),
+    ).toEqual(['queued', 'queued']);
+  });
+});
+
+const setupLaunchResult = (
+  repositories: ReturnType<typeof createTestRepositories>,
+  input: ProjectRunAttemptLaunchInput,
+  ordinal: number,
+) => {
+  const task = repositories.tasks.get(input.taskId);
+  if (!task) throw new Error('Expected launch task');
+  const workspace = repositories.workspaces.create(
+    workspaceSchema.parse({
+      id: `launch-workspace-${ordinal}`,
+      projectId: task.projectId,
+      type: 'shared',
+      path: input.workspace.path,
+    }),
+  );
+  const session = repositories.sessions.create(
+    sessionSchema.parse({
+      id: `launch-session-${ordinal}`,
+      projectId: task.projectId,
+      workspaceId: workspace.id,
+      title: input.title,
+      permissionMode: input.permissionMode,
+      lifecycleState: 'running',
+      createdAt: now,
+      updatedAt: now,
+    }),
+  );
+  const attempt = repositories.attempts.createForTask(
+    task.id,
+    session.id,
+    taskAttemptSourceSchema.parse(input.source),
+    taskActorSchema.parse({
+      type: 'system',
+      id: `project-run:${input.source.runId}:${input.source.runItemId}`,
+    }),
+    'developer',
+  );
+  return { attempt, session };
+};

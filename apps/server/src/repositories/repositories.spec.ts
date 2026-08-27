@@ -469,6 +469,11 @@ describe('repositories', () => {
       attempt({
         id: 'attempt-2',
         ordinal: 2,
+        source: {
+          type: 'project_run',
+          runId: 'run-1',
+          runItemId: 'item-1',
+        },
         createdAt: '2026-08-24T00:03:00.000Z',
       }),
     );
@@ -482,6 +487,12 @@ describe('repositories', () => {
     expect(
       repos.attempts.listByTask('task-1').map((value) => value.ordinal),
     ).toEqual([1, 2]);
+    expect(
+      repos.attempts.listByTask('task-1').map((value) => value.source),
+    ).toEqual([
+      'linked',
+      { type: 'project_run', runId: 'run-1', runItemId: 'item-1' },
+    ]);
     expect(repos.attempts.getCurrentBySession('s1')).toMatchObject({
       id: 'attempt-2',
     });

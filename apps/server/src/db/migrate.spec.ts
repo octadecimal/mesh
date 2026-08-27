@@ -25,6 +25,7 @@ import { openDatabase, type Database } from './database.js';
 import { migrate } from './migrate.js';
 import { CommandRepository } from '../repositories/command-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
+import { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import { SessionRepository } from '../repositories/session-repository.js';
 import { TaskRepository } from '../repositories/task-repository.js';
@@ -328,6 +329,8 @@ describe('migrate', () => {
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
       { id: '012-project-runs' },
+      { id: '013-task-attempt-project-run-source' },
+      { id: '014-project-run-prelaunch-attention' },
     ]);
     expect(
       database
@@ -390,6 +393,11 @@ describe('migrate', () => {
         { name: 'task_snapshot_description' },
       ]),
     );
+    expect(
+      database
+        .prepare("SELECT name FROM pragma_table_info('task_attempts')")
+        .all(),
+    ).toContainEqual({ name: 'source_json' });
   });
 
   it('upgrades Milestone 3 projects with the manual QA defaults', () => {
@@ -522,6 +530,164 @@ describe('migrate', () => {
       ]),
     );
     assertProjectRunConstraints(database);
+  });
+
+  it('upgrades a 012 database with nullable project-run attempt provenance', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-attempt-source-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-27T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+      '009-qa-execution.sql',
+      '010-review-automation-state.sql',
+      '011-qa-interruption-repair.sql',
+      '012-project-runs.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+    database.exec('PRAGMA foreign_keys = OFF');
+    database
+      .prepare(
+        `INSERT INTO task_attempts (
+          id, task_id, session_id, ordinal, source, actor_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'legacy-attempt',
+        'legacy-task',
+        'legacy-session',
+        1,
+        'launched',
+        '{"type":"human","id":"operator-1"}',
+        appliedAt,
+      );
+    database.exec('PRAGMA foreign_keys = ON');
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare('SELECT source, source_json FROM task_attempts WHERE id = ?')
+        .get('legacy-attempt'),
+    ).toEqual({ source: 'launched', source_json: null });
+    expect(
+      database.prepare('SELECT id FROM schema_migrations ORDER BY id').all(),
+    ).toContainEqual({ id: '013-task-attempt-project-run-source' });
+  });
+
+  it('upgrades a 013 database to preserve pre-launch attention outcomes', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-run-attention-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-27T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+      '009-qa-execution.sql',
+      '010-review-automation-state.sql',
+      '011-qa-interruption-repair.sql',
+      '012-project-runs.sql',
+      '013-task-attempt-project-run-source.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+    new ProjectRepository(database).create(
+      projectSchema.parse({
+        id: 'attention-project',
+        displayName: 'Attention project',
+        repositoryPath: 'C:/code/attention-project',
+        discoveredAt: appliedAt,
+        discoveryMetadata: {},
+      }),
+    );
+    new TaskRepository(database).create(
+      taskSchema.parse({
+        id: 'attention-task',
+        projectId: 'attention-project',
+        title: 'Attention task',
+        description: 'Prove pre-launch failure persistence.',
+        acceptanceCriteria: ['The run item requires attention.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: appliedAt,
+        updatedAt: appliedAt,
+      }),
+    );
+    const runs = new ProjectRunRepository(database);
+    const run = runs.create({
+      id: 'attention-run',
+      projectId: 'attention-project',
+      concurrency: 1,
+      startedAt: appliedAt,
+      items: [
+        {
+          id: 'attention-item',
+          taskId: 'attention-task',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'attention-launch',
+        },
+      ],
+    });
+    const claim = runs.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: appliedAt,
+    });
+    if (!claim) throw new Error('Expected attention claim');
+
+    migrate(database);
+
+    expect(
+      runs.finishItem({
+        runId: claim.run.id,
+        itemId: claim.item.id,
+        expectedRunRevision: claim.run.revision,
+        status: 'attention_required',
+        outcomeReason: 'task_revision_conflict',
+        occurredAt: appliedAt,
+      }).items[0],
+    ).toMatchObject({
+      status: 'attention_required',
+      attemptId: null,
+      sessionId: null,
+      startedAt: null,
+    });
   });
 
   it('preserves 009 automation actions while expanding source-cycle foreign keys', () => {
@@ -691,6 +857,8 @@ describe('migrate', () => {
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
       { id: '012-project-runs' },
+      { id: '013-task-attempt-project-run-source' },
+      { id: '014-project-run-prelaunch-attention' },
     ]);
   });
 
@@ -906,6 +1074,14 @@ describe('migrate', () => {
       join(__dirname, 'migrations', '012-project-runs.sql'),
       join(directory, 'migrations', '012-project-runs.sql'),
     );
+    copyFileSync(
+      join(__dirname, 'migrations', '013-task-attempt-project-run-source.sql'),
+      join(directory, 'migrations', '013-task-attempt-project-run-source.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '014-project-run-prelaunch-attention.sql'),
+      join(directory, 'migrations', '014-project-run-prelaunch-attention.sql'),
+    );
     buildSync({
       bundle: true,
       entryPoints: [join(__dirname, 'migrate.ts')],
@@ -963,6 +1139,8 @@ describe('migrate', () => {
         { id: '010-review-automation-state' },
         { id: '011-qa-interruption-repair' },
         { id: '012-project-runs' },
+        { id: '013-task-attempt-project-run-source' },
+        { id: '014-project-run-prelaunch-attention' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -1041,6 +1219,8 @@ describe('migrate', () => {
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
       { id: '012-project-runs' },
+      { id: '013-task-attempt-project-run-source' },
+      { id: '014-project-run-prelaunch-attention' },
     ]);
   });
 
@@ -1487,6 +1667,8 @@ describe('migrate', () => {
         { id: '010-review-automation-state' },
         { id: '011-qa-interruption-repair' },
         { id: '012-project-runs' },
+        { id: '013-task-attempt-project-run-source' },
+        { id: '014-project-run-prelaunch-attention' },
       ]);
       expect(
         database

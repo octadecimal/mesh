@@ -254,6 +254,36 @@ describe('ProjectRunRepository', () => {
     ).toBeUndefined();
   });
 
+  it('persists attention required for a proven failure before launch linking', () => {
+    const repository = setup();
+    repositories.push(repository);
+    const run = createRun(repository.projectRuns, ['task-a']);
+    const claim = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: at,
+    });
+    if (!claim) throw new Error('Expected a claimed item');
+
+    const finished = repository.projectRuns.finishItem({
+      runId: run.id,
+      itemId: claim.item.id,
+      expectedRunRevision: claim.run.revision,
+      status: 'attention_required',
+      outcomeReason: 'task_revision_conflict',
+      occurredAt: at,
+    });
+
+    expect(finished.items[0]).toMatchObject({
+      status: 'attention_required',
+      attemptId: null,
+      sessionId: null,
+      startedAt: null,
+      finishedAt: at,
+      outcomeReason: 'task_revision_conflict',
+    });
+  });
+
   it('rejects launch links whose attempt task or session does not match the item', () => {
     const repository = setup();
     repositories.push(repository);

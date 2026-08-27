@@ -84,6 +84,20 @@ const projectRunsMigration = {
     'utf8',
   ),
 };
+const taskAttemptProjectRunSourceMigration = {
+  id: '013-task-attempt-project-run-source',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '013-task-attempt-project-run-source.sql'),
+    'utf8',
+  ),
+};
+const projectRunPrelaunchAttentionMigration = {
+  id: '014-project-run-prelaunch-attention',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '014-project-run-prelaunch-attention.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -98,6 +112,8 @@ const migrations = [
   reviewAutomationStateMigration,
   qaInterruptionRepairMigration,
   projectRunsMigration,
+  taskAttemptProjectRunSourceMigration,
+  projectRunPrelaunchAttentionMigration,
 ];
 
 export const migrate = (database: Database): void => {

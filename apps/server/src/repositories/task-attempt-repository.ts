@@ -18,6 +18,7 @@ type TaskAttemptRow = {
   session_id: string;
   ordinal: number;
   source: string;
+  source_json: string | null;
   actor_json: string;
   created_at: string;
   unlinked_at: string | null;
@@ -32,7 +33,7 @@ const toTaskAttempt = (row: TaskAttemptRow): TaskAttempt =>
     taskId: row.task_id,
     sessionId: row.session_id,
     ordinal: row.ordinal,
-    source: row.source,
+    source: row.source_json ? JSON.parse(row.source_json) : row.source,
     actor: JSON.parse(row.actor_json),
     createdAt: row.created_at,
     unlinkedAt: row.unlinked_at,
@@ -61,10 +62,10 @@ export class TaskAttemptRepository {
   constructor(private readonly database: Database) {
     this.insert = database.prepare(`
       INSERT INTO task_attempts (
-        id, task_id, session_id, ordinal, source, actor_json, created_at,
+        id, task_id, session_id, ordinal, source, source_json, actor_json, created_at,
         unlinked_at, unlinked_by_json, unlink_reason
       ) VALUES (
-        @id, @taskId, @sessionId, @ordinal, @source, @actorJson, @createdAt,
+        @id, @taskId, @sessionId, @ordinal, @source, @sourceJson, @actorJson, @createdAt,
         @unlinkedAt, @unlinkedByJson, @unlinkReason
       )
     `);
@@ -204,8 +205,12 @@ export class TaskAttemptRepository {
   }
 
   private toParameters(attempt: TaskAttempt) {
+    const projectRunSource =
+      typeof attempt.source === 'string' ? null : attempt.source;
     return {
       ...attempt,
+      source: projectRunSource ? 'launched' : attempt.source,
+      sourceJson: projectRunSource ? JSON.stringify(projectRunSource) : null,
       actorJson: JSON.stringify(attempt.actor),
       unlinkedAt: attempt.unlinkedAt,
       unlinkedByJson: attempt.unlinkedBy

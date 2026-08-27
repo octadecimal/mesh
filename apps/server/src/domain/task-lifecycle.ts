@@ -16,7 +16,10 @@ export type AuthorizeTaskTransitionInput = {
   actor: TaskActor;
   reason?: string;
   blocked?: boolean;
-  operation?: 'developer_submit_review' | 'developer_mark_blocked';
+  operation?:
+    | 'developer_submit_review'
+    | 'developer_mark_blocked'
+    | 'project_run_launch';
 };
 
 export type AuthorizeQaVerdictInput = {
@@ -162,11 +165,24 @@ export const authorizeTaskTransition = (
     task.lifecycleState === 'in_progress' &&
     nextState === 'in_progress' &&
     blocked === true;
+  const projectRunLaunch =
+    actor.type === 'system' &&
+    operation === 'project_run_launch' &&
+    task.lifecycleState === 'ready' &&
+    nextState === 'in_progress' &&
+    !task.blocked &&
+    blocked === undefined;
   const developerOperation = operation !== undefined;
 
   if (
-    (developerOperation && !developerSubmission && !developerBlock) ||
-    (actor.type !== 'human' && !developerSubmission && !developerBlock)
+    (developerOperation &&
+      !developerSubmission &&
+      !developerBlock &&
+      !projectRunLaunch) ||
+    (actor.type !== 'human' &&
+      !developerSubmission &&
+      !developerBlock &&
+      !projectRunLaunch)
   ) {
     throw new TaskTransitionUnauthorizedError(nextState, actor);
   }

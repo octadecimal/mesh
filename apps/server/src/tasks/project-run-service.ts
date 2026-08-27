@@ -6,16 +6,23 @@ import {
   type Project,
   type ProjectEvent,
   type ProjectRun,
+  type ProjectRunItem,
   type StableTaskErrorCode,
   type TaskActor,
 } from '@mesh-session-platform/contracts';
 
+import type { Database } from '../db/database.js';
 import type { CommandRepository } from '../repositories/command-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
+import {
+  AttemptStartFailedError,
+  type AttemptMutationResult,
+  type ProjectRunAttemptLaunchInput,
+} from './attempt-service.js';
 import { selectEligibleRunTasks } from './project-run-policy.js';
 
 const DEFAULT_MAX_CONCURRENCY = 4;
@@ -40,12 +47,20 @@ export type ChangeProjectRunInput = {
 };
 
 type ProjectRunServiceDependencies = {
+  database: Database;
   projects: ProjectRepository;
   tasks: TaskRepository;
   attempts: TaskAttemptRepository;
   projectRuns: ProjectRunRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
+  attemptService: {
+    launchAttempt(
+      input: ProjectRunAttemptLaunchInput,
+    ): Promise<
+      AttemptMutationResult | Pick<AttemptMutationResult, 'attempt' | 'session'>
+    >;
+  };
   publisher: { publishProject(event: ProjectEvent): void };
   maxConcurrency?: number;
   now?: () => string;
@@ -202,6 +217,229 @@ export class ProjectRunService {
     });
   }
 
+  async drainAvailableSlots(runId: string): Promise<ProjectRun> {
+    const parsedRunId = idSchema.parse(runId);
+    for (;;) {
+      const run = this.dependencies.projectRuns.get(parsedRunId);
+      if (!run) {
+        throw new ProjectRunServiceError(
+          'project_run_not_found',
+          `Project run '${parsedRunId}' was not found`,
+        );
+      }
+      if (run.state !== 'running') return run;
+      const counts = this.dependencies.projectRuns.reconcileCounts(run.id);
+      if (counts.launchPending + counts.active >= run.concurrency) return run;
+      const next = run.items.find(({ status }) => status === 'queued');
+      if (!next) {
+        if (counts.launchPending + counts.active > 0) return run;
+        return this.completeQueue(run);
+      }
+      const claim = this.claimNext(run);
+      if (!claim) continue;
+      await this.launchClaim(claim.run, claim.item);
+    }
+  }
+
+  private claimNext(
+    run: ProjectRun,
+  ): { run: ProjectRun; item: ProjectRunItem } | undefined {
+    this.dependencies.database.exec('BEGIN IMMEDIATE');
+    try {
+      const claim = this.dependencies.projectRuns.claimNext({
+        runId: run.id,
+        expectedRunRevision: run.revision,
+        occurredAt: this.now(),
+      });
+      if (!claim) {
+        this.dependencies.database.exec('COMMIT');
+        return undefined;
+      }
+      const event = this.appendRunEvent(claim.run, claim.run.updatedAt);
+      this.dependencies.database.exec('COMMIT');
+      this.dependencies.publisher.publishProject(event);
+      return claim;
+    } catch (error) {
+      if (this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
+      throw error;
+    }
+  }
+
+  private async launchClaim(
+    claimedRun: ProjectRun,
+    claimedItem: ProjectRunItem,
+  ): Promise<void> {
+    const current = this.dependencies.projectRuns.get(claimedRun.id);
+    const item = current?.items.find(({ id }) => id === claimedItem.id);
+    if (!current || !item || item.status !== 'launch_pending') return;
+    const task = this.dependencies.tasks.get(item.taskId);
+    const project = task
+      ? this.dependencies.projects.get(task.projectId)
+      : undefined;
+    if (!task || !project) {
+      this.pauseForAmbiguousLaunch(current.id);
+      return;
+    }
+    if (project.archivedAt) {
+      this.finishClaim(current, item, 'project_archived');
+      return;
+    }
+
+    try {
+      const result = await this.dependencies.attemptService.launchAttempt({
+        launchIdempotencyKey: item.launchIdempotencyKey,
+        source: {
+          type: 'project_run',
+          runId: current.id,
+          runItemId: item.id,
+        },
+        taskId: item.taskId,
+        expectedRevision: item.taskRevision,
+        title: task.title,
+        permissionMode: 'safe_auto',
+        workspace: { type: 'shared', path: project.repositoryPath },
+      });
+      if (!result.session) {
+        this.pauseForAmbiguousLaunch(current.id);
+        return;
+      }
+      this.linkClaim(current.id, item.id, result.attempt.id, result.session.id);
+    } catch (error) {
+      const code = this.errorCode(error);
+      if (this.isKnownItemFailure(error, code)) {
+        const latest = this.dependencies.projectRuns.get(current.id);
+        const latestItem = latest?.items.find(({ id }) => id === item.id);
+        if (latest && latestItem?.status === 'launch_pending') {
+          this.finishClaim(latest, latestItem, code ?? 'attempt_start_failed');
+        }
+        return;
+      }
+      this.pauseForAmbiguousLaunch(current.id);
+    }
+  }
+
+  private linkClaim(
+    runId: string,
+    itemId: string,
+    attemptId: string,
+    sessionId: string,
+  ): ProjectRun {
+    return this.mutateRun(runId, (run) =>
+      this.dependencies.projectRuns.linkLaunch({
+        runId,
+        itemId,
+        expectedRunRevision: run.revision,
+        attemptId,
+        sessionId,
+        occurredAt: this.now(),
+      }),
+    );
+  }
+
+  private finishClaim(
+    run: ProjectRun,
+    item: ProjectRunItem,
+    reason: string,
+  ): ProjectRun {
+    return this.mutateRun(run.id, (current) =>
+      this.dependencies.projectRuns.finishItem({
+        runId: current.id,
+        itemId: item.id,
+        expectedRunRevision: current.revision,
+        status: 'attention_required',
+        outcomeReason: reason,
+        occurredAt: this.now(),
+      }),
+    );
+  }
+
+  private pauseForAmbiguousLaunch(runId: string): ProjectRun {
+    const current = this.dependencies.projectRuns.get(runId);
+    if (!current || current.state !== 'running') {
+      if (!current) {
+        throw new ProjectRunServiceError(
+          'project_run_not_found',
+          `Project run '${runId}' was not found`,
+        );
+      }
+      return current;
+    }
+    return this.mutateRun(runId, (run) => {
+      const changed = this.dependencies.projectRuns.changeState({
+        runId,
+        expectedRunRevision: run.revision,
+        state: 'paused',
+        occurredAt: this.now(),
+      });
+      if (!changed) this.throwStale(runId);
+      return changed;
+    });
+  }
+
+  private completeQueue(run: ProjectRun): ProjectRun {
+    return this.mutateRun(run.id, (current) => {
+      const changed = this.dependencies.projectRuns.changeState({
+        runId: current.id,
+        expectedRunRevision: current.revision,
+        state: 'completed',
+        completionReason: 'queue_finished',
+        occurredAt: this.now(),
+      });
+      if (!changed) this.throwStale(current.id);
+      return changed;
+    });
+  }
+
+  private mutateRun(
+    runId: string,
+    mutate: (run: ProjectRun) => ProjectRun,
+  ): ProjectRun {
+    this.dependencies.database.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.dependencies.projectRuns.get(runId);
+      if (!current) {
+        throw new ProjectRunServiceError(
+          'project_run_not_found',
+          `Project run '${runId}' was not found`,
+        );
+      }
+      const run = mutate(current);
+      const event = this.appendRunEvent(run, run.updatedAt);
+      this.dependencies.database.exec('COMMIT');
+      this.dependencies.publisher.publishProject(event);
+      return run;
+    } catch (error) {
+      if (this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
+      throw error;
+    }
+  }
+
+  private isKnownItemFailure(
+    error: unknown,
+    code: string | undefined,
+  ): boolean {
+    return (
+      error instanceof AttemptStartFailedError ||
+      code === 'attempt_start_failed' ||
+      code === 'workspace_preserved' ||
+      code === 'project_archived' ||
+      code === 'task_revision_conflict' ||
+      code === 'task_not_ready' ||
+      code === 'task_blocked' ||
+      code === 'task_transition_invalid'
+    );
+  }
+
+  private errorCode(error: unknown): string | undefined {
+    return typeof error === 'object' && error !== null && 'code' in error
+      ? String(error.code)
+      : undefined;
+  }
+
   private execute(
     idempotencyKey: string,
     mutate: () => ProjectRunCommandOutcome,
@@ -315,18 +553,19 @@ export class ProjectRunService {
     run: ProjectRun,
     occurredAt: string,
   ): ProjectRunCommandOutcome {
-    const event = this.dependencies.projectEvents.appendInTransaction(
-      run.projectId,
-      {
-        protocolVersion: 1,
-        id: this.createId(),
-        projectId: run.projectId,
-        occurredAt,
-        type: 'project.run_changed',
-        payload: { run },
-      },
-    );
+    const event = this.appendRunEvent(run, occurredAt);
     return { run, events: [event] };
+  }
+
+  private appendRunEvent(run: ProjectRun, occurredAt: string): ProjectEvent {
+    return this.dependencies.projectEvents.appendInTransaction(run.projectId, {
+      protocolVersion: 1,
+      id: this.createId(),
+      projectId: run.projectId,
+      occurredAt,
+      type: 'project.run_changed',
+      payload: { run },
+    });
   }
 
   private now(): string {

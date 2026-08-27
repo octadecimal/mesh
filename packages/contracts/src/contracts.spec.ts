@@ -27,6 +27,7 @@ import {
   sessionSchema,
   stableTaskErrorCodeSchema,
   taskActorSchema,
+  taskAttemptSourceSchema,
   taskAttemptSchema,
   taskCommandSchema,
   taskSchema,
@@ -88,6 +89,17 @@ describe('session platform contracts', () => {
         updatedAt: now,
       }),
     ).toThrow();
+    expect(
+      taskAttemptSourceSchema.parse({
+        type: 'project_run',
+        runId: 'run-1',
+        runItemId: 'item-1',
+      }),
+    ).toEqual({
+      type: 'project_run',
+      runId: 'run-1',
+      runItemId: 'item-1',
+    });
     expect(
       taskAttemptSchema.parse({
         id: 'attempt-1',

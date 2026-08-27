@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 
 import {
   developerExecutionCycleSchema,
+  idSchema,
   rawDiagnosticSchema,
   sessionSchema,
   stableTaskErrorCodeSchema,
   taskActorSchema,
+  taskAttemptSourceSchema,
   workspaceSchema,
   UnsafeQaWorkspaceError,
   type MutatingCommand,
@@ -17,6 +19,7 @@ import {
   type Task,
   type TaskActor,
   type TaskAttempt,
+  type TaskAttemptSource,
   type Workspace,
 } from '@mesh-session-platform/contracts';
 
@@ -39,6 +42,7 @@ import type { DeveloperExecutionRepository } from '../repositories/developer-exe
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
@@ -77,6 +81,20 @@ export type AttemptLaunchInput = {
 
 export type DeveloperAttemptLaunchInput = Omit<AttemptLaunchInput, 'actor'> & {
   actor: Omit<AttemptActorInput, 'type'> & { type: 'human' };
+};
+
+type ProjectRunAttemptSource = {
+  type: 'project_run';
+  runId: string;
+  runItemId: string;
+};
+
+export type ProjectRunAttemptLaunchInput = Omit<
+  AttemptLaunchInput,
+  'commandId' | 'actor'
+> & {
+  launchIdempotencyKey: string;
+  source: ProjectRunAttemptSource;
 };
 
 export type DeveloperRecoveryKind = 'rejection' | 'unblock';
@@ -138,6 +156,7 @@ type AttemptRegistry = {
 type AttemptServiceDependencies = {
   database: Database;
   projects: ProjectRepository;
+  projectRuns: ProjectRunRepository;
   tasks: TaskRepository;
   attempts: TaskAttemptRepository;
   sessions: SessionRepository;
@@ -261,19 +280,61 @@ export class AttemptService {
   }
 
   launch(input: AttemptLaunchInput): Promise<AttemptMutationResult> {
-    return this.launchAttempt(input, false);
+    return this.executeAttemptLaunch(input, false);
   }
 
   launchDeveloper(
     input: DeveloperAttemptLaunchInput,
   ): Promise<AttemptMutationResult> {
-    return this.launchAttempt(input, true);
+    return this.executeAttemptLaunch(input, true);
+  }
+
+  async launchAttempt(
+    input: ProjectRunAttemptLaunchInput,
+  ): Promise<AttemptMutationResult> {
+    const source = taskAttemptSourceSchema.parse(input.source);
+    if (typeof source === 'string') {
+      throw new AttemptInvalidCommandError(
+        'Project run attempt source is required',
+      );
+    }
+    const run = this.dependencies.projectRuns.get(source.runId);
+    const item = run?.items.find(({ id }) => id === source.runItemId);
+    if (
+      !run ||
+      !item ||
+      item.status !== 'launch_pending' ||
+      item.taskId !== input.taskId ||
+      item.taskRevision !== input.expectedRevision ||
+      item.launchIdempotencyKey !== input.launchIdempotencyKey
+    ) {
+      throw new AttemptInvalidCommandError(
+        'Project run launch authority does not match the durable claim',
+      );
+    }
+    return this.executeAttemptLaunch(
+      {
+        commandId: idSchema.parse(input.launchIdempotencyKey),
+        taskId: input.taskId,
+        expectedRevision: input.expectedRevision,
+        title: input.title,
+        permissionMode: input.permissionMode,
+        workspace: input.workspace,
+        actor: {
+          type: 'system',
+          id: `project-run:${source.runId}:${source.runItemId}`,
+        },
+      },
+      true,
+      undefined,
+      source,
+    );
   }
 
   reworkDeveloperNew(
     input: DeveloperAttemptReworkInput,
   ): Promise<AttemptMutationResult> {
-    return this.launchAttempt(input, true, input);
+    return this.executeAttemptLaunch(input, true, input);
   }
 
   async resumeDeveloper(
@@ -337,10 +398,11 @@ export class AttemptService {
     return { attempt: currentAttempt, session, workspace };
   }
 
-  private async launchAttempt(
+  private async executeAttemptLaunch(
     input: AttemptLaunchInput,
     developer: boolean,
     recovery?: DeveloperAttemptReworkInput,
+    source: TaskAttemptSource = 'launched',
   ): Promise<AttemptMutationResult> {
     let completedLaunch:
       | {
@@ -364,8 +426,13 @@ export class AttemptService {
         : undefined;
       const task =
         recoveryContext?.task ??
-        this.requireLaunchableTask(input.taskId, input.expectedRevision, actor);
-      this.reserveLaunch(task.id, input.commandId);
+        this.requireLaunchableTask(
+          input.taskId,
+          input.expectedRevision,
+          actor,
+          typeof source !== 'string',
+        );
+      this.reserveLaunch(task.id, input.commandId, typeof source !== 'string');
       try {
         if (!input.workspace) {
           throw new AttemptInvalidCommandError('Attempt workspace is required');
@@ -399,6 +466,7 @@ export class AttemptService {
               workspace,
               session,
               recovery,
+              source,
             );
           } catch (error) {
             if (isStableLaunchConflict(error)) throw error;
@@ -439,6 +507,7 @@ export class AttemptService {
             hasWorktreeReservation,
             developer,
             recovery,
+            source,
           );
         } catch (error) {
           if (hasWorktreeReservation) {
@@ -513,13 +582,21 @@ export class AttemptService {
                 recovery,
                 actor,
               )
-            : await this.dependencies.taskService.transition({
-                commandId: `${input.commandId}:task-transition`,
-                taskId: task.id,
-                expectedRevision: input.expectedRevision,
-                nextState: 'in_progress',
-                actor,
-              });
+            : await (typeof source === 'string'
+                ? this.dependencies.taskService.transition({
+                    commandId: `${input.commandId}:task-transition`,
+                    taskId: task.id,
+                    expectedRevision: input.expectedRevision,
+                    nextState: 'in_progress',
+                    actor,
+                  })
+                : this.dependencies.taskService.transitionProjectRun({
+                    commandId: `${input.commandId}:task-transition`,
+                    taskId: task.id,
+                    expectedRevision: input.expectedRevision,
+                    nextState: 'in_progress',
+                    actor,
+                  }));
           this.dependencies.registry.publisher.publishProject(transition.event);
           const result = {
             task: transition.task,
@@ -652,6 +729,15 @@ export class AttemptService {
           input.expectedRevision,
         );
         const currentSession = this.requireSession(input.sessionId);
+        if (
+          this.dependencies.database
+            .prepare(
+              'SELECT 1 FROM task_attempt_launch_reservations WHERE task_id = ?',
+            )
+            .get(currentTask.id)
+        ) {
+          throw new TaskRevisionConflictError(currentTask);
+        }
         if (this.dependencies.attempts.getCurrentBySession(currentSession.id)) {
           throw new SessionAlreadyLinkedError(currentSession.id);
         }
@@ -704,14 +790,37 @@ export class AttemptService {
     return result;
   }
 
-  private reserveLaunch(taskId: string, commandId: string): void {
+  private reserveLaunch(
+    taskId: string,
+    commandId: string,
+    requireNoCurrentAttempt = false,
+  ): void {
+    if (requireNoCurrentAttempt) {
+      this.dependencies.database.exec('BEGIN IMMEDIATE');
+    }
     try {
+      if (
+        requireNoCurrentAttempt &&
+        this.dependencies.attempts
+          .listByTask(taskId)
+          .some(({ unlinkedAt }) => unlinkedAt === null)
+      ) {
+        const task = this.dependencies.tasks.get(taskId);
+        if (!task) throw new TaskNotFoundError(taskId);
+        throw new TaskRevisionConflictError(task);
+      }
       this.dependencies.database
         .prepare(
           'INSERT INTO task_attempt_launch_reservations (task_id, command_id, created_at) VALUES (?, ?, ?)',
         )
         .run(taskId, commandId, this.now());
+      if (requireNoCurrentAttempt) {
+        this.dependencies.database.exec('COMMIT');
+      }
     } catch {
+      if (requireNoCurrentAttempt && this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
       const task = this.dependencies.tasks.get(taskId);
       if (!task) throw new TaskNotFoundError(taskId);
       throw new TaskRevisionConflictError(task);
@@ -740,9 +849,15 @@ export class AttemptService {
     taskId: string,
     expectedRevision: number,
     actor: TaskActor,
+    projectRunLaunch = false,
   ): Task {
     const task = this.requireTask(taskId, expectedRevision);
-    authorizeTaskTransition({ task, nextState: 'in_progress', actor });
+    authorizeTaskTransition({
+      task,
+      nextState: 'in_progress',
+      actor,
+      ...(projectRunLaunch ? { operation: 'project_run_launch' as const } : {}),
+    });
     return task;
   }
 
@@ -896,6 +1011,7 @@ export class AttemptService {
     workspace: Workspace,
     session: Session,
     recovery?: DeveloperAttemptReworkInput,
+    source: TaskAttemptSource = 'launched',
   ): void {
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
@@ -905,7 +1021,12 @@ export class AttemptService {
           actor,
         );
       } else {
-        this.requireLaunchableTask(task.id, expectedRevision, actor);
+        this.requireLaunchableTask(
+          task.id,
+          expectedRevision,
+          actor,
+          typeof source !== 'string',
+        );
       }
       this.dependencies.workspaces.create(workspace);
       this.dependencies.sessions.create(session);
@@ -929,6 +1050,7 @@ export class AttemptService {
     hasWorktreeReservation: boolean,
     developer: boolean,
     recovery?: DeveloperAttemptReworkInput,
+    source: TaskAttemptSource = 'launched',
   ) {
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
@@ -940,7 +1062,12 @@ export class AttemptService {
         : undefined;
       const current =
         recoveryContext?.task ??
-        this.requireLaunchableTask(task.id, expectedRevision, actor);
+        this.requireLaunchableTask(
+          task.id,
+          expectedRevision,
+          actor,
+          typeof source !== 'string',
+        );
       let persistedSession: Session;
       if (hasWorktreeReservation) {
         if (!this.dependencies.workspaces.markActive(workspace.id)) {
@@ -956,7 +1083,7 @@ export class AttemptService {
       const attempt = this.dependencies.attempts.createForTask(
         current.id,
         persistedSession.id,
-        'launched',
+        source,
         actor,
         developer ? 'developer' : null,
       );

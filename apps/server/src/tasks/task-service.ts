@@ -244,6 +244,19 @@ export class TaskService {
   async transition(
     input: TaskMutationInput<'task.transition'>,
   ): Promise<TaskMutationResult> {
+    return this.transitionWithOperation(input);
+  }
+
+  async transitionProjectRun(
+    input: TaskMutationInput<'task.transition'>,
+  ): Promise<TaskMutationResult> {
+    return this.transitionWithOperation(input, 'project_run_launch');
+  }
+
+  private async transitionWithOperation(
+    input: TaskMutationInput<'task.transition'>,
+    operation?: 'project_run_launch',
+  ): Promise<TaskMutationResult> {
     return this.execute(input.commandId, () => {
       const task = this.requireMutableTask(
         input.taskId,
@@ -255,6 +268,7 @@ export class TaskService {
         nextState,
         actor: input.actor,
         reason: input.reason,
+        operation,
       });
       const occurredAt = this.now();
       const updated = this.update(task, input.expectedRevision, {

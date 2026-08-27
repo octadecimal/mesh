@@ -36,6 +36,7 @@ import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
 import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
+import { ProjectRunRepository } from './repositories/project-run-repository.js';
 import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
 import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
@@ -183,6 +184,7 @@ export const startServer = async (
   recoverInterruptedSessions(database);
 
   const projects = new ProjectRepository(database);
+  const projectRuns = new ProjectRunRepository(database);
   const tasks = new TaskRepository(database);
   const attempts = new TaskAttemptRepository(database);
   const transitions = new TaskTransitionRepository(database);
@@ -299,6 +301,7 @@ export const startServer = async (
   const attemptService = new AttemptService({
     database,
     projects,
+    projectRuns,
     tasks,
     attempts,
     sessions,

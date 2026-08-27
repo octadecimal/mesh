@@ -131,7 +131,14 @@ export const taskSchema = taskSchemaBase.transform((task) => ({
   },
 })) as z.ZodType<TaskSchemaOutput, z.input<typeof taskSchemaBase>>;
 
-export const taskAttemptSourceSchema = z.enum(['launched', 'linked']);
+export const taskAttemptSourceSchema = z.union([
+  z.enum(['launched', 'linked']),
+  z.object({
+    type: z.literal('project_run'),
+    runId: idSchema,
+    runItemId: idSchema,
+  }),
+]);
 const taskAttemptSchemaBase = z.object({
   id: idSchema,
   taskId: idSchema,
