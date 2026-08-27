@@ -462,6 +462,15 @@ describe('executeCommand', () => {
         discoveryMetadata: {},
       }),
     );
+    repositories.projects.updateQaConfiguration(
+      project.id,
+      project.qaConfiguration.revision,
+      {
+        instructions: { content: 'Verify replay.' },
+        reviewPolicy: 'autonomous_review',
+      },
+      taskActorSchema.parse({ type: 'human', id: 'operator-1' }),
+    );
     const task = repositories.tasks.create(
       taskSchema.parse({
         id: 'task-replay',

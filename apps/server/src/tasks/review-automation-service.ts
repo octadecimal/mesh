@@ -550,6 +550,19 @@ export class ReviewAutomationService {
         .filter(({ status }) => status !== 'passed')
         .map(({ criterionId, evidence }) => `${criterionId}: ${evidence}`)
         .join('\n');
+      const currentProject = this.dependencies.projects.get(
+        currentTask.projectId,
+      );
+      if (
+        (!currentProject ||
+          currentProject.qaConfiguration.reviewPolicy !==
+            'autonomous_review') &&
+        currentTask.lifecycleState === 'review'
+      ) {
+        throw new ReviewAutomationPausedError(
+          'Autonomous review policy was withdrawn before Developer resume.',
+        );
+      }
       await this.dependencies.developerReworkService.resume({
         commandId: action.idempotencyKey,
         taskId: action.taskId,

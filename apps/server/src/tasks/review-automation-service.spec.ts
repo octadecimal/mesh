@@ -453,6 +453,17 @@ describe('ReviewAutomationService', () => {
     const cycle = context.rejectedCycle();
     const action = context.pendingResumeAction(cycle);
     context.recordCompletedResume(action.idempotencyKey);
+    context.repositories.projects.updateQaConfiguration(
+      context.project.id,
+      context.project.qaConfiguration.revision,
+      {
+        instructions: {
+          content: context.project.qaConfiguration.instructions.content,
+        },
+        reviewPolicy: 'manual',
+      },
+      human,
+    );
 
     const recovered = await context.service.continueRejectedVerdict({
       taskId: context.task.id,
@@ -467,54 +478,93 @@ describe('ReviewAutomationService', () => {
     ).toEqual([]);
   });
 
-  it.each(['policy', 'state'] as const)(
-    'fails and pauses a pending action after a changed %s preflight',
-    async (change) => {
-      const context = setup({
-        resumeFailure: new Error(`changed ${change} preflight`),
-      });
-      const cycle = context.rejectedCycle();
-      const action = context.pendingResumeAction(cycle);
-      if (change === 'policy') {
-        context.repositories.projects.updateQaConfiguration(
-          context.project.id,
-          context.project.qaConfiguration.revision,
-          {
-            instructions: {
-              content: context.project.qaConfiguration.instructions.content,
-            },
-            reviewPolicy: 'manual',
-          },
-          human,
-        );
-      } else {
-        const current = context.repositories.tasks.get(context.task.id);
-        if (!current) throw new Error('Expected current task');
-        context.repositories.tasks.update(
-          { ...current, lifecycleState: 'in_progress', updatedAt: now },
-          current.revision,
-        );
-      }
+  it('terminalizes without resuming when autonomous policy is withdrawn', async () => {
+    const context = setup();
+    const cycle = context.rejectedCycle();
+    const action = context.pendingResumeAction(cycle);
+    context.repositories.projects.updateQaConfiguration(
+      context.project.id,
+      context.project.qaConfiguration.revision,
+      {
+        instructions: {
+          content: context.project.qaConfiguration.instructions.content,
+        },
+        reviewPolicy: 'manual',
+      },
+      human,
+    );
 
-      await expect(
-        context.service.continueRejectedVerdict({
-          taskId: context.task.id,
-          cycleId: cycle.id,
-        }),
-      ).rejects.toThrow(`changed ${change} preflight`);
+    await expect(
+      context.service.continueRejectedVerdict({
+        taskId: context.task.id,
+        cycleId: cycle.id,
+      }),
+    ).rejects.toMatchObject({ code: 'review_automation_paused' });
 
-      expect(context.resumeStarts()).toBe(0);
-      expect(
-        context.repositories.qaExecutions.getAutomationAction(action.id),
-      ).toMatchObject({ status: 'failed' });
-      expect(
-        context.repositories.qaExecutions.listPendingAutomationActions(),
-      ).toEqual([]);
-      expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
-        reviewAutomation: { status: 'paused' },
-      });
-    },
-  );
+    expect(context.resume).not.toHaveBeenCalled();
+    expect(
+      context.repositories.qaExecutions.getAutomationAction(action.id),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'review_automation_paused',
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      lifecycleState: 'review',
+      reviewAutomation: {
+        status: 'paused',
+        pauseReason:
+          'Automatic resume_developer failed: Autonomous review policy was withdrawn before Developer resume.',
+      },
+    });
+    expect(
+      context.repositories.qaExecutions.getReport('qa-report-1'),
+    ).toMatchObject({ disposition: 'rejected' });
+    expect(
+      context.repositories.projectEvents.after(context.project.id, 0).at(-1),
+    ).toMatchObject({
+      type: 'task.review_automation_changed',
+      payload: {
+        action: { id: action.id, status: 'failed' },
+        automation: {
+          status: 'paused',
+          pauseReason:
+            'Automatic resume_developer failed: Autonomous review policy was withdrawn before Developer resume.',
+        },
+      },
+    });
+  });
+
+  it('fails and pauses a pending action after a changed state preflight', async () => {
+    const context = setup({
+      resumeFailure: new Error('changed state preflight'),
+    });
+    const cycle = context.rejectedCycle();
+    const action = context.pendingResumeAction(cycle);
+    const current = context.repositories.tasks.get(context.task.id);
+    if (!current) throw new Error('Expected current task');
+    context.repositories.tasks.update(
+      { ...current, lifecycleState: 'in_progress', updatedAt: now },
+      current.revision,
+    );
+
+    await expect(
+      context.service.continueRejectedVerdict({
+        taskId: context.task.id,
+        cycleId: cycle.id,
+      }),
+    ).rejects.toThrow('changed state preflight');
+
+    expect(context.resumeStarts()).toBe(0);
+    expect(
+      context.repositories.qaExecutions.getAutomationAction(action.id),
+    ).toMatchObject({ status: 'failed' });
+    expect(
+      context.repositories.qaExecutions.listPendingAutomationActions(),
+    ).toEqual([]);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+  });
 
   it('enables review automation as an idempotent human command', async () => {
     const context = setup({ automationStatus: 'disabled' });
