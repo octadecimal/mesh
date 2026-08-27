@@ -321,6 +321,76 @@ describe('ProjectRunRepository', () => {
     });
   });
 
+  it('rejects a launch link whose matching session belongs to another project', () => {
+    const repository = setup();
+    repositories.push(repository);
+    repository.projects.create(
+      projectSchema.parse({
+        id: 'project-2',
+        displayName: 'Other project',
+        repositoryPath: 'C:/code/other-project',
+        discoveredAt: at,
+        discoveryMetadata: {},
+      }),
+    );
+    repository.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-2',
+        projectId: 'project-2',
+        type: 'shared',
+        path: 'C:/code/other-project',
+      }),
+    );
+    repository.sessions.create(
+      sessionSchema.parse({
+        id: 'session-other-project',
+        projectId: 'project-2',
+        workspaceId: 'workspace-2',
+        title: 'Other project task',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: at,
+        updatedAt: at,
+      }),
+    );
+    repository.attempts.create(
+      taskAttemptSchema.parse({
+        id: 'attempt-other-project',
+        taskId: 'task-a',
+        sessionId: 'session-other-project',
+        ordinal: 2,
+        source: 'launched',
+        actor: { type: 'system', id: 'system-1' },
+        createdAt: at,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: null,
+      }),
+    );
+    const run = createRun(repository.projectRuns, ['task-a']);
+    const claim = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: at,
+    });
+
+    expect(() =>
+      repository.projectRuns.linkLaunch({
+        runId: run.id,
+        itemId: claim!.item.id,
+        expectedRunRevision: claim!.run.revision,
+        attemptId: 'attempt-other-project',
+        sessionId: 'session-other-project',
+        occurredAt: at,
+      }),
+    ).toThrow('Project run item launch cannot be linked');
+    expect(repository.projectRuns.get(run.id)).toMatchObject({
+      revision: claim!.run.revision,
+      items: [{ id: claim!.item.id, status: 'launch_pending' }],
+    });
+  });
+
   it('normalizes durable run identifiers and launch keys before storing and querying', () => {
     const repository = setup();
     repositories.push(repository);
