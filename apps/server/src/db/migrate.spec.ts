@@ -103,6 +103,209 @@ const runProductionBuild = (
   }
 };
 
+const tableNames = (database: Database): string[] =>
+  database
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+    .all()
+    .map((row) => (row as { name: string }).name);
+
+const assertPlanningStorageConstraints = (database: Database): void => {
+  const at = '2026-08-27T00:00:00.000Z';
+  const insertPlan = database.prepare(
+    `INSERT INTO project_plans (
+      id, project_id, goal, constraints_json, non_goals_json, policy_version,
+      status, revision, current_base_id, current_session_id,
+      latest_proposal_ordinal, attention_json, created_by_json, created_at,
+      updated_at, terminal_at, terminal_by_json, terminal_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insertPlan.run(
+    'planning-constraint-plan',
+    'constraint-project',
+    'Persist planning constraints',
+    '[]',
+    '[]',
+    'v1',
+    'planning',
+    1,
+    'planning-constraint-base',
+    null,
+    0,
+    null,
+    '{"type":"human","id":"operator"}',
+    at,
+    at,
+    null,
+    null,
+    null,
+  );
+  expect(() =>
+    insertPlan.run(
+      'planning-constraint-plan-second',
+      'constraint-project',
+      'Second active plan',
+      '[]',
+      '[]',
+      'v1',
+      'awaiting_review',
+      1,
+      'planning-constraint-base-second',
+      null,
+      0,
+      null,
+      '{"type":"human","id":"operator"}',
+      at,
+      at,
+      null,
+      null,
+      null,
+    ),
+  ).toThrow();
+
+  database
+    .prepare(
+      `INSERT INTO project_plan_bases (
+        id, plan_id, ordinal, repository_identity, tasks_json,
+        dependencies_json, project_archived_at, project_revision,
+        policy_revision, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      'planning-constraint-base',
+      'planning-constraint-plan',
+      1,
+      'C:/code/constraint-project',
+      '[]',
+      '[]',
+      null,
+      1,
+      1,
+      at,
+    );
+  database
+    .prepare(
+      `INSERT INTO project_plan_sessions (
+        session_id, plan_id, project_id, capability_generation, started_at,
+        ended_at
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      'constraint-session',
+      'planning-constraint-plan',
+      'constraint-project',
+      1,
+      at,
+      null,
+    );
+  database
+    .prepare(
+      `INSERT INTO project_plan_proposals (
+        id, plan_id, base_id, ordinal, plan_revision, capability_generation,
+        session_id, assumptions_json, risks_json, exclusions_json, submitted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      'planning-constraint-proposal',
+      'planning-constraint-plan',
+      'planning-constraint-base',
+      1,
+      1,
+      1,
+      'constraint-session',
+      '[]',
+      '[]',
+      '[]',
+      at,
+    );
+  const insertProposalTask = database.prepare(
+    `INSERT INTO project_plan_proposal_tasks (
+      proposal_id, task_key, ordinal, title, description,
+      acceptance_criteria_json, priority, labels_json, rationale, goal_mapping
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insertProposalTask.run(
+    'planning-constraint-proposal',
+    'planning-constraint-proposal-task',
+    0,
+    'Constraint proposal task',
+    'Persist planning constraints',
+    '["Persist planning constraints"]',
+    'normal',
+    '[]',
+    'Required for test coverage',
+    'Planning storage',
+  );
+  expect(() =>
+    insertProposalTask.run(
+      'planning-constraint-proposal',
+      'planning-constraint-proposal-task',
+      1,
+      'Duplicate proposal task',
+      'Should not be stored',
+      '["Should not be stored"]',
+      'normal',
+      '[]',
+      'Duplicate local key',
+      'Planning storage',
+    ),
+  ).toThrow();
+  expect(() =>
+    database
+      .prepare(
+        'UPDATE project_plan_proposals SET ordinal = ? WHERE id = ?',
+      )
+      .run(2, 'planning-constraint-proposal'),
+  ).toThrow();
+  expect(() =>
+    database
+      .prepare(
+        'UPDATE project_plan_proposal_tasks SET task_key = ? WHERE proposal_id = ? AND task_key = ?',
+      )
+      .run(
+        'planning-constraint-proposal-task-renamed',
+        'planning-constraint-proposal',
+        'planning-constraint-proposal-task',
+      ),
+  ).toThrow();
+
+  const insertMapping = database.prepare(
+    `INSERT INTO project_plan_task_mappings (
+      proposal_id, proposal_task_key, project_id, task_id, created_at
+    ) VALUES (?, ?, ?, ?, ?)`,
+  );
+  insertMapping.run(
+    'planning-constraint-proposal',
+    'planning-constraint-proposal-task',
+    'constraint-project',
+    'constraint-task',
+    at,
+  );
+  expect(() =>
+    insertMapping.run(
+      'planning-constraint-proposal',
+      'planning-constraint-proposal-task',
+      'constraint-project',
+      'constraint-task',
+      at,
+    ),
+  ).toThrow();
+
+  const insertDependency = database.prepare(
+    `INSERT INTO task_dependencies (
+      project_id, task_id, prerequisite_task_id, created_by_json, created_at
+    ) VALUES (?, ?, ?, ?, ?)`,
+  );
+  expect(() =>
+    insertDependency.run(
+      'constraint-project',
+      'constraint-task',
+      'constraint-task',
+      '{"type":"human","id":"operator"}',
+      at,
+    ),
+  ).toThrow();
+};
+
 const assertProjectRunConstraints = (database: Database): void => {
   const at = '2026-08-27T00:00:00.000Z';
   new ProjectRepository(database).create(
@@ -333,6 +536,7 @@ describe('migrate', () => {
       { id: '014-project-run-prelaunch-attention' },
       { id: '015-project-run-pause-reason' },
       { id: '016-project-run-automation-status' },
+      { id: '017-pm-planning' },
     ]);
     expect(
       database
@@ -353,6 +557,15 @@ describe('migrate', () => {
         'developer_review_feedback',
         'project_runs',
         'project_run_items',
+        'project_plans',
+        'project_plan_bases',
+        'project_plan_sessions',
+        'project_plan_proposals',
+        'project_plan_proposal_tasks',
+        'project_plan_proposal_dependencies',
+        'project_plan_feedback',
+        'project_plan_task_mappings',
+        'task_dependencies',
       ]),
     );
     expect(
@@ -383,6 +596,7 @@ describe('migrate', () => {
       ]),
     );
     assertProjectRunConstraints(database);
+    assertPlanningStorageConstraints(database);
     expect(
       database
         .prepare(
@@ -400,6 +614,207 @@ describe('migrate', () => {
         .prepare("SELECT name FROM pragma_table_info('task_attempts')")
         .all(),
     ).toContainEqual({ name: 'source_json' });
+  });
+
+  it('upgrades an 016 database without changing existing planning-adjacent rows', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-pm-planning-upgrade-'));
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const at = '2026-08-27T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+      '009-qa-execution.sql',
+      '010-review-automation-state.sql',
+      '011-qa-interruption-repair.sql',
+      '012-project-runs.sql',
+      '013-task-attempt-project-run-source.sql',
+      '014-project-run-prelaunch-attention.sql',
+      '015-project-run-pause-reason.sql',
+      '016-project-run-automation-status.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), at);
+    }
+    new ProjectRepository(database).create(
+      projectSchema.parse({
+        id: 'planning-upgrade-project',
+        displayName: 'Planning upgrade',
+        repositoryPath: 'C:/code/planning-upgrade',
+        discoveredAt: at,
+        discoveryMetadata: {},
+      }),
+    );
+    new TaskRepository(database).create(
+      taskSchema.parse({
+        id: 'planning-upgrade-task',
+        projectId: 'planning-upgrade-project',
+        title: 'Preserve existing task',
+        description: 'Pre-017 task row',
+        acceptanceCriteria: ['Remain byte-equivalent'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'ready',
+        labels: ['planning'],
+        notes: 'pre-017',
+        blocked: null,
+        revision: 1,
+        createdAt: at,
+        updatedAt: at,
+      }),
+    );
+    new WorkspaceRepository(database).create(
+      workspaceSchema.parse({
+        id: 'planning-upgrade-workspace',
+        projectId: 'planning-upgrade-project',
+        type: 'shared',
+        path: 'C:/code/planning-upgrade',
+      }),
+    );
+    new SessionRepository(database).create(
+      sessionSchema.parse({
+        id: 'planning-upgrade-session',
+        projectId: 'planning-upgrade-project',
+        workspaceId: 'planning-upgrade-workspace',
+        title: 'Planning upgrade session',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: at,
+        updatedAt: at,
+      }),
+    );
+    database
+      .prepare(
+        `INSERT INTO task_attempts (
+          id, task_id, session_id, ordinal, source, actor_json, created_at,
+          unlinked_at, unlinked_by_json, unlink_reason, source_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'planning-upgrade-attempt',
+        'planning-upgrade-task',
+        'planning-upgrade-session',
+        1,
+        'launched',
+        '{"type":"human","id":"operator"}',
+        at,
+        null,
+        null,
+        null,
+        null,
+      );
+    database
+      .prepare(
+        `INSERT INTO developer_execution_cycles (
+          id, attempt_id, ordinal, mode, authorized_by_json,
+          authorization_command_id, policy_version, project_instructions_content,
+          project_instructions_revision, task_snapshot_revision,
+          task_snapshot_description, task_snapshot_acceptance_criteria_json,
+          workspace_id, permission_mode, started_at, ended_at,
+          terminal_disposition, completion_report_id, blocker_report_id,
+          terminal_command_id, terminal_event_id, task_snapshot_title
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'planning-upgrade-execution',
+        'planning-upgrade-attempt',
+        1,
+        'new',
+        '{"type":"human","id":"operator"}',
+        'planning-upgrade-command',
+        'v1',
+        '',
+        1,
+        1,
+        'Pre-017 task row',
+        '["Remain byte-equivalent"]',
+        'planning-upgrade-workspace',
+        'safe_auto',
+        at,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        'Preserve existing task',
+      );
+    database
+      .prepare(
+        `INSERT INTO project_runs (
+          id, project_id, state, revision, concurrency, started_at, updated_at,
+          completed_at, completion_reason, pause_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'planning-upgrade-run',
+        'planning-upgrade-project',
+        'running',
+        1,
+        1,
+        at,
+        at,
+        null,
+        null,
+        null,
+      );
+    database
+      .prepare(
+        `INSERT INTO project_events (
+          id, project_id, sequence, occurred_at, type, payload_json
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'planning-upgrade-event',
+        'planning-upgrade-project',
+        1,
+        at,
+        'project.changed',
+        '{"pre017":true}',
+      );
+
+    const existingRows = {
+      projects: database.prepare('SELECT * FROM projects').all(),
+      tasks: database.prepare('SELECT * FROM tasks').all(),
+      attempts: database.prepare('SELECT * FROM task_attempts').all(),
+      executions: database.prepare('SELECT * FROM developer_execution_cycles').all(),
+      runs: database.prepare('SELECT * FROM project_runs').all(),
+      events: database.prepare('SELECT * FROM project_events').all(),
+    };
+
+    migrate(database);
+
+    expect(tableNames(database)).toEqual(
+      expect.arrayContaining([
+        'project_plans',
+        'project_plan_bases',
+        'project_plan_sessions',
+        'project_plan_proposals',
+        'project_plan_proposal_tasks',
+        'project_plan_proposal_dependencies',
+        'project_plan_feedback',
+        'project_plan_task_mappings',
+        'task_dependencies',
+      ]),
+    );
+    expect({
+      projects: database.prepare('SELECT * FROM projects').all(),
+      tasks: database.prepare('SELECT * FROM tasks').all(),
+      attempts: database.prepare('SELECT * FROM task_attempts').all(),
+      executions: database.prepare('SELECT * FROM developer_execution_cycles').all(),
+      runs: database.prepare('SELECT * FROM project_runs').all(),
+      events: database.prepare('SELECT * FROM project_events').all(),
+    }).toEqual(existingRows);
   });
 
   it('upgrades Milestone 3 projects with the manual QA defaults', () => {
@@ -873,6 +1288,7 @@ describe('migrate', () => {
       { id: '014-project-run-prelaunch-attention' },
       { id: '015-project-run-pause-reason' },
       { id: '016-project-run-automation-status' },
+      { id: '017-pm-planning' },
     ]);
   });
 
@@ -1104,6 +1520,10 @@ describe('migrate', () => {
       join(__dirname, 'migrations', '016-project-run-automation-status.sql'),
       join(directory, 'migrations', '016-project-run-automation-status.sql'),
     );
+    copyFileSync(
+      join(__dirname, 'migrations', '017-pm-planning.sql'),
+      join(directory, 'migrations', '017-pm-planning.sql'),
+    );
     buildSync({
       bundle: true,
       entryPoints: [join(__dirname, 'migrate.ts')],
@@ -1165,6 +1585,7 @@ describe('migrate', () => {
         { id: '014-project-run-prelaunch-attention' },
         { id: '015-project-run-pause-reason' },
         { id: '016-project-run-automation-status' },
+        { id: '017-pm-planning' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -1247,6 +1668,7 @@ describe('migrate', () => {
       { id: '014-project-run-prelaunch-attention' },
       { id: '015-project-run-pause-reason' },
       { id: '016-project-run-automation-status' },
+      { id: '017-pm-planning' },
     ]);
   });
 
@@ -1713,6 +2135,7 @@ describe('migrate', () => {
         { id: '014-project-run-prelaunch-attention' },
         { id: '015-project-run-pause-reason' },
         { id: '016-project-run-automation-status' },
+        { id: '017-pm-planning' },
       ]);
       expect(
         database
