@@ -190,7 +190,7 @@ function ConnectedApp({
         });
       });
   };
-  const submitTaskCommand = (command: MutatingCommand) => {
+  const submitProjectCommand = (command: MutatingCommand) => {
     onCommand?.({ type: command.type, payload: command.payload });
     return api ? api.command(command) : Promise.resolve(undefined);
   };
@@ -590,7 +590,7 @@ function ConnectedApp({
             <TaskBoard
               project={activeProject}
               projection={projection}
-              onCommand={submitTaskCommand}
+              onCommand={submitProjectCommand}
               onSelectTask={onSelectTask}
               onOpenSession={openSession}
               connected={

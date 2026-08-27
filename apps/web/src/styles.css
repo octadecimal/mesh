@@ -129,7 +129,7 @@ textarea:focus-visible {
 .project-board-boundary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   height: 100%;
@@ -138,8 +138,14 @@ textarea:focus-visible {
 }
 
 .project-board-header,
+.project-board-boundary > .project-run-panel,
 .project-board-boundary > .task-board {
   grid-column: 1 / -1;
+}
+
+.project-board-boundary > .project-run-panel {
+  max-height: min(28rem, 42vh);
+  overflow: auto;
 }
 
 .project-board-boundary > .developer-instructions,
@@ -200,6 +206,202 @@ textarea:focus-visible {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+.project-run-panel {
+  display: grid;
+  gap: 0.9rem;
+  border-block: 1px solid var(--border);
+  padding: 1rem;
+  background: linear-gradient(135deg, #101925, #0d141e);
+}
+.project-run-panel h3,
+.project-run-panel h4,
+.project-run-panel p {
+  margin: 0;
+}
+.project-run-heading {
+  align-items: center;
+}
+.project-run-start,
+.project-run-active,
+.project-run-authorization,
+.project-run-history,
+.project-run-history-entry {
+  display: grid;
+  gap: 0.8rem;
+}
+.project-run-start > p,
+.project-run-empty,
+.project-run-outcome,
+.project-run-item-evidence,
+.project-run-history-heading span,
+.project-run-concurrency span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.project-run-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+.project-run-summary > div {
+  display: grid;
+  gap: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  padding: 0.65rem;
+  background: #0b1119;
+}
+.project-run-summary span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.project-run-items,
+.project-run-preview,
+.project-run-repairs ul {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.project-run-item,
+.project-run-preview li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  background: #0a1018;
+}
+.project-run-item-main {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.3rem 0.65rem;
+}
+.project-run-position {
+  display: inline-grid;
+  width: 1.6rem;
+  height: 1.6rem;
+  place-items: center;
+  border: 1px solid var(--strong);
+  border-radius: 999px;
+  color: #c9d7ea;
+  background: #151e2b;
+  font-size: 0.7rem;
+  font-weight: 800;
+}
+.project-run-status {
+  white-space: nowrap;
+}
+.project-run-status-attention_required,
+.project-run-state-paused,
+.project-run-state-draining {
+  color: #fde68a;
+  border-color: #854d0e;
+  background: #422006;
+}
+.project-run-status-completed,
+.project-run-state-completed {
+  color: #a7f3d0;
+  border-color: #065f46;
+  background: #022c22;
+}
+.project-run-status-not_started {
+  color: #cbd5e1;
+  border-color: #475569;
+  background: #1e293b;
+}
+.project-run-evidence-link {
+  width: fit-content;
+  border: 0;
+  padding: 0;
+  color: #93c5fd;
+  background: transparent;
+  font-weight: 750;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+.project-run-controls,
+.project-run-authorization-heading,
+.project-run-history-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.project-run-stop-confirmation {
+  display: grid;
+  gap: 0.7rem;
+  border: 1px solid #9f1239;
+  border-radius: 0.55rem;
+  padding: 0.8rem;
+  background: #4c05191f;
+}
+.project-run-authorization {
+  border-top: 1px solid var(--border);
+  padding-top: 0.8rem;
+}
+.project-run-preview li > span:last-child {
+  color: #b9c6d8;
+  font-size: 0.76rem;
+}
+.project-run-concurrency {
+  display: grid;
+  grid-template-columns: auto 5rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.65rem;
+  color: #c6d1e0;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+.project-run-concurrency input {
+  width: 100%;
+  border: 1px solid var(--strong);
+  border-radius: 0.45rem;
+  padding: 0.48rem;
+  color: var(--text);
+  background: #090e15;
+}
+.project-run-subscription-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  color: #d5dfec;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.project-run-subscription-confirmation input {
+  margin-top: 0.18rem;
+}
+.project-run-history {
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+.project-run-history-entry {
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  padding: 0.75rem;
+  background: #0a1018aa;
+}
+.project-run-history-heading > div {
+  display: grid;
+  gap: 0.2rem;
+}
+.project-run-repairs ul {
+  margin-top: 0.4rem;
+  padding-left: 1rem;
+  list-style: disc;
 }
 .task-board-toolbar {
   display: flex;
@@ -996,6 +1198,14 @@ textarea:focus-visible {
   border-color: var(--border);
   color: #c5cfdd;
 }
+.button-danger {
+  color: #ffe4e6;
+  background: #881337;
+  border-color: #be123c;
+}
+.button-danger:hover:not(:disabled) {
+  background: #9f1239;
+}
 
 .search-field {
   display: grid;
@@ -1599,12 +1809,18 @@ textarea:focus-visible {
 @media (max-width: 760px) {
   .project-board-boundary {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto minmax(0, 1fr);
   }
 
   .project-board-header,
+  .project-board-boundary > .project-run-panel,
   .project-board-boundary > .task-board {
     grid-column: 1;
+  }
+
+  .project-board-boundary > .project-run-panel {
+    max-height: none;
+    overflow: visible;
   }
 
   .project-board-boundary > .developer-instructions,
@@ -1676,6 +1892,31 @@ textarea:focus-visible {
   }
   .project-board-archive-state {
     align-items: stretch;
+  }
+  .project-run-summary {
+    grid-template-columns: 1fr;
+  }
+  .project-run-item,
+  .project-run-preview li {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+  }
+  .project-run-status,
+  .project-run-preview li > span:last-child {
+    grid-column: 2;
+  }
+  .project-run-controls,
+  .project-run-authorization-heading,
+  .project-run-history-heading,
+  .project-run-stop-confirmation .dialog-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .project-run-concurrency {
+    grid-template-columns: minmax(0, 1fr) 5rem;
+  }
+  .project-run-concurrency span {
+    grid-column: 1 / -1;
   }
   .task-board-tabs {
     display: grid;

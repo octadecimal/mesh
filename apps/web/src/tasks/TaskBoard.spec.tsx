@@ -9,12 +9,15 @@ import {
 import userEvent from '@testing-library/user-event';
 import {
   projectSchema,
+  projectRunItemSchema,
+  projectRunSchema,
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
   taskSchema,
   type MutatingCommand,
   type ProjectSnapshot,
+  type ProjectRun,
   type Task,
 } from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
@@ -93,6 +96,55 @@ describe('TaskBoard', () => {
     expect(
       screen.getByRole('region', { name: 'Attempt timeline' }),
     ).toBeDefined();
+  });
+
+  it('mounts run controls above the board and opens attention evidence in the task drawer', async () => {
+    const user = userEvent.setup();
+    const onSelectTask = vi.fn();
+    const attentionItem = projectRunItemSchema.parse({
+      id: 'run-item-ready',
+      runId: 'run-1',
+      projectId: project.id,
+      taskId: 'ready',
+      taskRevision: 1,
+      policyRevision: 1,
+      taskAutomationGeneration: 0,
+      queuePosition: 0,
+      status: 'attention_required',
+      attemptId: null,
+      sessionId: null,
+      launchIdempotencyKey: 'launch-ready',
+      claimedAt: null,
+      startedAt: null,
+      finishedAt: timestamp,
+      outcomeReason: 'manual_review_required',
+    });
+    const activeRun = projectRunSchema.parse({
+      id: 'run-1',
+      projectId: project.id,
+      revision: 2,
+      concurrency: 1,
+      state: 'running',
+      startedAt: timestamp,
+      updatedAt: timestamp,
+      completionReason: null,
+      completedAt: null,
+      items: [attentionItem],
+    });
+    renderBoard({ onSelectTask, runs: [activeRun] });
+
+    const controls = screen.getByRole('region', { name: 'Project run' });
+    const board = screen.getByRole('region', { name: 'Backlog tasks' });
+    expect(
+      controls.compareDocumentPosition(board) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await user.click(
+      screen.getByRole('button', { name: 'Open Ready task evidence' }),
+    );
+    expect(onSelectTask).toHaveBeenCalledWith('ready');
+    expect(screen.getByRole('dialog', { name: 'Ready task' })).toBeVisible();
   });
 
   it('opens lightweight backlog creation from the board toolbar', async () => {
@@ -598,7 +650,10 @@ const baseTasks = [
   }),
 ];
 
-const boardProjection = (taskOverrides: Task[] = []) => {
+const boardProjection = (
+  taskOverrides: Task[] = [],
+  runs: ProjectRun[] = [],
+) => {
   const byTaskId = new Map(
     baseTasks.map((candidate) => [candidate.id, candidate]),
   );
@@ -645,6 +700,8 @@ const boardProjection = (taskOverrides: Task[] = []) => {
     ],
     transitions: [],
     repairs: [],
+    runs,
+    projectRunLimits: { maxConcurrency: 4 },
     cursor: 1,
   };
   return replaceProjectSnapshot(
@@ -666,15 +723,17 @@ const renderBoard = ({
   archived = false,
   onCommand = vi.fn().mockResolvedValue(undefined),
   onSelectTask,
+  runs = [],
 }: {
   archived?: boolean;
   onCommand?: (command: MutatingCommand) => Promise<unknown> | void;
   onSelectTask?: (taskId: string) => void;
+  runs?: ProjectRun[];
 } = {}) =>
   render(
     <TaskBoard
       project={archived ? { ...project, archivedAt: timestamp } : project}
-      projection={boardProjection()}
+      projection={boardProjection([], runs)}
       onCommand={onCommand}
       onSelectTask={onSelectTask}
     />,
