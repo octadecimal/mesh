@@ -77,6 +77,41 @@ const qaInterruptionRepairMigration = {
     'utf8',
   ),
 };
+const projectRunsMigration = {
+  id: '012-project-runs',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '012-project-runs.sql'),
+    'utf8',
+  ),
+};
+const taskAttemptProjectRunSourceMigration = {
+  id: '013-task-attempt-project-run-source',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '013-task-attempt-project-run-source.sql'),
+    'utf8',
+  ),
+};
+const projectRunPrelaunchAttentionMigration = {
+  id: '014-project-run-prelaunch-attention',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '014-project-run-prelaunch-attention.sql'),
+    'utf8',
+  ),
+};
+const projectRunPauseReasonMigration = {
+  id: '015-project-run-pause-reason',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '015-project-run-pause-reason.sql'),
+    'utf8',
+  ),
+};
+const projectRunAutomationStatusMigration = {
+  id: '016-project-run-automation-status',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '016-project-run-automation-status.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -90,6 +125,11 @@ const migrations = [
   qaExecutionMigration,
   reviewAutomationStateMigration,
   qaInterruptionRepairMigration,
+  projectRunsMigration,
+  taskAttemptProjectRunSourceMigration,
+  projectRunPrelaunchAttentionMigration,
+  projectRunPauseReasonMigration,
+  projectRunAutomationStatusMigration,
 ];
 
 export const migrate = (database: Database): void => {

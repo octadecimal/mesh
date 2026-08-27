@@ -24,6 +24,7 @@ import {
 
 import { createTestRepositories } from '../test/create-test-database.js';
 import { waitForWorkerMessage } from '../test/wait-for-worker-message.js';
+import { assertWorkspaceAvailable } from './workspace-occupancy.js';
 import { CommandReconciliationRequiredError } from './command-repository.js';
 import { TaskAttemptRepository } from './task-attempt-repository.js';
 
@@ -91,6 +92,46 @@ describe('repositories', () => {
   afterEach(() => {
     for (const dispose of disposers.splice(0)) {
       dispose();
+    }
+  });
+
+  it('requires workspace occupancy checks to run inside a transaction', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+
+    expect(() =>
+      assertWorkspaceAvailable(repos.database, {
+        path: 'C:/code/platform-worktree',
+        excludingSessionId: 'candidate',
+        policy: 'exclusive',
+      }),
+    ).toThrow('active transaction');
+  });
+
+  it('allows a session to retain its own protected workspace', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    repos.workspaces.create(
+      workspaceSchema.parse({
+        ...workspace(),
+        owner: 'mesh',
+        cleanupState: 'active',
+      }),
+    );
+    repos.sessions.create(session());
+
+    repos.database.exec('BEGIN IMMEDIATE');
+    try {
+      expect(() =>
+        assertWorkspaceAvailable(repos.database, {
+          path: workspace().path,
+          excludingSessionId: session().id,
+          policy: 'manual',
+        }),
+      ).not.toThrow();
+    } finally {
+      repos.database.exec('ROLLBACK');
     }
   });
 
@@ -469,6 +510,11 @@ describe('repositories', () => {
       attempt({
         id: 'attempt-2',
         ordinal: 2,
+        source: {
+          type: 'project_run',
+          runId: 'run-1',
+          runItemId: 'item-1',
+        },
         createdAt: '2026-08-24T00:03:00.000Z',
       }),
     );
@@ -482,6 +528,12 @@ describe('repositories', () => {
     expect(
       repos.attempts.listByTask('task-1').map((value) => value.ordinal),
     ).toEqual([1, 2]);
+    expect(
+      repos.attempts.listByTask('task-1').map((value) => value.source),
+    ).toEqual([
+      'linked',
+      { type: 'project_run', runId: 'run-1', runItemId: 'item-1' },
+    ]);
     expect(repos.attempts.getCurrentBySession('s1')).toMatchObject({
       id: 'attempt-2',
     });
@@ -991,6 +1043,128 @@ describe('repositories', () => {
       expect(executions).toBe(1);
     },
   );
+
+  it('serializes project-run reservation against manual protected-path entry', async () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+    repos.projects.create(project());
+    const bundleDirectory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-occupancy-worker-'),
+    );
+    disposers.push(() =>
+      rmSync(bundleDirectory, { force: true, recursive: true }),
+    );
+    const modulePath = join(bundleDirectory, 'workspace-occupancy.cjs');
+    buildSync({
+      bundle: true,
+      entryPoints: [join(__dirname, 'workspace-occupancy.ts')],
+      external: ['better-sqlite3'],
+      format: 'cjs',
+      outfile: modulePath,
+      platform: 'node',
+      tsconfig: join(__dirname, '..', '..', '..', '..', 'tsconfig.base.json'),
+    });
+    const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    const protectedPath = 'C:/code/platform-run-item';
+    const workerSource = `
+      const { parentPort, workerData } = require('node:worker_threads');
+      const Database = require('better-sqlite3');
+      const { assertWorkspaceAvailable } = require(workerData.modulePath);
+      const database = new Database(workerData.path);
+      database.pragma('foreign_keys = ON');
+      database.pragma('busy_timeout = 5000');
+      parentPort.postMessage({ type: 'ready' });
+      Atomics.wait(new Int32Array(workerData.barrier), 0, 0);
+      try {
+        database.exec('BEGIN IMMEDIATE');
+        assertWorkspaceAvailable(database, {
+          path: workerData.protectedPath,
+          excludingSessionId: workerData.sessionId,
+          policy: workerData.kind === 'project' ? 'exclusive' : 'manual',
+        });
+        database.prepare(
+          'INSERT INTO workspaces (id, project_id, type, path, git_branch, git_worktree_path, owner, cleanup_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        ).run(
+          workerData.workspaceId,
+          'p1',
+          workerData.kind === 'project' ? 'worktree' : 'shared',
+          workerData.protectedPath,
+          workerData.kind === 'project' ? 'mesh/run/item' : null,
+          workerData.kind === 'project' ? workerData.protectedPath : null,
+          workerData.kind === 'project' ? 'mesh' : null,
+          workerData.kind === 'project' ? 'pending' : 'active',
+        );
+        database.prepare(
+          'INSERT INTO sessions (id, claude_resume_id, project_id, workspace_id, title, permission_mode, lifecycle_state, created_at, updated_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)',
+        ).run(
+          workerData.sessionId,
+          'p1',
+          workerData.workspaceId,
+          workerData.kind,
+          'interactive',
+          'idle',
+          '2026-08-27T00:00:00.000Z',
+          '2026-08-27T00:00:00.000Z',
+        );
+        database.exec('COMMIT');
+        parentPort.postMessage({ type: 'result', kind: workerData.kind });
+      } catch (error) {
+        if (database.inTransaction) database.exec('ROLLBACK');
+        parentPort.postMessage({
+          type: 'error',
+          code: error.code,
+          message: error.message,
+        });
+      } finally {
+        database.close();
+      }
+    `;
+    const start = (kind: 'project' | 'manual') =>
+      new Worker(workerSource, {
+        eval: true,
+        workerData: {
+          barrier,
+          kind,
+          modulePath,
+          path: repos.path,
+          protectedPath,
+          sessionId: `${kind}-session`,
+          workspaceId: `${kind}-workspace`,
+        },
+      });
+    const workers = [start('project'), start('manual')];
+
+    try {
+      await Promise.all(workers.map((worker) => waitForWorkerMessage(worker)));
+      const resultsPromise = Promise.all(
+        workers.map((worker) =>
+          waitForWorkerMessage<{
+            type: 'result' | 'error';
+            kind?: string;
+            code?: string;
+            message?: string;
+          }>(worker),
+        ),
+      );
+      Atomics.store(new Int32Array(barrier), 0, 1);
+      Atomics.notify(new Int32Array(barrier), 0, workers.length);
+      const results = await resultsPromise;
+
+      expect(results.filter((result) => result.type === 'result')).toHaveLength(
+        1,
+      );
+      expect(results.filter((result) => result.type === 'error')).toEqual([
+        expect.objectContaining({ code: 'project_run_conflict' }),
+      ]);
+      expect(
+        repos.database.prepare('SELECT id FROM sessions ORDER BY id').all(),
+      ).toHaveLength(1);
+    } finally {
+      Atomics.store(new Int32Array(barrier), 0, 1);
+      Atomics.notify(new Int32Array(barrier), 0, workers.length);
+      await Promise.allSettled(workers.map((worker) => worker.terminate()));
+    }
+  }, 15_000);
 
   it('allocates unique consecutive sequences for concurrent connections', async () => {
     const repos = createTestRepositories();

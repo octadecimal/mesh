@@ -8,6 +8,7 @@ import {
   projectSchema,
   taskAttemptSchema,
   taskSchema,
+  type StableTaskErrorCode,
 } from '@mesh-session-platform/contracts';
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
@@ -16,6 +17,10 @@ import { QaVerificationExecutableUnavailableError } from '../platform/qa-verific
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
 import type { QaExecutionService } from '../tasks/qa-execution-service.js';
+import {
+  ProjectRunServiceError,
+  type ProjectRunService,
+} from '../tasks/project-run-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { buildApp } from '../app.js';
 
@@ -31,6 +36,16 @@ const setup = (options?: {
   withGit?: boolean;
   gitExitCode?: number;
   seedProject?: boolean;
+  projectRunMaxConcurrency?: number;
+  projectRunService?: Pick<
+    ProjectRunService,
+    | 'startRun'
+    | 'pauseRun'
+    | 'resumeRun'
+    | 'stopRun'
+    | 'drainAvailableSlots'
+    | 'observeTaskOutcome'
+  >;
   qaExecutionService?: Pick<
     QaExecutionService,
     'launch' | 'submitVerdict' | 'repairInterrupted'
@@ -193,6 +208,73 @@ describe('HTTP command routes', () => {
         message: 'The QA capability is invalid.',
       },
     });
+  });
+
+  it('maps every canonical project-run failure to its stable HTTP envelope', async () => {
+    let currentCode: StableTaskErrorCode = 'project_run_invalid';
+    const fail = () => {
+      throw new ProjectRunServiceError(
+        currentCode,
+        `Project run failed with ${currentCode}`,
+        { runId: 'run-1' },
+      );
+    };
+    const fixture = setup({
+      projectRunService: {
+        startRun: fail,
+        pauseRun: fail,
+        resumeRun: fail,
+        stopRun: fail,
+        drainAvailableSlots: async () => fail(),
+        observeTaskOutcome: async () => undefined,
+      },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      fixture.repositories.dispose();
+    });
+    const cases = [
+      ['project_run_not_found', 404],
+      ['project_run_revision_conflict', 409],
+      ['project_run_invalid', 400],
+      ['project_run_transition_invalid', 409],
+      ['project_run_conflict', 409],
+      ['project_run_empty', 422],
+      ['project_run_stale', 409],
+      ['project_run_concurrency_exceeded', 422],
+      ['project_run_not_controllable', 409],
+    ] as const satisfies ReadonlyArray<readonly [StableTaskErrorCode, number]>;
+
+    for (const [code, statusCode] of cases) {
+      currentCode = code;
+      const response = await fixture.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: `command-${code}`,
+          command: {
+            type: 'project.run.start',
+            payload: {
+              projectId: 'p1',
+              concurrency: 1,
+              expectedPolicyRevision: 1,
+              expectedTasks: [],
+              actor: { type: 'human', id: 'operator-run' },
+            },
+          },
+        },
+      });
+
+      expect(response.statusCode).toBe(statusCode);
+      expect(response.json()).toEqual({
+        error: {
+          code,
+          message: `Project run failed with ${code}`,
+          details: { runId: 'run-1' },
+        },
+      });
+    }
   });
 
   it('maps a manual QA baseline without approved Git to service unavailable', async () => {
@@ -522,6 +604,144 @@ describe('HTTP command routes', () => {
     expect(first.json().warnings).toContainEqual(
       expect.objectContaining({ code: 'shared_workspace_collision' }),
     );
+  });
+
+  it('rejects manual session creation in an occupied Mesh worktree', async () => {
+    const fixture = setup({
+      createId: () => 'manual-session',
+      billingConflicts: [],
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+    const protectedPath = join(fixture.workspacePath, 'project-run-worktree');
+    fixture.repositories.workspaces.create({
+      id: id('run-workspace'),
+      projectId: id('p1'),
+      type: 'worktree',
+      path: protectedPath,
+      gitBranch: 'mesh/run/item',
+      gitWorktreePath: protectedPath,
+      owner: 'mesh',
+      cleanupState: 'pending',
+    });
+    fixture.repositories.sessions.create({
+      id: id('run-session'),
+      projectId: id('p1'),
+      workspaceId: id('run-workspace'),
+      title: 'Reserved run item',
+      permissionMode: 'safe_auto',
+      lifecycleState: 'idle',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'manual-create-protected',
+        command: {
+          type: 'session.create',
+          payload: {
+            projectId: 'p1',
+            workspaceId: 'run-workspace',
+            title: 'Unsafe manual session',
+            permissionMode: 'interactive',
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: { code: 'project_run_conflict' },
+    });
+    expect(fixture.repositories.sessions.get('manual-session')).toBeUndefined();
+    expect(fixture.driver.createdRequests).toHaveLength(0);
+  });
+
+  it('rejects resume through an alias of an occupied Mesh worktree', async () => {
+    const fixture = setup({ billingConflicts: [] });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+    fixture.repositories.events.append(
+      's1',
+      {
+        id: 'resume-protected-ready',
+        occurredAt: now,
+        type: 'session.status',
+        payload: { from: 'idle', to: 'interrupted' },
+      },
+      {
+        id: id('resume-protected-raw'),
+        sessionId: id('s1'),
+        capturedAt: now,
+        payload: {},
+      },
+      { lifecycleState: 'interrupted', claudeResumeId: 'claude-1' },
+    );
+    const protectedPath = join(fixture.workspacePath, 'project-run-worktree');
+    fixture.repositories.workspaces.create({
+      id: id('run-workspace'),
+      projectId: id('p1'),
+      type: 'worktree',
+      path: protectedPath,
+      gitBranch: 'mesh/run/item',
+      gitWorktreePath: protectedPath,
+      owner: 'mesh',
+      cleanupState: 'active',
+    });
+    fixture.repositories.workspaces.create({
+      id: id('run-alias'),
+      projectId: id('p1'),
+      type: 'shared',
+      path: protectedPath,
+      cleanupState: 'active',
+    });
+    fixture.repositories.sessions.create({
+      id: id('run-session'),
+      projectId: id('p1'),
+      workspaceId: id('run-workspace'),
+      title: 'Active run item',
+      permissionMode: 'safe_auto',
+      lifecycleState: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'resume-protected',
+        command: {
+          type: 'session.resume',
+          payload: {
+            sessionId: 's1',
+            workspaceId: 'run-alias',
+            permissionMode: 'safe_auto',
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: { code: 'project_run_conflict' },
+    });
+    expect(fixture.repositories.sessions.get('s1')).toMatchObject({
+      workspaceId: 'w1',
+      permissionMode: 'interactive',
+    });
+    expect(fixture.driver.resumedRequests).toHaveLength(0);
   });
 
   it('resumes only from a stored Claude ID and refuses a second live-driver attachment', async () => {
@@ -978,7 +1198,7 @@ describe('HTTP command routes', () => {
   });
 
   it('returns only the selected project records and its latest event cursor', async () => {
-    const fixture = setup();
+    const fixture = setup({ projectRunMaxConcurrency: 6 });
     cleanups.push(async () => {
       await fixture.app.close();
       fixture.repositories.dispose();
@@ -1028,6 +1248,20 @@ describe('HTTP command routes', () => {
       });
     const selectedTask = fixture.repositories.tasks.create(task('t1', 'p1'));
     const otherTask = fixture.repositories.tasks.create(task('t2', 'p2'));
+    fixture.repositories.projectRuns.create({
+      id: 'run-p1',
+      projectId: 'p1',
+      concurrency: 2,
+      startedAt: now,
+      items: [],
+    });
+    fixture.repositories.projectRuns.create({
+      id: 'run-p2',
+      projectId: 'p2',
+      concurrency: 1,
+      startedAt: now,
+      items: [],
+    });
     const actor = { type: 'human' as const, id: id('human-1') };
     fixture.repositories.attempts.create(
       taskAttemptSchema.parse({
@@ -1112,11 +1346,14 @@ describe('HTTP command routes', () => {
       attempts: [{ id: 'a1', taskId: 't1' }],
       transitions: [{ id: 'transition-1', taskId: 't1' }],
       repairs: [],
+      runs: [{ id: 'run-p1', projectId: 'p1' }],
+      projectRunLimits: { maxConcurrency: 6 },
       cursor: 2,
     });
     expect(JSON.stringify(snapshot.json())).not.toContain('t2');
     expect(JSON.stringify(snapshot.json())).not.toContain('a2');
     expect(JSON.stringify(snapshot.json())).not.toContain('transition-2');
+    expect(JSON.stringify(snapshot.json())).not.toContain('run-p2');
     expect(history.statusCode).toBe(200);
     expect(history.json()).toMatchObject({
       projectId: 'p1',

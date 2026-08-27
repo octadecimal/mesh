@@ -130,6 +130,26 @@ describe('SessionRegistry Developer attachment', () => {
     },
   });
 
+  const seedProtectedWorkspace = (
+    repositories: ReturnType<typeof createTestRepositories>,
+    id = 'protected-worktree',
+  ): string => {
+    const path = 'C:/code/project-1/.mesh-project-runs/item';
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id,
+        projectId: 'project-1',
+        type: 'worktree',
+        path,
+        gitBranch: 'mesh/run/item',
+        gitWorktreePath: path,
+        owner: 'mesh',
+        cleanupState: 'active',
+      }),
+    );
+    return id;
+  };
+
   it('passes Developer configuration only to the requested create and resume attaches', async () => {
     const repositories = createTestRepositories();
     const driver = new FakeClaudeSessionDriver();
@@ -165,6 +185,487 @@ describe('SessionRegistry Developer attachment', () => {
       permissionMode: 'safe_auto',
       developer: configuration,
     });
+  });
+
+  it('keeps resume configuration unchanged when a Mesh worktree is occupied', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    const tripAuditBarrier = vi.spyOn(
+      registry as unknown as {
+        tripAuditBarrier(error: unknown): void;
+      },
+      'tripAuditBarrier',
+    );
+    seed(repositories, 'resume-protected', 'interrupted');
+    const protectedPath = 'C:/code/project-1/.mesh-project-runs/item';
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'protected-worktree',
+        projectId: 'project-1',
+        type: 'worktree',
+        path: protectedPath,
+        gitBranch: 'mesh/run/item',
+        gitWorktreePath: protectedPath,
+        owner: 'mesh',
+        cleanupState: 'active',
+      }),
+    );
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'protected-alias',
+        projectId: 'project-1',
+        type: 'shared',
+        path: protectedPath,
+        cleanupState: 'active',
+      }),
+    );
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'protected-occupant',
+        projectId: 'project-1',
+        workspaceId: 'protected-worktree',
+        title: 'Protected occupant',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+
+    await expect(
+      registry.resume('resume-protected', {
+        workspaceId: 'protected-alias',
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toMatchObject({ code: 'project_run_conflict' });
+
+    expect(repositories.sessions.get('resume-protected')).toMatchObject({
+      workspaceId: 'workspace-1',
+      permissionMode: 'interactive',
+    });
+    expect(driver.resumedRequests).toHaveLength(0);
+    expect(registry.auditStatus).toBe('available');
+    expect(tripAuditBarrier).not.toHaveBeenCalled();
+  });
+
+  it('trips the audit barrier once when resume reservation commit fails', async () => {
+    const repositories = createTestRepositories();
+    const commitFailure = new Error('resume reservation commit failed');
+    let failCommit = false;
+    let commitAttempts = 0;
+    let rollbackCalls = 0;
+    const database = new Proxy(repositories.database, {
+      get(target, property, receiver) {
+        if (property === 'exec') {
+          return (sql: string) => {
+            if (sql === 'COMMIT') {
+              commitAttempts += 1;
+              if (failCommit) {
+                failCommit = false;
+                throw commitFailure;
+              }
+            }
+            if (sql === 'ROLLBACK') rollbackCalls += 1;
+            return target.exec(sql);
+          };
+        }
+        if (property === 'prepare') return target.prepare.bind(target);
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const driver = new FakeClaudeSessionDriver();
+    const invalidated: string[] = [];
+    const registry = new SessionRegistry({
+      ...repositories,
+      database,
+      driver,
+      invalidateDeveloperCapability: (sessionId) => invalidated.push(sessionId),
+      closeDatabase: () => undefined,
+    });
+    const tripAuditBarrier = vi.spyOn(
+      registry as unknown as {
+        tripAuditBarrier(error: unknown): void;
+      },
+      'tripAuditBarrier',
+    );
+    seed(repositories, 'active-during-commit-failure');
+    seed(repositories, 'commit-failed-resume', 'interrupted');
+    const workspaceId = seedProtectedWorkspace(repositories);
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    await registry.create('active-during-commit-failure');
+    failCommit = true;
+
+    await expect(
+      registry.resume('commit-failed-resume', {
+        workspaceId,
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toBe(commitFailure);
+
+    expect(commitAttempts).toBe(1);
+    expect(rollbackCalls).toBe(1);
+    expect(tripAuditBarrier).toHaveBeenCalledOnce();
+    expect(tripAuditBarrier).toHaveBeenCalledWith(commitFailure);
+    expect(registry.auditStatus).toBe('audit_unavailable');
+    expect(repositories.sessions.get('commit-failed-resume')).toMatchObject({
+      workspaceId: 'workspace-1',
+      permissionMode: 'interactive',
+      lifecycleState: 'interrupted',
+    });
+    expect(repositories.events.after('commit-failed-resume', 0)).toEqual([]);
+    expect(repositories.diagnostics.list('commit-failed-resume')).toEqual([]);
+    expect(driver.resumedRequests).toHaveLength(0);
+    expect(invalidated).toContain('active-during-commit-failure');
+    await vi.waitFor(() =>
+      expect(driver.createdSessions[0]?.interrupted).toBe(true),
+    );
+    await expect(
+      registry.sendPrompt('active-during-commit-failure', 'blocked'),
+    ).rejects.toMatchObject({ code: 'audit_unavailable' });
+    await expect(
+      registry.resume('commit-failed-resume', {
+        workspaceId,
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toMatchObject({ code: 'audit_unavailable' });
+  });
+
+  it('durably reserves protected occupancy while driver resume is pending', async () => {
+    const repositories = createTestRepositories();
+    const pendingDriver = deferred<DriverSession>();
+    let resumeCalls = 0;
+    const driver: ClaudeSessionDriver = {
+      discover: async () => [],
+      create: async () => new FakeDriverSession('unused'),
+      resume: async () => {
+        resumeCalls += 1;
+        return resumeCalls === 1
+          ? pendingDriver.promise
+          : new ControlledDriverSession('unexpected-second-resume');
+      },
+    };
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'first-resume', 'interrupted');
+    seed(repositories, 'second-resume', 'interrupted');
+    const workspaceId = seedProtectedWorkspace(repositories);
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+
+    const firstResume = registry.resume('first-resume', {
+      workspaceId,
+      permissionMode: 'safe_auto',
+    });
+    await vi.waitFor(() => expect(resumeCalls).toBe(1));
+    const stateWhileDriverIsPending =
+      repositories.sessions.get('first-resume')?.lifecycleState;
+    const secondResult = await registry
+      .resume('second-resume', {
+        workspaceId,
+        permissionMode: 'safe_auto',
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    pendingDriver.resolve(new ControlledDriverSession('first-resumed-driver'));
+    await firstResume;
+
+    expect(stateWhileDriverIsPending).toBe('starting');
+    expect(secondResult).toMatchObject({ code: 'project_run_conflict' });
+    expect(resumeCalls).toBe(1);
+    expect(repositories.sessions.get('first-resume')?.lifecycleState).toBe(
+      'running',
+    );
+  });
+
+  it('records driver resume failure and permits a truthful retry', async () => {
+    const repositories = createTestRepositories();
+    let resumeCalls = 0;
+    const driver: ClaudeSessionDriver = {
+      discover: async () => [],
+      create: async () => new FakeDriverSession('unused'),
+      resume: async () => {
+        resumeCalls += 1;
+        if (resumeCalls === 1) throw new Error('resume driver unavailable');
+        return new ControlledDriverSession('recovered-resume');
+      },
+    };
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'failed-resume', 'interrupted');
+    const workspaceId = seedProtectedWorkspace(repositories);
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+
+    await expect(
+      registry.resume('failed-resume', {
+        workspaceId,
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toThrow('resume driver unavailable');
+
+    expect(repositories.sessions.get('failed-resume')?.lifecycleState).toBe(
+      'failed',
+    );
+    expect(repositories.events.after('failed-resume', 0)).toMatchObject([
+      {
+        sequence: 1,
+        type: 'session.status',
+        payload: { from: 'interrupted', to: 'starting' },
+      },
+      {
+        sequence: 2,
+        type: 'session.error',
+        payload: {
+          code: 'driver_resume_failed',
+          message: 'resume driver unavailable',
+        },
+      },
+      {
+        sequence: 3,
+        type: 'session.status',
+        payload: {
+          from: 'starting',
+          to: 'failed',
+          reason: 'driver_resume_failed',
+        },
+      },
+    ]);
+    expect(repositories.diagnostics.list('failed-resume')).toHaveLength(3);
+
+    await registry.resume('failed-resume', {
+      workspaceId,
+      permissionMode: 'safe_auto',
+    });
+
+    expect(resumeCalls).toBe(2);
+    expect(repositories.sessions.get('failed-resume')?.lifecycleState).toBe(
+      'running',
+    );
+  });
+
+  it('fails closed when the durable resume reservation cannot be audited', async () => {
+    const repositories = createTestRepositories({ failDiagnosticInsert: true });
+    const driver = new FakeClaudeSessionDriver();
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'resume-audit-failure', 'interrupted');
+    const workspaceId = seedProtectedWorkspace(repositories);
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+
+    await expect(
+      registry.resume('resume-audit-failure', {
+        workspaceId,
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toBeDefined();
+
+    expect(registry.auditStatus).toBe('audit_unavailable');
+    expect(repositories.sessions.get('resume-audit-failure')).toMatchObject({
+      workspaceId: 'workspace-1',
+      permissionMode: 'interactive',
+      lifecycleState: 'interrupted',
+    });
+    expect(driver.resumedRequests).toHaveLength(0);
+  });
+
+  it('releases a cancelled resume reservation after the driver settles', async () => {
+    const repositories = createTestRepositories();
+    const pendingDriver = deferred<DriverSession>();
+    const driver: ClaudeSessionDriver = {
+      discover: async () => [],
+      create: async () => new FakeDriverSession('unused'),
+      resume: async () => pendingDriver.promise,
+    };
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'cancelled-resume', 'interrupted');
+    const workspaceId = seedProtectedWorkspace(repositories);
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    const resumed = registry.resume('cancelled-resume', {
+      workspaceId,
+      permissionMode: 'safe_auto',
+    });
+    const rejection = resumed.catch((error: unknown) => error);
+    await vi.waitFor(() =>
+      expect(
+        repositories.sessions.get('cancelled-resume')?.lifecycleState,
+      ).toBe('starting'),
+    );
+
+    await registry.interrupt('cancelled-resume');
+    const session = new ControlledDriverSession('cancelled-driver');
+    pendingDriver.resolve(session);
+
+    await expect(rejection).resolves.toMatchObject({
+      code: 'invalid_session_state',
+      trigger: 'interrupt',
+    });
+    expect(session.interrupted).toBe(true);
+    expect(session.closed).toBe(true);
+    expect(repositories.sessions.get('cancelled-resume')?.lifecycleState).toBe(
+      'interrupted',
+    );
+    expect(
+      repositories.events.after('cancelled-resume', 0).slice(-2),
+    ).toMatchObject([
+      {
+        type: 'session.status',
+        payload: {
+          from: 'starting',
+          to: 'interrupting',
+        },
+      },
+      {
+        type: 'session.status',
+        payload: {
+          from: 'interrupting',
+          to: 'interrupted',
+          reason: 'resume_interrupt',
+        },
+      },
+    ]);
+  });
+
+  it('resumes its own stopped session in a protected workspace', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'own-protected-resume', 'interrupted');
+    const workspaceId = seedProtectedWorkspace(repositories);
+    repositories.sessions.configureResume(
+      'own-protected-resume',
+      workspaceId,
+      'safe_auto',
+    );
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+
+    await registry.resume('own-protected-resume', {
+      workspaceId,
+      permissionMode: 'safe_auto',
+    });
+
+    expect(driver.resumedRequests).toHaveLength(1);
+    expect(
+      repositories.sessions.get('own-protected-resume')?.lifecycleState,
+    ).toBe('running');
+  });
+
+  it('keeps resume configuration unchanged when attachment is already live', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'resume-live');
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-2',
+        projectId: 'project-1',
+        type: 'shared',
+        path: 'C:/code/project-1/alternate',
+        cleanupState: 'active',
+      }),
+    );
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    await registry.create('resume-live');
+
+    await expect(
+      registry.resume('resume-live', {
+        workspaceId: 'workspace-2',
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_session_state' });
+
+    expect(repositories.sessions.get('resume-live')).toMatchObject({
+      workspaceId: 'workspace-1',
+      permissionMode: 'interactive',
+    });
+    expect(driver.resumedRequests).toHaveLength(0);
+  });
+
+  it('keeps resume configuration unchanged without a Claude resume id', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'resume-missing-id');
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-2',
+        projectId: 'project-1',
+        type: 'shared',
+        path: 'C:/code/project-1/alternate',
+        cleanupState: 'active',
+      }),
+    );
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+
+    await expect(
+      registry.resume('resume-missing-id', {
+        workspaceId: 'workspace-2',
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_session_state' });
+
+    expect(repositories.sessions.get('resume-missing-id')).toMatchObject({
+      workspaceId: 'workspace-1',
+      permissionMode: 'interactive',
+    });
+    expect(driver.resumedRequests).toHaveLength(0);
   });
 
   it('passes QA role configuration without populating Developer controls', async () => {

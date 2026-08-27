@@ -81,6 +81,8 @@ const refreshedProjectSnapshot = {
   attempts: [],
   transitions: [],
   repairs: [],
+  runs: [],
+  projectRunLimits: { maxConcurrency: 1 },
   cursor: 3,
 } satisfies ProjectSnapshot;
 
@@ -107,6 +109,30 @@ const nextProjectEvent: ProjectEvent = {
       revision: 1,
       createdAt: '2026-08-24T00:00:00.000Z',
       updatedAt: '2026-08-24T00:00:00.000Z',
+    },
+  },
+};
+
+const projectRunChangedEvent: ProjectEvent = {
+  protocolVersion: 1,
+  id: 'project-run-event-4',
+  projectId: project.id,
+  sequence: 4,
+  occurredAt: '2026-08-24T00:00:00.000Z',
+  type: 'project.run_changed',
+  payload: {
+    run: {
+      id: 'run-1',
+      projectId: project.id,
+      revision: 1,
+      concurrency: 2,
+      state: 'running',
+      pauseReason: null,
+      completionReason: null,
+      startedAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:00:00.000Z',
+      completedAt: null,
+      items: [],
     },
   },
 };
@@ -155,6 +181,67 @@ describe('MeshSocket', () => {
     });
     expect(messages).toEqual([healthMessage]);
     expect(diagnostics).toHaveLength(1);
+    socket.close();
+  });
+
+  it('delivers complete run events and reports malformed run state as an invalid payload', () => {
+    const messages: ServerMessage[] = [];
+    const diagnostics: string[] = [];
+    const socket = new MeshSocket({
+      url: 'ws://mesh.test/api/realtime',
+      webSocket: (url) => new FakeSocket(url) as unknown as WebSocket,
+      cursors: () => ({}),
+      onMessage: (message) => messages.push(message),
+      onDiagnostic: (message) => diagnostics.push(message),
+    });
+
+    socket.connect();
+    const connection = FakeSocket.instances[0];
+    connection.open();
+    connection.receive({
+      protocolVersion: 1,
+      type: 'project.event',
+      payload: { event: projectRunChangedEvent },
+    });
+    connection.receive({
+      protocolVersion: 1,
+      type: 'project.event',
+      payload: {
+        event: {
+          ...projectRunChangedEvent,
+          payload: {
+            run: { ...projectRunChangedEvent.payload.run, state: 'unknown' },
+          },
+        },
+      },
+    });
+    connection.receive({
+      protocolVersion: 1,
+      type: 'project.event',
+      payload: {
+        event: {
+          ...projectRunChangedEvent,
+          payload: {
+            run: {
+              ...projectRunChangedEvent.payload.run,
+              projectId: otherProject.id,
+            },
+          },
+        },
+      },
+    });
+
+    expect(messages).toEqual([
+      {
+        protocolVersion: 1,
+        type: 'project.event',
+        payload: { event: projectRunChangedEvent },
+      },
+    ]);
+    expect(diagnostics).toEqual([
+      'Mesh socket received an invalid server payload.',
+      'Mesh socket received an invalid server payload.',
+    ]);
     socket.close();
   });
 

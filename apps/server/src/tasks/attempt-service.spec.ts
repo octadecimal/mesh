@@ -62,6 +62,10 @@ describe('AttemptService', () => {
       taskId: string;
       cycleId: string;
     }) => Promise<void>;
+    afterDeveloperBlocked?: (input: {
+      taskId: string;
+      cycleId: string;
+    }) => Promise<void>;
     resolveIdentity?: RepositoryIdentityResolver;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-attempt-service-'));
@@ -96,6 +100,7 @@ describe('AttemptService', () => {
       capabilities,
       developerExecutionService,
       afterDeveloperSubmission: options?.afterDeveloperSubmission,
+      afterDeveloperBlocked: options?.afterDeveloperBlocked,
       registry: {
         resume: (sessionId, configuration, developer) =>
           registry.resume(sessionId, configuration, developer),
@@ -458,6 +463,347 @@ describe('AttemptService', () => {
         .after('project-1', 0)
         .map((event) => event.type),
     ).toEqual(['task.attempt_changed', 'task.transitioned']);
+  });
+
+  it('binds a project-run launch to an internally derived system actor and durable source', async () => {
+    const { directory, repositories, service } = setup();
+    seedTask(repositories);
+    const run = repositories.projectRuns.create({
+      id: 'run-1',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-1',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+
+    const result = await service.launchAttempt({
+      launchIdempotencyKey: 'run-1:item-1:launch',
+      source: {
+        type: 'project_run',
+        runId: 'run-1',
+        runItemId: 'item-1',
+      },
+      taskId: 'task-1',
+      expectedRevision: 1,
+      title: 'Implement attempt launch',
+      permissionMode: 'safe_auto',
+      workspace: { type: 'shared', path: directory },
+    });
+
+    expect(result.attempt).toMatchObject({
+      source: { type: 'project_run', runId: 'run-1', runItemId: 'item-1' },
+      actor: { type: 'system', id: 'project-run:run-1:item-1' },
+      role: 'developer',
+    });
+    expect(result.cycle?.authorizedBy).toEqual(result.attempt.actor);
+    expect(repositories.attempts.listByTask('task-1')[0]?.source).toEqual(
+      result.attempt.source,
+    );
+  });
+
+  it('rejects project-run ownership that does not match the durable claim', async () => {
+    const { directory, driver, repositories, service } = setup();
+    seedTask(repositories);
+    const run = repositories.projectRuns.create({
+      id: 'run-1',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-1',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+
+    await expect(
+      service.launchAttempt({
+        launchIdempotencyKey: 'run-1:item-1:launch',
+        source: {
+          type: 'project_run',
+          runId: 'run-1',
+          runItemId: 'forged-item',
+        },
+        taskId: 'task-1',
+        expectedRevision: 1,
+        title: 'Forged launch',
+        permissionMode: 'safe_auto',
+        workspace: { type: 'shared', path: directory },
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_command' });
+    expect(repositories.attempts.listByTask('task-1')).toEqual([]);
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
+  });
+
+  it('rejects a project-run launch after a manual link wins the race', async () => {
+    const { directory, driver, repositories, service } = setup();
+    seedTask(repositories);
+    seedSession(repositories);
+    await service.link({
+      commandId: 'manual-link-race',
+      taskId: 'task-1',
+      expectedRevision: 1,
+      sessionId: 'session-1',
+      actor,
+    });
+    const run = repositories.projectRuns.create({
+      id: 'run-1',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-1',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+    await expect(
+      service.launchAttempt({
+        launchIdempotencyKey: 'run-1:item-1:launch',
+        source: { type: 'project_run', runId: 'run-1', runItemId: 'item-1' },
+        taskId: 'task-1',
+        expectedRevision: 1,
+        title: 'Project run launch',
+        permissionMode: 'safe_auto',
+        workspace: { type: 'shared', path: directory },
+      }),
+    ).rejects.toMatchObject({ code: 'task_revision_conflict' });
+    expect(repositories.attempts.listByTask('task-1')).toHaveLength(1);
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
+  });
+
+  it('rejects a manual link after a project-run launch reserves the task', async () => {
+    let releaseIdentity!: () => void;
+    const identityGate = new Promise<void>((resolve) => {
+      releaseIdentity = resolve;
+    });
+    const identityEntered = vi.fn();
+    let identityCalls = 0;
+    const { directory, repositories, service } = setup({
+      resolveIdentity: async (path) => {
+        identityEntered(path);
+        identityCalls += 1;
+        if (identityCalls === 1) await identityGate;
+        return {
+          canonicalPath: path,
+          commonDirectory: path,
+          repositoryIdentity: directory,
+        } as RepositoryIdentity;
+      },
+    });
+    seedTask(repositories);
+    const run = repositories.projectRuns.create({
+      id: 'run-1',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-1',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+    seedSession(repositories);
+
+    const launching = service.launchAttempt({
+      launchIdempotencyKey: 'run-1:item-1:launch',
+      source: { type: 'project_run', runId: 'run-1', runItemId: 'item-1' },
+      taskId: 'task-1',
+      expectedRevision: 1,
+      title: 'Project run launch',
+      permissionMode: 'safe_auto',
+      workspace: { type: 'shared', path: directory },
+    });
+    await vi.waitFor(() => expect(identityEntered).toHaveBeenCalled());
+
+    try {
+      await expect(
+        service.link({
+          commandId: 'manual-link-race',
+          taskId: 'task-1',
+          expectedRevision: 1,
+          sessionId: 'session-1',
+          actor,
+        }),
+      ).rejects.toMatchObject({ code: 'task_revision_conflict' });
+    } finally {
+      releaseIdentity();
+    }
+
+    await expect(launching).resolves.toMatchObject({
+      attempt: {
+        source: { type: 'project_run', runId: 'run-1', runItemId: 'item-1' },
+      },
+    });
+    expect(repositories.attempts.listByTask('task-1')).toHaveLength(1);
+  });
+
+  it('rejects a manual link while an open run item owns the task', async () => {
+    const { repositories, service } = setup();
+    seedTask(repositories);
+    const run = repositories.projectRuns.create({
+      id: 'run-1',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-1',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+    seedSession(repositories);
+
+    await expect(
+      service.link({
+        commandId: 'manual-link-open-run-item',
+        taskId: 'task-1',
+        expectedRevision: 1,
+        sessionId: 'session-1',
+        actor,
+      }),
+    ).rejects.toMatchObject({ code: 'task_revision_conflict' });
+    expect(repositories.attempts.listByTask('task-1')).toEqual([]);
+  });
+
+  it('atomically rejects a project-run worktree path occupied by a live session', async () => {
+    const createWorktree = vi.fn(async () => ({ created: true as const }));
+    const { directory, repositories, service } = setup({
+      git: { createWorktree },
+    });
+    seedTask(repositories);
+    const occupiedPath = join(directory, 'occupied-worktree');
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'occupied-workspace',
+        projectId: 'project-1',
+        type: 'worktree',
+        path: occupiedPath,
+        gitBranch: 'occupied',
+        gitWorktreePath: occupiedPath,
+        owner: 'mesh',
+        cleanupState: 'active',
+      }),
+    );
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'occupied-session',
+        projectId: 'project-1',
+        workspaceId: 'occupied-workspace',
+        title: 'Occupied session',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const run = repositories.projectRuns.create({
+      id: 'run-1',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-1',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+
+    await expect(
+      service.launchAttempt({
+        launchIdempotencyKey: 'run-1:item-1:launch',
+        source: { type: 'project_run', runId: 'run-1', runItemId: 'item-1' },
+        taskId: 'task-1',
+        expectedRevision: 1,
+        title: 'Collision proof',
+        permissionMode: 'safe_auto',
+        workspace: {
+          type: 'worktree',
+          repositoryPath: directory,
+          path: occupiedPath,
+          branch: 'mesh/collision',
+          startPoint: 'HEAD',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'project_run_conflict' });
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(repositories.workspaces.listByProject('project-1')).toHaveLength(1);
   });
 
   it('resumes the same Developer attempt with immutable feedback and current snapshots', async () => {
@@ -1287,11 +1633,13 @@ describe('AttemptService', () => {
 
   it('keeps mark-blocked durable when runtime interruption fails', async () => {
     const emergencyClose = vi.fn(async () => undefined);
+    const afterDeveloperBlocked = vi.fn(async () => undefined);
     const { directory, driver, repositories, service } = setup({
       terminalInterrupt: async () => {
         throw new Error('interrupt failed');
       },
       emergencyClose,
+      afterDeveloperBlocked,
     });
     seedTask(repositories);
     const launched = await service.launchDeveloper(
@@ -1315,6 +1663,10 @@ describe('AttemptService', () => {
       blocked: { reason: 'A dependency is missing.' },
     });
     expect(emergencyClose).toHaveBeenCalledWith(session.id);
+    expect(afterDeveloperBlocked).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      cycleId: cycle.id,
+    });
     expect(repositories.diagnostics.list(session.id)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1572,6 +1924,78 @@ describe('AttemptService', () => {
         }),
       }),
     );
+  });
+
+  it('surfaces a trigger-based project-run attempt audit failure as audit unavailable', async () => {
+    const createWorktree = vi.fn(async () => ({ created: true as const }));
+    const { directory, driver, repositories, service } = setup({
+      git: { createWorktree },
+    });
+    seedTask(repositories);
+    const run = repositories.projectRuns.create({
+      id: 'run-attempt-audit',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-attempt-audit',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-attempt-audit:task-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+    repositories.database.exec(`
+      CREATE TRIGGER fail_project_run_attempt_audit
+      BEFORE INSERT ON project_events
+      WHEN NEW.type = 'task.developer_execution_changed'
+      BEGIN
+        SELECT RAISE(FAIL, 'project run attempt audit failed');
+      END;
+    `);
+
+    await expect(
+      service.launchAttempt({
+        launchIdempotencyKey: 'run-attempt-audit:task-1:launch',
+        source: {
+          type: 'project_run',
+          runId: 'run-attempt-audit',
+          runItemId: 'item-attempt-audit',
+        },
+        taskId: 'task-1',
+        expectedRevision: 1,
+        title: 'Project run audit trigger',
+        permissionMode: 'safe_auto',
+        workspace: {
+          type: 'worktree',
+          repositoryPath: directory,
+          path: join(directory, 'project-run-audit-worktree'),
+          branch: 'mesh/project-run-audit',
+          startPoint: 'HEAD',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'audit_unavailable',
+      cause: expect.objectContaining({
+        message: 'project run attempt audit failed',
+      }),
+    });
+    expect(createWorktree).toHaveBeenCalledOnce();
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
+    expect(repositories.attempts.listByTask('task-1')).toEqual([]);
+    expect(repositories.workspaces.listByProject('project-1')).toEqual([
+      expect.objectContaining({ owner: 'mesh', cleanupState: 'pending' }),
+    ]);
   });
 
   it.each([

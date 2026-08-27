@@ -39,6 +39,8 @@ describe('loadServerConfig', () => {
         'mesh.sqlite',
       ),
       developmentOrigin: undefined,
+      gitExecutable: undefined,
+      projectRunMaxConcurrency: 4,
       webRoot: undefined,
     });
   });

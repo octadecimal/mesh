@@ -16,6 +16,7 @@ import {
   selectTaskTransitions,
   type BoardColumn,
 } from '../state/selectors';
+import { ProjectRunPanel } from './ProjectRunPanel';
 import { TaskCard } from './TaskCard';
 import { TaskDrawer } from './TaskDrawer';
 
@@ -141,6 +142,12 @@ export function TaskBoard({
       ? selectedDrawerTask
       : undefined;
   const creatingTaskForProject = creatingTask && drawerProjectId === project.id;
+  const selectTask = (taskId: string) => {
+    setCreatingTask(false);
+    setDrawerTaskId(taskId);
+    setDrawerProjectId(project.id);
+    onSelectTask?.(taskId);
+  };
   const drawerAttempts = drawerTask
     ? selectTaskAttempts(projection, drawerTask.id)
     : [];
@@ -342,12 +349,6 @@ export function TaskBoard({
           ? rankBefore(orderedTasks[0].rank)
           : undefined;
     const nextRank = orderedTasks[index + 1]?.rank;
-    const selectTask = (taskId: string) => {
-      setCreatingTask(false);
-      setDrawerTaskId(taskId);
-      setDrawerProjectId(project.id);
-      onSelectTask?.(taskId);
-    };
     return (
       <TaskCard
         key={task.id}
@@ -391,6 +392,17 @@ export function TaskBoard({
 
   return (
     <>
+      <ProjectRunPanel
+        key={project.id}
+        project={project}
+        projection={projection}
+        connected={connected}
+        maxConcurrency={
+          projection.projectRunMaxConcurrencyByProjectId[project.id]
+        }
+        onCommand={onCommand}
+        onSelectTask={selectTask}
+      />
       <div
         className="task-board"
         data-read-only={readOnly ? 'true' : undefined}

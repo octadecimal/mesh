@@ -54,6 +54,79 @@ do not delete history or guess the missing outcome. Inspect the task, attempt,
 session diagnostics, and preserved workspace before choosing a human recovery
 action.
 
+### Finite project runs
+
+Use **Start run** to authorize the current ordered set of eligible ready tasks.
+Inspect the preview first: authorization sends the previewed task ids and
+revisions as `expectedTasks`, together with the displayed project QA policy
+revision and every task's review-automation status and generation. A task edit,
+reorder, policy change, or automation change makes the command stale instead of
+silently changing the run. Choose bounded concurrency and confirm that the run
+may consume Claude subscription capacity. Membership and order are then frozen;
+tasks created or made ready later wait for a future run. Before each queued item
+launches, Mesh compares that frozen authorization with current policy and
+automation truth. A mismatch terminalizes only that item as attention required
+without creating an attempt.
+
+Start, resume, and each new claim preflight the shared billing environment and
+resolve the project's authoritative repository identity before authorizing or
+claiming work. The approved Git executable enumerates the complete registered
+worktree set and resolves `HEAD` to a commit. A billing conflict, an
+unsafe/mismatched or incomplete repository topology, or an unborn `HEAD`
+rejects Start before the workspace root or run is created. Resume and restart
+drain keep the existing run paused with `billing_conflict` or
+`repository_unsafe` so the operator can repair the condition without losing the
+frozen queue.
+
+Each run item launches in a deterministic Mesh-owned Git worktree beneath the
+configured base directory's `.mesh-project-runs` folder. The run and item ids
+give every Developer/QA chain a distinct branch and path, so concurrent items
+do not edit the imported repository or one another's files. Before Git worktree
+creation, an immediate reservation transaction checks the resolved path for
+live occupancy and commits a pending workspace plus idle session. Mesh then
+creates the filesystem worktree. A second immediate transaction activates the
+reservation and creates the attempt, execution cycle, and audit history. If Git
+or the second transaction fails, Mesh preserves the reservation or worktree for
+reconciliation instead of claiming atomicity across SQLite and the filesystem.
+
+Project-run reservation fails closed on any live session already using its
+planned path. In the reverse direction, manual create and resume fail closed
+before placing a second live session at a path backed by a pending or active
+Mesh-owned worktree, even when the selected workspace is a shared alias.
+Ordinary shared-folder overlap remains warning-only. Resume performs that
+occupancy check, applies the selected workspace and permission, and durably
+records the legal transition to live `starting` state in one immediate
+transaction. The transaction commits before Mesh calls the driver, so another
+create or resume observes the reservation while driver resume is pending. A
+known driver-resume rejection records ordered diagnostics and transitions the
+session to `failed`; the same session can then retry through the normal resume
+path. A cancelled pending resume keeps its live reservation until the driver
+settles and is closed, then durably transitions through `interrupting` to
+`interrupted`. The configured project-run root must be outside, and not equal
+to, every worktree registered to the project's Git common directory. If
+`.mesh-project-runs` would be nested inside any associated worktree, preflight
+reports `repository_unsafe` before root creation, authorization, resume, or
+claiming; set `MESH_WORKSPACE_ROOT` to a safe parent directory.
+
+`launch_pending` and `active` items both occupy capacity. Completed autonomous
+review releases a slot as completed. Manual review, disabled per-task
+automation, a Developer blocker, the rejection ceiling, and paused review
+automation release a slot as attention required, allowing later queued work to
+progress. These attention states require an operator decision outside the
+finite run; the run does not retry or invent a resolution.
+
+**Pause run** durably records `operator_paused` and prevents new launches while
+current launches and sessions settle. While paused, reconciliation continues to
+repair and observe `launch_pending` and `active` items, but never claims queued
+items. Refresh or backend restart preserves the run id, frozen queue, item
+results, and pause reason. **Resume run** continues that same queue after
+reviewing the reason. **Stop run** marks queued items not started, launches no
+replacements, drains already occupied items, and preserves the completed
+stopped run in project history. A restart ambiguity or an unexpected extra
+current attempt instead pauses with an explicit reason such as
+`launch_outcome_unknown`; inspect the attempts, diagnostics, and workspaces
+before resuming.
+
 ## Developer execution workflow
 
 Configure **Developer instructions** on the project before starting work. The
@@ -239,6 +312,11 @@ starts it. Enabled autonomous review may consume quota for each automatic QA
 start and each Developer resume; the explicit consent, rejection ceiling, and
 pause control bound that behavior.
 
+A finite project run can start several Developer sessions up to its confirmed
+concurrency and can also trigger autonomous QA or Developer rework. The start
+dialog therefore requires a separate capacity confirmation. Pause and Stop
+bound future launches; they do not erase subscription work already started.
+
 Multiple live sessions that share a folder can modify the same files. Mesh warns about this collision; prefer an isolated worktree when sessions may overlap. Mesh-created worktrees are preserved on archive and on failed or ambiguous cleanup. Deletion removes one only after explicit confirmation and ownership/path checks; otherwise remove or preserve it manually with Git after inspecting its changes.
 
 On backend shutdown, live sessions are interrupted before the database closes. If a process stops without completing that sequence, the next start records a durable `backend_restart` transition from the previous live state to `interrupted`. Closing a panel or browser does not stop its backend session.
@@ -258,7 +336,11 @@ repositories, and an in-process fake Claude driver available only under
 explicit test configuration. It covers explicit import, task launch and failure
 retention, manual QA, bounded autonomous rejection/rework, verified completion,
 and refresh recovery without contacting Claude or consuming Claude subscription
-quota. Failure traces and screenshots are retained under
+quota. The finite-run acceptance path additionally proves concurrency two,
+autonomous completion, manual and blocker attention, later queue progress,
+Pause/Resume, browser refresh, backend restart, Stop/drain, durable history, and
+an absent API-billing environment. It uses only the fake driver, a temporary Git
+repository, and a temporary SQLite database. Failure traces and screenshots are retained under
 `tmp/playwright/session-platform`.
 
 Windows Chromium is the required acceptance environment. The same test suite is the portable basis for future macOS/Linux matrix entries.

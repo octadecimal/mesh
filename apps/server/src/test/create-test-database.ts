@@ -10,6 +10,7 @@ import { DeveloperExecutionRepository } from '../repositories/developer-executio
 import { EventRepository } from '../repositories/event-repository.js';
 import { LayoutRepository } from '../repositories/layout-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
+import { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import { SessionRepository } from '../repositories/session-repository.js';
 import { ProjectEventRepository } from '../repositories/project-event-repository.js';
@@ -75,6 +76,7 @@ export const createTestRepositories = (options?: {
     path,
     database,
     projects: new ProjectRepository(database),
+    projectRuns: new ProjectRunRepository(database),
     tasks: new TaskRepository(database),
     attempts: new TaskAttemptRepository(database),
     developerExecutions: new DeveloperExecutionRepository(database),

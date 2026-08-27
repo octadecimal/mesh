@@ -167,7 +167,9 @@ describe('App', () => {
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
 
-    expect(screen.getByRole('region', { name: 'Mesh board' })).toBeDefined();
+    expect(screen.getByRole('region', { name: 'Mesh board' })).toHaveClass(
+      'project-board-mobile-scroller',
+    );
     await user.click(screen.getByRole('button', { name: 'Sessions' }));
     expect(
       screen.getByRole('main', { name: 'Session workspace' }),
@@ -217,6 +219,59 @@ describe('App', () => {
     expect(
       screen.getByRole('main', { name: 'Session workspace' }),
     ).toBeDefined();
+  });
+
+  it('wires project run authorization through the connected command path and snapshot limit', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    const readyTask = taskSchema.parse({
+      ...boardTask,
+      lifecycleState: 'ready',
+    });
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [readyTask],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      runs: [],
+      projectRunLimits: { maxConcurrency: 2 },
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(await screen.findByRole('button', { name: 'Start run' }));
+    expect(screen.getByLabelText('Concurrency')).toHaveAttribute('max', '2');
+    await user.click(
+      screen.getByRole('checkbox', { name: /subscription capacity/i }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Authorize run' }));
+
+    expect(api.command).toHaveBeenCalledWith({
+      type: 'project.run.start',
+      payload: {
+        projectId: project.id,
+        concurrency: 1,
+        expectedPolicyRevision: 1,
+        expectedTasks: [
+          {
+            taskId: 'board-task',
+            revision: 1,
+            automationStatus: 'disabled',
+            automationGeneration: 0,
+          },
+        ],
+        actor: taskActorSchema.parse({
+          type: 'human',
+          id: 'operator',
+          displayName: 'Operator',
+        }),
+      },
+    });
   });
 
   it('saves developer instructions with the current project revision and disables them when disconnected', async () => {

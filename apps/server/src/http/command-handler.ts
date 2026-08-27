@@ -11,6 +11,7 @@ import {
   sessionSchema,
   workspaceSchema,
   type Command,
+  type MutatingCommand,
   type ProjectEvent,
   type Session,
 } from '@mesh-session-platform/contracts';
@@ -33,6 +34,7 @@ import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
+import { assertWorkspaceAvailable } from '../repositories/workspace-occupancy.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
 import type { TaskMutationResult, TaskService } from '../tasks/task-service.js';
 import type {
@@ -50,6 +52,7 @@ import type {
   ReviewAutomationCommandOutcome,
   ReviewAutomationService,
 } from '../tasks/review-automation-service.js';
+import type { ProjectRunService } from '../tasks/project-run-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
@@ -97,6 +100,10 @@ export interface CommandDependencies {
   reviewAutomationService?: Pick<
     ReviewAutomationService,
     'afterDeveloperSubmission' | 'afterQaVerdict' | 'enable' | 'pause'
+  >;
+  projectRunService?: Pick<
+    ProjectRunService,
+    'startRun' | 'pauseRun' | 'resumeRun' | 'stopRun' | 'observeTaskOutcome'
   >;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
@@ -176,6 +183,16 @@ const requireReviewAutomationService = (dependencies: CommandDependencies) => {
     );
   }
   return dependencies.reviewAutomationService;
+};
+
+const requireProjectRunService = (dependencies: CommandDependencies) => {
+  if (!dependencies.projectRunService) {
+    throw new CommandError(
+      'invalid_command',
+      'Project run support is unavailable',
+    );
+  }
+  return dependencies.projectRunService;
 };
 
 const followUpErrorCodes = new Set([
@@ -279,6 +296,9 @@ const executeDeveloperAgentCommand = async (
       ...command.payload,
       commandId: idempotencyKey,
     });
+    await requireProjectRunService(dependencies).observeTaskOutcome(
+      result.task.id,
+    );
     return response(command.type, {
       ...result,
       projectEventCursor: result.event.sequence,
@@ -396,17 +416,43 @@ type ReviewAutomationCommand = Extract<
   }
 >;
 
-const executeReviewAutomationCommand = (
+const executeReviewAutomationCommand = async (
   command: ReviewAutomationCommand,
   idempotencyKey: string,
   dependencies: CommandDependencies,
-): CommandResponse => {
+): Promise<CommandResponse> => {
   const service = requireReviewAutomationService(dependencies);
   const result =
     command.type === 'task.review_automation.enable'
       ? service.enable({ ...command.payload, commandId: idempotencyKey })
       : service.pause({ ...command.payload, commandId: idempotencyKey });
+  if (command.type === 'task.review_automation.pause') {
+    await requireProjectRunService(dependencies).observeTaskOutcome(
+      result.task.id,
+    );
+  }
   return response(command.type, reviewAutomationResponse(result));
+};
+
+type ProjectRunCommand = Extract<
+  MutatingCommand,
+  { type: `project.run.${string}` }
+>;
+
+const executeProjectRunCommand = async (
+  command: ProjectRunCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  const service = requireProjectRunService(dependencies);
+  const result = await (command.type === 'project.run.start'
+    ? service.startRun({ ...command.payload, idempotencyKey })
+    : command.type === 'project.run.pause'
+      ? service.pauseRun({ ...command.payload, idempotencyKey })
+      : command.type === 'project.run.resume'
+        ? service.resumeRun({ ...command.payload, idempotencyKey })
+        : service.stopRun({ ...command.payload, idempotencyKey }));
+  return response(command.type, { run: result.run });
 };
 
 const executeDeveloperHumanCommand = async (
@@ -1021,9 +1067,11 @@ const executeMutation = async (
       assertBillingSafe(dependencies);
       const project = requireProject(dependencies, command.payload.projectId);
       let workspace;
+      let createWorkspace = false;
       if ('workspaceId' in command.payload) {
         workspace = requireWorkspace(dependencies, command.payload.workspaceId);
       } else {
+        createWorkspace = true;
         const pathOptions = dependencies.pathOptions;
         if (!pathOptions) {
           throw new CommandError(
@@ -1038,15 +1086,13 @@ const executeMutation = async (
               command.payload.workspace.path,
               pathOptions,
             );
-            workspace = dependencies.workspaces.create(
-              workspaceSchema.parse({
-                id: workspaceId,
-                projectId: project.id,
-                type: 'shared',
-                path,
-                cleanupState: 'active',
-              }),
-            );
+            workspace = workspaceSchema.parse({
+              id: workspaceId,
+              projectId: project.id,
+              type: 'shared',
+              path,
+              cleanupState: 'active',
+            });
           } else {
             if (!dependencies.git) {
               throw new CommandError(
@@ -1086,18 +1132,16 @@ const executeMutation = async (
                 error instanceof Error ? { message: error.message } : undefined,
               );
             }
-            workspace = dependencies.workspaces.create(
-              workspaceSchema.parse({
-                id: workspaceId,
-                projectId: project.id,
-                type: 'worktree',
-                path: worktreePath,
-                gitBranch: command.payload.workspace.branch,
-                gitWorktreePath: worktreePath,
-                owner: 'mesh',
-                cleanupState: 'active',
-              }),
-            );
+            workspace = workspaceSchema.parse({
+              id: workspaceId,
+              projectId: project.id,
+              type: 'worktree',
+              path: worktreePath,
+              gitBranch: command.payload.workspace.branch,
+              gitWorktreePath: worktreePath,
+              owner: 'mesh',
+              cleanupState: 'active',
+            });
           }
         } catch (error) {
           if (error instanceof CommandError) throw error;
@@ -1115,28 +1159,44 @@ const executeMutation = async (
         );
       }
       const now = (dependencies.now ?? (() => new Date().toISOString()))();
-      const session = dependencies.sessions.create(
-        sessionSchema.parse({
-          id: (dependencies.createId ?? randomUUID)(),
-          projectId: command.payload.projectId,
-          workspaceId: workspace.id,
-          title: command.payload.title,
-          permissionMode: command.payload.permissionMode,
-          lifecycleState: 'idle',
-          createdAt: now,
-          updatedAt: now,
-        }),
-      );
-      const collision = dependencies.sessions
-        .listByProject(session.projectId)
-        .some(
-          (candidate) =>
-            candidate.id !== session.id &&
-            workspace.type === 'shared' &&
-            isLive(candidate) &&
-            dependencies.workspaces.get(candidate.workspaceId)?.path ===
-              workspace.path,
-        );
+      const candidateSession = sessionSchema.parse({
+        id: (dependencies.createId ?? randomUUID)(),
+        projectId: command.payload.projectId,
+        workspaceId: workspace.id,
+        title: command.payload.title,
+        permissionMode: command.payload.permissionMode,
+        lifecycleState: 'idle',
+        createdAt: now,
+        updatedAt: now,
+      });
+      dependencies.database.exec('BEGIN IMMEDIATE');
+      let session;
+      let collision;
+      try {
+        assertWorkspaceAvailable(dependencies.database, {
+          path: workspace.path,
+          excludingSessionId: candidateSession.id,
+          policy: 'manual',
+        });
+        if (createWorkspace) dependencies.workspaces.create(workspace);
+        session = dependencies.sessions.create(candidateSession);
+        collision = dependencies.sessions
+          .listByProject(session.projectId)
+          .some(
+            (candidate) =>
+              candidate.id !== session.id &&
+              workspace.type === 'shared' &&
+              isLive(candidate) &&
+              dependencies.workspaces.get(candidate.workspaceId)?.path ===
+                workspace.path,
+          );
+        dependencies.database.exec('COMMIT');
+      } catch (error) {
+        if (dependencies.database.inTransaction) {
+          dependencies.database.exec('ROLLBACK');
+        }
+        throw error;
+      }
       await dependencies.registry.create(session.id);
       return response(
         command.type,
@@ -1332,6 +1392,13 @@ export const executeCommand = async (
     if (command.command.type === 'project.qa_configuration.update') {
       return executeQaConfigurationUpdate(
         command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (command.command.type.startsWith('project.run.')) {
+      return executeProjectRunCommand(
+        command.command as ProjectRunCommand,
         command.idempotencyKey,
         dependencies,
       );

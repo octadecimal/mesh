@@ -12,7 +12,11 @@ import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
 } from './developer-execution.js';
-import { qaReportInputSchema, reviewPolicySchema } from './qa-execution.js';
+import {
+  qaReportInputSchema,
+  reviewAutomationStatusSchema,
+  reviewPolicySchema,
+} from './qa-execution.js';
 import { protocolVersionSchema } from './protocol.js';
 
 export const discoveryCommandSchema = z.discriminatedUnion('type', [
@@ -138,6 +142,47 @@ export const projectCommandSchema = z.discriminatedUnion('type', [
       expectedRevision: expectedRevisionSchema,
       content: z.string(),
       reviewPolicy: reviewPolicySchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.run.start'),
+    payload: z.object({
+      projectId: idSchema,
+      concurrency: z.number().int().positive(),
+      expectedPolicyRevision: expectedRevisionSchema,
+      expectedTasks: z.array(
+        z.object({
+          taskId: idSchema,
+          revision: expectedRevisionSchema,
+          automationStatus: reviewAutomationStatusSchema,
+          automationGeneration: z.number().int().nonnegative(),
+        }),
+      ),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.run.pause'),
+    payload: z.object({
+      runId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.run.resume'),
+    payload: z.object({
+      runId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.run.stop'),
+    payload: z.object({
+      runId: idSchema,
+      expectedRevision: expectedRevisionSchema,
       actor: humanActorSchema,
     }),
   }),

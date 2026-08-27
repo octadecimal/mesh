@@ -169,6 +169,86 @@ describe('project snapshot read consistency', () => {
     });
   });
 
+  it('projects complete ordered project-run history with configured limits and project isolation', () => {
+    const fixture = seed();
+    const otherProject = fixture.repositories.projects.create(
+      projectSchema.parse({
+        id: 'p2',
+        displayName: 'Other',
+        repositoryPath: 'C:/code/other',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    fixture.repositories.projectRuns.create({
+      id: 'run-history-b',
+      projectId: fixture.project.id,
+      state: 'completed',
+      concurrency: 1,
+      startedAt: '2026-08-24T00:02:00.000Z',
+      completedAt: '2026-08-24T00:03:00.000Z',
+      completionReason: 'queue_finished',
+      items: [],
+    });
+    fixture.repositories.projectRuns.create({
+      id: 'run-history-a',
+      projectId: fixture.project.id,
+      state: 'completed',
+      concurrency: 2,
+      startedAt: '2026-08-24T00:01:00.000Z',
+      completedAt: '2026-08-24T00:01:30.000Z',
+      completionReason: 'stopped',
+      items: [],
+    });
+    fixture.repositories.projectRuns.create({
+      id: 'run-active',
+      projectId: fixture.project.id,
+      concurrency: 3,
+      startedAt: '2026-08-24T00:04:00.000Z',
+      items: [
+        {
+          id: 'run-active-item',
+          taskId: fixture.task.id,
+          taskRevision: fixture.task.revision,
+          policyRevision: fixture.project.qaConfiguration.revision,
+          taskAutomationStatus: fixture.task.reviewAutomation.status,
+          taskAutomationGeneration: fixture.task.reviewAutomation.generation,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-active:task:launch',
+        },
+      ],
+    });
+    fixture.repositories.projectRuns.create({
+      id: 'run-other',
+      projectId: otherProject.id,
+      concurrency: 1,
+      startedAt: '2026-08-24T00:00:00.000Z',
+      items: [],
+    });
+
+    const snapshot = buildProjectSnapshot(
+      { ...fixture.repositories, projectRunMaxConcurrency: 3 },
+      fixture.project.id,
+    );
+
+    expect(snapshot.runs.map(({ id }) => id)).toEqual([
+      'run-history-a',
+      'run-history-b',
+      'run-active',
+    ]);
+    expect(snapshot.projectRunLimits).toEqual({ maxConcurrency: 3 });
+    expect(snapshot.runs.at(-1)?.items).toEqual([
+      expect.objectContaining({
+        id: 'run-active-item',
+        status: 'queued',
+        taskAutomationStatus: fixture.task.reviewAutomation.status,
+      }),
+    ]);
+    expect(snapshot.runs).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'run-other' })]),
+    );
+  });
+
   it('returns repair records in snapshots and durable project history', () => {
     const fixture = seed();
     const repair = attemptRepairSchema.parse({

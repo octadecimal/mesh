@@ -1,4 +1,7 @@
-import type { PermissionMode } from '@mesh-session-platform/contracts';
+import type {
+  PermissionMode,
+  SessionEvent,
+} from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
 import type {
@@ -12,8 +15,14 @@ import type { DiagnosticRepository } from '../repositories/diagnostic-repository
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
+import { assertWorkspaceAvailable } from '../repositories/workspace-occupancy.js';
 import { EventPublisher } from './event-publisher.js';
-import { AuditUnavailableError, SessionRuntime } from './session-runtime.js';
+import { transition } from './lifecycle.js';
+import {
+  appendAuditedSessionEvent,
+  AuditUnavailableError,
+  SessionRuntime,
+} from './session-runtime.js';
 
 interface SessionRegistryDependencies {
   database: Database;
@@ -53,6 +62,10 @@ export class SessionRegistry {
     return this.unavailable ? 'audit_unavailable' : 'available';
   }
 
+  reportAuditFailure(error: unknown): void {
+    this.tripAuditBarrier(error);
+  }
+
   async create(
     sessionId: string,
     configuration?: AgentRuntimeConfiguration,
@@ -65,12 +78,70 @@ export class SessionRegistry {
     configuration: { workspaceId: string; permissionMode: PermissionMode },
     runtimeConfiguration?: AgentRuntimeConfiguration,
   ): Promise<void> {
-    const configured = this.dependencies.sessions.configureResume(
-      sessionId,
-      configuration.workspaceId,
-      configuration.permissionMode,
-    );
-    if (!configured) throw { code: 'session_not_found', sessionId };
+    this.assertWritable();
+    this.assertAttachAvailable(sessionId, 'resume');
+    let reservationEvent: SessionEvent;
+    try {
+      this.dependencies.database.exec('BEGIN IMMEDIATE');
+      const current = this.dependencies.sessions.get(sessionId);
+      if (!current) throw { code: 'session_not_found', sessionId };
+      if (!current.claudeResumeId) {
+        throw {
+          code: 'invalid_session_state',
+          from: current.lifecycleState,
+          trigger: 'resume',
+        };
+      }
+      const workspace = this.dependencies.workspaces.get(
+        configuration.workspaceId,
+      );
+      if (!workspace) {
+        throw {
+          code: 'workspace_not_found',
+          workspaceId: configuration.workspaceId,
+        };
+      }
+      assertWorkspaceAvailable(this.dependencies.database, {
+        path: workspace.path,
+        excludingSessionId: sessionId,
+        policy: 'manual',
+      });
+      const reservedState = transition(current.lifecycleState, {
+        type: 'resume',
+      });
+      const configured = this.dependencies.sessions.configureResume(
+        sessionId,
+        configuration.workspaceId,
+        configuration.permissionMode,
+      );
+      if (!configured) throw { code: 'session_not_found', sessionId };
+      reservationEvent = appendAuditedSessionEvent(this.dependencies.events, {
+        sessionId,
+        draft: {
+          type: 'session.status',
+          payload: {
+            from: current.lifecycleState,
+            to: reservedState,
+          },
+        },
+        raw: { kind: 'runtime_transition', trigger: 'resume' },
+        sessionUpdate: { lifecycleState: reservedState },
+      });
+      this.dependencies.database.exec('COMMIT');
+    } catch (error) {
+      let rollbackError: unknown;
+      try {
+        if (this.dependencies.database.inTransaction) {
+          this.dependencies.database.exec('ROLLBACK');
+        }
+      } catch (failure) {
+        rollbackError = failure;
+      }
+      const auditCause = isResumeDomainError(error) ? rollbackError : error;
+      if (auditCause) this.tripAuditBarrier(auditCause);
+      throw error;
+    }
+    this.publisher.publish(reservationEvent);
     await this.attach(sessionId, 'resume', runtimeConfiguration);
   }
 
@@ -178,15 +249,7 @@ export class SessionRegistry {
     configuration?: AgentRuntimeConfiguration,
   ): Promise<void> {
     this.assertWritable();
-    if (
-      this.runtimes.has(sessionId) ||
-      this.pendingAttaches.has(sessionId) ||
-      this.repairReservations.has(sessionId)
-    ) {
-      const state =
-        this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
-      throw { code: 'invalid_session_state', from: state, trigger: mode };
-    }
+    this.assertAttachAvailable(sessionId, mode);
     const session = this.dependencies.sessions.get(sessionId);
     if (!session) throw { code: 'session_not_found', sessionId };
     const workspace = this.dependencies.workspaces.get(session.workspaceId);
@@ -232,6 +295,7 @@ export class SessionRegistry {
       }
     };
     let placeholder: DriverSession | undefined;
+    let driverAttached = false;
     const role = isRoleRuntimeConfiguration(configuration)
       ? configuration
       : undefined;
@@ -254,6 +318,7 @@ export class SessionRegistry {
             developer,
             role,
           }));
+      driverAttached = true;
       this.assertPendingAttachCurrent(sessionId, pending);
       const runtime = new SessionRuntime({
         session,
@@ -267,9 +332,7 @@ export class SessionRegistry {
       runtimeRef.current = runtime;
       this.runtimes.set(sessionId, runtime);
       this.pendingAttaches.delete(sessionId);
-      runtime.persistTransition({
-        type: mode === 'create' ? 'start' : 'resume',
-      });
+      if (mode === 'create') runtime.persistTransition({ type: 'start' });
       runtime.persistTransition(
         { type: 'driver_started' },
         undefined,
@@ -277,6 +340,7 @@ export class SessionRegistry {
       );
       runtime.startConsuming();
     } catch (error) {
+      let reportedError = error;
       const runtime = runtimeRef.current;
       if (runtime && this.runtimes.get(sessionId) === runtime) {
         this.runtimes.delete(sessionId);
@@ -287,15 +351,147 @@ export class SessionRegistry {
       ) {
         this.invalidateDeveloperCapability(sessionId);
       }
+      if (
+        mode === 'resume' &&
+        !driverAttached &&
+        !pending.cancellation &&
+        !this.unavailable
+      ) {
+        try {
+          this.recordResumeFailure(sessionId, error);
+        } catch (auditError) {
+          this.tripAuditBarrier(auditError);
+          reportedError = auditError;
+        }
+      }
       await placeholder?.interrupt().catch(() => undefined);
       await placeholder?.close().catch(() => undefined);
-      throw error;
+      if (
+        mode === 'resume' &&
+        pending.cancellation &&
+        pending.cancellation !== 'audit' &&
+        !this.unavailable
+      ) {
+        try {
+          this.recordResumeCancellation(sessionId, pending.cancellation);
+        } catch (auditError) {
+          this.tripAuditBarrier(auditError);
+          reportedError = auditError;
+        }
+      }
+      throw reportedError;
     } finally {
       if (this.pendingAttaches.get(sessionId) === pending) {
         this.pendingAttaches.delete(sessionId);
       }
       pending.resolveSettled();
     }
+  }
+
+  private recordResumeFailure(sessionId: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    let failureEvent: SessionEvent | undefined;
+    let statusEvent: SessionEvent | undefined;
+    this.dependencies.database.exec('BEGIN IMMEDIATE');
+    try {
+      const session = this.dependencies.sessions.get(sessionId);
+      if (!session || session.lifecycleState !== 'starting') {
+        this.dependencies.database.exec('COMMIT');
+        return;
+      }
+      failureEvent = appendAuditedSessionEvent(this.dependencies.events, {
+        sessionId,
+        draft: {
+          type: 'session.error',
+          payload: { code: 'driver_resume_failed', message },
+        },
+        raw: { kind: 'driver_resume_failure', message },
+      });
+      const failedState = transition(session.lifecycleState, {
+        type: 'driver_failed',
+      });
+      statusEvent = appendAuditedSessionEvent(this.dependencies.events, {
+        sessionId,
+        draft: {
+          type: 'session.status',
+          payload: {
+            from: session.lifecycleState,
+            to: failedState,
+            reason: 'driver_resume_failed',
+          },
+        },
+        raw: {
+          kind: 'runtime_transition',
+          trigger: 'driver_failed',
+          message,
+        },
+        sessionUpdate: { lifecycleState: failedState },
+      });
+      this.dependencies.database.exec('COMMIT');
+    } catch (auditError) {
+      if (this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
+      throw auditError;
+    }
+    this.publisher.publish(failureEvent);
+    this.publisher.publish(statusEvent);
+  }
+
+  private recordResumeCancellation(
+    sessionId: string,
+    cancellation: Exclude<PendingAttachCancellation, 'audit'>,
+  ): void {
+    let interruptEvent: SessionEvent | undefined;
+    let stoppedEvent: SessionEvent | undefined;
+    this.dependencies.database.exec('BEGIN IMMEDIATE');
+    try {
+      const session = this.dependencies.sessions.get(sessionId);
+      if (!session || session.lifecycleState !== 'starting') {
+        this.dependencies.database.exec('COMMIT');
+        return;
+      }
+      const interruptingState = transition(session.lifecycleState, {
+        type: 'interrupt',
+      });
+      interruptEvent = appendAuditedSessionEvent(this.dependencies.events, {
+        sessionId,
+        draft: {
+          type: 'session.status',
+          payload: { from: session.lifecycleState, to: interruptingState },
+        },
+        raw: { kind: 'runtime_transition', trigger: 'interrupt' },
+        sessionUpdate: { lifecycleState: interruptingState },
+      });
+      const stoppedState = transition(interruptingState, {
+        type: 'driver_stopped',
+      });
+      stoppedEvent = appendAuditedSessionEvent(this.dependencies.events, {
+        sessionId,
+        draft: {
+          type: 'session.status',
+          payload: {
+            from: interruptingState,
+            to: stoppedState,
+            reason: `resume_${cancellation}`,
+          },
+        },
+        raw: {
+          kind: 'runtime_transition',
+          trigger: 'driver_stopped',
+          reason: `resume_${cancellation}`,
+        },
+        sessionUpdate: { lifecycleState: stoppedState },
+      });
+      this.dependencies.database.exec('COMMIT');
+    } catch (auditError) {
+      if (this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
+      throw auditError;
+    }
+    this.publisher.publish(interruptEvent);
+    this.publisher.publish(stoppedEvent);
   }
 
   private assertPendingAttachCurrent(
@@ -314,6 +510,22 @@ export class SessionRegistry {
       from: 'interrupting',
       trigger: pending.cancellation ?? 'driver_required',
     };
+  }
+
+  private assertAttachAvailable(
+    sessionId: string,
+    mode: 'create' | 'resume',
+  ): void {
+    if (
+      !this.runtimes.has(sessionId) &&
+      !this.pendingAttaches.has(sessionId) &&
+      !this.repairReservations.has(sessionId)
+    ) {
+      return;
+    }
+    const state =
+      this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
+    throw { code: 'invalid_session_state', from: state, trigger: mode };
   }
 
   private assertWritable(): void {
@@ -382,3 +594,17 @@ const isDeveloperRuntimeConfiguration = (
   configuration: AgentRuntimeConfiguration | undefined,
 ): configuration is DeveloperRuntimeConfiguration =>
   configuration !== undefined && 'controls' in configuration;
+
+const resumeDomainErrorCodes = new Set([
+  'invalid_session_state',
+  'project_run_conflict',
+  'session_not_found',
+  'workspace_not_found',
+]);
+
+const isResumeDomainError = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  typeof error.code === 'string' &&
+  resumeDomainErrorCodes.has(error.code);

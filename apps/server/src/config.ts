@@ -26,7 +26,18 @@ export interface ServerConfig {
   developmentOrigin?: string;
   gitExecutable?: string;
   webRoot?: string;
+  projectRunMaxConcurrency: number;
 }
+
+const readProjectRunMaxConcurrency = (value: string | undefined): number => {
+  const concurrency = Number(value?.trim() || '4');
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error(
+      'MESH_PROJECT_RUN_MAX_CONCURRENCY must be a positive integer',
+    );
+  }
+  return concurrency;
+};
 
 export const isLoopbackAddress = (host: string): boolean => {
   const normalized =
@@ -106,5 +117,8 @@ export const loadServerConfig = (
       environment.NODE_ENV === 'production'
         ? resolve(currentDirectory, 'dist/apps/web')
         : undefined,
+    projectRunMaxConcurrency: readProjectRunMaxConcurrency(
+      environment.MESH_PROJECT_RUN_MAX_CONCURRENCY,
+    ),
   };
 };

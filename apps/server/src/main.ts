@@ -36,6 +36,7 @@ import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
 import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
+import { ProjectRunRepository } from './repositories/project-run-repository.js';
 import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
 import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
@@ -55,6 +56,13 @@ import {
   reconcileTaskAttempts,
 } from './tasks/reconcile-attempts.js';
 import { ReviewAutomationService } from './tasks/review-automation-service.js';
+import { ProjectRunService } from './tasks/project-run-service.js';
+import { createProjectRunPreflight } from './tasks/project-run-preflight.js';
+import {
+  createProjectRunWorkspacePlanner,
+  projectRunWorkspaceRoot,
+} from './tasks/project-run-workspace.js';
+import { reconcileProjectRuns } from './tasks/reconcile-project-runs.js';
 import { TaskService } from './tasks/task-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
@@ -183,6 +191,7 @@ export const startServer = async (
   recoverInterruptedSessions(database);
 
   const projects = new ProjectRepository(database);
+  const projectRuns = new ProjectRunRepository(database);
   const tasks = new TaskRepository(database);
   const attempts = new TaskAttemptRepository(database);
   const transitions = new TaskTransitionRepository(database);
@@ -195,6 +204,7 @@ export const startServer = async (
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
+  const originPolicy = createOriginPolicy(config.developmentOrigin);
   const taskService = new TaskService({
     database,
     projects,
@@ -211,32 +221,124 @@ export const startServer = async (
   );
   const capabilities = new DeveloperCapabilityRegistry();
   const qaCapabilities = new QaCapabilityRegistry();
-  const roleServices: { reviewAutomation?: ReviewAutomationService } = {};
+  const roleServices: {
+    reviewAutomation?: ReviewAutomationService;
+    projectRuns?: ProjectRunService;
+  } = {};
+  const runDrains = new Map<string, Promise<void>>();
+  const rerunRunDrains = new Set<string>();
+  let pendingStoppedRuntimeReconciliation: SessionRegistry | undefined;
+  let runDrainFailure: unknown;
   const requireReviewAutomation = (): ReviewAutomationService => {
     if (!roleServices.reviewAutomation) {
       throw new Error('Review automation service is not composed');
     }
     return roleServices.reviewAutomation;
   };
-  const runtimeRepairs: AttemptRepair[] = [];
-  const reconcileStoppedRuntime = (activeRegistry: SessionRegistry) => {
-    const result = reconcileTaskAttempts({
-      database,
-      projects,
-      tasks,
-      attempts,
-      sessions,
-      workspaces,
-      diagnostics,
-      developerExecutions,
-      qaExecutions,
-      qaCapabilities,
-      projectEvents,
-    });
-    runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
-    for (const event of result.events)
-      activeRegistry.publisher.publishProject(event);
+  const requireProjectRuns = (): ProjectRunService => {
+    if (!roleServices.projectRuns) {
+      throw new Error('Project run service is not composed');
+    }
+    return roleServices.projectRuns;
   };
+  const runtimeRepairs: AttemptRepair[] = [];
+  const projectCursors = () =>
+    new Map(
+      projects
+        .list()
+        .map(
+          (project) =>
+            [project.id, projectEvents.latestSequence(project.id)] as const,
+        ),
+    );
+  const publishRecoveredEvents = (
+    cursors: ReadonlyMap<string, number>,
+    activeRegistry: SessionRegistry,
+  ) => {
+    for (const project of projects.list()) {
+      for (const event of projectEvents.after(
+        project.id,
+        cursors.get(project.id) ?? 0,
+      )) {
+        activeRegistry.publisher.publishProject(event);
+      }
+    }
+  };
+  const failProjectRunAudit = (error: unknown) => {
+    runDrainFailure ??= error;
+    originPolicy.stopAccepting();
+    registry.reportAuditFailure(error);
+  };
+  const scheduleRunDrains = (runIds: readonly string[]): void => {
+    for (const runId of runIds) {
+      if (!originPolicy.accepting) continue;
+      if (runDrains.has(runId)) {
+        rerunRunDrains.add(runId);
+        continue;
+      }
+      const drain = Promise.resolve()
+        .then(async () => {
+          await requireProjectRuns().drainAvailableSlots(runId);
+        })
+        .catch((error: unknown) => failProjectRunAudit(error))
+        .finally(() => {
+          if (runDrains.get(runId) !== drain) return;
+          runDrains.delete(runId);
+          if (rerunRunDrains.delete(runId)) scheduleRunDrains([runId]);
+          if (runDrains.size === 0 && pendingStoppedRuntimeReconciliation) {
+            const activeRegistry = pendingStoppedRuntimeReconciliation;
+            pendingStoppedRuntimeReconciliation = undefined;
+            try {
+              reconcileStoppedRuntime(activeRegistry);
+            } catch {
+              // The reconciliation path already tripped the central audit barrier.
+            }
+          }
+        });
+      runDrains.set(runId, drain);
+    }
+  };
+  const settleRunDrains = async (): Promise<void> => {
+    while (runDrains.size > 0) {
+      await Promise.allSettled([...runDrains.values()]);
+    }
+    if (runDrainFailure) throw runDrainFailure;
+  };
+  function reconcileStoppedRuntime(activeRegistry: SessionRegistry): void {
+    if (runDrains.size > 0) {
+      pendingStoppedRuntimeReconciliation = activeRegistry;
+      return;
+    }
+    const cursors = projectCursors();
+    try {
+      const result = reconcileTaskAttempts({
+        database,
+        projects,
+        tasks,
+        attempts,
+        sessions,
+        workspaces,
+        diagnostics,
+        developerExecutions,
+        qaExecutions,
+        qaCapabilities,
+        projectEvents,
+      });
+      runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
+      reconcileTaskAttemptLaunchReservations(database);
+      publishRecoveredEvents(cursors, activeRegistry);
+      for (const taskId of new Set(
+        result.repairs.map((repair) => repair.taskId),
+      )) {
+        void requireProjectRuns()
+          .observeTaskOutcome(taskId)
+          .catch((error: unknown) => failProjectRunAudit(error));
+      }
+    } catch (error) {
+      failProjectRunAudit(error);
+      throw error;
+    }
+  }
   const registry = new SessionRegistry({
     database,
     sessions,
@@ -283,6 +385,9 @@ export const startServer = async (
     afterDeveloperSubmission: async (input) => {
       await requireReviewAutomation().afterDeveloperSubmission(input);
     },
+    afterDeveloperBlocked: async (input) => {
+      await requireProjectRuns().observeTaskOutcome(input.taskId);
+    },
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
   const processRunner = new NodeProcessRunner({ trustedGitExecutable });
@@ -299,6 +404,7 @@ export const startServer = async (
   const attemptService = new AttemptService({
     database,
     projects,
+    projectRuns,
     tasks,
     attempts,
     sessions,
@@ -316,6 +422,43 @@ export const startServer = async (
     resolveIdentity,
     billingConflicts,
   });
+  const runWorkspaceRoot = projectRunWorkspaceRoot(config.baseDirectory);
+  const projectRunService = new ProjectRunService({
+    database,
+    projects,
+    tasks,
+    attempts,
+    developerExecutions,
+    projectRuns,
+    projectEvents,
+    commands,
+    attemptService,
+    preflight: createProjectRunPreflight({
+      billingConflicts,
+      resolveIdentity,
+      pathOptions,
+      workspaceRoot: runWorkspaceRoot,
+      ensureWorkspaceRoot: (path) => mkdirSync(path, { recursive: true }),
+    }),
+    planWorkspace: createProjectRunWorkspacePlanner(config.baseDirectory),
+    publisher: registry.publisher,
+    canLaunch: () => originPolicy.accepting,
+    maxConcurrency: config.projectRunMaxConcurrency,
+    onAuditFailure: failProjectRunAudit,
+    scheduleDrain: (runId) => scheduleRunDrains([runId]),
+  });
+  roleServices.projectRuns = projectRunService;
+  const projectRunBoundary = {
+    startRun: projectRunService.startRun.bind(projectRunService),
+    pauseRun: projectRunService.pauseRun.bind(projectRunService),
+    resumeRun: projectRunService.resumeRun.bind(projectRunService),
+    stopRun: projectRunService.stopRun.bind(projectRunService),
+    observeTaskOutcome:
+      projectRunService.observeTaskOutcome.bind(projectRunService),
+  } satisfies Pick<
+    ProjectRunService,
+    'startRun' | 'pauseRun' | 'resumeRun' | 'stopRun' | 'observeTaskOutcome'
+  >;
   const qaExecutionService = new QaExecutionService({
     database,
     projects,
@@ -337,6 +480,9 @@ export const startServer = async (
     afterRejectedVerdict: async (input) => {
       await requireReviewAutomation().afterQaVerdict(input);
     },
+    afterVerifiedVerdict: async (input) => {
+      await projectRunBoundary.observeTaskOutcome(input.taskId);
+    },
     afterInterruptedRepair: () => reconcileStoppedRuntime(registry),
   });
   roleServices.reviewAutomation = new ReviewAutomationService({
@@ -350,8 +496,10 @@ export const startServer = async (
     projectEvents,
     qaExecutionService,
     developerReworkService,
+    observeTaskOutcome: projectRunBoundary.observeTaskOutcome,
     publisher: registry.publisher,
   });
+  const recoveryCursors = projectCursors();
   const reconciliation = reconcileTaskAttempts({
     database,
     projects,
@@ -367,7 +515,22 @@ export const startServer = async (
   });
   runtimeRepairs.push(...reconciliation.repairs);
   reconcileTaskAttemptLaunchReservations(database);
-  const originPolicy = createOriginPolicy(config.developmentOrigin);
+  const runReconciliation = reconcileProjectRuns({
+    database,
+    projects,
+    tasks,
+    attempts,
+    sessions,
+    workspaces,
+    diagnostics,
+    developerExecutions,
+    qaExecutions,
+    qaCapabilities,
+    projectEvents,
+    projectRuns,
+    billingConflicts,
+  });
+  publishRecoveredEvents(recoveryCursors, registry);
   const app = buildApp({
     database,
     projects,
@@ -377,9 +540,12 @@ export const startServer = async (
     developerExecutionService,
     qaExecutionService,
     reviewAutomationService: roleServices.reviewAutomation,
+    projectRunService: projectRunBoundary,
     attempts,
     transitions,
     projectEvents,
+    projectRuns,
+    projectRunMaxConcurrency: config.projectRunMaxConcurrency,
     developerExecutions,
     qaExecutions,
     repairs: runtimeRepairs,
@@ -401,7 +567,20 @@ export const startServer = async (
 
   const lifecycle = createProcessLifecycle({
     stopAccepting: () => originPolicy.stopAccepting(),
-    shutdownRuntime: () => registry.shutdown(),
+    shutdownRuntime: async () => {
+      let failure: unknown;
+      try {
+        await settleRunDrains();
+      } catch (error) {
+        failure = error;
+      }
+      try {
+        await registry.shutdown();
+      } catch (error) {
+        failure ??= error;
+      }
+      if (failure) throw failure;
+    },
     closeSockets: () => app.close(),
     auditStatus: () => registry.auditStatus,
     signalFailure: (code) => {
@@ -423,6 +602,7 @@ export const startServer = async (
     originPolicy.setServedOrigin(origin);
     process.once('SIGINT', onSignal);
     process.once('SIGTERM', onSignal);
+    scheduleRunDrains(runReconciliation.launchableRunIds);
     return { app, origin, close };
   } catch (error) {
     await close();

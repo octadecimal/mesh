@@ -5,6 +5,7 @@ import type {
   DeveloperExecutionCycle,
   DeveloperReviewFeedback,
   ProjectEvent,
+  ProjectRun,
   ProjectSnapshot,
   QaExecutionCycle,
   QaReport,
@@ -15,6 +16,7 @@ import type {
   TaskAttempt,
   TaskTransition,
 } from '@mesh-session-platform/contracts';
+import { projectEventSchema } from '@mesh-session-platform/contracts';
 
 import {
   applyEvent,
@@ -250,6 +252,39 @@ const automationAction: ReviewAutomationAction = {
   completedAt: null,
 };
 
+const run = (overrides: Partial<ProjectRun> = {}): ProjectRun => ({
+  id: 'run-1',
+  projectId: project.id,
+  revision: 1,
+  concurrency: 2,
+  state: 'running',
+  startedAt: timestamp,
+  updatedAt: timestamp,
+  completionReason: null,
+  completedAt: null,
+  items: [
+    {
+      id: 'run-item-1',
+      runId: 'run-1',
+      projectId: project.id,
+      taskId: task().id,
+      taskRevision: 1,
+      policyRevision: 1,
+      taskAutomationGeneration: 0,
+      queuePosition: 0,
+      status: 'queued',
+      outcomeReason: null,
+      attemptId: null,
+      sessionId: null,
+      launchIdempotencyKey: 'run-1:run-item-1:launch',
+      claimedAt: null,
+      startedAt: null,
+      finishedAt: null,
+    },
+  ],
+  ...overrides,
+});
+
 const projectSnapshot = (
   overrides: Partial<ProjectSnapshot> = {},
 ): ProjectSnapshot => ({
@@ -266,6 +301,8 @@ const projectSnapshot = (
   qaCycles: [qaCycle],
   qaReports: [qaReport],
   reviewAutomationActions: [automationAction],
+  runs: [],
+  projectRunLimits: { maxConcurrency: 4 },
   cursor: 3,
   ...overrides,
 });
@@ -397,9 +434,143 @@ describe('replaceSnapshot', () => {
       current.reviewAutomationByTaskId,
     );
   });
+
+  it('removes normalized runs for projects absent from a fresh session snapshot', () => {
+    const current = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({ runs: [run()] }),
+    );
+
+    const next = replaceSnapshot(current, snapshot(7));
+
+    expect(next.projectRunsById).toEqual({});
+    expect(next.projectRunIdsByProjectId).toEqual({});
+    expect(next.projectRunMaxConcurrencyByProjectId).toEqual({});
+  });
 });
 
 describe('project projection', () => {
+  it('normalizes snapshot runs and replaces only the snapshotted project run history', () => {
+    const completedRun: ProjectRun = {
+      ...run({ id: 'run-completed' }),
+      state: 'completed',
+      completionReason: 'queue_finished',
+      completedAt: timestamp,
+    };
+    const otherProject = { ...project, id: 'project-2' };
+    const otherRun = run({
+      id: 'run-other',
+      projectId: otherProject.id,
+      items: [
+        {
+          ...run().items[0],
+          id: 'run-item-other',
+          runId: 'run-other',
+          projectId: otherProject.id,
+          taskId: 'task-2',
+        },
+      ],
+    });
+    const withBothProjects = replaceProjectSnapshot(
+      replaceProjectSnapshot(
+        createProjection(snapshot()),
+        projectSnapshot({ runs: [completedRun, run()] }),
+      ),
+      projectSnapshot({
+        project: otherProject,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        developerCycles: [],
+        developerCompletionReports: [],
+        developerBlockerReports: [],
+        developerReviewFeedback: [],
+        qaCycles: [],
+        qaReports: [],
+        reviewAutomationActions: [],
+        runs: [otherRun],
+        projectRunLimits: { maxConcurrency: 3 },
+      }),
+    );
+
+    const next = replaceProjectSnapshot(
+      withBothProjects,
+      projectSnapshot({
+        runs: [run({ revision: 2 })],
+        projectRunLimits: { maxConcurrency: 6 },
+      }),
+    );
+
+    expect(next.projectRunsById).toMatchObject({
+      'run-1': run({ revision: 2 }),
+      'run-other': otherRun,
+    });
+    expect(next.projectRunsById['run-completed']).toBeUndefined();
+    expect(next.projectRunIdsByProjectId).toEqual({
+      [project.id]: ['run-1'],
+      [otherProject.id]: ['run-other'],
+    });
+    expect(next.projectRunMaxConcurrencyByProjectId).toEqual({
+      [project.id]: 6,
+      [otherProject.id]: 3,
+    });
+  });
+
+  it('upserts complete project run aggregates while preserving cursor replay rules', () => {
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({ runs: [] }),
+    );
+    const changed: ProjectEvent = {
+      protocolVersion: 1,
+      id: 'project-run-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'project.run_changed',
+      payload: { run: run() },
+    };
+
+    expect(
+      projectEventSchema.safeParse({
+        ...changed,
+        payload: { run: run({ projectId: 'project-2' }) },
+      }).success,
+    ).toBe(false);
+
+    const applied = applyProjectEvent(starting, changed);
+
+    expect(applied.kind).toBe('applied');
+    if (applied.kind !== 'applied') return;
+    expect(applied.state.projectRunsById['run-1']).toEqual(run());
+    expect(applied.state.projectRunIdsByProjectId[project.id]).toEqual([
+      'run-1',
+    ]);
+    expect(applyProjectEvent(applied.state, changed)).toEqual({
+      kind: 'duplicate',
+    });
+    expect(
+      applyProjectEvent(applied.state, { ...changed, sequence: 6 }),
+    ).toEqual({ kind: 'gap', expected: 5, received: 6 });
+
+    const updated = applyProjectEvent(applied.state, {
+      ...changed,
+      id: 'project-run-event-5',
+      sequence: 5,
+      payload: { run: run({ revision: 2, concurrency: 1 }) },
+    });
+    expect(updated.kind).toBe('applied');
+    if (updated.kind === 'applied') {
+      expect(updated.state.projectRunsById['run-1']).toEqual(
+        run({ revision: 2, concurrency: 1 }),
+      );
+      expect(updated.state.projectRunIdsByProjectId[project.id]).toEqual([
+        'run-1',
+      ]);
+    }
+  });
+
   it('replaces QA records by stable identity for only the snapshotted project', () => {
     const otherProject = {
       ...project,

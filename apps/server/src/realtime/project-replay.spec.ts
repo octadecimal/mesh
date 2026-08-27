@@ -3,6 +3,7 @@ import {
   attemptRepairSchema,
   idSchema,
   projectEventSchema,
+  projectRunSchema,
   taskSchema,
   type ProjectEvent,
 } from '@mesh-session-platform/contracts';
@@ -125,6 +126,29 @@ const developerEvent = projectEventSchema.parse({
   },
 });
 
+const runEvent = projectEventSchema.parse({
+  protocolVersion: 1,
+  id: 'run-event-1',
+  projectId: 'project-1',
+  sequence: 3,
+  occurredAt: '2026-08-24T00:03:00.000Z',
+  type: 'project.run_changed',
+  payload: {
+    run: projectRunSchema.parse({
+      id: 'run-1',
+      projectId: 'project-1',
+      revision: 2,
+      concurrency: 2,
+      state: 'paused',
+      startedAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:03:00.000Z',
+      completedAt: null,
+      completionReason: null,
+      items: [],
+    }),
+  },
+});
+
 describe('ProjectReplayService', () => {
   it('replays repair-bearing project events without losing repair data', () => {
     const replay = new ProjectReplayService({
@@ -155,6 +179,23 @@ describe('ProjectReplayService', () => {
     expect(JSON.stringify(replay.after({ 'project-1': 1 }))).not.toContain(
       'capability',
     );
+  });
+
+  it('replays authoritative project-run changes after the requested cursor', () => {
+    const replay = new ProjectReplayService({
+      retainedAfter: (_projectId, after) => ({
+        events: after < runEvent.sequence ? [runEvent] : [],
+        lowWater: 3,
+        highWater: 3,
+      }),
+    });
+
+    expect(replay.after({ 'project-1': 2 })).toMatchObject({
+      events: [runEvent],
+      resyncProjectIds: [],
+      highWaterByProject: { 'project-1': 3 },
+    });
+    expect(replay.after({ 'project-1': 3 }).events).toEqual([]);
   });
 
   it('replays retained project events after independent cursors', () => {

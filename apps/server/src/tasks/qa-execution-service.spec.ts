@@ -75,6 +75,10 @@ describe('QaExecutionService', () => {
       taskId: string;
       cycleId: string;
     }) => Promise<void>;
+    afterVerifiedVerdict?: (input: {
+      taskId: string;
+      cycleId: string;
+    }) => Promise<void>;
     trackedSourceStates?: string[];
     verificationRunner?: {
       preflightTrackedSource?(path: string): Promise<void>;
@@ -383,6 +387,7 @@ describe('QaExecutionService', () => {
       capabilities: qaCapabilities,
       registry,
       afterRejectedVerdict: options?.afterRejectedVerdict,
+      afterVerifiedVerdict: options?.afterVerifiedVerdict,
       billingConflicts: options?.billingConflict
         ? [{ variable: 'ANTHROPIC_API_KEY' }]
         : [],
@@ -1260,6 +1265,33 @@ describe('QaExecutionService', () => {
       cycleId: launched.cycle.id,
     });
     expect(afterRejectedVerdict.mock.invocationCallOrder[0]).toBeLessThan(
+      context.interrupt.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it('notifies orchestration after a verified autonomous verdict before stopping the QA runtime', async () => {
+    const afterVerdict = vi.fn(async () => undefined);
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      afterVerifiedVerdict: afterVerdict,
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+
+    await control.execute(reportFor(launched.cycle));
+
+    expect(afterVerdict).toHaveBeenCalledWith({
+      taskId: context.task.id,
+      cycleId: launched.cycle.id,
+    });
+    expect(afterVerdict.mock.invocationCallOrder[0]).toBeLessThan(
       context.interrupt.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     );
   });

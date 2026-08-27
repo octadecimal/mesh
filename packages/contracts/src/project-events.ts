@@ -22,6 +22,7 @@ import {
   reviewAutomationActionSchema,
   reviewAutomationStateSchema,
 } from './qa-execution.js';
+import { projectRunSchema } from './project-runs.js';
 import { protocolVersionSchema } from './protocol.js';
 
 const projectEvent = <Type extends string, Payload extends z.ZodType>(
@@ -74,6 +75,17 @@ export const projectQaConfigurationChangedEventSchema = projectEvent(
   'project.qa_configuration_changed',
   z.object({ project: projectSchema }),
 );
+export const projectRunChangedEventSchema = projectEvent(
+  'project.run_changed',
+  z.object({ run: projectRunSchema }),
+).superRefine(({ projectId, payload }, context) => {
+  if (payload.run.projectId === projectId) return;
+  context.addIssue({
+    code: 'custom',
+    message: 'Project run events must belong to their enclosing project.',
+    path: ['payload', 'run', 'projectId'],
+  });
+});
 const taskQaExecutionChangedPayloadSchema = z
   .object({
     task: taskSchema,
@@ -198,6 +210,7 @@ export const projectEventSchema = z.discriminatedUnion('type', [
   taskAttemptRepairDetectedEventSchema,
   projectDeveloperInstructionsChangedEventSchema,
   projectQaConfigurationChangedEventSchema,
+  projectRunChangedEventSchema,
   taskDeveloperExecutionChangedEventSchema,
   taskQaExecutionChangedEventSchema,
   taskReviewAutomationChangedEventSchema,

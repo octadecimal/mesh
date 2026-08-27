@@ -14,11 +14,22 @@ import { Worker } from 'node:worker_threads';
 import { buildSync } from 'esbuild';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import {
+  projectSchema,
+  sessionSchema,
+  taskSchema,
+  workspaceSchema,
+} from '@mesh-session-platform/contracts';
+
 import { openDatabase, type Database } from './database.js';
 import { migrate } from './migrate.js';
 import { CommandRepository } from '../repositories/command-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
+import { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
+import { SessionRepository } from '../repositories/session-repository.js';
+import { TaskRepository } from '../repositories/task-repository.js';
+import { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import { waitForWorkerMessage } from '../test/wait-for-worker-message.js';
 
 const runProductionBuild = (
@@ -92,6 +103,188 @@ const runProductionBuild = (
   }
 };
 
+const assertProjectRunConstraints = (database: Database): void => {
+  const at = '2026-08-27T00:00:00.000Z';
+  new ProjectRepository(database).create(
+    projectSchema.parse({
+      id: 'constraint-project',
+      displayName: 'Constraint project',
+      repositoryPath: 'C:/code/constraint-project',
+      discoveredAt: at,
+      discoveryMetadata: {},
+    }),
+  );
+  new TaskRepository(database).create(
+    taskSchema.parse({
+      id: 'constraint-task',
+      projectId: 'constraint-project',
+      title: 'Constraint task',
+      description: '',
+      acceptanceCriteria: ['Persist constraints'],
+      priority: 'normal',
+      rank: 'a',
+      lifecycleState: 'ready',
+      labels: [],
+      notes: '',
+      blocked: null,
+      revision: 1,
+      createdAt: at,
+      updatedAt: at,
+    }),
+  );
+  new WorkspaceRepository(database).create(
+    workspaceSchema.parse({
+      id: 'constraint-workspace',
+      projectId: 'constraint-project',
+      type: 'shared',
+      path: 'C:/code/constraint-project',
+    }),
+  );
+  new SessionRepository(database).create(
+    sessionSchema.parse({
+      id: 'constraint-session',
+      projectId: 'constraint-project',
+      workspaceId: 'constraint-workspace',
+      title: 'Constraint session',
+      permissionMode: 'safe_auto',
+      lifecycleState: 'running',
+      createdAt: at,
+      updatedAt: at,
+    }),
+  );
+  database
+    .prepare(
+      `INSERT INTO project_runs (
+        id, project_id, state, revision, concurrency, started_at, updated_at,
+        completed_at, completion_reason
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      'constraint-run',
+      'constraint-project',
+      'running',
+      1,
+      1,
+      at,
+      at,
+      null,
+      null,
+    );
+  const insertRun = database.prepare(
+    `INSERT INTO project_runs (
+      id, project_id, state, revision, concurrency, started_at, updated_at,
+      completed_at, completion_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  expect(() =>
+    insertRun.run(
+      'invalid-concurrency',
+      'constraint-project',
+      'completed',
+      1,
+      0,
+      at,
+      at,
+      at,
+      'invalid concurrency',
+    ),
+  ).toThrow();
+  expect(() =>
+    insertRun.run(
+      'invalid-revision',
+      'constraint-project',
+      'completed',
+      0,
+      1,
+      at,
+      at,
+      at,
+      'invalid revision',
+    ),
+  ).toThrow();
+  expect(() =>
+    insertRun.run(
+      'invalid-completion-reason',
+      'constraint-project',
+      'completed',
+      1,
+      1,
+      at,
+      at,
+      at,
+      null,
+    ),
+  ).toThrow();
+
+  const insertItem = database.prepare(
+    `INSERT INTO project_run_items (
+      id, run_id, project_id, task_id, task_revision, policy_revision,
+      task_automation_generation, queue_position, status, attempt_id, session_id,
+      launch_idempotency_key, claimed_at, started_at, finished_at, outcome_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  expect(() =>
+    insertItem.run(
+      'invalid-position',
+      'constraint-run',
+      'constraint-project',
+      'constraint-task',
+      1,
+      1,
+      0,
+      -1,
+      'queued',
+      null,
+      null,
+      'constraint-position',
+      null,
+      null,
+      null,
+      null,
+    ),
+  ).toThrow();
+  expect(() =>
+    insertItem.run(
+      'invalid-not-started-timestamp',
+      'constraint-run',
+      'constraint-project',
+      'constraint-task',
+      1,
+      1,
+      0,
+      0,
+      'not_started',
+      null,
+      null,
+      'constraint-not-started',
+      null,
+      at,
+      at,
+      'not started',
+    ),
+  ).toThrow();
+  expect(() =>
+    insertItem.run(
+      'invalid-linked-pair',
+      'constraint-run',
+      'constraint-project',
+      'constraint-task',
+      1,
+      1,
+      0,
+      0,
+      'active',
+      null,
+      'constraint-session',
+      'constraint-linked-pair',
+      at,
+      at,
+      null,
+      null,
+    ),
+  ).toThrow();
+};
+
 describe('migrate', () => {
   const databases: Database[] = [];
   const directories: string[] = [];
@@ -135,6 +328,11 @@ describe('migrate', () => {
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
+      { id: '012-project-runs' },
+      { id: '013-task-attempt-project-run-source' },
+      { id: '014-project-run-prelaunch-attention' },
+      { id: '015-project-run-pause-reason' },
+      { id: '016-project-run-automation-status' },
     ]);
     expect(
       database
@@ -153,8 +351,38 @@ describe('migrate', () => {
         'developer_completion_reports',
         'developer_blocker_reports',
         'developer_review_feedback',
+        'project_runs',
+        'project_run_items',
       ]),
     );
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        'one_active_project_run',
+        'one_open_project_run_item_per_task',
+        'project_run_queue_order',
+      ]),
+    );
+    expect(
+      database
+        .prepare("SELECT * FROM pragma_foreign_key_list('project_run_items')")
+        .all(),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: 'project_runs', from: 'run_id' }),
+        expect.objectContaining({ table: 'projects', from: 'project_id' }),
+        expect.objectContaining({ table: 'tasks', from: 'task_id' }),
+        expect.objectContaining({ table: 'task_attempts', from: 'attempt_id' }),
+        expect.objectContaining({ table: 'sessions', from: 'session_id' }),
+      ]),
+    );
+    assertProjectRunConstraints(database);
     expect(
       database
         .prepare(
@@ -167,6 +395,11 @@ describe('migrate', () => {
         { name: 'task_snapshot_description' },
       ]),
     );
+    expect(
+      database
+        .prepare("SELECT name FROM pragma_table_info('task_attempts')")
+        .all(),
+    ).toContainEqual({ name: 'source_json' });
   });
 
   it('upgrades Milestone 3 projects with the manual QA defaults', () => {
@@ -230,6 +463,242 @@ describe('migrate', () => {
       revision: 1,
       updatedAt: appliedAt,
       updatedBy: null,
+    });
+  });
+
+  it('upgrades an 011 database with project-run tables, constraints, and indexes', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-project-run-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-27T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+      '009-qa-execution.sql',
+      '010-review-automation-state.sql',
+      '011-qa-interruption-repair.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(expect.arrayContaining(['project_runs', 'project_run_items']));
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        'one_active_project_run',
+        'one_open_project_run_item_per_task',
+        'project_run_queue_order',
+      ]),
+    );
+    expect(
+      database
+        .prepare("SELECT * FROM pragma_foreign_key_list('project_run_items')")
+        .all(),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: 'project_runs', from: 'run_id' }),
+        expect.objectContaining({ table: 'projects', from: 'project_id' }),
+        expect.objectContaining({ table: 'tasks', from: 'task_id' }),
+        expect.objectContaining({ table: 'task_attempts', from: 'attempt_id' }),
+        expect.objectContaining({ table: 'sessions', from: 'session_id' }),
+      ]),
+    );
+    assertProjectRunConstraints(database);
+  });
+
+  it('upgrades a 012 database with nullable project-run attempt provenance', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-attempt-source-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-27T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+      '009-qa-execution.sql',
+      '010-review-automation-state.sql',
+      '011-qa-interruption-repair.sql',
+      '012-project-runs.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+    database.exec('PRAGMA foreign_keys = OFF');
+    database
+      .prepare(
+        `INSERT INTO task_attempts (
+          id, task_id, session_id, ordinal, source, actor_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'legacy-attempt',
+        'legacy-task',
+        'legacy-session',
+        1,
+        'launched',
+        '{"type":"human","id":"operator-1"}',
+        appliedAt,
+      );
+    database.exec('PRAGMA foreign_keys = ON');
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare('SELECT source, source_json FROM task_attempts WHERE id = ?')
+        .get('legacy-attempt'),
+    ).toEqual({ source: 'launched', source_json: null });
+    expect(
+      database.prepare('SELECT id FROM schema_migrations ORDER BY id').all(),
+    ).toContainEqual({ id: '013-task-attempt-project-run-source' });
+  });
+
+  it('upgrades a 013 database to preserve pre-launch attention outcomes', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-run-attention-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-27T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+      '009-qa-execution.sql',
+      '010-review-automation-state.sql',
+      '011-qa-interruption-repair.sql',
+      '012-project-runs.sql',
+      '013-task-attempt-project-run-source.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+    new ProjectRepository(database).create(
+      projectSchema.parse({
+        id: 'attention-project',
+        displayName: 'Attention project',
+        repositoryPath: 'C:/code/attention-project',
+        discoveredAt: appliedAt,
+        discoveryMetadata: {},
+      }),
+    );
+    new TaskRepository(database).create(
+      taskSchema.parse({
+        id: 'attention-task',
+        projectId: 'attention-project',
+        title: 'Attention task',
+        description: 'Prove pre-launch failure persistence.',
+        acceptanceCriteria: ['The run item requires attention.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: appliedAt,
+        updatedAt: appliedAt,
+      }),
+    );
+    database
+      .prepare(
+        `INSERT INTO project_runs (
+          id, project_id, state, revision, concurrency, started_at, updated_at,
+          completed_at, completion_reason
+        ) VALUES (?, ?, 'running', 2, 1, ?, ?, NULL, NULL)`,
+      )
+      .run('attention-run', 'attention-project', appliedAt, appliedAt);
+    database
+      .prepare(
+        `INSERT INTO project_run_items (
+          id, run_id, project_id, task_id, task_revision, policy_revision,
+          task_automation_generation, queue_position, status, attempt_id,
+          session_id, launch_idempotency_key, claimed_at, started_at,
+          finished_at, outcome_reason
+        ) VALUES (
+          ?, ?, ?, ?, 1, 1, 0, 0, 'launch_pending', NULL, NULL, ?, ?, NULL,
+          NULL, NULL
+        )`,
+      )
+      .run(
+        'attention-item',
+        'attention-run',
+        'attention-project',
+        'attention-task',
+        'attention-launch',
+        appliedAt,
+      );
+
+    migrate(database);
+    const runs = new ProjectRunRepository(database);
+    const claim = runs.get('attention-run');
+    if (!claim) throw new Error('Expected migrated attention run');
+    const claimedItem = claim.items[0];
+    if (!claimedItem) throw new Error('Expected migrated attention item');
+
+    expect(
+      runs.finishItem({
+        runId: claim.id,
+        itemId: claimedItem.id,
+        expectedRunRevision: claim.revision,
+        status: 'attention_required',
+        outcomeReason: 'task_revision_conflict',
+        occurredAt: appliedAt,
+      }).items[0],
+    ).toMatchObject({
+      status: 'attention_required',
+      taskAutomationStatus: 'disabled',
+      attemptId: null,
+      sessionId: null,
+      startedAt: null,
     });
   });
 
@@ -399,6 +868,11 @@ describe('migrate', () => {
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
+      { id: '012-project-runs' },
+      { id: '013-task-attempt-project-run-source' },
+      { id: '014-project-run-prelaunch-attention' },
+      { id: '015-project-run-pause-reason' },
+      { id: '016-project-run-automation-status' },
     ]);
   });
 
@@ -610,6 +1084,26 @@ describe('migrate', () => {
       join(__dirname, 'migrations', '011-qa-interruption-repair.sql'),
       join(directory, 'migrations', '011-qa-interruption-repair.sql'),
     );
+    copyFileSync(
+      join(__dirname, 'migrations', '012-project-runs.sql'),
+      join(directory, 'migrations', '012-project-runs.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '013-task-attempt-project-run-source.sql'),
+      join(directory, 'migrations', '013-task-attempt-project-run-source.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '014-project-run-prelaunch-attention.sql'),
+      join(directory, 'migrations', '014-project-run-prelaunch-attention.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '015-project-run-pause-reason.sql'),
+      join(directory, 'migrations', '015-project-run-pause-reason.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '016-project-run-automation-status.sql'),
+      join(directory, 'migrations', '016-project-run-automation-status.sql'),
+    );
     buildSync({
       bundle: true,
       entryPoints: [join(__dirname, 'migrate.ts')],
@@ -666,6 +1160,11 @@ describe('migrate', () => {
         { id: '009-qa-execution' },
         { id: '010-review-automation-state' },
         { id: '011-qa-interruption-repair' },
+        { id: '012-project-runs' },
+        { id: '013-task-attempt-project-run-source' },
+        { id: '014-project-run-prelaunch-attention' },
+        { id: '015-project-run-pause-reason' },
+        { id: '016-project-run-automation-status' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -743,6 +1242,11 @@ describe('migrate', () => {
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
+      { id: '012-project-runs' },
+      { id: '013-task-attempt-project-run-source' },
+      { id: '014-project-run-prelaunch-attention' },
+      { id: '015-project-run-pause-reason' },
+      { id: '016-project-run-automation-status' },
     ]);
   });
 
@@ -1157,6 +1661,22 @@ describe('migrate', () => {
     ).toEqual({ project_id: 'p1', high_water: 2 });
   });
 
+  it('adds a nullable durable pause reason to existing project runs', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-run-pause-reason-'));
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare(
+          "SELECT name, `notnull` AS nullable_flag FROM pragma_table_info('project_runs') WHERE name = 'pause_reason'",
+        )
+        .get(),
+    ).toEqual({ name: 'pause_reason', nullable_flag: 0 });
+  });
+
   it('loads the built migration registry and applies every migration from a fresh production output', () => {
     const workspaceRoot = join(__dirname, '..', '..', '..', '..');
     const directory = mkdtempSync(
@@ -1188,6 +1708,11 @@ describe('migrate', () => {
         { id: '009-qa-execution' },
         { id: '010-review-automation-state' },
         { id: '011-qa-interruption-repair' },
+        { id: '012-project-runs' },
+        { id: '013-task-attempt-project-run-source' },
+        { id: '014-project-run-prelaunch-attention' },
+        { id: '015-project-run-pause-reason' },
+        { id: '016-project-run-automation-status' },
       ]);
       expect(
         database

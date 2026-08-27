@@ -190,7 +190,7 @@ function ConnectedApp({
         });
       });
   };
-  const submitTaskCommand = (command: MutatingCommand) => {
+  const submitProjectCommand = (command: MutatingCommand) => {
     onCommand?.({ type: command.type, payload: command.payload });
     return api ? api.command(command) : Promise.resolve(undefined);
   };
@@ -507,7 +507,7 @@ function ConnectedApp({
         </div>
         {projectLoadError ? (
           <section
-            className="project-board-boundary"
+            className="project-board-boundary project-board-mobile-scroller"
             aria-label="Project board unavailable"
           >
             <div>
@@ -534,7 +534,7 @@ function ConnectedApp({
           </section>
         ) : view === 'board' && activeProject && !projectLoadTargetId ? (
           <section
-            className={`project-board-boundary${
+            className={`project-board-boundary project-board-mobile-scroller${
               activeProject.archivedAt ? ' project-board-read-only' : ''
             }`}
             aria-label={`${activeProject.displayName} board`}
@@ -590,7 +590,7 @@ function ConnectedApp({
             <TaskBoard
               project={activeProject}
               projection={projection}
-              onCommand={submitTaskCommand}
+              onCommand={submitProjectCommand}
               onSelectTask={onSelectTask}
               onOpenSession={openSession}
               connected={

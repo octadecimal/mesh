@@ -639,6 +639,29 @@ describe('reconcileTaskAttempts', () => {
     expect(repositories.tasks.get('task-1')?.lifecycleState).toBe('ready');
   });
 
+  it('preserves project-run provenance when startup outcome is unknown', () => {
+    const repositories = setup({
+      taskState: 'ready',
+      sessionState: 'starting',
+      source: {
+        type: 'project_run',
+        runId: idSchema.parse('run-1'),
+        runItemId: idSchema.parse('item-1'),
+      },
+    });
+
+    recoverInterruptedSessions(repositories.database);
+
+    expect(reconcile(repositories).repairs).toEqual([
+      {
+        taskId: 'task-1',
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+        reason: 'startup_outcome_unknown',
+      },
+    ]);
+  });
+
   it('does not repair an in-progress task while any current attempt is live', () => {
     const repositories = setup({
       taskState: 'in_progress',

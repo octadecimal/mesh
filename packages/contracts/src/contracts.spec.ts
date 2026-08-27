@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   blockedConditionSchema,
+  compareCodeUnits,
   commandSchema,
   commandEnvelopeSchema,
   developerBlockerReportSchema,
@@ -10,6 +11,9 @@ import {
   developerReviewFeedbackSchema,
   projectEventSchema,
   projectHistorySchema,
+  projectRunChangedEventSchema,
+  projectRunItemSchema,
+  projectRunSchema,
   projectSchema,
   projectSnapshotSchema,
   qaExecutionCycleSchema,
@@ -22,7 +26,9 @@ import {
   sessionHistorySchema,
   sessionSnapshotSchema,
   sessionSchema,
+  stableTaskErrorCodeSchema,
   taskActorSchema,
+  taskAttemptSourceSchema,
   taskAttemptSchema,
   taskCommandSchema,
   taskSchema,
@@ -32,6 +38,13 @@ import {
 describe('session platform contracts', () => {
   const now = '2026-08-25T00:00:00.000Z';
   const actor = { type: 'human' as const, id: 'operator-1' };
+
+  it.each(['project_run_stale', 'project_run_not_controllable'] as const)(
+    'accepts the canonical %s operator-control error code',
+    (code) => {
+      expect(stableTaskErrorCodeSchema.parse(code)).toBe(code);
+    },
+  );
 
   it('accepts lightweight backlog tasks and rejects an empty blocked reason', () => {
     expect(
@@ -77,6 +90,17 @@ describe('session platform contracts', () => {
         updatedAt: now,
       }),
     ).toThrow();
+    expect(
+      taskAttemptSourceSchema.parse({
+        type: 'project_run',
+        runId: 'run-1',
+        runItemId: 'item-1',
+      }),
+    ).toEqual({
+      type: 'project_run',
+      runId: 'run-1',
+      runItemId: 'item-1',
+    });
     expect(
       taskAttemptSchema.parse({
         id: 'attempt-1',
@@ -1262,6 +1286,363 @@ describe('session platform contracts', () => {
         updatedBy: null,
       });
       expect(taskAttemptSchema.parse(milestone3Attempt).qaCycles).toEqual([]);
+    });
+  });
+
+  describe('project run contracts', () => {
+    const claimedAt = '2026-08-27T00:00:10.000Z';
+    const startedAt = '2026-08-27T00:00:20.000Z';
+    const finishedAt = '2026-08-27T00:01:00.000Z';
+    const run = {
+      id: 'run-1',
+      projectId: 'project-1',
+      state: 'running' as const,
+      revision: 1,
+      concurrency: 2,
+      pauseReason: null,
+      completionReason: null,
+      startedAt: '2026-08-27T00:00:00.000Z',
+      updatedAt: '2026-08-27T00:00:00.000Z',
+      completedAt: null,
+      items: [
+        {
+          id: 'item-1',
+          runId: 'run-1',
+          projectId: 'project-1',
+          taskId: 'task-1',
+          taskRevision: 3,
+          policyRevision: 2,
+          taskAutomationStatus: 'enabled' as const,
+          taskAutomationGeneration: 4,
+          queuePosition: 0,
+          status: 'queued' as const,
+          outcomeReason: null,
+          attemptId: null,
+          sessionId: null,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+          claimedAt: null,
+          startedAt: null,
+          finishedAt: null,
+        },
+      ],
+    };
+
+    const itemStates = [
+      run.items[0],
+      {
+        ...run.items[0],
+        status: 'launch_pending' as const,
+        claimedAt,
+      },
+      {
+        ...run.items[0],
+        status: 'active' as const,
+        claimedAt,
+        startedAt,
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+      },
+      {
+        ...run.items[0],
+        status: 'completed' as const,
+        outcomeReason: 'task_done',
+        claimedAt,
+        startedAt,
+        finishedAt,
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+      },
+      {
+        ...run.items[0],
+        status: 'attention_required' as const,
+        outcomeReason: 'launch_failed',
+        claimedAt,
+        finishedAt,
+      },
+      {
+        ...run.items[0],
+        status: 'not_started' as const,
+        outcomeReason: 'stopped',
+        finishedAt,
+      },
+    ];
+
+    it.each(itemStates)('parses the $status project run item state', (item) => {
+      expect(projectRunItemSchema.parse(item)).toEqual(item);
+    });
+
+    it.each([
+      ['running', null, null, null],
+      ['paused', 'operator_paused', null, null],
+      ['draining', null, null, null],
+      ['completed', null, 'queue_finished', finishedAt],
+    ] as const)(
+      'parses the %s project run state',
+      (state, pauseReason, completionReason, completedAt) => {
+        expect(
+          projectRunSchema.parse({
+            ...run,
+            state,
+            pauseReason,
+            completionReason,
+            completedAt,
+          }).state,
+        ).toBe(state);
+      },
+    );
+
+    it('rejects invalid project run item and terminal run combinations', () => {
+      expect(() =>
+        projectRunItemSchema.parse({
+          ...run.items[0],
+          status: 'completed',
+          outcomeReason: null,
+        }),
+      ).toThrow();
+      expect(() =>
+        projectRunItemSchema.parse({
+          ...run.items[0],
+          status: 'queued',
+          outcomeReason: 'completed',
+        }),
+      ).toThrow();
+      expect(() =>
+        projectRunSchema.parse({
+          ...run,
+          state: 'completed',
+          completedAt: null,
+          completionReason: 'queue_finished',
+        }),
+      ).toThrow();
+      for (const item of [
+        { ...run.items[0], attemptId: 'attempt-1' },
+        { ...run.items[0], status: 'launch_pending', claimedAt: null },
+        { ...run.items[0], status: 'active', claimedAt, startedAt },
+        {
+          ...run.items[0],
+          status: 'completed',
+          outcomeReason: 'task_done',
+          claimedAt,
+          startedAt,
+          finishedAt,
+        },
+        {
+          ...run.items[0],
+          status: 'attention_required',
+          outcomeReason: 'launch_failed',
+          claimedAt,
+          finishedAt,
+          attemptId: 'attempt-1',
+        },
+        {
+          ...run.items[0],
+          status: 'not_started',
+          outcomeReason: 'stopped',
+          claimedAt,
+          finishedAt,
+        },
+      ]) {
+        expect(() => projectRunItemSchema.parse(item)).toThrow();
+      }
+    });
+
+    it('rejects inconsistent aggregate ownership, identity, order, and lifecycle', () => {
+      for (const items of [
+        [{ ...run.items[0], runId: 'run-other' }],
+        [{ ...run.items[0], projectId: 'project-other' }],
+        [run.items[0], { ...run.items[0] }],
+        [run.items[0], { ...run.items[0], id: 'item-2' }],
+        [
+          run.items[0],
+          {
+            ...run.items[0],
+            id: 'item-2',
+            taskId: 'task-2',
+          },
+        ],
+      ]) {
+        expect(() => projectRunSchema.parse({ ...run, items })).toThrow();
+      }
+
+      expect(() =>
+        projectRunSchema.parse({ ...run, pauseReason: 'operator_paused' }),
+      ).toThrow();
+      expect(
+        projectRunSchema.parse({
+          ...run,
+          state: 'paused',
+          pauseReason: null,
+        }).pauseReason,
+      ).toBe('operator_paused');
+      expect(() =>
+        projectRunSchema.parse({
+          ...run,
+          state: 'completed',
+          completionReason: 'queue_finished',
+          completedAt: finishedAt,
+          items: [itemStates[2]],
+        }),
+      ).toThrow();
+    });
+
+    it('decodes legitimate run payloads from before pause and automation snapshots', () => {
+      const oldItem = {
+        ...run.items[0],
+        taskAutomationStatus: undefined,
+      };
+      expect(
+        projectRunSchema.parse({
+          ...run,
+          state: 'paused',
+          pauseReason: undefined,
+          items: [oldItem],
+        }),
+      ).toMatchObject({
+        pauseReason: 'operator_paused',
+        items: [{ taskAutomationStatus: 'disabled' }],
+      });
+    });
+
+    it('orders run preview text by deterministic UTF-16 code units', () => {
+      expect(['\ue000', '😀', 'A'].sort(compareCodeUnits)).toEqual([
+        'A',
+        '😀',
+        '\ue000',
+      ]);
+      expect(compareCodeUnits('same', 'same')).toBe(0);
+    });
+
+    it('parses runs, run commands, and authoritative run events', () => {
+      expect(projectRunSchema.parse(run)).toEqual(run);
+
+      for (const command of [
+        {
+          type: 'project.run.start',
+          payload: {
+            projectId: 'project-1',
+            concurrency: 2,
+            expectedPolicyRevision: 2,
+            expectedTasks: [
+              {
+                taskId: 'task-2',
+                revision: 5,
+                automationStatus: 'disabled',
+                automationGeneration: 0,
+              },
+              {
+                taskId: 'task-1',
+                revision: 3,
+                automationStatus: 'enabled',
+                automationGeneration: 4,
+              },
+            ],
+            actor,
+          },
+        },
+        {
+          type: 'project.run.pause',
+          payload: { runId: 'run-1', expectedRevision: 1, actor },
+        },
+        {
+          type: 'project.run.resume',
+          payload: { runId: 'run-1', expectedRevision: 2, actor },
+        },
+        {
+          type: 'project.run.stop',
+          payload: { runId: 'run-1', expectedRevision: 3, actor },
+        },
+      ]) {
+        expect(
+          commandEnvelopeSchema.parse({
+            protocolVersion: 1,
+            idempotencyKey: `project-run-${command.type}`,
+            command,
+          }).command.type,
+        ).toBe(command.type);
+      }
+
+      expect(() =>
+        commandEnvelopeSchema.parse({
+          protocolVersion: 1,
+          idempotencyKey: 'project-run-unbound-start',
+          command: {
+            type: 'project.run.start',
+            payload: { projectId: 'project-1', concurrency: 2, actor },
+          },
+        }),
+      ).toThrow();
+
+      expect(
+        projectRunChangedEventSchema.parse({
+          protocolVersion: 1,
+          id: 'project-event-run-1',
+          projectId: 'project-1',
+          sequence: 1,
+          occurredAt: run.updatedAt,
+          type: 'project.run_changed',
+          payload: { run },
+        }).payload.run,
+      ).toEqual(run);
+    });
+
+    it('rejects run events and snapshots that cross project boundaries or repeat a run id', () => {
+      const project = projectSchema.parse({
+        id: 'project-1',
+        displayName: 'Mesh',
+        repositoryPath: 'C:/code/mesh',
+        discoveredAt: now,
+      });
+      const snapshot = {
+        protocolVersion: 1,
+        project,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 0,
+      };
+
+      expect(() =>
+        projectRunChangedEventSchema.parse({
+          protocolVersion: 1,
+          id: 'project-event-run-other-project',
+          projectId: 'project-1',
+          sequence: 1,
+          occurredAt: run.updatedAt,
+          type: 'project.run_changed',
+          payload: { run: { ...run, projectId: 'project-2' } },
+        }),
+      ).toThrow();
+      expect(() =>
+        projectSnapshotSchema.parse({
+          ...snapshot,
+          runs: [{ ...run, projectId: 'project-2' }],
+        }),
+      ).toThrow();
+      expect(() =>
+        projectSnapshotSchema.parse({ ...snapshot, runs: [run, { ...run }] }),
+      ).toThrow();
+    });
+
+    it('decodes project snapshots created before runs existed', () => {
+      const project = projectSchema.parse({
+        id: 'project-1',
+        displayName: 'Mesh',
+        repositoryPath: 'C:/code/mesh',
+        discoveredAt: now,
+      });
+
+      expect(
+        projectSnapshotSchema.parse({
+          protocolVersion: 1,
+          project,
+          tasks: [],
+          attempts: [],
+          transitions: [],
+          repairs: [],
+          cursor: 0,
+        }),
+      ).toMatchObject({ runs: [], projectRunLimits: { maxConcurrency: 1 } });
     });
   });
 });

@@ -1,12 +1,14 @@
 import type {
   AttemptRepair,
   Project,
+  ProjectRun,
   SavedLayout,
   Session,
   Task,
   TaskAttempt,
   TaskTransition,
 } from '@mesh-session-platform/contracts';
+import { compareCodeUnits } from '@mesh-session-platform/contracts';
 
 import type { MeshProjection, PendingApproval } from './reducer';
 
@@ -72,6 +74,45 @@ export const selectProjectRepairConditions = (
   state: MeshProjection,
   projectId: string,
 ): AttemptRepair[] => [...(state.repairsByProjectId[projectId] ?? [])];
+
+export const selectProjectRuns = (
+  state: MeshProjection,
+  projectId: string,
+): ProjectRun[] =>
+  (state.projectRunIdsByProjectId[projectId] ?? []).flatMap((runId) => {
+    const run = state.projectRunsById[runId];
+    return run ? [run] : [];
+  });
+
+export const selectActiveProjectRun = (
+  state: MeshProjection,
+  projectId: string,
+): ProjectRun | undefined =>
+  selectProjectRuns(state, projectId).find((run) => run.state !== 'completed');
+
+export const selectEligibleRunPreview = (
+  state: MeshProjection,
+  projectId: string,
+): Task[] => {
+  const taskIdsWithCurrentAttempt = new Set(
+    Object.values(state.attemptsById)
+      .filter((attempt) => attempt.unlinkedAt === null)
+      .map((attempt) => attempt.taskId),
+  );
+  return Object.values(state.tasksById)
+    .filter(
+      (task) =>
+        task.projectId === projectId &&
+        task.lifecycleState === 'ready' &&
+        task.blocked === null &&
+        !taskIdsWithCurrentAttempt.has(task.id),
+    )
+    .sort(
+      (left, right) =>
+        compareCodeUnits(left.rank, right.rank) ||
+        compareCodeUnits(left.id, right.id),
+    );
+};
 
 const layoutSpecificity = ({
   projectId,

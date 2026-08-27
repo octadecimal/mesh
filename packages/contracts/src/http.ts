@@ -25,6 +25,7 @@ import {
 } from './qa-execution.js';
 import { sessionEventSchema } from './events.js';
 import { projectEventSchema } from './project-events.js';
+import { projectRunSchema } from './project-runs.js';
 import { protocolVersionSchema } from './protocol.js';
 
 export const sessionSnapshotSchema = z.object({
@@ -53,24 +54,51 @@ export const sessionDiagnosticsSchema = z.object({
   nextAfter: idSchema.optional(),
 });
 
-export const projectSnapshotSchema = z.object({
-  protocolVersion: protocolVersionSchema,
-  project: projectSchema,
-  tasks: z.array(taskSchema),
-  attempts: z.array(taskAttemptSchema),
-  transitions: z.array(taskTransitionSchema),
-  repairs: z.array(attemptRepairSchema),
-  developerCycles: z.array(developerExecutionCycleSchema).default([]),
-  developerCompletionReports: z
-    .array(developerCompletionReportSchema)
-    .default([]),
-  developerBlockerReports: z.array(developerBlockerReportSchema).default([]),
-  developerReviewFeedback: z.array(developerReviewFeedbackSchema).default([]),
-  qaCycles: z.array(qaExecutionCycleSchema).default([]),
-  qaReports: z.array(qaReportSchema).default([]),
-  reviewAutomationActions: z.array(reviewAutomationActionSchema).default([]),
-  cursor: z.number().int().nonnegative(),
-});
+export const projectSnapshotSchema = z
+  .object({
+    protocolVersion: protocolVersionSchema,
+    project: projectSchema,
+    tasks: z.array(taskSchema),
+    attempts: z.array(taskAttemptSchema),
+    transitions: z.array(taskTransitionSchema),
+    repairs: z.array(attemptRepairSchema),
+    developerCycles: z.array(developerExecutionCycleSchema).default([]),
+    developerCompletionReports: z
+      .array(developerCompletionReportSchema)
+      .default([]),
+    developerBlockerReports: z.array(developerBlockerReportSchema).default([]),
+    developerReviewFeedback: z.array(developerReviewFeedbackSchema).default([]),
+    qaCycles: z.array(qaExecutionCycleSchema).default([]),
+    qaReports: z.array(qaReportSchema).default([]),
+    reviewAutomationActions: z.array(reviewAutomationActionSchema).default([]),
+    runs: z.array(projectRunSchema).default([]),
+    projectRunLimits: z
+      .object({ maxConcurrency: z.number().int().positive() })
+      .default({
+        maxConcurrency: 1,
+      }),
+    cursor: z.number().int().nonnegative(),
+  })
+  .superRefine(({ project, runs }, context) => {
+    const runIds = new Set<string>();
+    for (const [index, run] of runs.entries()) {
+      if (run.projectId !== project.id) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Project snapshot runs must belong to the snapshot project.',
+          path: ['runs', index, 'projectId'],
+        });
+      }
+      if (runIds.has(run.id)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Project snapshot run IDs must be unique.',
+          path: ['runs', index, 'id'],
+        });
+      }
+      runIds.add(run.id);
+    }
+  });
 
 export const projectHistorySchema = z
   .object({
