@@ -78,7 +78,14 @@ export const projectQaConfigurationChangedEventSchema = projectEvent(
 export const projectRunChangedEventSchema = projectEvent(
   'project.run_changed',
   z.object({ run: projectRunSchema }),
-);
+).superRefine(({ projectId, payload }, context) => {
+  if (payload.run.projectId === projectId) return;
+  context.addIssue({
+    code: 'custom',
+    message: 'Project run events must belong to their enclosing project.',
+    path: ['payload', 'run', 'projectId'],
+  });
+});
 const taskQaExecutionChangedPayloadSchema = z
   .object({
     task: taskSchema,

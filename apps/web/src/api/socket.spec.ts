@@ -214,6 +214,21 @@ describe('MeshSocket', () => {
         },
       },
     });
+    connection.receive({
+      protocolVersion: 1,
+      type: 'project.event',
+      payload: {
+        event: {
+          ...projectRunChangedEvent,
+          payload: {
+            run: {
+              ...projectRunChangedEvent.payload.run,
+              projectId: otherProject.id,
+            },
+          },
+        },
+      },
+    });
 
     expect(messages).toEqual([
       {
@@ -223,6 +238,7 @@ describe('MeshSocket', () => {
       },
     ]);
     expect(diagnostics).toEqual([
+      'Mesh socket received an invalid server payload.',
       'Mesh socket received an invalid server payload.',
     ]);
     socket.close();

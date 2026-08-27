@@ -16,6 +16,7 @@ import type {
   TaskAttempt,
   TaskTransition,
 } from '@mesh-session-platform/contracts';
+import { projectEventSchema } from '@mesh-session-platform/contracts';
 
 import {
   applyEvent,
@@ -530,6 +531,13 @@ describe('project projection', () => {
       type: 'project.run_changed',
       payload: { run: run() },
     };
+
+    expect(
+      projectEventSchema.safeParse({
+        ...changed,
+        payload: { run: run({ projectId: 'project-2' }) },
+      }).success,
+    ).toBe(false);
 
     const applied = applyProjectEvent(starting, changed);
 

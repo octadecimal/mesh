@@ -169,4 +169,27 @@ describe('project resync', () => {
       store.state.projectRunMaxConcurrencyByProjectId['project-1'].get(),
     ).toBe(4);
   });
+
+  it('keeps the current projection when the resync snapshot has cross-project or duplicate runs', async () => {
+    const store = createMeshStore(sessionSnapshot);
+    const valid = projectSnapshot('project-1', 7);
+    const invalid = {
+      ...valid,
+      runs: [
+        { ...valid.runs[0], projectId: 'project-2' },
+        { ...valid.runs[0] },
+      ],
+    };
+    const coordinator = createResyncCoordinator(
+      {
+        snapshot: async () => sessionSnapshot,
+        projectSnapshot: async () => projectSnapshotSchema.parse(invalid),
+      },
+      store,
+    );
+
+    await expect(coordinator.refreshProject('project-1')).rejects.toThrow();
+    expect(store.state.projectRunsById.get({ noproxy: true })).toEqual({});
+    expect(store.state.projectCursors.get({ noproxy: true })).toEqual({});
+  });
 });

@@ -1428,6 +1428,45 @@ describe('session platform contracts', () => {
       ).toEqual(run);
     });
 
+    it('rejects run events and snapshots that cross project boundaries or repeat a run id', () => {
+      const project = projectSchema.parse({
+        id: 'project-1',
+        displayName: 'Mesh',
+        repositoryPath: 'C:/code/mesh',
+        discoveredAt: now,
+      });
+      const snapshot = {
+        protocolVersion: 1,
+        project,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 0,
+      };
+
+      expect(() =>
+        projectRunChangedEventSchema.parse({
+          protocolVersion: 1,
+          id: 'project-event-run-other-project',
+          projectId: 'project-1',
+          sequence: 1,
+          occurredAt: run.updatedAt,
+          type: 'project.run_changed',
+          payload: { run: { ...run, projectId: 'project-2' } },
+        }),
+      ).toThrow();
+      expect(() =>
+        projectSnapshotSchema.parse({
+          ...snapshot,
+          runs: [{ ...run, projectId: 'project-2' }],
+        }),
+      ).toThrow();
+      expect(() =>
+        projectSnapshotSchema.parse({ ...snapshot, runs: [run, { ...run }] }),
+      ).toThrow();
+    });
+
     it('decodes project snapshots created before runs existed', () => {
       const project = projectSchema.parse({
         id: 'project-1',

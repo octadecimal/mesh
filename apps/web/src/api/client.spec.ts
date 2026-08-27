@@ -65,6 +65,22 @@ describe('MeshApi', () => {
 
     await expect(api.projectSnapshot('project-1')).rejects.toThrow();
   });
+
+  it('rejects cross-project and duplicate runs before they reach the projection', async () => {
+    for (const runs of [
+      [{ ...runSnapshot.runs[0], projectId: 'project-2' }],
+      [runSnapshot.runs[0], { ...runSnapshot.runs[0] }],
+    ]) {
+      const api = new MeshApi({
+        fetch: vi.fn().mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ ...runSnapshot, runs }),
+        }),
+      });
+
+      await expect(api.projectSnapshot('project-1')).rejects.toThrow();
+    }
+  });
 });
 
 const project = {
