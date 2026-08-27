@@ -153,6 +153,18 @@ describe('task lifecycle policy', () => {
     },
   );
 
+  it('allows a documented transition from in_progress to ready despite incomplete prerequisites', () => {
+    expect(
+      authorizeTaskTransition({
+        task: taskIn('in_progress'),
+        nextState: 'ready',
+        actor: human,
+        reason: 'Pause work until the next planning pass',
+        incompletePrerequisiteIds: ['prerequisite'],
+      }),
+    ).toBeUndefined();
+  });
+
   it('rejects launching done and cancelled tasks', () => {
     for (const lifecycleState of ['done', 'cancelled'] as const) {
       expect(() =>

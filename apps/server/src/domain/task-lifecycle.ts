@@ -189,12 +189,17 @@ export const authorizeTaskTransition = (
   }
 
   if (nextState === 'ready' || nextState === 'in_progress') {
+    const dependencyReadinessApplies =
+      (task.lifecycleState === 'backlog' && nextState === 'ready') ||
+      nextState === 'in_progress';
     const problems: TaskReadinessProblem[] = [
       ...readinessProblems(task),
-      ...(input.incompletePrerequisiteIds ?? []).map((taskId) => ({
-        type: 'dependency_incomplete' as const,
-        taskId: idSchema.parse(taskId),
-      })),
+      ...(dependencyReadinessApplies
+        ? (input.incompletePrerequisiteIds ?? []).map((taskId) => ({
+            type: 'dependency_incomplete' as const,
+            taskId: idSchema.parse(taskId),
+          }))
+        : []),
     ];
     if (problems.length > 0) throw new TaskReadinessError(problems);
   }
