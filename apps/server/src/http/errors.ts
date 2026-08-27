@@ -16,6 +16,15 @@ export type StableErrorCode =
   | 'repository_ambiguous'
   | 'repository_already_imported'
   | 'project_revision_conflict'
+  | 'project_run_not_found'
+  | 'project_run_revision_conflict'
+  | 'project_run_invalid'
+  | 'project_run_transition_invalid'
+  | 'project_run_conflict'
+  | 'project_run_empty'
+  | 'project_run_stale'
+  | 'project_run_concurrency_exceeded'
+  | 'project_run_not_controllable'
   | 'task_revision_conflict'
   | 'task_not_found'
   | 'task_not_ready'
@@ -78,6 +87,15 @@ const statusCodes: Record<StableErrorCode, number> = {
   repository_ambiguous: 400,
   repository_already_imported: 409,
   project_revision_conflict: 409,
+  project_run_not_found: 404,
+  project_run_revision_conflict: 409,
+  project_run_invalid: 400,
+  project_run_transition_invalid: 409,
+  project_run_conflict: 409,
+  project_run_empty: 422,
+  project_run_stale: 409,
+  project_run_concurrency_exceeded: 422,
+  project_run_not_controllable: 409,
   task_revision_conflict: 409,
   task_not_found: 404,
   session_already_linked: 409,

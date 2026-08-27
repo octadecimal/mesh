@@ -16,6 +16,7 @@ import {
   developerExecutionCycleSchema,
   idSchema,
   projectSchema,
+  projectRunSchema,
   qaExecutionCycleSchema,
   qaReportSchema,
   reviewAutomationActionSchema,
@@ -23,6 +24,7 @@ import {
   taskActorSchema,
   taskAttemptSchema,
   taskSchema,
+  type ProjectRun,
   workspaceSchema,
 } from '@mesh-session-platform/contracts';
 
@@ -44,6 +46,7 @@ import { DeveloperExecutionService } from '../tasks/developer-execution-service.
 import { DeveloperReworkService } from '../tasks/developer-rework-service.js';
 import { QaCapabilityRegistry } from '../tasks/qa-capability-registry.js';
 import { QaExecutionService } from '../tasks/qa-execution-service.js';
+import { ProjectRunService } from '../tasks/project-run-service.js';
 import { ReviewAutomationService } from '../tasks/review-automation-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
@@ -148,6 +151,13 @@ describe('executeCommand', () => {
       now: () => now,
       createId,
     });
+    const projectRunService = new ProjectRunService({
+      ...repositories,
+      attemptService,
+      publisher: registry.publisher,
+      now: () => now,
+      createId,
+    });
     const qaExecutionService = new QaExecutionService({
       ...repositories,
       attemptService,
@@ -184,6 +194,7 @@ describe('executeCommand', () => {
         developerExecutionService,
         qaExecutionService,
         reviewAutomationService,
+        projectRunService,
         registry,
         driver,
         pathOptions,
@@ -198,6 +209,127 @@ describe('executeCommand', () => {
     protocolVersion: 1,
     idempotencyKey,
     command,
+  });
+
+  it('dispatches all project-run controls and schedules only runnable outcomes', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const actor = { type: 'human' as const, id: 'operator-run' };
+    const run = (
+      state: 'running' | 'paused' | 'draining',
+      revision: number,
+    ): ProjectRun =>
+      projectRunSchema.parse({
+        id: 'run-1',
+        projectId: 'project-run',
+        revision,
+        concurrency: 2,
+        state,
+        startedAt: now,
+        updatedAt: now,
+        completedAt: null,
+        completionReason: null,
+        items: [],
+      });
+    const inputs: unknown[] = [];
+    const drained: string[] = [];
+    const projectRunService = {
+      startRun: (input: unknown) => {
+        inputs.push(input);
+        return { run: run('running', 1), events: [] };
+      },
+      pauseRun: (input: unknown) => {
+        inputs.push(input);
+        return { run: run('paused', 2), events: [] };
+      },
+      resumeRun: (input: unknown) => {
+        inputs.push(input);
+        return { run: run('running', 3), events: [] };
+      },
+      stopRun: (input: unknown) => {
+        inputs.push(input);
+        return { run: run('draining', 4), events: [] };
+      },
+      drainAvailableSlots: async (runId: string) => {
+        drained.push(runId);
+        return run('running', 3);
+      },
+      observeTaskOutcome: async () => undefined,
+    };
+    const execute = (idempotencyKey: string, command: unknown) =>
+      executeCommand(projectCommand(idempotencyKey, command), {
+        ...fixture.dependencies,
+        projectRunService,
+      });
+
+    const started = await execute('start-run-command', {
+      type: 'project.run.start',
+      payload: { projectId: 'project-run', concurrency: 2, actor },
+    });
+    const paused = await execute('pause-run-command', {
+      type: 'project.run.pause',
+      payload: { runId: 'run-1', expectedRevision: 1, actor },
+    });
+    const resumed = await execute('resume-run-command', {
+      type: 'project.run.resume',
+      payload: { runId: 'run-1', expectedRevision: 2, actor },
+    });
+    const stopped = await execute('stop-run-command', {
+      type: 'project.run.stop',
+      payload: { runId: 'run-1', expectedRevision: 3, actor },
+    });
+
+    expect(started.result).toEqual({ run: run('running', 1) });
+    expect(paused.result).toEqual({ run: run('paused', 2) });
+    expect(resumed.result).toEqual({ run: run('running', 3) });
+    expect(stopped.result).toEqual({ run: run('draining', 4) });
+    expect(inputs).toEqual([
+      {
+        projectId: 'project-run',
+        concurrency: 2,
+        actor,
+        idempotencyKey: 'start-run-command',
+      },
+      {
+        runId: 'run-1',
+        expectedRevision: 1,
+        actor,
+        idempotencyKey: 'pause-run-command',
+      },
+      {
+        runId: 'run-1',
+        expectedRevision: 2,
+        actor,
+        idempotencyKey: 'resume-run-command',
+      },
+      {
+        runId: 'run-1',
+        expectedRevision: 3,
+        actor,
+        idempotencyKey: 'stop-run-command',
+      },
+    ]);
+    expect(drained).toEqual(['run-1', 'run-1']);
+  });
+
+  it('rejects non-human project-run authority at the command boundary', async () => {
+    const fixture = commandDependencies(tmpdir());
+
+    const error = await executeCommand(
+      projectCommand('start-run-system', {
+        type: 'project.run.start',
+        payload: {
+          projectId: 'project-run',
+          concurrency: 1,
+          actor: { type: 'system', id: 'scheduler' },
+        },
+      }),
+      fixture.dependencies,
+    ).catch(toHttpError);
+
+    expect(error).toMatchObject({
+      statusCode: 400,
+      body: { error: { code: 'invalid_command' } },
+    });
   });
 
   it('dispatches manual QA launch without exposing runtime capabilities', async () => {
@@ -306,6 +438,12 @@ describe('executeCommand', () => {
       directory,
       () => `automation-http-${++nextId}`,
     );
+    const observedTaskIds: string[] = [];
+    (dependencies as { projectRunService: unknown }).projectRunService = {
+      observeTaskOutcome: async (taskId: string) => {
+        observedTaskIds.push(taskId);
+      },
+    };
     const project = repositories.projects.create(
       projectSchema.parse({
         id: 'project-automation',
@@ -380,6 +518,7 @@ describe('executeCommand', () => {
       commandType: 'task.review_automation.pause',
       result: { task: { reviewAutomation: { status: 'paused' } } },
     });
+    expect(observedTaskIds).toEqual([task.id]);
 
     const conflict = await executeCommand(
       projectCommand('pause-automation-stale', {
@@ -826,6 +965,59 @@ describe('executeCommand', () => {
     expect(result).toMatchObject({
       commandType: 'task.developer.submit_review',
       result: { projectEventCursor: 5 },
+    });
+  });
+
+  it('observes a Developer blocker only after its durable outcome commits', async () => {
+    const { directory } = await createRepository();
+    const { dependencies } = commandDependencies(directory);
+    const order: string[] = [];
+    (
+      dependencies as { developerExecutionService: unknown }
+    ).developerExecutionService = {
+      markBlocked: () => {
+        order.push('committed');
+        return {
+          task: { id: 'task-blocked', projectId: 'project-blocked' },
+          attempt: { id: 'attempt-blocked' },
+          cycle: { id: 'cycle-blocked' },
+          report: { id: 'report-blocked' },
+          event: { sequence: 7 },
+        };
+      },
+    };
+    (dependencies as { projectRunService: unknown }).projectRunService = {
+      observeTaskOutcome: async (taskId: string) => {
+        order.push(`observed:${taskId}`);
+      },
+    };
+
+    const result = await executeCommand(
+      projectCommand('developer-block-command', {
+        type: 'task.developer.block',
+        payload: {
+          capability: 'developer-capability-blocked',
+          expectedRevision: 3,
+          report: {
+            id: 'report-blocked',
+            cycleId: 'cycle-blocked',
+            reason: 'Operator input required.',
+            evidence: 'The required credential is unavailable.',
+            attemptedWork: 'Validated the local configuration.',
+            suggestedHumanAction: 'Provide the credential.',
+            preserveWorkspace: true,
+            createdAt: now,
+          },
+          actor: { type: 'agent', id: 'developer-agent-blocked' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(order).toEqual(['committed', 'observed:task-blocked']);
+    expect(result).toMatchObject({
+      commandType: 'task.developer.block',
+      result: { task: { id: 'task-blocked' }, projectEventCursor: 7 },
     });
   });
 

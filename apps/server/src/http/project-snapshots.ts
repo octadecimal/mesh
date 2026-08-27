@@ -9,6 +9,7 @@ import type { Database } from '../db/database.js';
 import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import type { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
@@ -22,6 +23,8 @@ export interface ProjectSnapshotDependencies {
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
   transitions: TaskTransitionRepository;
   projectEvents: ProjectEventRepository;
+  projectRuns: Pick<ProjectRunRepository, 'listByProject'>;
+  projectRunMaxConcurrency?: number;
   developerExecutions: Pick<
     DeveloperExecutionRepository,
     | 'listByTask'
@@ -96,6 +99,10 @@ export const buildProjectSnapshot = (
       qaReports: dependencies.qaExecutions.listReportsForAttempts(attemptIds),
       reviewAutomationActions:
         dependencies.qaExecutions.listAutomationActionsForTasks(taskIds),
+      runs: dependencies.projectRuns.listByProject(project.id),
+      projectRunLimits: {
+        maxConcurrency: dependencies.projectRunMaxConcurrency ?? 1,
+      },
       cursor: dependencies.projectEvents.latestSequence(project.id),
     });
   })();

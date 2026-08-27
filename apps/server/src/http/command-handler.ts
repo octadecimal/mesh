@@ -11,6 +11,7 @@ import {
   sessionSchema,
   workspaceSchema,
   type Command,
+  type MutatingCommand,
   type ProjectEvent,
   type Session,
 } from '@mesh-session-platform/contracts';
@@ -50,6 +51,7 @@ import type {
   ReviewAutomationCommandOutcome,
   ReviewAutomationService,
 } from '../tasks/review-automation-service.js';
+import type { ProjectRunService } from '../tasks/project-run-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
@@ -97,6 +99,15 @@ export interface CommandDependencies {
   reviewAutomationService?: Pick<
     ReviewAutomationService,
     'afterDeveloperSubmission' | 'afterQaVerdict' | 'enable' | 'pause'
+  >;
+  projectRunService?: Pick<
+    ProjectRunService,
+    | 'startRun'
+    | 'pauseRun'
+    | 'resumeRun'
+    | 'stopRun'
+    | 'drainAvailableSlots'
+    | 'observeTaskOutcome'
   >;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
@@ -176,6 +187,16 @@ const requireReviewAutomationService = (dependencies: CommandDependencies) => {
     );
   }
   return dependencies.reviewAutomationService;
+};
+
+const requireProjectRunService = (dependencies: CommandDependencies) => {
+  if (!dependencies.projectRunService) {
+    throw new CommandError(
+      'invalid_command',
+      'Project run support is unavailable',
+    );
+  }
+  return dependencies.projectRunService;
 };
 
 const followUpErrorCodes = new Set([
@@ -279,6 +300,9 @@ const executeDeveloperAgentCommand = async (
       ...command.payload,
       commandId: idempotencyKey,
     });
+    await requireProjectRunService(dependencies).observeTaskOutcome(
+      result.task.id,
+    );
     return response(command.type, {
       ...result,
       projectEventCursor: result.event.sequence,
@@ -396,17 +420,50 @@ type ReviewAutomationCommand = Extract<
   }
 >;
 
-const executeReviewAutomationCommand = (
+const executeReviewAutomationCommand = async (
   command: ReviewAutomationCommand,
   idempotencyKey: string,
   dependencies: CommandDependencies,
-): CommandResponse => {
+): Promise<CommandResponse> => {
   const service = requireReviewAutomationService(dependencies);
   const result =
     command.type === 'task.review_automation.enable'
       ? service.enable({ ...command.payload, commandId: idempotencyKey })
       : service.pause({ ...command.payload, commandId: idempotencyKey });
+  if (command.type === 'task.review_automation.pause') {
+    await requireProjectRunService(dependencies).observeTaskOutcome(
+      result.task.id,
+    );
+  }
   return response(command.type, reviewAutomationResponse(result));
+};
+
+type ProjectRunCommand = Extract<
+  MutatingCommand,
+  { type: `project.run.${string}` }
+>;
+
+const executeProjectRunCommand = async (
+  command: ProjectRunCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  const service = requireProjectRunService(dependencies);
+  const result =
+    command.type === 'project.run.start'
+      ? service.startRun({ ...command.payload, idempotencyKey })
+      : command.type === 'project.run.pause'
+        ? service.pauseRun({ ...command.payload, idempotencyKey })
+        : command.type === 'project.run.resume'
+          ? service.resumeRun({ ...command.payload, idempotencyKey })
+          : service.stopRun({ ...command.payload, idempotencyKey });
+  if (
+    command.type === 'project.run.start' ||
+    command.type === 'project.run.resume'
+  ) {
+    await service.drainAvailableSlots(result.run.id);
+  }
+  return response(command.type, { run: result.run });
 };
 
 const executeDeveloperHumanCommand = async (
@@ -1332,6 +1389,13 @@ export const executeCommand = async (
     if (command.command.type === 'project.qa_configuration.update') {
       return executeQaConfigurationUpdate(
         command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (command.command.type.startsWith('project.run.')) {
+      return executeProjectRunCommand(
+        command.command as ProjectRunCommand,
         command.idempotencyKey,
         dependencies,
       );

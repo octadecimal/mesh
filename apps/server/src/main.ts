@@ -56,6 +56,8 @@ import {
   reconcileTaskAttempts,
 } from './tasks/reconcile-attempts.js';
 import { ReviewAutomationService } from './tasks/review-automation-service.js';
+import { ProjectRunService } from './tasks/project-run-service.js';
+import { reconcileProjectRuns } from './tasks/reconcile-project-runs.js';
 import { TaskService } from './tasks/task-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
@@ -197,6 +199,7 @@ export const startServer = async (
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
+  const originPolicy = createOriginPolicy(config.developmentOrigin);
   const taskService = new TaskService({
     database,
     projects,
@@ -213,31 +216,92 @@ export const startServer = async (
   );
   const capabilities = new DeveloperCapabilityRegistry();
   const qaCapabilities = new QaCapabilityRegistry();
-  const roleServices: { reviewAutomation?: ReviewAutomationService } = {};
+  const roleServices: {
+    reviewAutomation?: ReviewAutomationService;
+    projectRuns?: ProjectRunService;
+  } = {};
   const requireReviewAutomation = (): ReviewAutomationService => {
     if (!roleServices.reviewAutomation) {
       throw new Error('Review automation service is not composed');
     }
     return roleServices.reviewAutomation;
   };
+  const requireProjectRuns = (): ProjectRunService => {
+    if (!roleServices.projectRuns) {
+      throw new Error('Project run service is not composed');
+    }
+    return roleServices.projectRuns;
+  };
   const runtimeRepairs: AttemptRepair[] = [];
+  const projectCursors = () =>
+    new Map(
+      projects
+        .list()
+        .map(
+          (project) =>
+            [project.id, projectEvents.latestSequence(project.id)] as const,
+        ),
+    );
+  const publishRecoveredEvents = (
+    cursors: ReadonlyMap<string, number>,
+    activeRegistry: SessionRegistry,
+  ) => {
+    for (const project of projects.list()) {
+      for (const event of projectEvents.after(
+        project.id,
+        cursors.get(project.id) ?? 0,
+      )) {
+        activeRegistry.publisher.publishProject(event);
+      }
+    }
+  };
+  const scheduleRunDrains = (runIds: readonly string[]) => {
+    if (!originPolicy.accepting) return;
+    for (const runId of runIds) {
+      void requireProjectRuns()
+        .drainAvailableSlots(runId)
+        .catch(() => originPolicy.stopAccepting());
+    }
+  };
   const reconcileStoppedRuntime = (activeRegistry: SessionRegistry) => {
-    const result = reconcileTaskAttempts({
-      database,
-      projects,
-      tasks,
-      attempts,
-      sessions,
-      workspaces,
-      diagnostics,
-      developerExecutions,
-      qaExecutions,
-      qaCapabilities,
-      projectEvents,
-    });
-    runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
-    for (const event of result.events)
-      activeRegistry.publisher.publishProject(event);
+    const cursors = projectCursors();
+    try {
+      const result = reconcileTaskAttempts({
+        database,
+        projects,
+        tasks,
+        attempts,
+        sessions,
+        workspaces,
+        diagnostics,
+        developerExecutions,
+        qaExecutions,
+        qaCapabilities,
+        projectEvents,
+      });
+      runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
+      reconcileTaskAttemptLaunchReservations(database);
+      const runReconciliation = reconcileProjectRuns({
+        database,
+        projects,
+        tasks,
+        attempts,
+        sessions,
+        workspaces,
+        diagnostics,
+        developerExecutions,
+        qaExecutions,
+        qaCapabilities,
+        projectEvents,
+        projectRuns,
+        billingConflicts,
+      });
+      publishRecoveredEvents(cursors, activeRegistry);
+      scheduleRunDrains(runReconciliation.launchableRunIds);
+    } catch (error) {
+      originPolicy.stopAccepting();
+      throw error;
+    }
   };
   const registry = new SessionRegistry({
     database,
@@ -319,6 +383,52 @@ export const startServer = async (
     resolveIdentity,
     billingConflicts,
   });
+  const projectRunService = new ProjectRunService({
+    database,
+    projects,
+    tasks,
+    attempts,
+    developerExecutions,
+    projectRuns,
+    projectEvents,
+    commands,
+    attemptService,
+    publisher: registry.publisher,
+    maxConcurrency: config.projectRunMaxConcurrency,
+  });
+  roleServices.projectRuns = projectRunService;
+  const withProjectRunAuditBarrier = async <Result>(
+    operation: () => Promise<Result>,
+  ): Promise<Result> => {
+    try {
+      return await operation();
+    } catch (error) {
+      originPolicy.stopAccepting();
+      throw error;
+    }
+  };
+  const projectRunBoundary = {
+    startRun: projectRunService.startRun.bind(projectRunService),
+    pauseRun: projectRunService.pauseRun.bind(projectRunService),
+    resumeRun: projectRunService.resumeRun.bind(projectRunService),
+    stopRun: projectRunService.stopRun.bind(projectRunService),
+    drainAvailableSlots: (runId: string) =>
+      withProjectRunAuditBarrier(() =>
+        projectRunService.drainAvailableSlots(runId),
+      ),
+    observeTaskOutcome: (taskId: string) =>
+      withProjectRunAuditBarrier(() =>
+        projectRunService.observeTaskOutcome(taskId),
+      ),
+  } satisfies Pick<
+    ProjectRunService,
+    | 'startRun'
+    | 'pauseRun'
+    | 'resumeRun'
+    | 'stopRun'
+    | 'drainAvailableSlots'
+    | 'observeTaskOutcome'
+  >;
   const qaExecutionService = new QaExecutionService({
     database,
     projects,
@@ -353,8 +463,10 @@ export const startServer = async (
     projectEvents,
     qaExecutionService,
     developerReworkService,
+    observeTaskOutcome: projectRunBoundary.observeTaskOutcome,
     publisher: registry.publisher,
   });
+  const recoveryCursors = projectCursors();
   const reconciliation = reconcileTaskAttempts({
     database,
     projects,
@@ -370,7 +482,22 @@ export const startServer = async (
   });
   runtimeRepairs.push(...reconciliation.repairs);
   reconcileTaskAttemptLaunchReservations(database);
-  const originPolicy = createOriginPolicy(config.developmentOrigin);
+  const runReconciliation = reconcileProjectRuns({
+    database,
+    projects,
+    tasks,
+    attempts,
+    sessions,
+    workspaces,
+    diagnostics,
+    developerExecutions,
+    qaExecutions,
+    qaCapabilities,
+    projectEvents,
+    projectRuns,
+    billingConflicts,
+  });
+  publishRecoveredEvents(recoveryCursors, registry);
   const app = buildApp({
     database,
     projects,
@@ -380,9 +507,12 @@ export const startServer = async (
     developerExecutionService,
     qaExecutionService,
     reviewAutomationService: roleServices.reviewAutomation,
+    projectRunService: projectRunBoundary,
     attempts,
     transitions,
     projectEvents,
+    projectRuns,
+    projectRunMaxConcurrency: config.projectRunMaxConcurrency,
     developerExecutions,
     qaExecutions,
     repairs: runtimeRepairs,
@@ -426,6 +556,7 @@ export const startServer = async (
     originPolicy.setServedOrigin(origin);
     process.once('SIGINT', onSignal);
     process.once('SIGTERM', onSignal);
+    scheduleRunDrains(runReconciliation.launchableRunIds);
     return { app, origin, close };
   } catch (error) {
     await close();

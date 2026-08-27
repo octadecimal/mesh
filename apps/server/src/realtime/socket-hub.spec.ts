@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   idSchema,
   projectEventSchema,
+  projectRunSchema,
   taskSchema,
   type ProjectEvent,
   type ServerMessage,
@@ -104,6 +105,29 @@ const developerEvent = projectEventSchema.parse({
     completionReport: null,
     blockerReport: null,
     reviewFeedback: null,
+  },
+});
+
+const runEvent = projectEventSchema.parse({
+  protocolVersion: 1,
+  id: 'run-event-p1-2',
+  projectId: 'p1',
+  sequence: 2,
+  occurredAt: '2026-08-24T00:02:00.000Z',
+  type: 'project.run_changed',
+  payload: {
+    run: projectRunSchema.parse({
+      id: 'run-1',
+      projectId: 'p1',
+      revision: 1,
+      concurrency: 2,
+      state: 'running',
+      startedAt: '2026-08-24T00:00:00.000Z',
+      updatedAt: '2026-08-24T00:02:00.000Z',
+      completedAt: null,
+      completionReason: null,
+      items: [],
+    }),
   },
 });
 
@@ -375,6 +399,34 @@ describe('SocketHub', () => {
       payload: { event: developerEvent },
     });
     expect(JSON.stringify(message)).not.toContain('capability');
+  });
+
+  it('streams an authoritative project-run change on its project subscription', () => {
+    const publisher = new EventPublisher();
+    const hub = new SocketHub({
+      publisher,
+      events: { after: () => [] },
+      projectEvents: {
+        retainedAfter: () => ({
+          events: [projectEvent('p1', 1)],
+          lowWater: 1,
+          highWater: 1,
+        }),
+      },
+      now: () => '2026-08-24T00:00:00.000Z',
+      heartbeatIntervalMs: 0,
+    });
+    const socket = new TestSocket();
+
+    hub.attach(socket);
+    socket.subscribe({}, { p1: 0 });
+    publisher.publishProject(runEvent);
+
+    expect(socket.messages).toContainEqual({
+      protocolVersion: 1,
+      type: 'project.event',
+      payload: { event: runEvent },
+    });
   });
 
   it('emits project resync without replaying an unavailable suffix', () => {

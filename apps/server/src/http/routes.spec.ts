@@ -8,6 +8,7 @@ import {
   projectSchema,
   taskAttemptSchema,
   taskSchema,
+  type StableTaskErrorCode,
 } from '@mesh-session-platform/contracts';
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
@@ -16,6 +17,10 @@ import { QaVerificationExecutableUnavailableError } from '../platform/qa-verific
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
 import type { QaExecutionService } from '../tasks/qa-execution-service.js';
+import {
+  ProjectRunServiceError,
+  type ProjectRunService,
+} from '../tasks/project-run-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { buildApp } from '../app.js';
 
@@ -31,6 +36,16 @@ const setup = (options?: {
   withGit?: boolean;
   gitExitCode?: number;
   seedProject?: boolean;
+  projectRunMaxConcurrency?: number;
+  projectRunService?: Pick<
+    ProjectRunService,
+    | 'startRun'
+    | 'pauseRun'
+    | 'resumeRun'
+    | 'stopRun'
+    | 'drainAvailableSlots'
+    | 'observeTaskOutcome'
+  >;
   qaExecutionService?: Pick<
     QaExecutionService,
     'launch' | 'submitVerdict' | 'repairInterrupted'
@@ -193,6 +208,71 @@ describe('HTTP command routes', () => {
         message: 'The QA capability is invalid.',
       },
     });
+  });
+
+  it('maps every canonical project-run failure to its stable HTTP envelope', async () => {
+    let currentCode: StableTaskErrorCode = 'project_run_invalid';
+    const fail = () => {
+      throw new ProjectRunServiceError(
+        currentCode,
+        `Project run failed with ${currentCode}`,
+        { runId: 'run-1' },
+      );
+    };
+    const fixture = setup({
+      projectRunService: {
+        startRun: fail,
+        pauseRun: fail,
+        resumeRun: fail,
+        stopRun: fail,
+        drainAvailableSlots: async () => fail(),
+        observeTaskOutcome: async () => undefined,
+      },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      fixture.repositories.dispose();
+    });
+    const cases = [
+      ['project_run_not_found', 404],
+      ['project_run_revision_conflict', 409],
+      ['project_run_invalid', 400],
+      ['project_run_transition_invalid', 409],
+      ['project_run_conflict', 409],
+      ['project_run_empty', 422],
+      ['project_run_stale', 409],
+      ['project_run_concurrency_exceeded', 422],
+      ['project_run_not_controllable', 409],
+    ] as const satisfies ReadonlyArray<readonly [StableTaskErrorCode, number]>;
+
+    for (const [code, statusCode] of cases) {
+      currentCode = code;
+      const response = await fixture.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: `command-${code}`,
+          command: {
+            type: 'project.run.start',
+            payload: {
+              projectId: 'p1',
+              concurrency: 1,
+              actor: { type: 'human', id: 'operator-run' },
+            },
+          },
+        },
+      });
+
+      expect(response.statusCode).toBe(statusCode);
+      expect(response.json()).toEqual({
+        error: {
+          code,
+          message: `Project run failed with ${code}`,
+          details: { runId: 'run-1' },
+        },
+      });
+    }
   });
 
   it('maps a manual QA baseline without approved Git to service unavailable', async () => {
@@ -978,7 +1058,7 @@ describe('HTTP command routes', () => {
   });
 
   it('returns only the selected project records and its latest event cursor', async () => {
-    const fixture = setup();
+    const fixture = setup({ projectRunMaxConcurrency: 6 });
     cleanups.push(async () => {
       await fixture.app.close();
       fixture.repositories.dispose();
@@ -1028,6 +1108,20 @@ describe('HTTP command routes', () => {
       });
     const selectedTask = fixture.repositories.tasks.create(task('t1', 'p1'));
     const otherTask = fixture.repositories.tasks.create(task('t2', 'p2'));
+    fixture.repositories.projectRuns.create({
+      id: 'run-p1',
+      projectId: 'p1',
+      concurrency: 2,
+      startedAt: now,
+      items: [],
+    });
+    fixture.repositories.projectRuns.create({
+      id: 'run-p2',
+      projectId: 'p2',
+      concurrency: 1,
+      startedAt: now,
+      items: [],
+    });
     const actor = { type: 'human' as const, id: id('human-1') };
     fixture.repositories.attempts.create(
       taskAttemptSchema.parse({
@@ -1112,11 +1206,14 @@ describe('HTTP command routes', () => {
       attempts: [{ id: 'a1', taskId: 't1' }],
       transitions: [{ id: 'transition-1', taskId: 't1' }],
       repairs: [],
+      runs: [{ id: 'run-p1', projectId: 'p1' }],
+      projectRunLimits: { maxConcurrency: 6 },
       cursor: 2,
     });
     expect(JSON.stringify(snapshot.json())).not.toContain('t2');
     expect(JSON.stringify(snapshot.json())).not.toContain('a2');
     expect(JSON.stringify(snapshot.json())).not.toContain('transition-2');
+    expect(JSON.stringify(snapshot.json())).not.toContain('run-p2');
     expect(history.statusCode).toBe(200);
     expect(history.json()).toMatchObject({
       projectId: 'p1',
