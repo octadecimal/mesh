@@ -31,7 +31,8 @@ describe('NodeProcessRunner', () => {
         'setInterval(() => undefined, 1000)',
       ].join(';');
       const parent = [
-        `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore' })`,
+        `const child = require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore', detached: process.platform === 'win32' })`,
+        `if (process.platform === 'win32') child.unref()`,
         'setInterval(() => undefined, 1000)',
       ].join(';');
       const controller = new AbortController();
@@ -51,9 +52,41 @@ describe('NodeProcessRunner', () => {
       );
     } finally {
       if (grandchildPid && isAlive(grandchildPid)) {
-        process.kill(grandchildPid);
+        const remainingPid = grandchildPid;
+        process.kill(remainingPid);
+        await vi.waitFor(() => expect(isAlive(remainingPid)).toBe(false));
       }
       rmSync(directory, { force: true, recursive: true });
     }
+  });
+
+  it.runIf(process.platform === 'win32').each([
+    ['corepack', ['pnpm', '--version']],
+    ['pnpm', ['--version']],
+    ['npm', ['--version']],
+  ])(
+    'runs the vetted Windows %s launcher without a shell',
+    async (executable, args) => {
+      const result = await new NodeProcessRunner().run(executable, args, {
+        cwd: process.cwd(),
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/);
+    },
+  );
+
+  it('terminates a command when streamed output reaches its bound', async () => {
+    await expect(
+      new NodeProcessRunner().run(
+        process.execPath,
+        ['-e', `process.stdout.write('x'.repeat(64 * 1024))`],
+        { cwd: process.cwd(), maxOutputBytes: 1_024 },
+      ),
+    ).rejects.toMatchObject({
+      code: 'process_output_limit_exceeded',
+      limit: 1_024,
+      stream: 'stdout',
+    });
   });
 });

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile, readlink, realpath } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 import type { ProcessResult, ProcessRunner } from './process-runner.js';
 
@@ -49,6 +49,15 @@ export class QaVerificationTimedOutError extends Error {
   }
 }
 
+export class QaVerificationOutputLimitError extends Error {
+  readonly code = 'qa_verification_output_limit_exceeded';
+
+  constructor() {
+    super('QA verification exceeded its bounded output limit.');
+    this.name = 'QaVerificationOutputLimitError';
+  }
+}
+
 type TrackedFileStat = {
   dev: bigint | number;
   ino: bigint | number;
@@ -64,8 +73,14 @@ type TrackedFileIdentity = {
   symbolicLink: boolean;
 };
 
+type TrackedParentIdentity = {
+  key: string;
+  path: string;
+};
+
 const stableSnapshotAttempts = 3;
 const defaultVerificationTimeoutMs = 300_000;
+const verificationOutputLimitBytes = 64_000;
 
 const allowedExecutables = new Set(['corepack', 'pnpm', 'npm', 'git']);
 const readOnlyGitCommands = new Set([
@@ -158,6 +173,10 @@ const pathValueArguments = new Set([
   '--testrunner',
   '--tsconfig',
 ]);
+const safeNonPathValueArguments = new Set([
+  '--test-name-pattern',
+  '--testnamepattern',
+]);
 const interactiveArguments = new Set([
   '--browser',
   '--interactive',
@@ -168,7 +187,8 @@ const interactiveArguments = new Set([
   '--watch-all',
   '--watchall',
 ]);
-const interactiveScript = /(^|:)(dev|interactive|serve|start|ui|watch)(:|$)/;
+const interactiveScript =
+  /(^|[:._-])(dev|interactive|serve|server|start|ui|watch)([:._-]|$)/;
 
 const executableName = (value: string) =>
   value
@@ -294,15 +314,37 @@ const canonicalEscapesWorkspace = async (
   workspacePath: string,
   candidate: string,
 ): Promise<boolean> => {
+  let canonicalWorkspace: string;
   try {
-    const canonicalWorkspace = await realpath(workspacePath);
-    const canonicalCandidate = await realpath(
-      resolve(workspacePath, candidate.replace(/\\/g, '/')),
-    );
-    return escapesWorkspace(canonicalWorkspace, canonicalCandidate);
+    canonicalWorkspace = await realpath(workspacePath);
   } catch (error) {
     if (isMissingFile(error)) return false;
     throw error;
+  }
+  let current = resolve(workspacePath, candidate.replace(/\\/g, '/'));
+  while (true) {
+    try {
+      return escapesWorkspace(canonicalWorkspace, await realpath(current));
+    } catch (error) {
+      if (!isMissingFile(error)) throw error;
+      const parent = dirname(current);
+      if (parent === current) return true;
+      current = parent;
+    }
+  }
+};
+
+const assertWorkspaceBoundValue = async (
+  workspacePath: string,
+  value: string,
+): Promise<void> => {
+  if (
+    escapesWorkspace(workspacePath, value) ||
+    (await canonicalEscapesWorkspace(workspacePath, value))
+  ) {
+    throw new QaVerificationCommandRejectedError(
+      'Verification command paths must remain inside the assigned workspace.',
+    );
   }
 };
 
@@ -310,8 +352,16 @@ const assertWorkspaceBoundArguments = async (
   workspacePath: string,
   args: readonly string[],
 ): Promise<void> => {
-  let followingPathValue = false;
+  let followingValue: 'path' | 'safe_non_path' | undefined;
   for (const argument of args) {
+    if (followingValue) {
+      const valueKind = followingValue;
+      followingValue = undefined;
+      if (valueKind === 'path') {
+        await assertWorkspaceBoundValue(workspacePath, argument);
+      }
+      continue;
+    }
     const name = optionName(argument);
     const shortOption =
       argument.startsWith('-') && !argument.startsWith('--')
@@ -330,23 +380,25 @@ const assertWorkspaceBoundArguments = async (
         'Verification commands may not update source or select output destinations.',
       );
     }
-    const joinedPathValue =
-      pathValueArguments.has(name) && argument.includes('=');
-    const pathCandidate =
-      followingPathValue || joinedPathValue || looksLikePathOperand(argument);
-    followingPathValue =
-      pathValueArguments.has(name) && !argument.includes('=');
-    if (!pathCandidate) continue;
-    const assignedValue = joinedPathValue
-      ? argument.slice(argument.indexOf('=') + 1)
-      : argument;
-    if (
-      escapesWorkspace(workspacePath, assignedValue) ||
-      (await canonicalEscapesWorkspace(workspacePath, assignedValue))
-    ) {
-      throw new QaVerificationCommandRejectedError(
-        'Verification command paths must remain inside the assigned workspace.',
-      );
+    if (argument.startsWith('--') && argument.includes('=')) {
+      if (!safeNonPathValueArguments.has(name)) {
+        await assertWorkspaceBoundValue(
+          workspacePath,
+          argument.slice(argument.indexOf('=') + 1),
+        );
+      }
+      continue;
+    }
+    if (pathValueArguments.has(name)) {
+      followingValue = 'path';
+      continue;
+    }
+    if (safeNonPathValueArguments.has(name)) {
+      followingValue = 'safe_non_path';
+      continue;
+    }
+    if (looksLikePathOperand(argument)) {
+      await assertWorkspaceBoundValue(workspacePath, argument);
     }
   }
 };
@@ -437,7 +489,22 @@ export class QaVerificationRunner {
       ) {
         throw new Error('Tracked source path escaped the verified workspace.');
       }
+      const parentBefore = canonicalWorkspace
+        ? await this.readTrackedParentIdentity(canonicalWorkspace, absolutePath)
+        : undefined;
+      if (parentBefore === 'missing') return undefined;
       const before = await this.readFileIdentity(absolutePath);
+      if (
+        parentBefore &&
+        canonicalWorkspace &&
+        !(await this.trackedParentMatches(
+          canonicalWorkspace,
+          absolutePath,
+          parentBefore,
+        ))
+      ) {
+        return undefined;
+      }
       if (before === 'missing') {
         if ((await this.readFileIdentity(absolutePath)) !== 'missing') {
           return undefined;
@@ -451,6 +518,13 @@ export class QaVerificationRunner {
         const after = await this.readFileIdentity(absolutePath);
         const confirmedTarget = await this.tryReadTrackedLink(absolutePath);
         if (
+          (parentBefore &&
+            canonicalWorkspace &&
+            !(await this.trackedParentMatches(
+              canonicalWorkspace,
+              absolutePath,
+              parentBefore,
+            ))) ||
           after === 'missing' ||
           !after.symbolicLink ||
           before.key !== after.key ||
@@ -525,6 +599,49 @@ export class QaVerificationRunner {
       if (isMissingFile(error)) return 'missing';
       throw error;
     }
+  }
+
+  private async readTrackedParentIdentity(
+    canonicalWorkspace: string,
+    path: string,
+  ): Promise<TrackedParentIdentity | 'missing'> {
+    const canonicalParent = await this.tryRealPath(dirname(path));
+    if (!canonicalParent) return 'missing';
+    if (escapesWorkspace(canonicalWorkspace, canonicalParent)) {
+      throw new Error('Tracked source path escaped the verified workspace.');
+    }
+    try {
+      const current = await lstat(canonicalParent, { bigint: true });
+      return {
+        path: canonicalParent,
+        key: [
+          current.dev,
+          current.ino,
+          current.mode,
+          current.mtimeNs,
+          current.ctimeNs,
+        ].join(':'),
+      };
+    } catch (error) {
+      if (isMissingFile(error)) return 'missing';
+      throw error;
+    }
+  }
+
+  private async trackedParentMatches(
+    canonicalWorkspace: string,
+    path: string,
+    expected: TrackedParentIdentity,
+  ): Promise<boolean> {
+    const current = await this.readTrackedParentIdentity(
+      canonicalWorkspace,
+      path,
+    );
+    return (
+      current !== 'missing' &&
+      current.path === expected.path &&
+      current.key === expected.key
+    );
   }
 
   private async tryRealPath(path: string): Promise<string | undefined> {
@@ -602,6 +719,7 @@ export class QaVerificationRunner {
       input.args,
       assignedWorkspace,
       options.signal,
+      verificationOutputLimitBytes,
     );
     return {
       ...result,
@@ -616,6 +734,7 @@ export class QaVerificationRunner {
     args: readonly string[],
     cwd: string,
     parentSignal?: AbortSignal,
+    maxOutputBytes?: number,
   ): Promise<ProcessResult> {
     if (parentSignal?.aborted) throw new QaVerificationCancelledError();
     const controller = new AbortController();
@@ -633,6 +752,7 @@ export class QaVerificationRunner {
     try {
       const result = await this.processes.run(executable, args, {
         cwd,
+        ...(maxOutputBytes ? { maxOutputBytes } : {}),
         signal: controller.signal,
       });
       if (controller.signal.aborted) {
@@ -642,6 +762,14 @@ export class QaVerificationRunner {
     } catch (error) {
       if (controller.signal.aborted) {
         throw abortReason ?? new QaVerificationCancelledError();
+      }
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'process_output_limit_exceeded'
+      ) {
+        throw new QaVerificationOutputLimitError();
       }
       throw error;
     } finally {

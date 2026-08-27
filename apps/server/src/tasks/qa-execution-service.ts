@@ -185,6 +185,11 @@ type SourceMutationContext = {
   workspaceBaseline: string;
 };
 
+type VerificationFailureCode =
+  | 'qa_verification_cancelled'
+  | 'qa_verification_output_limit_exceeded'
+  | 'qa_verification_timed_out';
+
 const verificationCommandSchema = z.object({
   executable: z.string().trim().min(1),
   args: z.array(z.string()).min(1).max(64),
@@ -300,6 +305,7 @@ const safeQaControlErrorCodes = new Set([
   'qa_control_busy',
   'qa_workspace_path_rejected',
   'qa_verification_cancelled',
+  'qa_verification_output_limit_exceeded',
   'qa_verification_timed_out',
 ]);
 
@@ -1347,11 +1353,12 @@ export class QaExecutionService {
 
   private verificationInterruptionCode(
     error: unknown,
-  ): 'qa_verification_cancelled' | 'qa_verification_timed_out' | undefined {
+  ): VerificationFailureCode | undefined {
     if (typeof error !== 'object' || error === null || !('code' in error)) {
       return undefined;
     }
     return error.code === 'qa_verification_cancelled' ||
+      error.code === 'qa_verification_output_limit_exceeded' ||
       error.code === 'qa_verification_timed_out'
       ? error.code
       : undefined;
@@ -1360,7 +1367,7 @@ export class QaExecutionService {
   private async pauseForVerificationFailure(
     context: SourceMutationContext,
     capability: string,
-    code: 'qa_verification_cancelled' | 'qa_verification_timed_out',
+    code: VerificationFailureCode,
     verification: VerificationState,
   ): Promise<void> {
     if (verification.failureRecorded) return;
@@ -1379,7 +1386,9 @@ export class QaExecutionService {
             pauseReason:
               code === 'qa_verification_timed_out'
                 ? 'QA verification timed out; human inspection is required.'
-                : 'QA verification was interrupted; human inspection is required.',
+                : code === 'qa_verification_output_limit_exceeded'
+                  ? 'QA verification exceeded its output limit; human inspection is required.'
+                  : 'QA verification was interrupted; human inspection is required.',
             updatedAt: occurredAt,
           },
           updatedAt: occurredAt,
@@ -1425,7 +1434,7 @@ export class QaExecutionService {
     verification.failureRecorded = true;
     if (event) this.dependencies.registry.publisher.publishProject(event);
     this.dependencies.capabilities.invalidate(capability);
-    if (code === 'qa_verification_timed_out') {
+    if (code !== 'qa_verification_cancelled') {
       await this.dependencies.registry.interrupt(context.sessionId);
     }
   }

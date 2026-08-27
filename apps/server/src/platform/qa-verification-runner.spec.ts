@@ -134,6 +134,18 @@ describe('QaVerificationRunner', () => {
     { executable: 'pnpm', args: ['run', 'test:watch'] },
     { executable: 'pnpm', args: ['nx', 'test', 'server', '--watch=true'] },
     { executable: 'npm', args: ['start'] },
+    { executable: 'pnpm', args: ['test', '--root=../../outside'] },
+    {
+      executable: 'pnpm',
+      args: ['test', '--coverage.reportsDirectory=../../outside'],
+    },
+    { executable: 'pnpm', args: ['run', 'test:server'] },
+    { executable: 'pnpm', args: ['run', 'test-server'] },
+    { executable: 'pnpm', args: ['run', 'test.server'] },
+    { executable: 'pnpm', args: ['run', 'test_server'] },
+    { executable: 'pnpm', args: ['run', 'test-watch'] },
+    { executable: 'pnpm', args: ['run', 'test.watch'] },
+    { executable: 'pnpm', args: ['run', 'test_watch'] },
   ])(
     'rejects source-authoring command authority: $executable $args',
     async (input) => {
@@ -166,6 +178,10 @@ describe('QaVerificationRunner', () => {
     {
       executable: 'pnpm',
       args: ['test', '--', '--testNamePattern=/workspace behavior/'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', '--', '--testNamePattern', '/workspace behavior/'],
     },
   ])(
     'preserves workspace-local verification paths: $executable $args',
@@ -298,6 +314,28 @@ describe('QaVerificationRunner', () => {
     }
   });
 
+  it('maps streamed output overflow to a stable QA verification failure', async () => {
+    const run = vi.fn(async () => {
+      throw Object.assign(new Error('output limit exceeded'), {
+        code: 'process_output_limit_exceeded',
+        limit: 64_000,
+        stream: 'stdout',
+      });
+    });
+    const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+    await expect(
+      runner.run('C:\\repo', { executable: 'pnpm', args: ['test'] }),
+    ).rejects.toMatchObject({
+      code: 'qa_verification_output_limit_exceeded',
+    });
+    expect(run).toHaveBeenCalledWith(
+      'pnpm',
+      ['test'],
+      expect.objectContaining({ maxOutputBytes: 64_000 }),
+    );
+  });
+
   it('rejects a test config reached through an external directory link', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-root-'));
     const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-outside-'));
@@ -319,6 +357,31 @@ describe('QaVerificationRunner', () => {
         runner.run(root, {
           executable: 'pnpm',
           args: ['test', '--', '--config=external/vitest.config.ts'],
+        }),
+      ).rejects.toBeInstanceOf(QaVerificationCommandRejectedError);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+      rmSync(outside, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects a missing config beneath an external directory link', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-outside-'));
+    try {
+      symlinkSync(
+        outside,
+        join(root, 'external'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      const run = vi.fn();
+      const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+      await expect(
+        runner.run(root, {
+          executable: 'pnpm',
+          args: ['test', '--', '--config=external/missing/vitest.config.ts'],
         }),
       ).rejects.toBeInstanceOf(QaVerificationCommandRejectedError);
       expect(run).not.toHaveBeenCalled();
@@ -387,6 +450,38 @@ describe('QaVerificationRunner', () => {
     } finally {
       rmSync(root, { force: true, recursive: true });
       rmSync(outside, { force: true, recursive: true });
+    }
+  });
+
+  it('rejects an indexed link object reached through an external parent junction', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-source-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-source-outside-'));
+    const target = mkdtempSync(join(tmpdir(), 'mesh-qa-source-target-'));
+    try {
+      symlinkSync(
+        outside,
+        join(root, 'external-parent'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      symlinkSync(
+        target,
+        join(outside, 'tracked-link'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      const run = vi.fn(async () => ({
+        exitCode: 0,
+        stdout: 'external-parent/tracked-link\0',
+        stderr: '',
+      }));
+      const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+      await expect(runner.captureTrackedSource(root)).rejects.toThrow(
+        'Tracked source path escaped the verified workspace.',
+      );
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+      rmSync(outside, { force: true, recursive: true });
+      rmSync(target, { force: true, recursive: true });
     }
   });
 

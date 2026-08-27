@@ -655,6 +655,60 @@ describe('QaExecutionService', () => {
     }
   });
 
+  it('pauses QA with a stable diagnostic when verification output overflows', async () => {
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => 'sha256:developer-source',
+        run: async () => {
+          throw Object.assign(new Error('output limit exceeded'), {
+            code: 'qa_verification_output_limit_exceeded',
+          });
+        },
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const response = await control.execute({
+      executable: 'pnpm',
+      args: ['test'],
+    });
+
+    expect(response).toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining(
+            'qa_verification_output_limit_exceeded',
+          ),
+        },
+      ],
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_output_limit_exceeded',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+  });
+
   it('cancels a hanging verification with its runtime and records the pause', async () => {
     const started = deferred();
     let activeChildren = 0;

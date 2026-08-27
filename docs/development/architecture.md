@@ -88,11 +88,18 @@ no built-in tools and does not load filesystem settings or inherited MCP
 servers. It receives only Mesh's structured verdict, constrained verification,
 and bounded workspace read, list, and search controls. Those workspace controls
 resolve requested paths canonically inside the assigned workspace and reject
-absolute paths, traversal, and links whose targets escape it. The constrained
-runner admits only non-interactive verification commands, gives each child a
-five-minute wall-clock bound, and cancels owned process trees when the QA
-runtime is interrupted or closes. It never exposes a general shell or
-source-authoring control.
+absolute paths, traversal, and links whose targets escape it. Handle-backed
+reads and directory enumerations revalidate the canonical root, object, and
+parent identities before returning data so a link or file swap fails closed.
+The constrained runner treats ambiguous joined option values as workspace
+paths unless they are explicitly safe non-path values, and validates missing
+paths through their deepest existing ancestor. It admits only non-interactive
+verification commands, gives each child a five-minute wall-clock bound, caps
+each output stream at 64,000 bytes, and cancels owned process trees when the QA
+runtime is interrupted, closes, or exceeds a bound. On Windows, vetted package
+manager commands resolve to canonical bundled JavaScript entries and run via
+the installed Node executable with the shell disabled. The runner never exposes
+a general shell or source-authoring control.
 
 The server captures Git-tracked source before launch, after every verification
 command, and immediately before verdict persistence instead of accepting an
@@ -106,7 +113,8 @@ mutation, so the verdict transaction begins immediately after capture without
 claiming
 filesystem-transaction atomicity. Tracked symbolic links are hashed as link
 identity and target text without following the target; regular tracked files
-must resolve inside the workspace. Timeout, cancellation, or confinement
+must resolve inside the workspace, and an indexed link's canonical parent must
+also remain there. Timeout, cancellation, output overflow, or confinement
 failure pauses review and prevents a verdict. Verification may create ordinary
 ignored build or test artifacts.
 

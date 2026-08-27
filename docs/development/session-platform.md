@@ -112,13 +112,19 @@ creates a separate QA session and cycle in the Developer attempt's exact
 workspace. QA receives no Claude SDK built-in tools or inherited filesystem MCP
 configuration. It can read, list, and search the submitted source only through
 bounded Mesh controls that reject absolute paths, traversal, and symlink or
-junction escapes. It may request named verification commands through Mesh's
-constrained runner, but receives no shell and cannot write source, create
-another worktree, commit, merge, or create a pull request. Interactive, watch,
-server, and authoring-style command forms are rejected. Every verification
-child has a five-minute wall-clock bound and is cancelled with the owning QA
-runtime; timeout or cancellation durably pauses review without recording a
-verdict.
+junction escapes. Mesh revalidates the opened object, its parent, and the
+workspace root before and after reads or directory enumeration so concurrent
+path swaps fail closed. It may request named verification commands through
+Mesh's constrained runner, but receives no shell and cannot write source,
+create another worktree, commit, merge, or create a pull request. Ambiguous
+joined option values are treated as workspace paths, including missing paths
+whose deepest existing ancestor is a link. Interactive, watch, server, and
+authoring-style command forms are rejected. Every verification child has a
+five-minute wall-clock bound and a 64,000-byte limit per output stream, and is
+cancelled with the owning QA runtime. Timeout, output overflow, or cancellation
+durably pauses review without recording a verdict. On Windows, vetted package
+manager commands use canonical bundled JavaScript launchers through the
+installed Node executable, with shell execution disabled.
 
 Mesh captures Git-tracked source at launch, after each verification command,
 and immediately before verdict persistence. A capture is accepted only when
@@ -130,9 +136,10 @@ those observations rather than locking the workspace. A write after the
 accepted observation is a new concurrent mutation; Mesh does not claim
 filesystem-transaction atomicity. A tracked symbolic link contributes its own
 identity and target text to the snapshot without exposing the target; regular
-tracked files must resolve inside the assigned workspace. Its structured report
-covers every snapshotted acceptance criterion and records evidence, verification
-performed, residual risks, and workspace state.
+tracked files and every indexed link object's canonical parent must remain
+inside the assigned workspace. Its structured report covers every snapshotted
+acceptance criterion and records evidence, verification performed, residual
+risks, and workspace state.
 
 After a verified verdict, a human may accept the task as done. After a rejection,
 a human chooses the appropriate Developer rework action. Manual mode never
