@@ -85,17 +85,17 @@ export class QaWorkspacePathRejectedError extends Error {
   }
 }
 
-export class QaWorkspaceSearchCancelledError extends Error {
-  readonly code = 'qa_workspace_search_cancelled';
+export class QaWorkspaceOperationCancelledError extends Error {
+  readonly code = 'qa_workspace_operation_cancelled';
 
   constructor() {
-    super('QA workspace search was cancelled with its owning runtime.');
-    this.name = 'QaWorkspaceSearchCancelledError';
+    super('QA workspace access was cancelled with its owning runtime.');
+    this.name = 'QaWorkspaceOperationCancelledError';
   }
 }
 
 const throwIfSearchAborted = (signal?: AbortSignal) => {
-  if (signal?.aborted) throw new QaWorkspaceSearchCancelledError();
+  if (signal?.aborted) throw new QaWorkspaceOperationCancelledError();
 };
 
 const within = (root: string, candidate: string) => {

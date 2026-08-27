@@ -123,7 +123,7 @@ describe('QaWorkspaceReader', () => {
 
       await expect(
         reader.list(root, '.', { signal: controller.signal }),
-      ).rejects.toMatchObject({ code: 'qa_workspace_search_cancelled' });
+      ).rejects.toMatchObject({ code: 'qa_workspace_operation_cancelled' });
       expect(yielded).toBe(4);
       expect(closed).toBe(true);
     } finally {
@@ -208,7 +208,7 @@ describe('QaWorkspaceReader', () => {
         reader.search(root, '.', 'not present', {
           signal: controller.signal,
         }),
-      ).rejects.toMatchObject({ code: 'qa_workspace_search_cancelled' });
+      ).rejects.toMatchObject({ code: 'qa_workspace_operation_cancelled' });
       expect(yielded).toBe(5);
       expect(closed).toBe(true);
     } finally {
@@ -417,7 +417,7 @@ describe('QaWorkspaceReader', () => {
         reader.search(root, '.', 'searched', {
           signal: controller.signal,
         }),
-      ).rejects.toMatchObject({ code: 'qa_workspace_search_cancelled' });
+      ).rejects.toMatchObject({ code: 'qa_workspace_operation_cancelled' });
     } finally {
       rmSync(root, { force: true, recursive: true });
     }

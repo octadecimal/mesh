@@ -141,6 +141,7 @@ type QaExecutionServiceDependencies = {
   registry: QaRegistry;
   billingConflicts?: readonly { variable: string }[];
   verificationRunner: {
+    preflightTrackedSource(path: string, signal?: AbortSignal): Promise<void>;
     captureTrackedSource(path: string, signal?: AbortSignal): Promise<string>;
     run(
       path: string,
@@ -186,7 +187,7 @@ type SourceMutationContext = {
 };
 
 type VerificationFailureCode =
-  | 'qa_workspace_search_cancelled'
+  | 'qa_workspace_operation_cancelled'
   | 'qa_verification_cancelled'
   | 'qa_verification_executable_unavailable'
   | 'qa_verification_output_limit_exceeded'
@@ -307,7 +308,7 @@ const safeQaControlErrorCodes = new Set([
   'qa_source_mutation_detected',
   'qa_control_busy',
   'qa_workspace_path_rejected',
-  'qa_workspace_search_cancelled',
+  'qa_workspace_operation_cancelled',
   'qa_verification_cancelled',
   'qa_verification_executable_unavailable',
   'qa_verification_output_limit_exceeded',
@@ -369,6 +370,18 @@ export class QaExecutionService {
       input.commandId,
     );
     if (existing.found) return existing.response;
+    this.assertBillingSafe();
+    const preflightActor = this.requireActor(input);
+    const preflightContext = this.requireLaunchContext(input, preflightActor);
+    const preflightWorkspace =
+      await this.dependencies.attemptService.requireQaWorkspace({
+        taskId: preflightContext.task.id,
+        attemptId: preflightContext.attempt.id,
+        workspaceId: preflightContext.developerCycle.workspaceId,
+      });
+    await this.dependencies.verificationRunner.preflightTrackedSource(
+      preflightWorkspace.workspace.path,
+    );
     let started: { sessionId: string; capability: string } | undefined;
     try {
       return await this.dependencies.commands.executeOnce(
@@ -1393,7 +1406,7 @@ export class QaExecutionService {
     if (typeof error !== 'object' || error === null || !('code' in error)) {
       return undefined;
     }
-    return error.code === 'qa_workspace_search_cancelled' ||
+    return error.code === 'qa_workspace_operation_cancelled' ||
       error.code === 'qa_verification_cancelled' ||
       error.code === 'qa_verification_executable_unavailable' ||
       error.code === 'qa_verification_output_limit_exceeded' ||
@@ -1423,8 +1436,8 @@ export class QaExecutionService {
             ...task.reviewAutomation,
             status: 'paused',
             pauseReason:
-              code === 'qa_workspace_search_cancelled'
-                ? 'QA workspace search was interrupted; human inspection is required.'
+              code === 'qa_workspace_operation_cancelled'
+                ? 'QA workspace access was interrupted; human inspection is required.'
                 : code === 'qa_verification_executable_unavailable'
                   ? 'A trusted QA verification executable is unavailable; human inspection is required.'
                   : code === 'qa_verification_timed_out'
@@ -1481,7 +1494,7 @@ export class QaExecutionService {
     this.dependencies.capabilities.invalidate(capability);
     if (
       code !== 'qa_verification_cancelled' &&
-      code !== 'qa_workspace_search_cancelled'
+      code !== 'qa_workspace_operation_cancelled'
     ) {
       await this.dependencies.registry.interrupt(context.sessionId);
     }

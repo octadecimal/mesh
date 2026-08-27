@@ -154,7 +154,11 @@ describe('executeCommand', () => {
       capabilities: qaCapabilities,
       registry,
       verificationRunner: new QaVerificationRunner({
-        run: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        run: async (_executable, args) => ({
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? 'true\n' : '',
+          stderr: '',
+        }),
       }),
       now: () => now,
       createId,

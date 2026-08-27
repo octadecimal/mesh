@@ -98,6 +98,9 @@ closes the handle at the entry or queue budget instead of materializing an
 unbounded directory first. Workspace listing uses the same streaming boundary,
 returns at most 500 entries, reads at most one additional entry to report
 truncation, and closes promptly when the owning cycle is cancelled.
+Cancellation of either listing or search reports the shared
+`qa_workspace_operation_cancelled` diagnostic because both operations use the
+same runtime-owned traversal boundary.
 The constrained runner treats ambiguous joined option values as workspace
 paths unless they are explicitly safe non-path values, and validates missing
 paths through their deepest existing ancestor. It admits only non-interactive
@@ -113,10 +116,16 @@ relative, and workspace-contained entries. The approval records canonical file
 identity outside the configured workspace root and is revalidated before every
 Git spawn. Runtime code never searches `PATH`, trusts `SystemRoot`, or consults
 repository-controlled configuration. A missing or changed approval fails closed
-before launch. Mesh proves that its canonical owned-tree terminator works before
-launching a child; a missing, failing, or unresponsive terminator refuses launch
-or durably pauses the QA cycle after an exact-owned-PID fallback. The runner
-never exposes a general shell or source-authoring control.
+before launch. Before reserving a new QA launch command, the service repeats
+actor, lifecycle, and exact-workspace authorization and runs one bounded,
+read-only Git capability probe. This avoids probing an unauthorized path and
+leaves no command reservation when the approved executable is unavailable, so
+the same idempotency key can be retried after operator repair. The full
+authoritative tracked-source capture remains inside the reserved launch command.
+Mesh proves that its canonical owned-tree terminator works before launching a
+child; a missing, failing, or unresponsive terminator refuses launch or durably
+pauses the QA cycle after an exact-owned-PID fallback. The runner never exposes
+a general shell or source-authoring control.
 
 The server captures Git-tracked source before launch, after every verification
 command, and immediately before verdict persistence instead of accepting an

@@ -411,6 +411,25 @@ describe('QaVerificationRunner', () => {
     );
   });
 
+  it('preflights tracked source with one bounded read-only Git probe', async () => {
+    const run = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: 'true\n',
+      stderr: '',
+    }));
+    const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+    await expect(
+      runner.preflightTrackedSource('C:\\verified-workspace'),
+    ).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalledOnce();
+    expect(run).toHaveBeenCalledWith(
+      'git',
+      ['-C', 'C:\\verified-workspace', 'rev-parse', '--is-inside-work-tree'],
+      expect.objectContaining({ cwd: 'C:\\verified-workspace' }),
+    );
+  });
+
   it.each([
     {
       name: 'runtime cancellation',

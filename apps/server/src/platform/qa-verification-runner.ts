@@ -526,6 +526,27 @@ export class QaVerificationRunner {
     if (signal?.aborted) throw new QaVerificationCancelledError();
   }
 
+  async preflightTrackedSource(
+    workspacePath: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const assignedWorkspace = resolve(workspacePath);
+    this.throwIfCaptureCancelled(signal);
+    const result = await this.runOwnedProcess(
+      'git',
+      ['-C', assignedWorkspace, 'rev-parse', '--is-inside-work-tree'],
+      assignedWorkspace,
+      signal,
+      4_096,
+    );
+    this.throwIfCaptureCancelled(signal);
+    if (result.exitCode !== 0 || result.stdout.trim() !== 'true') {
+      throw new Error(
+        'Tracked source preflight could not read the verified workspace.',
+      );
+    }
+  }
+
   async captureTrackedSource(
     workspacePath: string,
     signal?: AbortSignal,

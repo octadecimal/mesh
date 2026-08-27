@@ -130,6 +130,8 @@ and stops and closes its directory handle with its owning QA cycle. It may
 request named verification commands through Mesh's constrained runner. File
 listing also streams entries, returns at most 500 plus a one-entry truncation
 lookahead, and closes its handle when the owning cycle is cancelled. QA
+workspace listing or search cancellation reports
+`qa_workspace_operation_cancelled` and pauses review without a verdict. QA
 receives no shell and cannot write source, create another worktree, commit,
 merge, or create a pull request. Ambiguous
 joined option values are treated as workspace paths, including missing paths
@@ -144,8 +146,12 @@ startup approval described above; every spawn revalidates the executable's
 canonical path and identity, and workspace-local copies cannot replace it. If
 the approval is unavailable when manual QA first captures its baseline, the
 command returns `503 qa_verification_executable_unavailable` with setup guidance
-and creates no QA session, cycle, or project event. If an already-active cycle
-loses its approval, Mesh refuses the child and durably pauses QA.
+and creates no command reservation, QA session, cycle, or project event. The
+same idempotency key can be retried after the operator repairs the approved Git
+capability. This pre-reservation probe is bounded and read-only; Mesh still
+performs the full authoritative baseline capture inside the audited launch
+command. If an already-active cycle loses its approval, Mesh refuses the child
+and durably pauses QA.
 Before launch, Mesh proves that the canonical owned-process-tree terminator is
 functional. If that capability is missing or later fails, Mesh uses only the
 exact owned PID as a bounded fallback and durably pauses QA rather than assuming

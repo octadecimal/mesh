@@ -77,6 +77,7 @@ describe('QaExecutionService', () => {
     }) => Promise<void>;
     trackedSourceStates?: string[];
     verificationRunner?: {
+      preflightTrackedSource?(path: string): Promise<void>;
       captureTrackedSource(path: string): Promise<string>;
       run(
         path: string,
@@ -346,16 +347,30 @@ describe('QaExecutionService', () => {
       const state = trackedSourceStates.shift();
       return state ?? 'sha256:developer-source';
     });
+    const preflightTrackedSource = vi.fn(async () => undefined);
     const runVerification = vi.fn(async (_path, input) => ({
       command: [input.executable, ...input.args].join(' '),
       exitCode: 0,
       stdout: 'verification passed',
       stderr: '',
     }));
-    const verificationRunner = options?.verificationRunner ?? {
-      captureTrackedSource,
-      run: runVerification,
-    };
+    const verificationRunner = options?.verificationRunner
+      ? {
+          preflightTrackedSource:
+            options.verificationRunner.preflightTrackedSource?.bind(
+              options.verificationRunner,
+            ) ?? preflightTrackedSource,
+          captureTrackedSource:
+            options.verificationRunner.captureTrackedSource.bind(
+              options.verificationRunner,
+            ),
+          run: options.verificationRunner.run.bind(options.verificationRunner),
+        }
+      : {
+          preflightTrackedSource,
+          captureTrackedSource,
+          run: runVerification,
+        };
     const registry = {
       create,
       interrupt,
@@ -392,6 +407,7 @@ describe('QaExecutionService', () => {
       service,
       starts,
       interrupt,
+      preflightTrackedSource,
       captureTrackedSource,
       runVerification,
       task,
@@ -487,12 +503,16 @@ describe('QaExecutionService', () => {
     },
   );
 
-  it('leaves no partial QA launch state when the initial Git baseline is unavailable', async () => {
+  it('leaves no command reservation and retries the same launch key after Git is restored', async () => {
+    let gitAvailable = false;
+    const preflightTrackedSource = vi.fn(async () => {
+      if (!gitAvailable) throw new QaVerificationExecutableUnavailableError();
+    });
+    const captureTrackedSource = vi.fn(async () => 'sha256:developer-source');
     const context = setup({
       verificationRunner: {
-        captureTrackedSource: async () => {
-          throw new QaVerificationExecutableUnavailableError();
-        },
+        preflightTrackedSource,
+        captureTrackedSource,
         run: async () => {
           throw new Error('verification must not start');
         },
@@ -523,6 +543,30 @@ describe('QaExecutionService', () => {
     ).toBe(projectEventsBefore);
     expect(context.publicationSnapshots).toEqual([]);
     expect(context.starts).toEqual([]);
+    expect(
+      context.repositories.database
+        .prepare('SELECT COUNT(*) AS count FROM processed_commands')
+        .get(),
+    ).toEqual({ count: 0 });
+
+    gitAvailable = true;
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).resolves.toMatchObject({
+      task: { id: context.task.id },
+      cycle: { workspaceBaseline: 'sha256:developer-source' },
+    });
+    expect(preflightTrackedSource).toHaveBeenCalledTimes(2);
+    expect(captureTrackedSource).toHaveBeenCalledOnce();
+    expect(context.starts).toHaveLength(1);
+    expect(
+      context.repositories.database
+        .prepare(
+          'SELECT state, COUNT(*) AS count FROM processed_commands GROUP BY state',
+        )
+        .all(),
+    ).toEqual([{ state: 'completed', count: 1 }]);
   });
 
   it('keeps inherited QA authority inside bounded workspace controls', async () => {
@@ -580,9 +624,9 @@ describe('QaExecutionService', () => {
   });
 
   it('rejects an adversarial source-writing verification request before process execution', async () => {
-    const process = vi.fn(async () => ({
+    const process = vi.fn(async (_executable, args: readonly string[]) => ({
       exitCode: 0,
-      stdout: '',
+      stdout: args.includes('rev-parse') ? 'true\n' : '',
       stderr: '',
     }));
     const context = setup({
@@ -622,11 +666,15 @@ describe('QaExecutionService', () => {
       const process = vi.fn(
         async (
           executable: string,
-          _args: readonly string[],
+          args: readonly string[],
           options: { signal?: AbortSignal },
         ) => {
           if (executable === 'git') {
-            return { exitCode: 0, stdout: '', stderr: '' };
+            return {
+              exitCode: 0,
+              stdout: args.includes('rev-parse') ? 'true\n' : '',
+              stderr: '',
+            };
           }
           started.resolve();
           if (!options.signal) {
@@ -898,7 +946,7 @@ describe('QaExecutionService', () => {
                 activeSearches -= 1;
                 reject(
                   Object.assign(new Error('search cancelled'), {
-                    code: 'qa_workspace_search_cancelled',
+                    code: 'qa_workspace_operation_cancelled',
                   }),
                 );
               },
@@ -923,7 +971,7 @@ describe('QaExecutionService', () => {
       content: [
         {
           type: 'text',
-          text: expect.stringContaining('qa_workspace_search_cancelled'),
+          text: expect.stringContaining('qa_workspace_operation_cancelled'),
         },
       ],
     });
@@ -937,7 +985,7 @@ describe('QaExecutionService', () => {
       expect.objectContaining({
         payload: expect.objectContaining({
           kind: 'qa_verification_failure',
-          code: 'qa_workspace_search_cancelled',
+          code: 'qa_workspace_operation_cancelled',
         }),
       }),
     );
@@ -967,7 +1015,7 @@ describe('QaExecutionService', () => {
                 activeListings -= 1;
                 reject(
                   Object.assign(new Error('listing cancelled'), {
-                    code: 'qa_workspace_search_cancelled',
+                    code: 'qa_workspace_operation_cancelled',
                   }),
                 );
               },
@@ -993,7 +1041,7 @@ describe('QaExecutionService', () => {
       content: [
         {
           type: 'text',
-          text: expect.stringContaining('qa_workspace_search_cancelled'),
+          text: expect.stringContaining('qa_workspace_operation_cancelled'),
         },
       ],
     });
@@ -1007,7 +1055,7 @@ describe('QaExecutionService', () => {
       expect.objectContaining({
         payload: expect.objectContaining({
           kind: 'qa_verification_failure',
-          code: 'qa_workspace_search_cancelled',
+          code: 'qa_workspace_operation_cancelled',
         }),
       }),
     );
@@ -1525,6 +1573,7 @@ describe('QaExecutionService', () => {
           actor,
         }),
       ).rejects.toMatchObject({ code: 'task_transition_unauthorized' });
+      expect(context.preflightTrackedSource).not.toHaveBeenCalled();
       expect(context.create).not.toHaveBeenCalled();
     },
   );
@@ -2029,9 +2078,9 @@ describe('QaExecutionService', () => {
     let armed = false;
     let rootRevalidations = 0;
     let cancelRuntime = () => undefined;
-    const run = vi.fn(async () => ({
+    const run = vi.fn(async (_executable, args: readonly string[]) => ({
       exitCode: 0,
-      stdout: 'source.ts\0',
+      stdout: args.includes('rev-parse') ? 'true\n' : 'source.ts\0',
       stderr: '',
     }));
     const verificationRunner = new QaVerificationRunner(
