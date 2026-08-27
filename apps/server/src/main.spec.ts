@@ -33,6 +33,7 @@ import { SessionRepository } from './repositories/session-repository.js';
 import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
 import { TaskRepository } from './repositories/task-repository.js';
 import { WorkspaceRepository } from './repositories/workspace-repository.js';
+import { EventPublisher } from './runtime/event-publisher.js';
 import {
   createProcessLifecycle,
   originFromAddress,
@@ -1110,6 +1111,476 @@ describe('production composition', () => {
     }
   });
 
+  it('waits for an in-flight run launch at shutdown and never claims the next item', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-main-run-shutdown-'));
+    directories.push(directory);
+    const repositoryPath = join(directory, 'repository');
+    const databasePath = join(directory, 'mesh.sqlite');
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: directory,
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    execFileSync(trustedGitExecutable.path, ['init', repositoryPath], {
+      cwd: directory,
+      windowsHide: true,
+    });
+    const identity = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: directory },
+      new NodeProcessRunner({ trustedGitExecutable }),
+    );
+    const database = openDatabase(databasePath);
+    migrate(database);
+    const projects = new ProjectRepository(database);
+    const tasks = new TaskRepository(database);
+    const projectRuns = new ProjectRunRepository(database);
+    const project = projects.create(
+      projectSchema.parse({
+        id: 'project-run-shutdown',
+        displayName: 'Run shutdown barrier',
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const runTasks = ['first', 'second'].map((suffix, index) =>
+      tasks.create(
+        taskSchema.parse({
+          id: `task-run-shutdown-${suffix}`,
+          projectId: project.id,
+          title: `Shutdown ${suffix}`,
+          description: 'Exercise shutdown during an in-flight run launch.',
+          acceptanceCriteria: ['Shutdown preserves queued work.'],
+          priority: 'normal',
+          rank: index === 0 ? 'a' : 'b',
+          lifecycleState: 'ready',
+          labels: [],
+          notes: '',
+          blocked: null,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      ),
+    );
+    projectRuns.create({
+      id: 'run-shutdown',
+      projectId: project.id,
+      concurrency: 2,
+      startedAt: now,
+      items: runTasks.map((task, queuePosition) => ({
+        id: `item-${task.id}`,
+        taskId: task.id,
+        taskRevision: task.revision,
+        policyRevision: project.qaConfiguration.revision,
+        taskAutomationGeneration: task.reviewAutomation.generation,
+        queuePosition,
+        launchIdempotencyKey: `launch-${task.id}`,
+      })),
+    });
+    database.close();
+
+    let releaseLaunch!: () => void;
+    const launchGate = new Promise<void>((resolve) => {
+      releaseLaunch = resolve;
+    });
+    const driver = new FakeClaudeSessionDriver();
+    const create = driver.create.bind(driver);
+    const createSpy = vi
+      .spyOn(driver, 'create')
+      .mockImplementation(async (request) => {
+        await launchGate;
+        return create(request);
+      });
+    const running = await startServer({
+      environment: {
+        NODE_ENV: 'test',
+        MESH_PORT: '0',
+        MESH_DATA_DIR: directory,
+        MESH_DATABASE_PATH: 'mesh.sqlite',
+        MESH_WORKSPACE_ROOT: directory,
+        MESH_GIT_EXECUTABLE: trustedGitExecutable.path,
+        MESH_PROJECT_RUN_MAX_CONCURRENCY: '2',
+      },
+      test: { driver, webRoot: directory },
+    });
+    const startupSnapshot = await running.app.inject({
+      method: 'GET',
+      url: `/api/projects/${project.id}/snapshot`,
+    });
+    expect(startupSnapshot.json().runs?.[0]).toMatchObject({
+      id: 'run-shutdown',
+      state: 'running',
+    });
+    await expect
+      .poll(async () => {
+        const response = await running.app.inject({
+          method: 'GET',
+          url: `/api/projects/${project.id}/snapshot`,
+        });
+        const item = response.json().runs?.[0]?.items?.[0];
+        return { status: item?.status, outcomeReason: item?.outcomeReason };
+      })
+      .toEqual({ status: 'launch_pending', outcomeReason: null });
+    await vi.waitFor(() => expect(createSpy).toHaveBeenCalledOnce());
+
+    let closeSettled = false;
+    const closing = running.close().finally(() => {
+      closeSettled = true;
+    });
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+    releaseLaunch();
+    await closing;
+
+    expect(driver.createdRequests).toHaveLength(1);
+    const recovered = openDatabase(databasePath);
+    try {
+      expect(
+        recovered
+          .prepare(
+            'SELECT id, status, outcome_reason AS outcomeReason FROM project_run_items WHERE run_id = ? ORDER BY queue_position',
+          )
+          .all('run-shutdown'),
+      ).toEqual([
+        {
+          id: 'item-task-run-shutdown-first',
+          status: 'attention_required',
+          outcomeReason: 'developer_cycle_without_live_session',
+        },
+        {
+          id: 'item-task-run-shutdown-second',
+          status: 'queued',
+          outcomeReason: null,
+        },
+      ]);
+    } finally {
+      recovered.close();
+    }
+  });
+
+  it('routes an asynchronous drain audit failure through the central runtime barrier', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-main-drain-audit-'));
+    directories.push(directory);
+    const repositoryPath = join(directory, 'repository');
+    const databasePath = join(directory, 'mesh.sqlite');
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: directory,
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    execFileSync(trustedGitExecutable.path, ['init', repositoryPath], {
+      cwd: directory,
+      windowsHide: true,
+    });
+    const identity = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: directory },
+      new NodeProcessRunner({ trustedGitExecutable }),
+    );
+    const database = openDatabase(databasePath);
+    migrate(database);
+    const projects = new ProjectRepository(database);
+    const tasks = new TaskRepository(database);
+    const workspaces = new WorkspaceRepository(database);
+    const project = projects.create(
+      projectSchema.parse({
+        id: 'project-drain-audit',
+        displayName: 'Drain audit barrier',
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const workspace = workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-drain-audit',
+        projectId: project.id,
+        type: 'shared',
+        path: identity.canonicalPath,
+      }),
+    );
+    tasks.create(
+      taskSchema.parse({
+        id: 'task-drain-audit',
+        projectId: project.id,
+        title: 'Fail a claimed run event',
+        description: 'Exercise asynchronous project-run audit failure.',
+        acceptanceCriteria: ['The central barrier becomes unavailable.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    database.exec(`
+      CREATE TRIGGER fail_claimed_run_event
+      BEFORE INSERT ON project_events
+      WHEN NEW.project_id = 'project-drain-audit'
+        AND NEW.type = 'project.run_changed'
+        AND (SELECT COUNT(*) FROM project_events WHERE project_id = NEW.project_id) >= 1
+      BEGIN
+        SELECT RAISE(FAIL, 'claimed run audit failed');
+      END;
+    `);
+    database.close();
+
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: {
+        NODE_ENV: 'test',
+        MESH_PORT: '0',
+        MESH_DATA_DIR: directory,
+        MESH_DATABASE_PATH: 'mesh.sqlite',
+        MESH_WORKSPACE_ROOT: directory,
+        MESH_GIT_EXECUTABLE: trustedGitExecutable.path,
+      },
+      test: { driver, webRoot: directory },
+    });
+    let closeError: unknown;
+    const previousExitCode = process.exitCode;
+    try {
+      const session = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: 'create-drain-audit-runtime',
+          command: {
+            type: 'session.create',
+            payload: {
+              projectId: project.id,
+              workspaceId: workspace.id,
+              title: 'Owned runtime',
+              permissionMode: 'interactive',
+            },
+          },
+        },
+      });
+      expect(session.statusCode).toBe(200);
+
+      const started = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: 'start-drain-audit-run',
+          command: {
+            type: 'project.run.start',
+            payload: {
+              projectId: project.id,
+              concurrency: 1,
+              actor: { type: 'human', id: 'operator-drain-audit' },
+            },
+          },
+        },
+      });
+      expect(started.statusCode).toBe(200);
+      await vi.waitFor(() =>
+        expect(driver.createdSessions[0]?.interrupted).toBe(true),
+      );
+
+      const rejectedCommand = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: 'rejected-after-drain-audit',
+          command: {
+            type: 'project.run.pause',
+            payload: {
+              runId: started.json().result.run.id,
+              expectedRevision: started.json().result.run.revision,
+              actor: { type: 'human', id: 'operator-drain-audit' },
+            },
+          },
+        },
+      });
+      expect(rejectedCommand.statusCode).toBe(503);
+    } finally {
+      closeError = await running.close().catch((error: unknown) => error);
+      process.exitCode = previousExitCode;
+    }
+    expect(closeError).toMatchObject({ message: 'claimed run audit failed' });
+  });
+
+  it('publishes runtime-stopped run reconciliation from durable project events', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-main-run-stopped-'));
+    directories.push(directory);
+    const repositoryPath = join(directory, 'repository');
+    const databasePath = join(directory, 'mesh.sqlite');
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: directory,
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    execFileSync(trustedGitExecutable.path, ['init', repositoryPath], {
+      cwd: directory,
+      windowsHide: true,
+    });
+    const identity = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: directory },
+      new NodeProcessRunner({ trustedGitExecutable }),
+    );
+    const database = openDatabase(databasePath);
+    migrate(database);
+    const projects = new ProjectRepository(database);
+    const tasks = new TaskRepository(database);
+    const project = projects.create(
+      projectSchema.parse({
+        id: 'project-runtime-stopped',
+        displayName: 'Runtime stopped publication',
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    tasks.create(
+      taskSchema.parse({
+        id: 'task-runtime-stopped',
+        projectId: project.id,
+        title: 'Publish stopped recovery',
+        description: 'Publish durable run reconciliation to live clients.',
+        acceptanceCriteria: ['The recovered run event arrives live.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    database.close();
+
+    const publishedProjectEvents: Array<{
+      projectId: string;
+      sequence: number;
+      type: string;
+      payload: unknown;
+    }> = [];
+    const publishProject = EventPublisher.prototype.publishProject;
+    const publishSpy = vi
+      .spyOn(EventPublisher.prototype, 'publishProject')
+      .mockImplementation(function (event) {
+        publishedProjectEvents.push(event);
+        publishProject.call(this, event);
+      });
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: {
+        NODE_ENV: 'test',
+        MESH_PORT: '0',
+        MESH_DATA_DIR: directory,
+        MESH_DATABASE_PATH: 'mesh.sqlite',
+        MESH_WORKSPACE_ROOT: directory,
+        MESH_GIT_EXECUTABLE: trustedGitExecutable.path,
+      },
+      test: { driver, webRoot: directory },
+    });
+    try {
+      const started = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: 'start-runtime-stopped-run',
+          command: {
+            type: 'project.run.start',
+            payload: {
+              projectId: project.id,
+              concurrency: 1,
+              actor: { type: 'human', id: 'operator-runtime-stopped' },
+            },
+          },
+        },
+      });
+      expect(started.statusCode).toBe(200);
+      await expect
+        .poll(async () => {
+          const response = await running.app.inject({
+            method: 'GET',
+            url: `/api/projects/${project.id}/snapshot`,
+          });
+          return response.json().runs?.[0]?.items?.[0]?.status;
+        })
+        .toBe('active');
+      const snapshot = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/snapshot`,
+      });
+      const cursor = snapshot.json().cursor as number;
+      await vi.waitFor(() => expect(driver.createdSessions).toHaveLength(1));
+
+      const runtime = driver.createdSessions[0];
+      if (!runtime) throw new Error('Expected the project-run runtime');
+      runtime.crash(new Error('runtime stopped'));
+
+      await expect
+        .poll(() =>
+          publishedProjectEvents.find(
+            (event) =>
+              event.projectId === project.id &&
+              event.sequence > cursor &&
+              event.type === 'project.run_changed' &&
+              (event.payload as { run?: { state?: string } }).run?.state ===
+                'completed',
+          ),
+        )
+        .toMatchObject({
+          projectId: project.id,
+          sequence: cursor + 3,
+          type: 'project.run_changed',
+          payload: {
+            run: {
+              state: 'completed',
+              items: [
+                {
+                  status: 'attention_required',
+                  outcomeReason: 'developer_cycle_without_live_session',
+                },
+              ],
+            },
+          },
+        });
+      const history = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/history?after=${cursor}`,
+      });
+      expect(history.json().events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'project.run_changed',
+            payload: expect.objectContaining({
+              run: expect.objectContaining({ state: 'completed' }),
+            }),
+          }),
+        ]),
+      );
+    } finally {
+      publishSpy.mockRestore();
+      await running.close();
+    }
+  });
+
   it('stops accepting commands and socket upgrades after a run audit failure', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-main-run-audit-'));
     directories.push(directory);
@@ -1164,11 +1635,10 @@ describe('production composition', () => {
       }),
     );
     database.exec(`
-      CREATE TRIGGER fail_second_run_event
+      CREATE TRIGGER fail_first_run_event
       BEFORE INSERT ON project_events
       WHEN NEW.project_id = 'project-run-audit'
         AND NEW.type = 'project.run_changed'
-        AND (SELECT COUNT(*) FROM project_events WHERE project_id = NEW.project_id) >= 1
       BEGIN
         SELECT RAISE(FAIL, 'run audit insert failed');
       END;
@@ -1198,6 +1668,8 @@ describe('production composition', () => {
         },
       },
     };
+    let closeError: unknown;
+    const previousExitCode = process.exitCode;
     try {
       const failed = await running.app.inject({
         method: 'POST',
@@ -1223,7 +1695,9 @@ describe('production composition', () => {
       expect(rejectedCommand.statusCode).toBe(503);
       expect(rejectedSocket.statusCode).toBe(503);
     } finally {
-      await running.close();
+      closeError = await running.close().catch((error: unknown) => error);
+      process.exitCode = previousExitCode;
     }
+    expect(closeError).toMatchObject({ message: 'run audit insert failed' });
   });
 });

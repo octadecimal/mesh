@@ -102,12 +102,7 @@ export interface CommandDependencies {
   >;
   projectRunService?: Pick<
     ProjectRunService,
-    | 'startRun'
-    | 'pauseRun'
-    | 'resumeRun'
-    | 'stopRun'
-    | 'drainAvailableSlots'
-    | 'observeTaskOutcome'
+    'startRun' | 'pauseRun' | 'resumeRun' | 'stopRun' | 'observeTaskOutcome'
   >;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
@@ -457,12 +452,6 @@ const executeProjectRunCommand = async (
         : command.type === 'project.run.resume'
           ? service.resumeRun({ ...command.payload, idempotencyKey })
           : service.stopRun({ ...command.payload, idempotencyKey });
-  if (
-    command.type === 'project.run.start' ||
-    command.type === 'project.run.resume'
-  ) {
-    await service.drainAvailableSlots(result.run.id);
-  }
   return response(command.type, { run: result.run });
 };
 

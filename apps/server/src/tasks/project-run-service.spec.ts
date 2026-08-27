@@ -86,8 +86,11 @@ const createTask = (
   });
 
 const setup = (options?: {
+  canLaunch?: () => boolean;
   failProjectEventInsert?: boolean;
   maxConcurrency?: number;
+  onAuditFailure?: (error: unknown) => void;
+  scheduleDrain?: (runId: string) => void;
   launchAttempt?: (input: ProjectRunAttemptLaunchInput) => Promise<{
     attempt: ReturnType<
       ReturnType<typeof createTestRepositories>['attempts']['createForTask']
@@ -148,7 +151,10 @@ const setup = (options?: {
     ...repositories,
     attemptService: { launchAttempt },
     publisher,
+    canLaunch: options?.canLaunch,
     maxConcurrency: options?.maxConcurrency,
+    onAuditFailure: options?.onAuditFailure,
+    scheduleDrain: options?.scheduleDrain,
     now: () => now,
     createId: () => `generated-${++id}`,
   });
@@ -304,9 +310,98 @@ describe('ProjectRunService startRun', () => {
     expect(publisher.publishProject).toHaveBeenCalledOnce();
   });
 
+  it('schedules newly committed starts and resumes without replaying either side effect', () => {
+    const repositoriesRef: {
+      current?: ReturnType<typeof createTestRepositories>;
+    } = {};
+    const scheduled: Array<{
+      inTransaction: boolean;
+      runId: string;
+      persistedEvents: number;
+    }> = [];
+    const context = setup({
+      scheduleDrain: (runId) => {
+        const repositories = repositoriesRef.current;
+        if (!repositories) throw new Error('Repositories are unavailable');
+        scheduled.push({
+          inTransaction: repositories.database.inTransaction,
+          runId,
+          persistedEvents: repositories.projectEvents.after('project-1', 0)
+            .length,
+        });
+      },
+    });
+    repositoriesRef.current = context.repositories;
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-scheduled'),
+    );
+
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'scheduled-start',
+      1,
+    );
+    expect(
+      startRun(context.service, context.project.id, 'scheduled-start', 1),
+    ).toEqual(started);
+    const paused = context.service.pauseRun({
+      runId: started.run.id,
+      expectedRevision: started.run.revision,
+      actor: human,
+      idempotencyKey: 'scheduled-pause',
+    });
+    const resumed = context.service.resumeRun({
+      runId: paused.run.id,
+      expectedRevision: paused.run.revision,
+      actor: human,
+      idempotencyKey: 'scheduled-resume',
+    });
+    expect(
+      context.service.resumeRun({
+        runId: paused.run.id,
+        expectedRevision: paused.run.revision,
+        actor: human,
+        idempotencyKey: 'scheduled-resume',
+      }),
+    ).toEqual(resumed);
+
+    expect(scheduled).toEqual([
+      {
+        inTransaction: false,
+        runId: started.run.id,
+        persistedEvents: 1,
+      },
+      {
+        inTransaction: false,
+        runId: started.run.id,
+        persistedEvents: 3,
+      },
+    ]);
+  });
+
+  it('preserves the committed command outcome when scheduling throws', () => {
+    const { repositories, project, service } = setup({
+      scheduleDrain: () => {
+        throw new Error('drain scheduling failed');
+      },
+    });
+    repositories.tasks.create(createTask(project.id, 'task-1'));
+
+    const outcome = startRun(service, project.id);
+
+    expect(outcome.run).toMatchObject({
+      projectId: project.id,
+      state: 'running',
+    });
+    expect(repositories.projectEvents.after(project.id, 0)).toHaveLength(1);
+  });
+
   it('rolls back membership and does not publish when audit persistence fails', () => {
+    const onAuditFailure = vi.fn();
     const { repositories, project, publisher, service } = setup({
       failProjectEventInsert: true,
+      onAuditFailure,
     });
     repositories.tasks.create(createTask(project.id, 'task-1'));
 
@@ -315,6 +410,10 @@ describe('ProjectRunService startRun', () => {
     );
     expect(repositories.projectRuns.listByProject(project.id)).toEqual([]);
     expect(publisher.publishProject).not.toHaveBeenCalled();
+    expect(onAuditFailure).toHaveBeenCalledOnce();
+    expect(onAuditFailure.mock.calls[0]?.[0]).toMatchObject({
+      message: 'project event insert failed',
+    });
   });
 });
 
@@ -560,6 +659,65 @@ describe('ProjectRunService controls', () => {
     expect(repositories.projectRuns.get(started.run.id)).toEqual(started.run);
     expect(publisher.publishProject).toHaveBeenCalledOnce();
   });
+
+  it.each(['pause', 'resume', 'stop'] as const)(
+    'reports a %s audit-write failure without committing the control',
+    (control) => {
+      const onAuditFailure = vi.fn();
+      const { repositories, project, service } = setup({ onAuditFailure });
+      repositories.tasks.create(createTask(project.id, 'task-control-audit'));
+      const started = startRun(
+        service,
+        project.id,
+        `start-${control}-audit`,
+        1,
+      );
+      const controlled =
+        control === 'resume'
+          ? service.pauseRun({
+              runId: started.run.id,
+              expectedRevision: started.run.revision,
+              actor: human,
+              idempotencyKey: 'prepare-resume-audit',
+            }).run
+          : started.run;
+      repositories.database.exec(`
+        CREATE TRIGGER fail_${control}_run_event
+        BEFORE INSERT ON project_events
+        BEGIN
+          SELECT RAISE(FAIL, '${control} run audit failed');
+        END;
+      `);
+
+      expect(() =>
+        control === 'pause'
+          ? service.pauseRun({
+              runId: controlled.id,
+              expectedRevision: controlled.revision,
+              actor: human,
+              idempotencyKey: 'pause-audit-failure',
+            })
+          : control === 'resume'
+            ? service.resumeRun({
+                runId: controlled.id,
+                expectedRevision: controlled.revision,
+                actor: human,
+                idempotencyKey: 'resume-audit-failure',
+              })
+            : service.stopRun({
+                runId: controlled.id,
+                expectedRevision: controlled.revision,
+                actor: human,
+                idempotencyKey: 'stop-audit-failure-all-controls',
+              }),
+      ).toThrow(`${control} run audit failed`);
+      expect(repositories.projectRuns.get(controlled.id)).toEqual(controlled);
+      expect(onAuditFailure).toHaveBeenCalledOnce();
+      expect(onAuditFailure.mock.calls[0]?.[0]).toMatchObject({
+        message: `${control} run audit failed`,
+      });
+    },
+  );
 });
 
 describe('ProjectRunService drainAvailableSlots', () => {
@@ -887,6 +1045,47 @@ describe('ProjectRunService drainAvailableSlots', () => {
       expect(launchAttempt).toHaveBeenCalledOnce();
     },
   );
+
+  it('does not claim another item after the launch gate closes during an in-flight launch', async () => {
+    let accepting = true;
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
+      await pending;
+      return setupLaunchResult(context.repositories, input, 1);
+    });
+    const context = setup({
+      canLaunch: () => accepting,
+      launchAttempt,
+    });
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-a', { rank: 'a' }),
+    );
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-b', { rank: 'b' }),
+    );
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-shutdown-gate',
+      2,
+    );
+    const draining = context.service.drainAvailableSlots(started.run.id);
+    await vi.waitFor(() => expect(launchAttempt).toHaveBeenCalledOnce());
+
+    accepting = false;
+    release();
+    await draining;
+
+    expect(launchAttempt).toHaveBeenCalledOnce();
+    expect(
+      context.repositories.projectRuns
+        .get(started.run.id)
+        ?.items.map(({ status }) => status),
+    ).toEqual(['active', 'queued']);
+  });
 
   it('does not launch or claim another item when claim audit persistence fails', async () => {
     const context = setup();

@@ -211,7 +211,7 @@ describe('executeCommand', () => {
     command,
   });
 
-  it('dispatches all project-run controls and schedules only runnable outcomes', async () => {
+  it('dispatches all project-run controls without owning launch scheduling', async () => {
     const fixture = commandDependencies(tmpdir());
     const actor = { type: 'human' as const, id: 'operator-run' };
     const run = (
@@ -231,7 +231,6 @@ describe('executeCommand', () => {
         items: [],
       });
     const inputs: unknown[] = [];
-    const drained: string[] = [];
     const projectRunService = {
       startRun: (input: unknown) => {
         inputs.push(input);
@@ -248,10 +247,6 @@ describe('executeCommand', () => {
       stopRun: (input: unknown) => {
         inputs.push(input);
         return { run: run('draining', 4), events: [] };
-      },
-      drainAvailableSlots: async (runId: string) => {
-        drained.push(runId);
-        return run('running', 3);
       },
       observeTaskOutcome: async () => undefined,
     };
@@ -308,7 +303,76 @@ describe('executeCommand', () => {
         idempotencyKey: 'stop-run-command',
       },
     ]);
-    expect(drained).toEqual(['run-1', 'run-1']);
+  });
+
+  it('returns the committed start result when its drain fails and does not reschedule a duplicate', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const actor = { type: 'human' as const, id: 'operator-run' };
+    const project = fixture.repositories.projects.create(
+      projectSchema.parse({
+        id: 'project-run-idempotent',
+        displayName: 'Idempotent project run',
+        repositoryPath: 'C:/repo/project-run-idempotent',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    fixture.repositories.tasks.create(
+      taskSchema.parse({
+        id: 'task-run-idempotent',
+        projectId: project.id,
+        title: 'Run once',
+        description: '',
+        acceptanceCriteria: [],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const drainFailure = new Error('post-commit drain failed');
+    let observedDrainFailure: unknown;
+    let scheduled = 0;
+    let nextId = 0;
+    const projectRunService = new ProjectRunService({
+      ...fixture.repositories,
+      attemptService: fixture.dependencies.attemptService,
+      publisher: fixture.dependencies.registry.publisher,
+      scheduleDrain: () => {
+        scheduled += 1;
+        void Promise.reject(drainFailure).catch((error: unknown) => {
+          observedDrainFailure = error;
+        });
+      },
+      now: () => now,
+      createId: () => `run-command-${++nextId}`,
+    });
+    const command = projectCommand('start-run-idempotent', {
+      type: 'project.run.start',
+      payload: { projectId: project.id, concurrency: 1, actor },
+    });
+
+    const first = await executeCommand(command, {
+      ...fixture.dependencies,
+      projectRunService,
+    });
+    const duplicate = await executeCommand(command, {
+      ...fixture.dependencies,
+      projectRunService,
+    });
+    await Promise.resolve();
+
+    expect(first).toEqual(duplicate);
+    expect(first.result).toEqual({
+      run: fixture.repositories.projectRuns.get('run-command-1'),
+    });
+    expect(scheduled).toBe(1);
+    expect(observedDrainFailure).toBe(drainFailure);
   });
 
   it('rejects non-human project-run authority at the command boundary', async () => {

@@ -220,6 +220,8 @@ export const startServer = async (
     reviewAutomation?: ReviewAutomationService;
     projectRuns?: ProjectRunService;
   } = {};
+  const runDrains = new Map<string, Promise<void>>();
+  let runDrainFailure: unknown;
   const requireReviewAutomation = (): ReviewAutomationService => {
     if (!roleServices.reviewAutomation) {
       throw new Error('Review automation service is not composed');
@@ -255,13 +257,30 @@ export const startServer = async (
       }
     }
   };
+  const failProjectRunAudit = (error: unknown) => {
+    runDrainFailure ??= error;
+    originPolicy.stopAccepting();
+    registry.reportAuditFailure(error);
+  };
   const scheduleRunDrains = (runIds: readonly string[]) => {
-    if (!originPolicy.accepting) return;
     for (const runId of runIds) {
-      void requireProjectRuns()
-        .drainAvailableSlots(runId)
-        .catch(() => originPolicy.stopAccepting());
+      if (!originPolicy.accepting || runDrains.has(runId)) continue;
+      const drain = Promise.resolve()
+        .then(async () => {
+          await requireProjectRuns().drainAvailableSlots(runId);
+        })
+        .catch((error: unknown) => failProjectRunAudit(error))
+        .finally(() => {
+          if (runDrains.get(runId) === drain) runDrains.delete(runId);
+        });
+      runDrains.set(runId, drain);
     }
+  };
+  const settleRunDrains = async (): Promise<void> => {
+    while (runDrains.size > 0) {
+      await Promise.allSettled([...runDrains.values()]);
+    }
+    if (runDrainFailure) throw runDrainFailure;
   };
   const reconcileStoppedRuntime = (activeRegistry: SessionRegistry) => {
     const cursors = projectCursors();
@@ -299,7 +318,7 @@ export const startServer = async (
       publishRecoveredEvents(cursors, activeRegistry);
       scheduleRunDrains(runReconciliation.launchableRunIds);
     } catch (error) {
-      originPolicy.stopAccepting();
+      failProjectRunAudit(error);
       throw error;
     }
   };
@@ -394,40 +413,22 @@ export const startServer = async (
     commands,
     attemptService,
     publisher: registry.publisher,
+    canLaunch: () => originPolicy.accepting,
     maxConcurrency: config.projectRunMaxConcurrency,
+    onAuditFailure: failProjectRunAudit,
+    scheduleDrain: (runId) => scheduleRunDrains([runId]),
   });
   roleServices.projectRuns = projectRunService;
-  const withProjectRunAuditBarrier = async <Result>(
-    operation: () => Promise<Result>,
-  ): Promise<Result> => {
-    try {
-      return await operation();
-    } catch (error) {
-      originPolicy.stopAccepting();
-      throw error;
-    }
-  };
   const projectRunBoundary = {
     startRun: projectRunService.startRun.bind(projectRunService),
     pauseRun: projectRunService.pauseRun.bind(projectRunService),
     resumeRun: projectRunService.resumeRun.bind(projectRunService),
     stopRun: projectRunService.stopRun.bind(projectRunService),
-    drainAvailableSlots: (runId: string) =>
-      withProjectRunAuditBarrier(() =>
-        projectRunService.drainAvailableSlots(runId),
-      ),
-    observeTaskOutcome: (taskId: string) =>
-      withProjectRunAuditBarrier(() =>
-        projectRunService.observeTaskOutcome(taskId),
-      ),
+    observeTaskOutcome:
+      projectRunService.observeTaskOutcome.bind(projectRunService),
   } satisfies Pick<
     ProjectRunService,
-    | 'startRun'
-    | 'pauseRun'
-    | 'resumeRun'
-    | 'stopRun'
-    | 'drainAvailableSlots'
-    | 'observeTaskOutcome'
+    'startRun' | 'pauseRun' | 'resumeRun' | 'stopRun' | 'observeTaskOutcome'
   >;
   const qaExecutionService = new QaExecutionService({
     database,
@@ -534,7 +535,20 @@ export const startServer = async (
 
   const lifecycle = createProcessLifecycle({
     stopAccepting: () => originPolicy.stopAccepting(),
-    shutdownRuntime: () => registry.shutdown(),
+    shutdownRuntime: async () => {
+      let failure: unknown;
+      try {
+        await settleRunDrains();
+      } catch (error) {
+        failure = error;
+      }
+      try {
+        await registry.shutdown();
+      } catch (error) {
+        failure ??= error;
+      }
+      if (failure) throw failure;
+    },
     closeSockets: () => app.close(),
     auditStatus: () => registry.auditStatus,
     signalFailure: (code) => {

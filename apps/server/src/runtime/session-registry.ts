@@ -53,6 +53,10 @@ export class SessionRegistry {
     return this.unavailable ? 'audit_unavailable' : 'available';
   }
 
+  reportAuditFailure(error: unknown): void {
+    this.tripAuditBarrier(error);
+  }
+
   async create(
     sessionId: string,
     configuration?: AgentRuntimeConfiguration,

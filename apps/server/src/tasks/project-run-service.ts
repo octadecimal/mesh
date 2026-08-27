@@ -65,7 +65,10 @@ type ProjectRunServiceDependencies = {
     >;
   };
   publisher: { publishProject(event: ProjectEvent): void };
+  canLaunch?: () => boolean;
   maxConcurrency?: number;
+  onAuditFailure?: (error: unknown) => void;
+  scheduleDrain?: (runId: string) => void;
   now?: () => string;
   createId?: () => string;
 };
@@ -94,7 +97,7 @@ export class ProjectRunService {
   }
 
   startRun(input: StartProjectRunInput): ProjectRunCommandOutcome {
-    return this.execute(input.idempotencyKey, () => {
+    return this.executeScheduled(input.idempotencyKey, () => {
       this.requireHuman(input.actor);
       const project = this.requireActiveProject(input.projectId);
       this.requireConcurrency(input.concurrency);
@@ -174,7 +177,7 @@ export class ProjectRunService {
   }
 
   resumeRun(input: ChangeProjectRunInput): ProjectRunCommandOutcome {
-    return this.execute(input.idempotencyKey, () => {
+    return this.executeScheduled(input.idempotencyKey, () => {
       this.requireHuman(input.actor);
       const run = this.requireCurrentRun(input);
       this.requireState(run, ['paused']);
@@ -232,6 +235,7 @@ export class ProjectRunService {
         );
       }
       if (run.state !== 'running') return run;
+      if (!this.canLaunch()) return run;
       const counts = this.dependencies.projectRuns.reconcileCounts(run.id);
       const occupied = counts.launchPending + counts.active;
       if (occupied >= run.concurrency) return run;
@@ -602,6 +606,32 @@ export class ProjectRunService {
     return outcome;
   }
 
+  private executeScheduled(
+    idempotencyKey: string,
+    mutate: () => ProjectRunCommandOutcome,
+  ): ProjectRunCommandOutcome {
+    let committed = false;
+    const outcome = this.execute(idempotencyKey, () => {
+      const result = mutate();
+      committed = true;
+      return result;
+    });
+    if (committed) this.scheduleDrain(outcome.run.id);
+    return outcome;
+  }
+
+  private scheduleDrain(runId: string): void {
+    try {
+      this.dependencies.scheduleDrain?.(runId);
+    } catch (error) {
+      try {
+        this.dependencies.onAuditFailure?.(error);
+      } catch {
+        // A post-commit callback cannot replace the committed command result.
+      }
+    }
+  }
+
   private requireHuman(actor: TaskActor): void {
     const parsed = taskActorSchema.parse(actor);
     if (parsed.type !== 'human') {
@@ -699,14 +729,30 @@ export class ProjectRunService {
   }
 
   private appendRunEvent(run: ProjectRun, occurredAt: string): ProjectEvent {
-    return this.dependencies.projectEvents.appendInTransaction(run.projectId, {
-      protocolVersion: 1,
-      id: this.createId(),
-      projectId: run.projectId,
-      occurredAt,
-      type: 'project.run_changed',
-      payload: { run },
-    });
+    try {
+      return this.dependencies.projectEvents.appendInTransaction(
+        run.projectId,
+        {
+          protocolVersion: 1,
+          id: this.createId(),
+          projectId: run.projectId,
+          occurredAt,
+          type: 'project.run_changed',
+          payload: { run },
+        },
+      );
+    } catch (error) {
+      try {
+        this.dependencies.onAuditFailure?.(error);
+      } catch {
+        // Preserve the durable audit error as the operation failure.
+      }
+      throw error;
+    }
+  }
+
+  private canLaunch(): boolean {
+    return this.dependencies.canLaunch?.() ?? true;
   }
 
   private now(): string {
