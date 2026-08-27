@@ -388,10 +388,11 @@ persists the complete ordered event batch before publishing any member of it.
 Replay uses the same sequence and idempotency semantics as existing project
 history.
 
-Project snapshots carry the active plan, compact terminal plan summaries, and
-current dependency edges. Full immutable proposal and feedback history is
-loaded on demand from a read-only HTTP endpoint so repeated planning cycles do
-not make every reconnect payload grow without bound.
+Project snapshots carry the active plan, the 20 most recent terminal plan
+summaries, and current dependency edges. Older summaries use a paginated
+read-only project-plan listing endpoint. Full immutable proposal and feedback
+history is loaded on demand from a read-only plan-detail endpoint so repeated
+planning cycles do not make every reconnect payload grow without bound.
 
 ## Persistence and restart recovery
 
@@ -461,8 +462,9 @@ in allowed states. The milestone adds no graph visualization dependency.
   problems without creating a revision.
 - Stale planning or proposal revisions reject commands and return current
   authoritative state.
-- Stale board approval creates no task, edge, or approval event and returns a
-  bounded change summary.
+- Stale board approval creates no task, edge, or approval event. It returns at
+  most 50 added, 50 removed, and 50 changed task IDs, plus total counts and a
+  truncation flag for each category.
 - Approval persistence failure rolls back the plan, tasks, edges, events, and
   command result together.
 - Publication failure after commit is recoverable through durable replay; it
@@ -523,8 +525,8 @@ Domain and service tests prove:
 - Cancellation, archive conflicts, restart reconciliation, and repair states.
 
 Realtime and reducer tests prove ordered projection, duplicate delivery,
-disconnect/reconnect, replay gaps, resync, compact planning summaries, and
-on-demand proposal history.
+disconnect/reconnect, replay gaps, resync, the 20-summary snapshot bound,
+paginated older summaries, and on-demand proposal history.
 
 Component tests cover the planning form, subscription warning, active and
 attention states, proposal details, revision comparisons, stale evidence,
