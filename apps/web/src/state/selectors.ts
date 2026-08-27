@@ -8,6 +8,7 @@ import type {
   TaskAttempt,
   TaskTransition,
 } from '@mesh-session-platform/contracts';
+import { compareCodeUnits } from '@mesh-session-platform/contracts';
 
 import type { MeshProjection, PendingApproval } from './reducer';
 
@@ -108,7 +109,8 @@ export const selectEligibleRunPreview = (
     )
     .sort(
       (left, right) =>
-        left.rank.localeCompare(right.rank) || left.id.localeCompare(right.id),
+        compareCodeUnits(left.rank, right.rank) ||
+        compareCodeUnits(left.id, right.id),
     );
 };
 

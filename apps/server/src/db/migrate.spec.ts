@@ -332,6 +332,7 @@ describe('migrate', () => {
       { id: '013-task-attempt-project-run-source' },
       { id: '014-project-run-prelaunch-attention' },
       { id: '015-project-run-pause-reason' },
+      { id: '016-project-run-automation-status' },
     ]);
     expect(
       database
@@ -647,44 +648,54 @@ describe('migrate', () => {
         updatedAt: appliedAt,
       }),
     );
-    const runs = new ProjectRunRepository(database);
-    const run = runs.create({
-      id: 'attention-run',
-      projectId: 'attention-project',
-      concurrency: 1,
-      startedAt: appliedAt,
-      items: [
-        {
-          id: 'attention-item',
-          taskId: 'attention-task',
-          taskRevision: 1,
-          policyRevision: 1,
-          taskAutomationGeneration: 0,
-          queuePosition: 0,
-          launchIdempotencyKey: 'attention-launch',
-        },
-      ],
-    });
-    const claim = runs.claimNext({
-      runId: run.id,
-      expectedRunRevision: run.revision,
-      occurredAt: appliedAt,
-    });
-    if (!claim) throw new Error('Expected attention claim');
+    database
+      .prepare(
+        `INSERT INTO project_runs (
+          id, project_id, state, revision, concurrency, started_at, updated_at,
+          completed_at, completion_reason
+        ) VALUES (?, ?, 'running', 2, 1, ?, ?, NULL, NULL)`,
+      )
+      .run('attention-run', 'attention-project', appliedAt, appliedAt);
+    database
+      .prepare(
+        `INSERT INTO project_run_items (
+          id, run_id, project_id, task_id, task_revision, policy_revision,
+          task_automation_generation, queue_position, status, attempt_id,
+          session_id, launch_idempotency_key, claimed_at, started_at,
+          finished_at, outcome_reason
+        ) VALUES (
+          ?, ?, ?, ?, 1, 1, 0, 0, 'launch_pending', NULL, NULL, ?, ?, NULL,
+          NULL, NULL
+        )`,
+      )
+      .run(
+        'attention-item',
+        'attention-run',
+        'attention-project',
+        'attention-task',
+        'attention-launch',
+        appliedAt,
+      );
 
     migrate(database);
+    const runs = new ProjectRunRepository(database);
+    const claim = runs.get('attention-run');
+    if (!claim) throw new Error('Expected migrated attention run');
+    const claimedItem = claim.items[0];
+    if (!claimedItem) throw new Error('Expected migrated attention item');
 
     expect(
       runs.finishItem({
-        runId: claim.run.id,
-        itemId: claim.item.id,
-        expectedRunRevision: claim.run.revision,
+        runId: claim.id,
+        itemId: claimedItem.id,
+        expectedRunRevision: claim.revision,
         status: 'attention_required',
         outcomeReason: 'task_revision_conflict',
         occurredAt: appliedAt,
       }).items[0],
     ).toMatchObject({
       status: 'attention_required',
+      taskAutomationStatus: 'disabled',
       attemptId: null,
       sessionId: null,
       startedAt: null,
@@ -861,6 +872,7 @@ describe('migrate', () => {
       { id: '013-task-attempt-project-run-source' },
       { id: '014-project-run-prelaunch-attention' },
       { id: '015-project-run-pause-reason' },
+      { id: '016-project-run-automation-status' },
     ]);
   });
 
@@ -1088,6 +1100,10 @@ describe('migrate', () => {
       join(__dirname, 'migrations', '015-project-run-pause-reason.sql'),
       join(directory, 'migrations', '015-project-run-pause-reason.sql'),
     );
+    copyFileSync(
+      join(__dirname, 'migrations', '016-project-run-automation-status.sql'),
+      join(directory, 'migrations', '016-project-run-automation-status.sql'),
+    );
     buildSync({
       bundle: true,
       entryPoints: [join(__dirname, 'migrate.ts')],
@@ -1148,6 +1164,7 @@ describe('migrate', () => {
         { id: '013-task-attempt-project-run-source' },
         { id: '014-project-run-prelaunch-attention' },
         { id: '015-project-run-pause-reason' },
+        { id: '016-project-run-automation-status' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -1229,6 +1246,7 @@ describe('migrate', () => {
       { id: '013-task-attempt-project-run-source' },
       { id: '014-project-run-prelaunch-attention' },
       { id: '015-project-run-pause-reason' },
+      { id: '016-project-run-automation-status' },
     ]);
   });
 
@@ -1694,6 +1712,7 @@ describe('migrate', () => {
         { id: '013-task-attempt-project-run-source' },
         { id: '014-project-run-prelaunch-attention' },
         { id: '015-project-run-pause-reason' },
+        { id: '016-project-run-automation-status' },
       ]);
       expect(
         database

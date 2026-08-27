@@ -444,14 +444,13 @@ const executeProjectRunCommand = async (
   dependencies: CommandDependencies,
 ): Promise<CommandResponse> => {
   const service = requireProjectRunService(dependencies);
-  const result =
-    command.type === 'project.run.start'
-      ? service.startRun({ ...command.payload, idempotencyKey })
-      : command.type === 'project.run.pause'
-        ? service.pauseRun({ ...command.payload, idempotencyKey })
-        : command.type === 'project.run.resume'
-          ? service.resumeRun({ ...command.payload, idempotencyKey })
-          : service.stopRun({ ...command.payload, idempotencyKey });
+  const result = await (command.type === 'project.run.start'
+    ? service.startRun({ ...command.payload, idempotencyKey })
+    : command.type === 'project.run.pause'
+      ? service.pauseRun({ ...command.payload, idempotencyKey })
+      : command.type === 'project.run.resume'
+        ? service.resumeRun({ ...command.payload, idempotencyKey })
+        : service.stopRun({ ...command.payload, idempotencyKey }));
   return response(command.type, { run: result.run });
 };
 

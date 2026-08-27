@@ -212,8 +212,14 @@ export const qaExecutionCycleSchema = z
     },
   );
 
+export const reviewAutomationStatusSchema = z.enum([
+  'disabled',
+  'enabled',
+  'paused',
+]);
+
 export const reviewAutomationStateSchema = z.object({
-  status: z.enum(['disabled', 'enabled', 'paused']),
+  status: reviewAutomationStatusSchema,
   generation: z.number().int().nonnegative(),
   rejectionCount: z.number().int().nonnegative(),
   pauseReason: z.string().trim().min(1).nullable(),

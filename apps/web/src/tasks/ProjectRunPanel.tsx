@@ -1,4 +1,5 @@
 import {
+  compareCodeUnits,
   taskActorSchema,
   type MutatingCommand,
   type Project,
@@ -69,7 +70,7 @@ const orderedItems = (run: ProjectRun) =>
   [...run.items].sort(
     (left, right) =>
       left.queuePosition - right.queuePosition ||
-      left.taskId.localeCompare(right.taskId),
+      compareCodeUnits(left.taskId, right.taskId),
   );
 
 const effectiveReviewMode = (project: Project, task: Task) =>
@@ -209,9 +210,16 @@ export function ProjectRunPanel({
   const activeRun = selectActiveProjectRun(projection, project.id);
   const history = projectRuns.filter(({ state }) => state === 'completed');
   const eligibleTasks = selectEligibleRunPreview(projection, project.id);
-  const previewFingerprint = eligibleTasks
-    .map(({ id, revision }) => `${id}:${revision}`)
-    .join('|');
+  const policyRevision = project.qaConfiguration?.revision ?? 1;
+  const previewFingerprint = JSON.stringify({
+    policyRevision,
+    tasks: eligibleTasks.map(({ id, revision, reviewAutomation }) => ({
+      id,
+      revision,
+      automationStatus: reviewAutomation.status,
+      automationGeneration: reviewAutomation.generation,
+    })),
+  });
   const repairs = selectProjectRepairConditions(projection, project.id);
   const boundedMaximum = Math.max(1, maxConcurrency);
   const [authorizing, setAuthorizing] = useState(false);
@@ -292,10 +300,15 @@ export function ProjectRunPanel({
         payload: {
           projectId: project.id,
           concurrency,
-          expectedTasks: eligibleTasks.map(({ id, revision }) => ({
-            taskId: id,
-            revision,
-          })),
+          expectedPolicyRevision: policyRevision,
+          expectedTasks: eligibleTasks.map(
+            ({ id, revision, reviewAutomation }) => ({
+              taskId: id,
+              revision,
+              automationStatus: reviewAutomation.status,
+              automationGeneration: reviewAutomation.generation,
+            }),
+          ),
           actor: operator,
         },
       },
@@ -549,6 +562,7 @@ export function ProjectRunPanel({
                   </li>
                 ))}
               </ol>
+              <p>QA policy revision {policyRevision}</p>
               <label className="project-run-concurrency">
                 Concurrency
                 <input
@@ -571,6 +585,7 @@ export function ProjectRunPanel({
               <p className="notice notice-warning">
                 Concurrent launches consume Claude subscription capacity. Mesh
                 uses subscription-backed sessions and never enables API billing.
+                Each task launches in a Mesh-owned isolated Git worktree.
               </p>
               <label className="project-run-subscription-confirmation">
                 <input

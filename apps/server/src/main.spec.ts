@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 
@@ -44,6 +44,37 @@ import {
 } from './main.js';
 
 const now = '2026-08-25T12:00:00.000Z';
+
+const seedRepositoryCommit = (
+  gitExecutable: string,
+  repositoryPath: string,
+  cwd: string,
+) => {
+  writeFileSync(join(repositoryPath, '.mesh-test-base'), 'base\n');
+  execFileSync(
+    gitExecutable,
+    ['-C', repositoryPath, 'add', '.mesh-test-base'],
+    {
+      cwd,
+      windowsHide: true,
+    },
+  );
+  execFileSync(
+    gitExecutable,
+    [
+      '-C',
+      repositoryPath,
+      '-c',
+      'user.name=Mesh Test',
+      '-c',
+      'user.email=mesh@example.invalid',
+      'commit',
+      '-m',
+      'test base',
+    ],
+    { cwd, windowsHide: true },
+  );
+};
 
 describe('server configuration', () => {
   it('permits fake-driver injection only in explicit test configuration', () => {
@@ -885,6 +916,11 @@ describe('production composition', () => {
         cwd: directory,
         windowsHide: true,
       });
+      seedRepositoryCommit(
+        trustedGitExecutable.path,
+        repositoryPath,
+        directory,
+      );
       return resolveRepositoryIdentity(
         repositoryPath,
         { baseDirectory: directory },
@@ -948,6 +984,7 @@ describe('production composition', () => {
           taskId: task.id,
           taskRevision: task.revision,
           policyRevision: project.qaConfiguration.revision,
+          taskAutomationStatus: task.reviewAutomation.status,
           taskAutomationGeneration: task.reviewAutomation.generation,
           queuePosition,
           launchIdempotencyKey: `launch-${task.id}`,
@@ -1130,6 +1167,7 @@ describe('production composition', () => {
       cwd: directory,
       windowsHide: true,
     });
+    seedRepositoryCommit(trustedGitExecutable.path, repositoryPath, directory);
     const identity = await resolveRepositoryIdentity(
       repositoryPath,
       { baseDirectory: directory },
@@ -1180,6 +1218,7 @@ describe('production composition', () => {
         taskId: task.id,
         taskRevision: task.revision,
         policyRevision: project.qaConfiguration.revision,
+        taskAutomationStatus: task.reviewAutomation.status,
         taskAutomationGeneration: task.reviewAutomation.generation,
         queuePosition,
         launchIdempotencyKey: `launch-${task.id}`,
@@ -1282,6 +1321,7 @@ describe('production composition', () => {
       cwd: directory,
       windowsHide: true,
     });
+    seedRepositoryCommit(trustedGitExecutable.path, repositoryPath, directory);
     const identity = await resolveRepositoryIdentity(
       repositoryPath,
       { baseDirectory: directory },
@@ -1402,9 +1442,12 @@ describe('production composition', () => {
             payload: {
               projectId: project.id,
               concurrency: 2,
+              expectedPolicyRevision: project.qaConfiguration.revision,
               expectedTasks: runTasks.map((task) => ({
                 taskId: task.id,
                 revision: task.revision,
+                automationStatus: task.reviewAutomation.status,
+                automationGeneration: task.reviewAutomation.generation,
               })),
               actor: { type: 'human', id: 'operator-run-coalescing' },
             },
@@ -1415,6 +1458,40 @@ describe('production composition', () => {
       await secondLaunchStarted;
       await vi.waitFor(() => expect(driver.createdSessions).toHaveLength(1));
       expect(drainSpy).toHaveBeenCalledOnce();
+
+      const observation = openDatabase(databasePath);
+      try {
+        const workspaces = new WorkspaceRepository(observation).listByProject(
+          project.id,
+        );
+        expect(workspaces).toHaveLength(2);
+        expect(new Set(workspaces.map(({ path }) => path)).size).toBe(2);
+        for (const workspace of workspaces) {
+          expect(workspace).toMatchObject({
+            type: 'worktree',
+            owner: 'mesh',
+            gitWorktreePath: workspace.path,
+          });
+          expect(
+            relative(join(directory, '.mesh-project-runs'), workspace.path),
+          ).not.toMatch(/^\.\./);
+          const gitRoot = execFileSync(
+            trustedGitExecutable.path,
+            ['-C', workspace.path, 'rev-parse', '--show-toplevel'],
+            { cwd: directory, encoding: 'utf8', windowsHide: true },
+          ).trim();
+          expect(realpathSync(gitRoot)).toBe(realpathSync(workspace.path));
+        }
+        expect(
+          execFileSync(
+            trustedGitExecutable.path,
+            ['-C', repositoryPath, 'status', '--porcelain'],
+            { cwd: directory, encoding: 'utf8', windowsHide: true },
+          ),
+        ).toBe('');
+      } finally {
+        observation.close();
+      }
 
       await driver.markBlocked(0, {
         idempotencyKey: idSchema.parse('block-run-coalescing'),
@@ -1568,7 +1645,7 @@ describe('production composition', () => {
     }
   });
 
-  it('routes an asynchronous drain audit failure through the central runtime barrier', async () => {
+  it('routes a trigger-based attempt audit failure through the central runtime barrier', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-main-drain-audit-'));
     directories.push(directory);
     const repositoryPath = join(directory, 'repository');
@@ -1584,6 +1661,7 @@ describe('production composition', () => {
       cwd: directory,
       windowsHide: true,
     });
+    seedRepositoryCommit(trustedGitExecutable.path, repositoryPath, directory);
     const identity = await resolveRepositoryIdentity(
       repositoryPath,
       { baseDirectory: directory },
@@ -1616,8 +1694,8 @@ describe('production composition', () => {
       taskSchema.parse({
         id: 'task-drain-audit',
         projectId: project.id,
-        title: 'Fail a claimed run event',
-        description: 'Exercise asynchronous project-run audit failure.',
+        title: 'Fail an attempt audit event',
+        description: 'Exercise asynchronous attempt audit failure.',
         acceptanceCriteria: ['The central barrier becomes unavailable.'],
         priority: 'normal',
         rank: 'a',
@@ -1631,13 +1709,12 @@ describe('production composition', () => {
       }),
     );
     database.exec(`
-      CREATE TRIGGER fail_claimed_run_event
+      CREATE TRIGGER fail_project_run_attempt_event
       BEFORE INSERT ON project_events
       WHEN NEW.project_id = 'project-drain-audit'
-        AND NEW.type = 'project.run_changed'
-        AND (SELECT COUNT(*) FROM project_events WHERE project_id = NEW.project_id) >= 1
+        AND NEW.type = 'task.developer_execution_changed'
       BEGIN
-        SELECT RAISE(FAIL, 'claimed run audit failed');
+        SELECT RAISE(FAIL, 'project run attempt audit failed');
       END;
     `);
     database.close();
@@ -1687,7 +1764,15 @@ describe('production composition', () => {
             payload: {
               projectId: project.id,
               concurrency: 1,
-              expectedTasks: [{ taskId: 'task-drain-audit', revision: 1 }],
+              expectedPolicyRevision: project.qaConfiguration.revision,
+              expectedTasks: [
+                {
+                  taskId: 'task-drain-audit',
+                  revision: 1,
+                  automationStatus: 'disabled',
+                  automationGeneration: 0,
+                },
+              ],
               actor: { type: 'human', id: 'operator-drain-audit' },
             },
           },
@@ -1719,7 +1804,12 @@ describe('production composition', () => {
       closeError = await running.close().catch((error: unknown) => error);
       process.exitCode = previousExitCode;
     }
-    expect(closeError).toMatchObject({ message: 'claimed run audit failed' });
+    expect(closeError).toMatchObject({
+      code: 'audit_unavailable',
+      cause: expect.objectContaining({
+        message: 'project run attempt audit failed',
+      }),
+    });
   });
 
   it('publishes runtime-stopped run reconciliation from durable project events', async () => {
@@ -1738,6 +1828,7 @@ describe('production composition', () => {
       cwd: directory,
       windowsHide: true,
     });
+    seedRepositoryCommit(trustedGitExecutable.path, repositoryPath, directory);
     const identity = await resolveRepositoryIdentity(
       repositoryPath,
       { baseDirectory: directory },
@@ -1814,7 +1905,15 @@ describe('production composition', () => {
             payload: {
               projectId: project.id,
               concurrency: 1,
-              expectedTasks: [{ taskId: 'task-runtime-stopped', revision: 1 }],
+              expectedPolicyRevision: project.qaConfiguration.revision,
+              expectedTasks: [
+                {
+                  taskId: 'task-runtime-stopped',
+                  revision: 1,
+                  automationStatus: 'disabled',
+                  automationGeneration: 0,
+                },
+              ],
               actor: { type: 'human', id: 'operator-runtime-stopped' },
             },
           },
@@ -1904,6 +2003,7 @@ describe('production composition', () => {
       cwd: directory,
       windowsHide: true,
     });
+    seedRepositoryCommit(trustedGitExecutable.path, repositoryPath, directory);
     const identity = await resolveRepositoryIdentity(
       repositoryPath,
       { baseDirectory: directory },
@@ -1971,7 +2071,15 @@ describe('production composition', () => {
         payload: {
           projectId: project.id,
           concurrency: 1,
-          expectedTasks: [{ taskId: 'task-run-audit', revision: 1 }],
+          expectedPolicyRevision: project.qaConfiguration.revision,
+          expectedTasks: [
+            {
+              taskId: 'task-run-audit',
+              revision: 1,
+              automationStatus: 'disabled',
+              automationGeneration: 0,
+            },
+          ],
           actor: { type: 'human', id: 'operator-run-audit' },
         },
       },

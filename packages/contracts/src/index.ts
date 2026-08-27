@@ -3,6 +3,7 @@ export * from './developer-execution.js';
 export * from './qa-execution.js';
 export * from './errors.js';
 export * from './protocol.js';
+export * from './ordering.js';
 export * from './events.js';
 export * from './project-events.js';
 export * from './project-runs.js';

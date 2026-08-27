@@ -17,12 +17,14 @@ import {
 
 import { createTestRepositories } from '../test/create-test-database.js';
 import {
+  AttemptAuditUnavailableError,
   AttemptReconciliationRequiredError,
   AttemptStartFailedError,
   type ProjectRunAttemptLaunchInput,
 } from './attempt-service.js';
 import { ProjectRunService } from './project-run-service.js';
 import { selectEligibleRunTasks } from './project-run-policy.js';
+import { ProjectRunPreflightError } from './project-run-preflight.js';
 
 const now = '2026-08-27T00:00:00.000Z';
 const human = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
@@ -96,6 +98,7 @@ const setup = (options?: {
   maxConcurrency?: number;
   onAuditFailure?: (error: unknown) => void;
   scheduleDrain?: (runId: string) => void;
+  preflight?: (project: Project) => Promise<void>;
   launchAttempt?: (input: ProjectRunAttemptLaunchInput) => Promise<{
     attempt: ReturnType<
       ReturnType<typeof createTestRepositories>['attempts']['createForTask']
@@ -155,6 +158,14 @@ const setup = (options?: {
   const service = new ProjectRunService({
     ...repositories,
     attemptService: { launchAttempt },
+    preflight: options?.preflight ?? (async () => undefined),
+    planWorkspace: (workspaceProject, run, item) => ({
+      type: 'worktree',
+      repositoryPath: workspaceProject.repositoryPath,
+      path: `C:/mesh-runs/${run.id}/${item.id}`,
+      branch: `mesh/${run.id}/${item.id}`,
+      startPoint: 'HEAD',
+    }),
     publisher,
     canLaunch: options?.canLaunch,
     maxConcurrency: options?.maxConcurrency,
@@ -167,13 +178,8 @@ const setup = (options?: {
   return { launchAttempt, repositories, project, publisher, service };
 };
 
-const expectCode = (execute: () => unknown, code: string) => {
-  try {
-    execute();
-    throw new Error(`Expected '${code}'`);
-  } catch (error) {
-    expect(error).toMatchObject({ code });
-  }
+const expectCode = async (execute: () => unknown, code: string) => {
+  await expect(Promise.resolve().then(execute)).rejects.toMatchObject({ code });
 };
 
 const startRun = (
@@ -200,10 +206,16 @@ const startRun = (
     project,
     tasks,
     currentAttemptTaskIds,
-  }).map(({ task }) => ({ taskId: task.id, revision: task.revision }));
+  }).map(({ task }) => ({
+    taskId: task.id,
+    revision: task.revision,
+    automationStatus: task.reviewAutomation.status,
+    automationGeneration: task.reviewAutomation.generation,
+  }));
   return service.startRun({
     projectId,
     concurrency,
+    expectedPolicyRevision: project.qaConfiguration.revision,
     expectedTasks,
     actor,
     idempotencyKey,
@@ -211,19 +223,30 @@ const startRun = (
 };
 
 describe('ProjectRunService startRun', () => {
-  it('rejects a changed eligible selection before creating a run', () => {
+  it('rejects a changed eligible selection before creating a run', async () => {
     const { repositories, project, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-a'));
     repositories.tasks.create(createTask(project.id, 'task-b'));
 
-    expectCode(
+    await expectCode(
       () =>
         service.startRun({
           projectId: project.id,
           concurrency: 1,
+          expectedPolicyRevision: project.qaConfiguration.revision,
           expectedTasks: [
-            { taskId: 'task-b', revision: 1 },
-            { taskId: 'task-a', revision: 1 },
+            {
+              taskId: 'task-b',
+              revision: 1,
+              automationStatus: 'enabled',
+              automationGeneration: 3,
+            },
+            {
+              taskId: 'task-a',
+              revision: 1,
+              automationStatus: 'enabled',
+              automationGeneration: 3,
+            },
           ],
           actor: human,
           idempotencyKey: 'stale-preview',
@@ -233,7 +256,78 @@ describe('ProjectRunService startRun', () => {
     expect(repositories.projectRuns.listByProject(project.id)).toEqual([]);
   });
 
-  it('freezes eligible tasks in stable rank order with policy snapshots', () => {
+  it.each([
+    ['project policy revision', { expectedPolicyRevision: 6 }],
+    [
+      'task automation status',
+      {
+        expectedTasks: [
+          {
+            taskId: 'task-1',
+            revision: 1,
+            automationStatus: 'disabled',
+            automationGeneration: 3,
+          },
+        ],
+      },
+    ],
+    [
+      'task automation generation',
+      {
+        expectedTasks: [
+          {
+            taskId: 'task-1',
+            revision: 1,
+            automationStatus: 'enabled',
+            automationGeneration: 2,
+          },
+        ],
+      },
+    ],
+  ] as const)('rejects consent stale on %s', async (_label, override) => {
+    const { repositories, project, service } = setup();
+    repositories.tasks.create(createTask(project.id, 'task-1'));
+    await expectCode(
+      () =>
+        service.startRun({
+          projectId: project.id,
+          concurrency: 1,
+          expectedPolicyRevision: project.qaConfiguration.revision,
+          expectedTasks: [
+            {
+              taskId: 'task-1',
+              revision: 1,
+              automationStatus: 'enabled',
+              automationGeneration: 3,
+            },
+          ],
+          actor: human,
+          idempotencyKey: `stale-${_label.replace(/ /g, '-')}`,
+          ...override,
+        }),
+      'project_run_stale',
+    );
+    expect(repositories.projectRuns.listByProject(project.id)).toEqual([]);
+  });
+
+  it.each(['billing_conflict', 'repository_unsafe'] as const)(
+    'rejects start before authorization when preflight reports %s',
+    async (reason) => {
+      const { repositories, project, service } = setup({
+        preflight: async () => {
+          throw new ProjectRunPreflightError(reason);
+        },
+      });
+      repositories.tasks.create(createTask(project.id, 'task-1'));
+
+      await expect(startRun(service, project.id)).rejects.toMatchObject({
+        reason,
+      });
+      expect(repositories.projectRuns.listByProject(project.id)).toEqual([]);
+    },
+  );
+
+  it('freezes eligible tasks in stable rank order with policy snapshots', async () => {
     const { repositories, project, publisher, service } = setup();
     repositories.tasks.create(
       createTask(project.id, 'rank-b', { rank: 'b', revision: 4 }),
@@ -258,7 +352,7 @@ describe('ProjectRunService startRun', () => {
       }),
     );
 
-    const outcome = startRun(service, project.id);
+    const outcome = await startRun(service, project.id);
 
     expect(outcome.run.items.map(({ taskId }) => taskId)).toEqual([
       'rank-a',
@@ -292,39 +386,39 @@ describe('ProjectRunService startRun', () => {
     expect(publisher.publishProject).toHaveBeenCalledWith(outcome.events[0]);
   });
 
-  it('requires a human actor', () => {
+  it('requires a human actor', async () => {
     const { repositories, project, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
 
-    expectCode(
+    await expectCode(
       () => startRun(service, project.id, 'start-agent', 1, agent),
       'project_run_invalid',
     );
     expect(repositories.projectRuns.listByProject(project.id)).toEqual([]);
   });
 
-  it('rejects empty membership and another active run', () => {
+  it('rejects empty membership and another active run', async () => {
     const { repositories, project, service } = setup();
 
-    expectCode(
+    await expectCode(
       () => startRun(service, project.id, 'start-empty'),
       'project_run_empty',
     );
 
     repositories.tasks.create(createTask(project.id, 'task-1'));
-    startRun(service, project.id, 'start-first');
-    expectCode(
+    await startRun(service, project.id, 'start-first');
+    await expectCode(
       () => startRun(service, project.id, 'start-conflict'),
       'project_run_conflict',
     );
   });
 
-  it('enforces the configured concurrency cap, defaulting to four', () => {
+  it('enforces the configured concurrency cap, defaulting to four', async () => {
     const defaultSetup = setup();
     defaultSetup.repositories.tasks.create(
       createTask(defaultSetup.project.id, 'task-default'),
     );
-    expectCode(
+    await expectCode(
       () =>
         startRun(
           defaultSetup.service,
@@ -339,7 +433,7 @@ describe('ProjectRunService startRun', () => {
     configuredSetup.repositories.tasks.create(
       createTask(configuredSetup.project.id, 'task-configured'),
     );
-    expectCode(
+    await expectCode(
       () =>
         startRun(
           configuredSetup.service,
@@ -351,12 +445,12 @@ describe('ProjectRunService startRun', () => {
     );
   });
 
-  it('returns the original outcome for duplicate delivery without republishing', () => {
+  it('returns the original outcome for duplicate delivery without republishing', async () => {
     const { repositories, project, publisher, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
 
-    const first = startRun(service, project.id);
-    const duplicate = startRun(service, project.id);
+    const first = await startRun(service, project.id);
+    const duplicate = await startRun(service, project.id);
 
     expect(duplicate).toEqual(first);
     expect(repositories.projectRuns.listByProject(project.id)).toHaveLength(1);
@@ -364,7 +458,7 @@ describe('ProjectRunService startRun', () => {
     expect(publisher.publishProject).toHaveBeenCalledOnce();
   });
 
-  it('schedules newly committed starts and resumes without replaying either side effect', () => {
+  it('schedules newly committed starts and resumes without replaying either side effect', async () => {
     const repositoriesRef: {
       current?: ReturnType<typeof createTestRepositories>;
     } = {};
@@ -390,14 +484,14 @@ describe('ProjectRunService startRun', () => {
       createTask(context.project.id, 'task-scheduled'),
     );
 
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'scheduled-start',
       1,
     );
     expect(
-      startRun(context.service, context.project.id, 'scheduled-start', 1),
+      await startRun(context.service, context.project.id, 'scheduled-start', 1),
     ).toEqual(started);
     const paused = context.service.pauseRun({
       runId: started.run.id,
@@ -405,14 +499,14 @@ describe('ProjectRunService startRun', () => {
       actor: human,
       idempotencyKey: 'scheduled-pause',
     });
-    const resumed = context.service.resumeRun({
+    const resumed = await context.service.resumeRun({
       runId: paused.run.id,
       expectedRevision: paused.run.revision,
       actor: human,
       idempotencyKey: 'scheduled-resume',
     });
     expect(
-      context.service.resumeRun({
+      await context.service.resumeRun({
         runId: paused.run.id,
         expectedRevision: paused.run.revision,
         actor: human,
@@ -434,7 +528,7 @@ describe('ProjectRunService startRun', () => {
     ]);
   });
 
-  it('preserves the committed command outcome when scheduling throws', () => {
+  it('preserves the committed command outcome when scheduling throws', async () => {
     const { repositories, project, service } = setup({
       scheduleDrain: () => {
         throw new Error('drain scheduling failed');
@@ -442,7 +536,7 @@ describe('ProjectRunService startRun', () => {
     });
     repositories.tasks.create(createTask(project.id, 'task-1'));
 
-    const outcome = startRun(service, project.id);
+    const outcome = await startRun(service, project.id);
 
     expect(outcome.run).toMatchObject({
       projectId: project.id,
@@ -451,7 +545,7 @@ describe('ProjectRunService startRun', () => {
     expect(repositories.projectEvents.after(project.id, 0)).toHaveLength(1);
   });
 
-  it('rolls back membership and does not publish when audit persistence fails', () => {
+  it('rolls back membership and does not publish when audit persistence fails', async () => {
     const onAuditFailure = vi.fn();
     const { repositories, project, publisher, service } = setup({
       failProjectEventInsert: true,
@@ -459,7 +553,7 @@ describe('ProjectRunService startRun', () => {
     });
     repositories.tasks.create(createTask(project.id, 'task-1'));
 
-    expect(() => startRun(service, project.id)).toThrow(
+    await expect(startRun(service, project.id)).rejects.toThrow(
       'project event insert failed',
     );
     expect(repositories.projectRuns.listByProject(project.id)).toEqual([]);
@@ -472,10 +566,10 @@ describe('ProjectRunService startRun', () => {
 });
 
 describe('ProjectRunService controls', () => {
-  it('pauses and resumes the same frozen run', () => {
+  it('pauses and resumes the same frozen run', async () => {
     const { repositories, project, publisher, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
-    const started = startRun(service, project.id, 'start-controls', 1);
+    const started = await startRun(service, project.id, 'start-controls', 1);
 
     const paused = service.pauseRun({
       runId: started.run.id,
@@ -483,7 +577,7 @@ describe('ProjectRunService controls', () => {
       actor: human,
       idempotencyKey: 'pause-run-1',
     });
-    const resumed = service.resumeRun({
+    const resumed = await service.resumeRun({
       runId: paused.run.id,
       expectedRevision: paused.run.revision,
       actor: human,
@@ -504,10 +598,15 @@ describe('ProjectRunService controls', () => {
     expect(publisher.publishProject).toHaveBeenCalledTimes(3);
   });
 
-  it('revalidates project safety before resume', () => {
+  it('revalidates project safety before resume', async () => {
     const { repositories, project, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
-    const started = startRun(service, project.id, 'start-resume-safety', 1);
+    const started = await startRun(
+      service,
+      project.id,
+      'start-resume-safety',
+      1,
+    );
     const paused = service.pauseRun({
       runId: started.run.id,
       expectedRevision: started.run.revision,
@@ -516,7 +615,7 @@ describe('ProjectRunService controls', () => {
     });
     repositories.projects.archive(project.id, now);
 
-    expectCode(
+    await expectCode(
       () =>
         service.resumeRun({
           runId: paused.run.id,
@@ -529,12 +628,51 @@ describe('ProjectRunService controls', () => {
     expect(repositories.projectRuns.get(paused.run.id)?.state).toBe('paused');
   });
 
-  it('reports a stale run revision with the canonical code', () => {
+  it.each(['billing_conflict', 'repository_unsafe'] as const)(
+    'keeps resume paused with the specific %s preflight reason',
+    async (reason) => {
+      let blocked = false;
+      const { repositories, project, service } = setup({
+        preflight: async () => {
+          if (blocked) throw new ProjectRunPreflightError(reason);
+        },
+      });
+      repositories.tasks.create(createTask(project.id, 'task-1'));
+      const started = await startRun(service, project.id, `start-${reason}`, 1);
+      const paused = service.pauseRun({
+        runId: started.run.id,
+        expectedRevision: started.run.revision,
+        actor: human,
+        idempotencyKey: `pause-${reason}`,
+      });
+      blocked = true;
+
+      await expect(
+        service.resumeRun({
+          runId: paused.run.id,
+          expectedRevision: paused.run.revision,
+          actor: human,
+          idempotencyKey: `resume-${reason}`,
+        }),
+      ).rejects.toMatchObject({ reason });
+      expect(repositories.projectRuns.get(paused.run.id)).toMatchObject({
+        state: 'paused',
+        pauseReason: reason,
+      });
+      expect(
+        repositories.projectRuns
+          .get(paused.run.id)
+          ?.items.every(({ status }) => status === 'queued'),
+      ).toBe(true);
+    },
+  );
+
+  it('reports a stale run revision with the canonical code', async () => {
     const { repositories, project, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
-    const started = startRun(service, project.id, 'start-stale', 1);
+    const started = await startRun(service, project.id, 'start-stale', 1);
 
-    expectCode(
+    await expectCode(
       () =>
         service.pauseRun({
           runId: started.run.id,
@@ -546,10 +684,15 @@ describe('ProjectRunService controls', () => {
     );
   });
 
-  it('reports an uncontrollable run state with the canonical code', () => {
+  it('reports an uncontrollable run state with the canonical code', async () => {
     const { repositories, project, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
-    const started = startRun(service, project.id, 'start-not-controllable', 1);
+    const started = await startRun(
+      service,
+      project.id,
+      'start-not-controllable',
+      1,
+    );
 
     const paused = service.pauseRun({
       runId: started.run.id,
@@ -557,7 +700,7 @@ describe('ProjectRunService controls', () => {
       actor: human,
       idempotencyKey: 'pause-not-controllable',
     });
-    expectCode(
+    await expectCode(
       () =>
         service.pauseRun({
           runId: paused.run.id,
@@ -569,17 +712,22 @@ describe('ProjectRunService controls', () => {
     );
   });
 
-  it('returns a duplicate control outcome even after later state changes', () => {
+  it('returns a duplicate control outcome even after later state changes', async () => {
     const { repositories, project, publisher, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
-    const started = startRun(service, project.id, 'start-duplicate-control', 1);
+    const started = await startRun(
+      service,
+      project.id,
+      'start-duplicate-control',
+      1,
+    );
     const firstPause = service.pauseRun({
       runId: started.run.id,
       expectedRevision: started.run.revision,
       actor: human,
       idempotencyKey: 'pause-duplicate',
     });
-    service.resumeRun({
+    await service.resumeRun({
       runId: firstPause.run.id,
       expectedRevision: firstPause.run.revision,
       actor: human,
@@ -597,7 +745,7 @@ describe('ProjectRunService controls', () => {
     expect(publisher.publishProject).toHaveBeenCalledTimes(3);
   });
 
-  it('stops queued work atomically while active work keeps the run draining', () => {
+  it('stops queued work atomically while active work keeps the run draining', async () => {
     const { repositories, project, service } = setup();
     repositories.tasks.create(
       createTask(project.id, 'active-task', { rank: 'a' }),
@@ -605,7 +753,7 @@ describe('ProjectRunService controls', () => {
     repositories.tasks.create(
       createTask(project.id, 'queued-task', { rank: 'b' }),
     );
-    const started = startRun(service, project.id, 'start-draining', 1);
+    const started = await startRun(service, project.id, 'start-draining', 1);
     const claimed = repositories.projectRuns.claimNext({
       runId: started.run.id,
       expectedRunRevision: started.run.revision,
@@ -675,11 +823,16 @@ describe('ProjectRunService controls', () => {
     );
   });
 
-  it('completes a stopped run only when no slots are occupied', () => {
+  it('completes a stopped run only when no slots are occupied', async () => {
     const { repositories, project, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-a', { rank: 'a' }));
     repositories.tasks.create(createTask(project.id, 'task-b', { rank: 'b' }));
-    const started = startRun(service, project.id, 'start-stop-complete', 2);
+    const started = await startRun(
+      service,
+      project.id,
+      'start-stop-complete',
+      2,
+    );
 
     const stopped = service.stopRun({
       runId: started.run.id,
@@ -698,10 +851,10 @@ describe('ProjectRunService controls', () => {
     ).toBe(true);
   });
 
-  it('rolls back a stop when its run event cannot be persisted', () => {
+  it('rolls back a stop when its run event cannot be persisted', async () => {
     const { repositories, project, publisher, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
-    const started = startRun(service, project.id, 'start-stop-audit', 1);
+    const started = await startRun(service, project.id, 'start-stop-audit', 1);
     repositories.database.exec(`
       CREATE TRIGGER fail_run_control_event
       BEFORE INSERT ON project_events
@@ -724,11 +877,11 @@ describe('ProjectRunService controls', () => {
 
   it.each(['pause', 'resume', 'stop'] as const)(
     'reports a %s audit-write failure without committing the control',
-    (control) => {
+    async (control) => {
       const onAuditFailure = vi.fn();
       const { repositories, project, service } = setup({ onAuditFailure });
       repositories.tasks.create(createTask(project.id, 'task-control-audit'));
-      const started = startRun(
+      const started = await startRun(
         service,
         project.id,
         `start-${control}-audit`,
@@ -751,28 +904,30 @@ describe('ProjectRunService controls', () => {
         END;
       `);
 
-      expect(() =>
-        control === 'pause'
-          ? service.pauseRun({
-              runId: controlled.id,
-              expectedRevision: controlled.revision,
-              actor: human,
-              idempotencyKey: 'pause-audit-failure',
-            })
-          : control === 'resume'
-            ? service.resumeRun({
+      await expect(
+        Promise.resolve().then(() =>
+          control === 'pause'
+            ? service.pauseRun({
                 runId: controlled.id,
                 expectedRevision: controlled.revision,
                 actor: human,
-                idempotencyKey: 'resume-audit-failure',
+                idempotencyKey: 'pause-audit-failure',
               })
-            : service.stopRun({
-                runId: controlled.id,
-                expectedRevision: controlled.revision,
-                actor: human,
-                idempotencyKey: 'stop-audit-failure-all-controls',
-              }),
-      ).toThrow(`${control} run audit failed`);
+            : control === 'resume'
+              ? service.resumeRun({
+                  runId: controlled.id,
+                  expectedRevision: controlled.revision,
+                  actor: human,
+                  idempotencyKey: 'resume-audit-failure',
+                })
+              : service.stopRun({
+                  runId: controlled.id,
+                  expectedRevision: controlled.revision,
+                  actor: human,
+                  idempotencyKey: 'stop-audit-failure-all-controls',
+                }),
+        ),
+      ).rejects.toThrow(`${control} run audit failed`);
       expect(repositories.projectRuns.get(controlled.id)).toEqual(controlled);
       expect(onAuditFailure).toHaveBeenCalledOnce();
       expect(onAuditFailure.mock.calls[0]?.[0]).toMatchObject({
@@ -783,6 +938,37 @@ describe('ProjectRunService controls', () => {
 });
 
 describe('ProjectRunService drainAvailableSlots', () => {
+  it.each(['billing_conflict', 'repository_unsafe'] as const)(
+    'pauses before claiming restart work when preflight reports %s',
+    async (reason) => {
+      let blocked = false;
+      const context = setup({
+        preflight: async () => {
+          if (blocked) throw new ProjectRunPreflightError(reason);
+        },
+      });
+      context.repositories.tasks.create(
+        createTask(context.project.id, `task-${reason}`),
+      );
+      const started = await startRun(
+        context.service,
+        context.project.id,
+        `start-restart-${reason}`,
+        1,
+      );
+      blocked = true;
+
+      const run = await context.service.drainAvailableSlots(started.run.id);
+
+      expect(run).toMatchObject({
+        state: 'paused',
+        pauseReason: reason,
+        items: [expect.objectContaining({ status: 'queued' })],
+      });
+      expect(context.launchAttempt).not.toHaveBeenCalled();
+    },
+  );
+
   it('durably claims before launch and links the successful attempt and session', async () => {
     const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
       expect(context.repositories.database.inTransaction).toBe(false);
@@ -795,7 +981,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
     });
     const context = setup({ launchAttempt });
     context.repositories.tasks.create(createTask(context.project.id, 'task-a'));
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-launch',
@@ -817,9 +1003,122 @@ describe('ProjectRunService drainAvailableSlots', () => {
           runId: started.run.id,
           runItemId: started.run.items[0]?.id,
         },
+        workspace: expect.objectContaining({
+          type: 'worktree',
+          repositoryPath: context.project.repositoryPath,
+        }),
       }),
     );
   });
+
+  it.each([
+    'project policy revision',
+    'task automation status',
+    'task automation generation',
+  ] as const)(
+    'terminalizes a queued item when frozen %s becomes stale before launch',
+    async (kind) => {
+      const context = setup();
+      const original = context.repositories.tasks.create(
+        createTask(context.project.id, 'task-stale'),
+      );
+      const started = await startRun(
+        context.service,
+        context.project.id,
+        `start-stale-${kind.replace(/ /g, '-')}`,
+        1,
+      );
+      if (kind === 'project policy revision') {
+        context.repositories.projects.updateQaConfiguration(
+          context.project.id,
+          context.project.qaConfiguration.revision,
+          {
+            instructions: context.project.qaConfiguration.instructions,
+            reviewPolicy: context.project.qaConfiguration.reviewPolicy,
+          },
+          human,
+        );
+      } else {
+        context.repositories.tasks.update(
+          {
+            ...original,
+            reviewAutomation: {
+              ...original.reviewAutomation,
+              ...(kind === 'task automation status'
+                ? { status: 'paused' as const, pauseReason: 'operator_paused' }
+                : { generation: original.reviewAutomation.generation + 1 }),
+            },
+          },
+          original.revision,
+        );
+      }
+
+      const run = await context.service.drainAvailableSlots(started.run.id);
+
+      expect(run).toMatchObject({
+        state: 'completed',
+        items: [
+          expect.objectContaining({
+            status: 'attention_required',
+            outcomeReason: 'authorization_stale',
+            attemptId: null,
+            sessionId: null,
+          }),
+        ],
+      });
+      expect(context.launchAttempt).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [
+      'attempt audit unavailability',
+      () =>
+        new AttemptAuditUnavailableError(
+          new Error('attempt audit trigger failed'),
+        ),
+    ],
+    [
+      'diagnostic audit unavailability',
+      () =>
+        new AttemptReconciliationRequiredError(
+          'session-audit',
+          new Error('diagnostic audit trigger failed'),
+        ),
+    ],
+  ] as const)(
+    'propagates %s through the drain and trips the barrier callback',
+    async (label, createAuditFailure) => {
+      const auditFailure = createAuditFailure();
+      const onAuditFailure = vi.fn();
+      const context = setup({
+        onAuditFailure,
+        launchAttempt: async () => {
+          throw auditFailure;
+        },
+      });
+      context.repositories.tasks.create(
+        createTask(context.project.id, `task-${label.replace(/ /g, '-')}`),
+      );
+      const started = await startRun(
+        context.service,
+        context.project.id,
+        `start-${label.replace(/ /g, '-')}`,
+        1,
+      );
+
+      await expect(
+        context.service.drainAvailableSlots(started.run.id),
+      ).rejects.toBe(auditFailure);
+      expect(onAuditFailure).toHaveBeenCalledWith(auditFailure);
+      expect(
+        context.repositories.projectRuns.get(started.run.id),
+      ).toMatchObject({
+        state: 'running',
+        items: [expect.objectContaining({ status: 'launch_pending' })],
+      });
+    },
+  );
 
   it('counts launch_pending against capacity', async () => {
     let release!: () => void;
@@ -837,7 +1136,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
     context.repositories.tasks.create(
       createTask(context.project.id, 'task-b', { rank: 'b' }),
     );
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-capacity',
@@ -869,7 +1168,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
     context.repositories.tasks.create(
       createTask(context.project.id, 'task-retry'),
     );
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-retry',
@@ -902,7 +1201,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
     context.repositories.tasks.create(
       createTask(context.project.id, 'over-capacity-b', { rank: 'b' }),
     );
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-over-capacity',
@@ -940,7 +1239,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
     context.repositories.tasks.create(
       createTask(context.project.id, 'task-b', { rank: 'b' }),
     );
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-failure',
@@ -977,7 +1276,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
       context.repositories.tasks.create(
         createTask(context.project.id, 'task-b', { rank: 'b' }),
       );
-      const started = startRun(
+      const started = await startRun(
         context.service,
         context.project.id,
         `start-${code}`,
@@ -1001,14 +1300,11 @@ describe('ProjectRunService drainAvailableSlots', () => {
   it('pauses the run when launch outcome is ambiguous', async () => {
     const context = setup({
       launchAttempt: async () => {
-        throw new AttemptReconciliationRequiredError(
-          'unknown-session',
-          new Error('unknown'),
-        );
+        throw new Error('unknown launch outcome');
       },
     });
     context.repositories.tasks.create(createTask(context.project.id, 'task-a'));
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-ambiguous',
@@ -1032,7 +1328,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
         createTask(context.project.id, id, { rank }),
       );
     }
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-concurrent',
@@ -1069,7 +1365,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
       context.repositories.tasks.create(
         createTask(context.project.id, 'task-b', { rank: 'b' }),
       );
-      const started = startRun(
+      const started = await startRun(
         context.service,
         context.project.id,
         `start-${control}`,
@@ -1128,7 +1424,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
     context.repositories.tasks.create(
       createTask(context.project.id, 'task-b', { rank: 'b' }),
     );
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-shutdown-gate',
@@ -1155,7 +1451,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
     context.repositories.tasks.create(
       createTask(context.project.id, 'task-b', { rank: 'n' }),
     );
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       'start-audit',
@@ -1193,7 +1489,7 @@ describe('ProjectRunService observeTaskOutcome', () => {
     const nextTask = context.repositories.tasks.create(
       createTask(context.project.id, `${prefix}-next`, { rank: 'b' }),
     );
-    const started = startRun(
+    const started = await startRun(
       context.service,
       context.project.id,
       `${prefix}-start`,

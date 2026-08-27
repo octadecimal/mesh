@@ -21,11 +21,21 @@ import type { ProjectRunRepository } from '../repositories/project-run-repositor
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import {
+  AttemptAuditUnavailableError,
+  AttemptReconciliationRequiredError,
   AttemptStartFailedError,
   type AttemptMutationResult,
   type ProjectRunAttemptLaunchInput,
 } from './attempt-service.js';
-import { selectEligibleRunTasks } from './project-run-policy.js';
+import {
+  planProjectRun,
+  selectEligibleRunTasks,
+} from './project-run-policy.js';
+import {
+  ProjectRunPreflightError,
+  type ProjectRunPreflight,
+} from './project-run-preflight.js';
+import type { ProjectRunWorkspacePlanner } from './project-run-workspace.js';
 
 const DEFAULT_MAX_CONCURRENCY = 4;
 
@@ -37,7 +47,13 @@ export type ProjectRunCommandOutcome = {
 export type StartProjectRunInput = {
   projectId: string;
   concurrency: number;
-  expectedTasks: Array<{ taskId: string; revision: number }>;
+  expectedPolicyRevision: number;
+  expectedTasks: ReadonlyArray<{
+    taskId: string;
+    revision: number;
+    automationStatus: Task['reviewAutomation']['status'];
+    automationGeneration: number;
+  }>;
   actor: TaskActor;
   idempotencyKey: string;
 };
@@ -65,6 +81,8 @@ type ProjectRunServiceDependencies = {
       AttemptMutationResult | Pick<AttemptMutationResult, 'attempt' | 'session'>
     >;
   };
+  preflight: ProjectRunPreflight;
+  planWorkspace: ProjectRunWorkspacePlanner;
   publisher: { publishProject(event: ProjectEvent): void };
   canLaunch?: () => boolean;
   maxConcurrency?: number;
@@ -97,7 +115,21 @@ export class ProjectRunService {
     }
   }
 
-  startRun(input: StartProjectRunInput): ProjectRunCommandOutcome {
+  async startRun(
+    input: StartProjectRunInput,
+  ): Promise<ProjectRunCommandOutcome> {
+    const replay = this.getExistingOutcome(input.idempotencyKey);
+    if (replay) return replay;
+    this.requireHuman(input.actor);
+    const preflightProject = this.requireActiveProject(input.projectId);
+    this.requireConcurrency(input.concurrency);
+    if (this.dependencies.projectRuns.getActiveByProject(preflightProject.id)) {
+      throw new ProjectRunServiceError(
+        'project_run_conflict',
+        `Project '${preflightProject.id}' already has an active run`,
+      );
+    }
+    await this.dependencies.preflight(preflightProject);
     return this.executeScheduled(input.idempotencyKey, () => {
       this.requireHuman(input.actor);
       const project = this.requireActiveProject(input.projectId);
@@ -128,22 +160,35 @@ export class ProjectRunService {
         tasks,
         currentAttemptTaskIds,
       });
+      const currentPolicyRevision = project.qaConfiguration.revision;
       const currentTasks = eligible.map(({ task }) => ({
         taskId: task.id,
         revision: task.revision,
+        automationStatus: task.reviewAutomation.status,
+        automationGeneration: task.reviewAutomation.generation,
       }));
       if (
+        input.expectedPolicyRevision !== currentPolicyRevision ||
         input.expectedTasks.length !== currentTasks.length ||
         input.expectedTasks.some(
           (expected, index) =>
             expected.taskId !== currentTasks[index]?.taskId ||
-            expected.revision !== currentTasks[index]?.revision,
+            expected.revision !== currentTasks[index]?.revision ||
+            expected.automationStatus !==
+              currentTasks[index]?.automationStatus ||
+            expected.automationGeneration !==
+              currentTasks[index]?.automationGeneration,
         )
       ) {
         throw new ProjectRunServiceError(
           'project_run_stale',
           `Project '${project.id}' eligible tasks have changed`,
-          { expectedTasks: input.expectedTasks, currentTasks },
+          {
+            expectedPolicyRevision: input.expectedPolicyRevision,
+            currentPolicyRevision,
+            expectedTasks: input.expectedTasks,
+            currentTasks,
+          },
         );
       }
       if (eligible.length === 0) {
@@ -162,13 +207,19 @@ export class ProjectRunService {
         startedAt: occurredAt,
         items: eligible.map(
           (
-            { task, policyRevision, taskAutomationGeneration },
+            {
+              task,
+              policyRevision,
+              taskAutomationStatus,
+              taskAutomationGeneration,
+            },
             queuePosition,
           ) => ({
             id: this.createId(),
             taskId: task.id,
             taskRevision: task.revision,
             policyRevision,
+            taskAutomationStatus,
             taskAutomationGeneration,
             queuePosition,
             launchIdempotencyKey: `${runId}:${task.id}:launch`,
@@ -196,7 +247,26 @@ export class ProjectRunService {
     });
   }
 
-  resumeRun(input: ChangeProjectRunInput): ProjectRunCommandOutcome {
+  async resumeRun(
+    input: ChangeProjectRunInput,
+  ): Promise<ProjectRunCommandOutcome> {
+    const replay = this.getExistingOutcome(input.idempotencyKey);
+    if (replay) return replay;
+    this.requireHuman(input.actor);
+    const preflightRun = this.requireCurrentRun(input);
+    this.requireState(preflightRun, ['paused']);
+    const project = this.requireActiveProject(preflightRun.projectId);
+    try {
+      await this.dependencies.preflight(project);
+    } catch (error) {
+      if (
+        error instanceof ProjectRunPreflightError &&
+        preflightRun.pauseReason !== error.reason
+      ) {
+        this.recordPreflightPause(preflightRun.id, error.reason);
+      }
+      throw error;
+    }
     return this.executeScheduled(input.idempotencyKey, () => {
       this.requireHuman(input.actor);
       const run = this.requireCurrentRun(input);
@@ -246,6 +316,7 @@ export class ProjectRunService {
 
   async drainAvailableSlots(runId: string): Promise<ProjectRun> {
     const parsedRunId = idSchema.parse(runId);
+    let preflighted = false;
     for (;;) {
       const run = this.dependencies.projectRuns.get(parsedRunId);
       if (!run) {
@@ -254,18 +325,29 @@ export class ProjectRunService {
           `Project run '${parsedRunId}' was not found`,
         );
       }
-      if (run.state !== 'running') return run;
       if (!this.canLaunch()) return run;
-      const counts = this.dependencies.projectRuns.reconcileCounts(run.id);
-      const occupied = counts.launchPending + counts.active;
-      if (occupied >= run.concurrency) return run;
-      const next = run.items.find(({ status }) => status === 'queued');
-      if (!next) {
-        if (counts.launchPending + counts.active > 0) return run;
-        return this.completeQueue(run);
+      const plan = planProjectRun({ run });
+      if (plan.type === 'wait') return run;
+      if (plan.type === 'complete') return this.completeQueue(run);
+      if (!preflighted) {
+        const project = this.dependencies.projects.get(run.projectId);
+        if (!project || project.archivedAt) {
+          return this.recordPreflightPause(run.id, 'repository_unsafe');
+        }
+        try {
+          await this.dependencies.preflight(project);
+        } catch (error) {
+          if (error instanceof ProjectRunPreflightError) {
+            return this.recordPreflightPause(run.id, error.reason);
+          }
+          throw error;
+        }
+        preflighted = true;
+        continue;
       }
       const claim = this.claimNext(run);
       if (!claim) continue;
+      if (claim.item.id !== plan.itemId) continue;
       await this.launch(claim.run, claim.item);
     }
   }
@@ -355,6 +437,14 @@ export class ProjectRunService {
       this.finishClaim(current, item, 'project_archived');
       return;
     }
+    if (
+      project.qaConfiguration.revision !== item.policyRevision ||
+      task.reviewAutomation.status !== item.taskAutomationStatus ||
+      task.reviewAutomation.generation !== item.taskAutomationGeneration
+    ) {
+      this.finishClaim(current, item, 'authorization_stale');
+      return;
+    }
 
     try {
       const result = await this.dependencies.attemptService.launchAttempt({
@@ -368,7 +458,7 @@ export class ProjectRunService {
         expectedRevision: item.taskRevision,
         title: task.title,
         permissionMode: 'safe_auto',
-        workspace: { type: 'shared', path: project.repositoryPath },
+        workspace: this.dependencies.planWorkspace(project, current, item),
       });
       if (!result.session) {
         this.pauseForAmbiguousLaunch(current.id);
@@ -376,6 +466,19 @@ export class ProjectRunService {
       }
       this.linkClaim(current.id, item.id, result.attempt.id, result.session.id);
     } catch (error) {
+      if (
+        error instanceof AttemptAuditUnavailableError ||
+        error instanceof AttemptReconciliationRequiredError ||
+        this.errorCode(error) === 'audit_unavailable' ||
+        this.errorCode(error) === 'attempt_reconciliation_required'
+      ) {
+        try {
+          this.dependencies.onAuditFailure?.(error);
+        } catch {
+          // Preserve the originating audit error for the tracked drain.
+        }
+        throw error;
+      }
       const code = this.errorCode(error);
       if (this.isKnownItemFailure(error, code)) {
         const latest = this.dependencies.projectRuns.get(current.id);
@@ -603,7 +706,8 @@ export class ProjectRunService {
       code === 'task_revision_conflict' ||
       code === 'task_not_ready' ||
       code === 'task_blocked' ||
-      code === 'task_transition_invalid'
+      code === 'task_transition_invalid' ||
+      code === 'project_run_conflict'
     );
   }
 
@@ -634,6 +738,16 @@ export class ProjectRunService {
     return outcome;
   }
 
+  private getExistingOutcome(
+    idempotencyKey: string,
+  ): ProjectRunCommandOutcome | undefined {
+    const existing =
+      this.dependencies.commands.getExisting<ProjectRunCommandOutcome>(
+        idSchema.parse(idempotencyKey),
+      );
+    return existing.found ? existing.response : undefined;
+  }
+
   private executeScheduled(
     idempotencyKey: string,
     mutate: () => ProjectRunCommandOutcome,
@@ -658,6 +772,25 @@ export class ProjectRunService {
         // A post-commit callback cannot replace the committed command result.
       }
     }
+  }
+
+  private recordPreflightPause(
+    runId: string,
+    reason: 'billing_conflict' | 'repository_unsafe',
+  ): ProjectRun {
+    return this.mutateRun(runId, (run) => {
+      if (run.state !== 'running' && run.state !== 'paused') return run;
+      if (run.pauseReason === reason) return run;
+      const changed = this.dependencies.projectRuns.changeState({
+        runId,
+        expectedRunRevision: run.revision,
+        state: 'paused',
+        pauseReason: reason,
+        occurredAt: this.now(),
+      });
+      if (!changed) this.throwStale(runId);
+      return changed;
+    });
   }
 
   private requireHuman(actor: TaskActor): void {

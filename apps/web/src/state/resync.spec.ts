@@ -173,6 +173,9 @@ describe('project resync', () => {
   it('keeps the current projection when the resync snapshot has cross-project or duplicate runs', async () => {
     const store = createMeshStore(sessionSnapshot);
     const valid = projectSnapshot('project-1', 7);
+    const other = projectSnapshot('project-2', 4);
+    store.replaceProjectSnapshot(valid);
+    store.replaceProjectSnapshot(other);
     const invalid = {
       ...valid,
       runs: [
@@ -189,7 +192,12 @@ describe('project resync', () => {
     );
 
     await expect(coordinator.refreshProject('project-1')).rejects.toThrow();
-    expect(store.state.projectRunsById.get({ noproxy: true })).toEqual({});
-    expect(store.state.projectCursors.get({ noproxy: true })).toEqual({});
+    expect(
+      Object.keys(store.state.projectRunsById.get({ noproxy: true })),
+    ).toEqual(['run-project-1', 'run-project-2']);
+    expect(store.state.projectCursors.get({ noproxy: true })).toEqual({
+      'project-1': 7,
+      'project-2': 4,
+    });
   });
 });

@@ -58,10 +58,32 @@ action.
 
 Use **Start run** to authorize the current ordered set of eligible ready tasks.
 Inspect the preview first: authorization sends the previewed task ids and
-revisions as `expectedTasks`, so a task edit or reorder makes the command stale
-instead of silently changing the run. Choose bounded concurrency and confirm
-that the run may consume Claude subscription capacity. Membership and order are
-then frozen; tasks created or made ready later wait for a future run.
+revisions as `expectedTasks`, together with the displayed project QA policy
+revision and every task's review-automation status and generation. A task edit,
+reorder, policy change, or automation change makes the command stale instead of
+silently changing the run. Choose bounded concurrency and confirm that the run
+may consume Claude subscription capacity. Membership and order are then frozen;
+tasks created or made ready later wait for a future run. Before each queued item
+launches, Mesh compares that frozen authorization with current policy and
+automation truth. A mismatch terminalizes only that item as attention required
+without creating an attempt.
+
+Start and resume preflight the shared billing environment and resolve the
+project's authoritative repository identity before authorizing or claiming
+work. A billing conflict or unsafe/mismatched repository rejects Start. Resume
+keeps the existing run paused with `billing_conflict` or `repository_unsafe` so
+the operator can repair the condition without losing the frozen queue.
+
+Each run item launches in a deterministic Mesh-owned Git worktree beneath the
+configured base directory's `.mesh-project-runs` folder. The run and item ids
+give every Developer/QA chain a distinct branch and path, so concurrent items
+do not edit the imported repository or one another's files. Mesh also reserves
+the resolved workspace path in the same transaction that creates the attempt;
+an occupied path fails closed rather than starting a second current session.
+The configured workspace root must therefore be a parent of imported
+repositories, not an imported repository itself. If `.mesh-project-runs` would
+be nested inside the project, preflight reports `repository_unsafe` before
+authorization or claiming; set `MESH_WORKSPACE_ROOT` to a safe parent directory.
 
 `launch_pending` and `active` items both occupy capacity. Completed autonomous
 review releases a slot as completed. Manual review, disabled per-task
@@ -71,13 +93,16 @@ progress. These attention states require an operator decision outside the
 finite run; the run does not retry or invent a resolution.
 
 **Pause run** durably records `operator_paused` and prevents new launches while
-current launches and sessions settle. Refresh or backend restart preserves the
-run id, frozen queue, item results, and pause reason. **Resume run** continues
-that same queue after reviewing the reason. **Stop run** marks queued items not
-started, launches no replacements, drains already occupied items, and preserves
-the completed stopped run in project history. A restart ambiguity instead
-pauses with an explicit reason such as `launch_outcome_unknown`; inspect the
-attempt, diagnostics, and workspace before resuming.
+current launches and sessions settle. While paused, reconciliation continues to
+repair and observe `launch_pending` and `active` items, but never claims queued
+items. Refresh or backend restart preserves the run id, frozen queue, item
+results, and pause reason. **Resume run** continues that same queue after
+reviewing the reason. **Stop run** marks queued items not started, launches no
+replacements, drains already occupied items, and preserves the completed
+stopped run in project history. A restart ambiguity or an unexpected extra
+current attempt instead pauses with an explicit reason such as
+`launch_outcome_unknown`; inspect the attempts, diagnostics, and workspaces
+before resuming.
 
 ## Developer execution workflow
 

@@ -479,6 +479,7 @@ describe('AttemptService', () => {
           taskId: 'task-1',
           taskRevision: 1,
           policyRevision: 1,
+          taskAutomationStatus: 'disabled',
           taskAutomationGeneration: 0,
           queuePosition: 0,
           launchIdempotencyKey: 'run-1:item-1:launch',
@@ -530,6 +531,7 @@ describe('AttemptService', () => {
           taskId: 'task-1',
           taskRevision: 1,
           policyRevision: 1,
+          taskAutomationStatus: 'disabled',
           taskAutomationGeneration: 0,
           queuePosition: 0,
           launchIdempotencyKey: 'run-1:item-1:launch',
@@ -564,6 +566,14 @@ describe('AttemptService', () => {
   it('rejects a project-run launch after a manual link wins the race', async () => {
     const { directory, driver, repositories, service } = setup();
     seedTask(repositories);
+    seedSession(repositories);
+    await service.link({
+      commandId: 'manual-link-race',
+      taskId: 'task-1',
+      expectedRevision: 1,
+      sessionId: 'session-1',
+      actor,
+    });
     const run = repositories.projectRuns.create({
       id: 'run-1',
       projectId: 'project-1',
@@ -575,6 +585,7 @@ describe('AttemptService', () => {
           taskId: 'task-1',
           taskRevision: 1,
           policyRevision: 1,
+          taskAutomationStatus: 'disabled',
           taskAutomationGeneration: 0,
           queuePosition: 0,
           launchIdempotencyKey: 'run-1:item-1:launch',
@@ -586,15 +597,6 @@ describe('AttemptService', () => {
       expectedRunRevision: run.revision,
       occurredAt: now,
     });
-    seedSession(repositories);
-    await service.link({
-      commandId: 'manual-link-race',
-      taskId: 'task-1',
-      expectedRevision: 1,
-      sessionId: 'session-1',
-      actor,
-    });
-
     await expect(
       service.launchAttempt({
         launchIdempotencyKey: 'run-1:item-1:launch',
@@ -641,6 +643,7 @@ describe('AttemptService', () => {
           taskId: 'task-1',
           taskRevision: 1,
           policyRevision: 1,
+          taskAutomationStatus: 'disabled',
           taskAutomationGeneration: 0,
           queuePosition: 0,
           launchIdempotencyKey: 'run-1:item-1:launch',
@@ -685,6 +688,122 @@ describe('AttemptService', () => {
       },
     });
     expect(repositories.attempts.listByTask('task-1')).toHaveLength(1);
+  });
+
+  it('rejects a manual link while an open run item owns the task', async () => {
+    const { repositories, service } = setup();
+    seedTask(repositories);
+    const run = repositories.projectRuns.create({
+      id: 'run-1',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-1',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+    seedSession(repositories);
+
+    await expect(
+      service.link({
+        commandId: 'manual-link-open-run-item',
+        taskId: 'task-1',
+        expectedRevision: 1,
+        sessionId: 'session-1',
+        actor,
+      }),
+    ).rejects.toMatchObject({ code: 'task_revision_conflict' });
+    expect(repositories.attempts.listByTask('task-1')).toEqual([]);
+  });
+
+  it('atomically rejects a project-run worktree path occupied by a live session', async () => {
+    const createWorktree = vi.fn(async () => ({ created: true as const }));
+    const { directory, repositories, service } = setup({
+      git: { createWorktree },
+    });
+    seedTask(repositories);
+    const occupiedPath = join(directory, 'occupied-worktree');
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'occupied-workspace',
+        projectId: 'project-1',
+        type: 'worktree',
+        path: occupiedPath,
+        gitBranch: 'occupied',
+        gitWorktreePath: occupiedPath,
+        owner: 'mesh',
+        cleanupState: 'active',
+      }),
+    );
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'occupied-session',
+        projectId: 'project-1',
+        workspaceId: 'occupied-workspace',
+        title: 'Occupied session',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const run = repositories.projectRuns.create({
+      id: 'run-1',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-1',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+
+    await expect(
+      service.launchAttempt({
+        launchIdempotencyKey: 'run-1:item-1:launch',
+        source: { type: 'project_run', runId: 'run-1', runItemId: 'item-1' },
+        taskId: 'task-1',
+        expectedRevision: 1,
+        title: 'Collision proof',
+        permissionMode: 'safe_auto',
+        workspace: {
+          type: 'worktree',
+          repositoryPath: directory,
+          path: occupiedPath,
+          branch: 'mesh/collision',
+          startPoint: 'HEAD',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'project_run_conflict' });
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(repositories.workspaces.listByProject('project-1')).toHaveLength(1);
   });
 
   it('resumes the same Developer attempt with immutable feedback and current snapshots', async () => {
@@ -1805,6 +1924,78 @@ describe('AttemptService', () => {
         }),
       }),
     );
+  });
+
+  it('surfaces a trigger-based project-run attempt audit failure as audit unavailable', async () => {
+    const createWorktree = vi.fn(async () => ({ created: true as const }));
+    const { directory, driver, repositories, service } = setup({
+      git: { createWorktree },
+    });
+    seedTask(repositories);
+    const run = repositories.projectRuns.create({
+      id: 'run-attempt-audit',
+      projectId: 'project-1',
+      concurrency: 1,
+      startedAt: now,
+      items: [
+        {
+          id: 'item-attempt-audit',
+          taskId: 'task-1',
+          taskRevision: 1,
+          policyRevision: 1,
+          taskAutomationStatus: 'disabled',
+          taskAutomationGeneration: 0,
+          queuePosition: 0,
+          launchIdempotencyKey: 'run-attempt-audit:task-1:launch',
+        },
+      ],
+    });
+    repositories.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: now,
+    });
+    repositories.database.exec(`
+      CREATE TRIGGER fail_project_run_attempt_audit
+      BEFORE INSERT ON project_events
+      WHEN NEW.type = 'task.developer_execution_changed'
+      BEGIN
+        SELECT RAISE(FAIL, 'project run attempt audit failed');
+      END;
+    `);
+
+    await expect(
+      service.launchAttempt({
+        launchIdempotencyKey: 'run-attempt-audit:task-1:launch',
+        source: {
+          type: 'project_run',
+          runId: 'run-attempt-audit',
+          runItemId: 'item-attempt-audit',
+        },
+        taskId: 'task-1',
+        expectedRevision: 1,
+        title: 'Project run audit trigger',
+        permissionMode: 'safe_auto',
+        workspace: {
+          type: 'worktree',
+          repositoryPath: directory,
+          path: join(directory, 'project-run-audit-worktree'),
+          branch: 'mesh/project-run-audit',
+          startPoint: 'HEAD',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'audit_unavailable',
+      cause: expect.objectContaining({
+        message: 'project run attempt audit failed',
+      }),
+    });
+    expect(createWorktree).toHaveBeenCalledOnce();
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
+    expect(repositories.attempts.listByTask('task-1')).toEqual([]);
+    expect(repositories.workspaces.listByProject('project-1')).toEqual([
+      expect.objectContaining({ owner: 'mesh', cleanupState: 'pending' }),
+    ]);
   });
 
   it.each([

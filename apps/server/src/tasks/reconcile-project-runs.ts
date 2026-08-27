@@ -300,7 +300,7 @@ export const reconcileProjectRuns: ReconcileProjectRuns = (dependencies) => {
     for (const initialRun of dependencies.projectRuns.listByProject(
       project.id,
     )) {
-      if (initialRun.state === 'completed' || initialRun.state === 'paused') {
+      if (initialRun.state === 'completed') {
         continue;
       }
       let run: ProjectRun = initialRun;
@@ -387,7 +387,13 @@ export const reconcileProjectRuns: ReconcileProjectRuns = (dependencies) => {
         const matching = currentAttempts.filter((attempt) =>
           projectRunAttempt(attempt, run.id, item.id),
         );
-        if (matching.length > 1) {
+        if (
+          matching.length > 1 ||
+          (matching.length === 1 && currentAttempts.length !== 1) ||
+          (item.status === 'active' &&
+            matching.length === 0 &&
+            currentAttempts.length > 0)
+        ) {
           pauseRun(dependencies, run, 'capacity_ambiguous', occurredAt);
           pausedRunIds.push(run.id);
           paused = true;
@@ -481,6 +487,7 @@ export const reconcileProjectRuns: ReconcileProjectRuns = (dependencies) => {
       run = dependencies.projectRuns.get(run.id) ?? run;
       const counts = dependencies.projectRuns.reconcileCounts(run.id);
       const occupied = counts.launchPending + counts.active;
+      if (run.state === 'paused') continue;
       if (run.state === 'draining') {
         if (occupied === 0) {
           completeRun(dependencies, run, 'stopped', occurredAt);

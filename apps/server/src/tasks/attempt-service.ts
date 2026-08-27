@@ -226,6 +226,15 @@ export class SessionRepositoryMismatchError extends Error {
   }
 }
 
+export class WorkspaceOccupiedError extends Error {
+  readonly code = 'project_run_conflict';
+
+  constructor(readonly path: string) {
+    super(`Workspace '${path}' is already occupied by a live session`);
+    this.name = 'WorkspaceOccupiedError';
+  }
+}
+
 class AttemptInvalidCommandError extends Error {
   readonly code = 'invalid_command';
 }
@@ -260,6 +269,7 @@ const stableLaunchConflictCodes = new Set([
   'task_blocked',
   'task_transition_invalid',
   'task_transition_unauthorized',
+  'project_run_conflict',
 ]);
 
 const isStableLaunchConflict = (error: unknown): boolean => {
@@ -518,6 +528,9 @@ export class AttemptService {
             );
           }
           if (isStableLaunchConflict(error)) throw error;
+          if (typeof source !== 'string') {
+            throw new AttemptAuditUnavailableError(error);
+          }
           if (hasWorktreeReservation) {
             throw new WorkspacePreservedError(error);
           }
@@ -733,6 +746,21 @@ export class AttemptService {
           this.dependencies.database
             .prepare(
               'SELECT 1 FROM task_attempt_launch_reservations WHERE task_id = ?',
+            )
+            .get(currentTask.id)
+        ) {
+          throw new TaskRevisionConflictError(currentTask);
+        }
+        if (
+          this.dependencies.database
+            .prepare(
+              `SELECT 1
+              FROM project_run_items
+              JOIN project_runs ON project_runs.id = project_run_items.run_id
+              WHERE project_run_items.task_id = ?
+                AND project_run_items.status IN ('queued', 'launch_pending', 'active')
+                AND project_runs.state IN ('running', 'paused', 'draining')
+              LIMIT 1`,
             )
             .get(currentTask.id)
         ) {
@@ -1028,6 +1056,7 @@ export class AttemptService {
           typeof source !== 'string',
         );
       }
+      this.assertWorkspaceAvailable(workspace.path, session.id, source);
       this.dependencies.workspaces.create(workspace);
       this.dependencies.sessions.create(session);
       this.dependencies.database.exec('COMMIT');
@@ -1077,6 +1106,7 @@ export class AttemptService {
         }
         persistedSession = this.requireSession(session.id);
       } else {
+        this.assertWorkspaceAvailable(workspace.path, session.id, source);
         this.dependencies.workspaces.create(workspace);
         persistedSession = this.dependencies.sessions.create(session);
       }
@@ -1247,5 +1277,27 @@ export class AttemptService {
         details: this.dependencies.billingConflicts,
       };
     }
+  }
+
+  private assertWorkspaceAvailable(
+    path: string,
+    sessionId: string,
+    source: TaskAttemptSource,
+  ): void {
+    if (typeof source === 'string') return;
+    const occupied = this.dependencies.database
+      .prepare(
+        `SELECT sessions.id
+        FROM sessions
+        JOIN workspaces ON workspaces.id = sessions.workspace_id
+        WHERE workspaces.path = ?
+          AND sessions.id <> ?
+          AND sessions.lifecycle_state IN (
+            'idle', 'starting', 'running', 'waiting_for_approval', 'interrupting'
+          )
+        LIMIT 1`,
+      )
+      .get(path, sessionId);
+    if (occupied) throw new WorkspaceOccupiedError(path);
   }
 }

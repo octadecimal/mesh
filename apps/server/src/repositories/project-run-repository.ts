@@ -30,6 +30,7 @@ type ProjectRunItemRow = {
   task_revision: number;
   policy_revision: number;
   task_automation_generation: number;
+  task_automation_status: ProjectRunItem['taskAutomationStatus'];
   queue_position: number;
   status: string;
   attempt_id: string | null;
@@ -47,6 +48,7 @@ type CreateProjectRunItemInput = {
   taskRevision: number;
   policyRevision: number;
   taskAutomationGeneration: number;
+  taskAutomationStatus?: ProjectRunItem['taskAutomationStatus'];
   queuePosition: number;
   launchIdempotencyKey: string;
 };
@@ -134,6 +136,7 @@ const toItem = (row: ProjectRunItemRow): ProjectRunItem =>
     taskRevision: row.task_revision,
     policyRevision: row.policy_revision,
     taskAutomationGeneration: row.task_automation_generation,
+    taskAutomationStatus: row.task_automation_status,
     queuePosition: row.queue_position,
     status: row.status,
     attemptId: row.attempt_id,
@@ -191,6 +194,7 @@ export class ProjectRunRepository {
         : null;
     const items = input.items.map((item) => ({
       ...item,
+      taskAutomationStatus: item.taskAutomationStatus ?? 'disabled',
       id: idSchema.parse(item.id),
       taskId: idSchema.parse(item.taskId),
       launchIdempotencyKey: idSchema.parse(item.launchIdempotencyKey),
@@ -245,8 +249,9 @@ export class ProjectRunRepository {
       const insertItem = this.database.prepare(`INSERT INTO project_run_items (
         id, run_id, project_id, task_id, task_revision, policy_revision,
         task_automation_generation, queue_position, status, attempt_id, session_id,
+        task_automation_status,
         launch_idempotency_key, claimed_at, started_at, finished_at, outcome_reason
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, ?, NULL, NULL, NULL, NULL)`);
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, ?, ?, NULL, NULL, NULL, NULL)`);
       for (const item of items) {
         const taskId = item.taskId;
         const task = taskProject.get(taskId) as
@@ -266,6 +271,7 @@ export class ProjectRunRepository {
           item.policyRevision,
           item.taskAutomationGeneration,
           item.queuePosition,
+          item.taskAutomationStatus,
           item.launchIdempotencyKey,
         );
       }
@@ -334,7 +340,7 @@ export class ProjectRunRepository {
           AND EXISTS (
             SELECT 1 FROM project_runs
             WHERE project_runs.id = project_run_items.run_id
-              AND project_runs.state = 'running'
+              AND project_runs.state IN ('running', 'paused')
           )
           AND NOT EXISTS (
             SELECT 1 FROM task_attempts

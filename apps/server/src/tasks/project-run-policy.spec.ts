@@ -91,15 +91,16 @@ const item = (
     taskId: `task-${id}`,
     taskRevision: 1,
     policyRevision: 7,
+    taskAutomationStatus: 'enabled',
     taskAutomationGeneration: 3,
     queuePosition,
     status,
     outcomeReason: null,
-    attemptId: null,
-    sessionId: null,
+    attemptId: status === 'active' ? `attempt-${id}` : null,
+    sessionId: status === 'active' ? `session-${id}` : null,
     launchIdempotencyKey: `run-1:${id}:launch`,
-    claimedAt: null,
-    startedAt: null,
+    claimedAt: status === 'queued' ? null : now,
+    startedAt: status === 'active' ? now : null,
     finishedAt: null,
   });
 
@@ -183,21 +184,21 @@ describe('project run policy', () => {
         run({
           items: [
             item('queued', 'queued'),
-            item('pending', 'launch_pending'),
-            item('active', 'active'),
+            item('pending', 'launch_pending', 1),
+            item('active', 'active', 2),
           ],
         }),
       ),
     ).toBe(2);
   });
 
-  it('claims the first queued item by queue position and item ID when running below capacity', () => {
+  it('claims the first queued item by queue position when running below capacity', () => {
     expect(
       planProjectRun({
         run: run({
           items: [
-            item('same-position-b', 'queued', 1),
-            item('same-position-a', 'queued', 1),
+            item('later-b', 'queued', 2),
+            item('later-a', 'queued', 1),
             item('first', 'queued', 0),
           ],
         }),
@@ -205,25 +206,14 @@ describe('project run policy', () => {
     ).toEqual({ type: 'claim', itemId: 'first' });
   });
 
-  it('breaks queued item position ties by item ID', () => {
-    expect(
-      planProjectRun({
-        run: run({
-          items: [
-            item('same-position-b', 'queued'),
-            item('later', 'queued', 1),
-            item('same-position-a', 'queued'),
-          ],
-        }),
-      }),
-    ).toEqual({ type: 'claim', itemId: 'same-position-a' });
-  });
-
   it('waits when a running run has no available capacity', () => {
     expect(
       planProjectRun({
         run: run({
-          items: [item('pending', 'launch_pending'), item('active', 'active')],
+          items: [
+            item('pending', 'launch_pending'),
+            item('active', 'active', 1),
+          ],
         }),
       }),
     ).toEqual({ type: 'wait', reason: 'at_capacity' });

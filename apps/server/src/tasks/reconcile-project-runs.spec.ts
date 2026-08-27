@@ -90,6 +90,7 @@ describe('reconcileProjectRuns', () => {
         taskId: task.id,
         taskRevision: task.revision,
         policyRevision: project.qaConfiguration.revision,
+        taskAutomationStatus: task.reviewAutomation.status,
         taskAutomationGeneration: task.reviewAutomation.generation,
         queuePosition,
         launchIdempotencyKey: `run-1:${task.id}:launch`,
@@ -548,6 +549,121 @@ describe('reconcileProjectRuns', () => {
     expect(context.repositories.projectRuns.get(context.run.id)).toEqual(
       paused,
     );
+  });
+
+  it('repairs a paused active item after restart while preserving the pause idempotently', () => {
+    const context = setup();
+    const item = claim(context);
+    launchEffect(context, item, { taskState: 'in_progress', link: true });
+    const current = context.repositories.projectRuns.get(context.run.id)!;
+    const paused = context.repositories.projectRuns.changeState({
+      runId: current.id,
+      expectedRunRevision: current.revision,
+      state: 'paused',
+      pauseReason: 'operator_paused',
+      occurredAt: now,
+    });
+    if (!paused) throw new Error('Expected paused run');
+    recoverInterruptedSessions(context.repositories.database);
+
+    const first = reconcile(context);
+    const repaired = context.repositories.projectRuns.get(context.run.id)!;
+    const second = reconcile(context);
+
+    expect(first).toEqual({
+      repairedItemIds: [item.id],
+      pausedRunIds: [],
+      launchableRunIds: [],
+    });
+    expect(repaired).toMatchObject({
+      state: 'paused',
+      pauseReason: 'operator_paused',
+      items: [
+        expect.objectContaining({
+          status: 'attention_required',
+          outcomeReason: 'task_in_progress_without_live_session',
+        }),
+      ],
+    });
+    expect(second).toEqual({
+      repairedItemIds: [],
+      pausedRunIds: [],
+      launchableRunIds: [],
+    });
+  });
+
+  it('resets a proven effect-free paused launch claim without scheduling it', () => {
+    const context = setup();
+    const item = claim(context);
+    const current = context.repositories.projectRuns.get(context.run.id)!;
+    const paused = context.repositories.projectRuns.changeState({
+      runId: current.id,
+      expectedRunRevision: current.revision,
+      state: 'paused',
+      pauseReason: 'operator_paused',
+      occurredAt: now,
+    });
+    if (!paused) throw new Error('Expected paused run');
+
+    expect(reconcile(context)).toEqual({
+      repairedItemIds: [item.id],
+      pausedRunIds: [],
+      launchableRunIds: [],
+    });
+    const repaired = context.repositories.projectRuns.get(context.run.id)!;
+    expect(repaired).toMatchObject({
+      state: 'paused',
+      pauseReason: 'operator_paused',
+      items: [expect.objectContaining({ status: 'queued', claimedAt: null })],
+    });
+    expect(reconcile(context)).toEqual({
+      repairedItemIds: [],
+      pausedRunIds: [],
+      launchableRunIds: [],
+    });
+  });
+
+  it('pauses when a matching current attempt has any extra nonmatching current attempt', () => {
+    const context = setup();
+    const item = claim(context);
+    launchEffect(context, item, { taskState: 'in_progress' });
+    const workspace = context.repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-extra',
+        projectId: context.project.id,
+        type: 'shared',
+        path: `${context.project.repositoryPath}/extra`,
+      }),
+    );
+    const session = context.repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'session-extra',
+        projectId: context.project.id,
+        workspaceId: workspace.id,
+        title: 'Extra current attempt',
+        permissionMode: 'interactive',
+        lifecycleState: 'running',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    context.repositories.attempts.createForTask(
+      item.taskId,
+      session.id,
+      'linked',
+      human,
+    );
+
+    expect(reconcile(context)).toEqual({
+      repairedItemIds: [],
+      pausedRunIds: [context.run.id],
+      launchableRunIds: [],
+    });
+    expect(context.repositories.projectRuns.get(context.run.id)).toMatchObject({
+      state: 'paused',
+      pauseReason: 'capacity_ambiguous',
+      items: [expect.objectContaining({ status: 'launch_pending' })],
+    });
   });
 
   it('finishes a fully drained stopped run without launching work', () => {

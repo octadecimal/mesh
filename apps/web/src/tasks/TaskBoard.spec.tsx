@@ -114,7 +114,7 @@ describe('TaskBoard', () => {
       attemptId: null,
       sessionId: null,
       launchIdempotencyKey: 'launch-ready',
-      claimedAt: null,
+      claimedAt: timestamp,
       startedAt: null,
       finishedAt: timestamp,
       outcomeReason: 'manual_review_required',

@@ -12,7 +12,11 @@ import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
 } from './developer-execution.js';
-import { qaReportInputSchema, reviewPolicySchema } from './qa-execution.js';
+import {
+  qaReportInputSchema,
+  reviewAutomationStatusSchema,
+  reviewPolicySchema,
+} from './qa-execution.js';
 import { protocolVersionSchema } from './protocol.js';
 
 export const discoveryCommandSchema = z.discriminatedUnion('type', [
@@ -146,8 +150,14 @@ export const projectCommandSchema = z.discriminatedUnion('type', [
     payload: z.object({
       projectId: idSchema,
       concurrency: z.number().int().positive(),
+      expectedPolicyRevision: expectedRevisionSchema,
       expectedTasks: z.array(
-        z.object({ taskId: idSchema, revision: expectedRevisionSchema }),
+        z.object({
+          taskId: idSchema,
+          revision: expectedRevisionSchema,
+          automationStatus: reviewAutomationStatusSchema,
+          automationGeneration: z.number().int().nonnegative(),
+        }),
       ),
       actor: humanActorSchema,
     }),

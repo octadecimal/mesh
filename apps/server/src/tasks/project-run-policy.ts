@@ -4,10 +4,12 @@ import type {
   ProjectRunItem,
   Task,
 } from '@mesh-session-platform/contracts';
+import { compareCodeUnits } from '@mesh-session-platform/contracts';
 
 export interface EligibleRunTask {
   task: Task;
   policyRevision: number;
+  taskAutomationStatus: Task['reviewAutomation']['status'];
   taskAutomationGeneration: number;
 }
 
@@ -16,9 +18,6 @@ export interface SelectEligibleRunTasksInput {
   tasks: readonly Task[];
   currentAttemptTaskIds: ReadonlySet<string>;
 }
-
-const compareBinaryStrings = (left: string, right: string): number =>
-  left < right ? -1 : left > right ? 1 : 0;
 
 export const selectEligibleRunTasks = ({
   project,
@@ -35,12 +34,13 @@ export const selectEligibleRunTasks = ({
     )
     .sort(
       (left, right) =>
-        compareBinaryStrings(left.rank, right.rank) ||
-        compareBinaryStrings(left.id, right.id),
+        compareCodeUnits(left.rank, right.rank) ||
+        compareCodeUnits(left.id, right.id),
     )
     .map((task) => ({
       task,
       policyRevision: project.qaConfiguration.revision,
+      taskAutomationStatus: task.reviewAutomation.status,
       taskAutomationGeneration: task.reviewAutomation.generation,
     }));
 
@@ -60,7 +60,7 @@ export const occupiedSlots = (run: ProjectRun): number =>
 
 const compareQueuedItems = (left: ProjectRunItem, right: ProjectRunItem) =>
   left.queuePosition - right.queuePosition ||
-  compareBinaryStrings(left.id, right.id);
+  compareCodeUnits(left.id, right.id);
 
 export const planProjectRun = ({
   run,

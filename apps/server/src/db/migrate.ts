@@ -105,6 +105,13 @@ const projectRunPauseReasonMigration = {
     'utf8',
   ),
 };
+const projectRunAutomationStatusMigration = {
+  id: '016-project-run-automation-status',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '016-project-run-automation-status.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -122,6 +129,7 @@ const migrations = [
   taskAttemptProjectRunSourceMigration,
   projectRunPrelaunchAttentionMigration,
   projectRunPauseReasonMigration,
+  projectRunAutomationStatusMigration,
 ];
 
 export const migrate = (database: Database): void => {

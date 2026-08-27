@@ -256,7 +256,15 @@ describe('App', () => {
       payload: {
         projectId: project.id,
         concurrency: 1,
-        expectedTasks: [{ taskId: 'board-task', revision: 1 }],
+        expectedPolicyRevision: 1,
+        expectedTasks: [
+          {
+            taskId: 'board-task',
+            revision: 1,
+            automationStatus: 'disabled',
+            automationGeneration: 0,
+          },
+        ],
         actor: taskActorSchema.parse({
           type: 'human',
           id: 'operator',

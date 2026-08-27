@@ -62,6 +62,8 @@ describe('ProjectRunPanel', () => {
         /Concurrent launches consume Claude subscription capacity/i,
       ),
     ).toBeVisible();
+    expect(screen.getByText(/QA policy revision 3/i)).toBeVisible();
+    expect(screen.getByText(/Mesh-owned isolated Git worktree/i)).toBeVisible();
     expect(
       screen.getByRole('button', { name: 'Authorize run' }),
     ).toBeDisabled();
@@ -81,6 +83,96 @@ describe('ProjectRunPanel', () => {
       <ProjectRunPanel
         project={project}
         projection={projection({ tasks: [task({ revision: 2 })] })}
+        connected
+        maxConcurrency={3}
+        onCommand={vi.fn()}
+        onSelectTask={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole('checkbox', { name: /subscription capacity/i }),
+    ).not.toBeChecked();
+  });
+
+  it.each([
+    [
+      'project QA policy revision',
+      projectSchema.parse({
+        ...project,
+        qaConfiguration: { ...project.qaConfiguration, revision: 4 },
+      }),
+      task(),
+    ],
+    [
+      'task automation status',
+      project,
+      task({
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 0,
+          rejectionCount: 0,
+          pauseReason: null,
+          updatedAt: timestamp,
+        },
+      }),
+    ],
+    [
+      'task automation generation',
+      project,
+      task({
+        reviewAutomation: {
+          status: 'disabled',
+          generation: 1,
+          rejectionCount: 0,
+          pauseReason: null,
+          updatedAt: timestamp,
+        },
+      }),
+    ],
+  ])(
+    'invalidates consent when the %s changes',
+    async (_label, nextProject, nextTask) => {
+      const user = userEvent.setup();
+      const rendered = renderPanel({ tasks: [task()] });
+      await user.click(screen.getByRole('button', { name: 'Start run' }));
+      await user.click(
+        screen.getByRole('checkbox', { name: /subscription capacity/i }),
+      );
+
+      rendered.rerender(
+        <ProjectRunPanel
+          project={nextProject}
+          projection={projection({ tasks: [nextTask] })}
+          connected
+          maxConcurrency={3}
+          onCommand={vi.fn()}
+          onSelectTask={vi.fn()}
+        />,
+      );
+
+      expect(
+        screen.getByRole('checkbox', { name: /subscription capacity/i }),
+      ).not.toBeChecked();
+    },
+  );
+
+  it('invalidates consent when delimiter-shaped task ids change the preview', async () => {
+    const user = userEvent.setup();
+    const rendered = renderPanel({
+      tasks: [task({ id: 'a:1:disabled:0|b' })],
+    });
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await user.click(
+      screen.getByRole('checkbox', { name: /subscription capacity/i }),
+    );
+
+    rendered.rerender(
+      <ProjectRunPanel
+        project={project}
+        projection={projection({
+          tasks: [task({ id: 'a' }), task({ id: 'b', rank: 'b' })],
+        })}
         connected
         maxConcurrency={3}
         onCommand={vi.fn()}
@@ -148,7 +240,15 @@ describe('ProjectRunPanel', () => {
       payload: {
         projectId: project.id,
         concurrency: 1,
-        expectedTasks: [{ taskId: 'task-a', revision: 1 }],
+        expectedPolicyRevision: 3,
+        expectedTasks: [
+          {
+            taskId: 'task-a',
+            revision: 1,
+            automationStatus: 'disabled',
+            automationGeneration: 0,
+          },
+        ],
         actor: operator,
       },
     });
@@ -550,14 +650,32 @@ const task = (overrides: Partial<Task> = {}) =>
 
 const item = (
   overrides: Partial<ProjectRunItem> & Pick<ProjectRunItem, 'id' | 'taskId'>,
-) =>
-  projectRunItemSchema.parse({
+) => {
+  const status = overrides.status ?? 'queued';
+  const lifecycle =
+    status === 'launch_pending'
+      ? { claimedAt: timestamp }
+      : status === 'active' || status === 'completed'
+        ? {
+            claimedAt: timestamp,
+            startedAt: timestamp,
+            ...(status === 'completed' ? { finishedAt: timestamp } : {}),
+            attemptId: overrides.attemptId ?? `attempt-${overrides.id}`,
+            sessionId: overrides.sessionId ?? `session-${overrides.id}`,
+          }
+        : status === 'attention_required'
+          ? { claimedAt: timestamp, finishedAt: timestamp }
+          : status === 'not_started'
+            ? { finishedAt: timestamp }
+            : {};
+  return projectRunItemSchema.parse({
     id: overrides.id,
     runId: 'run-1',
     projectId: project.id,
     taskId: overrides.taskId,
     taskRevision: 1,
     policyRevision: 3,
+    taskAutomationStatus: 'disabled',
     taskAutomationGeneration: 0,
     queuePosition: 0,
     status: 'queued',
@@ -568,8 +686,10 @@ const item = (
     startedAt: null,
     finishedAt: null,
     outcomeReason: null,
+    ...lifecycle,
     ...overrides,
   });
+};
 
 const run = (overrides: Partial<ProjectRun> = {}) =>
   projectRunSchema.parse({

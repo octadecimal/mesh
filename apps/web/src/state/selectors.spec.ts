@@ -32,6 +32,7 @@ const run = (overrides: Partial<ProjectRun> = {}): ProjectRun => ({
   revision: 1,
   concurrency: 2,
   state: 'running',
+  pauseReason: null,
   startedAt: timestamp,
   updatedAt: timestamp,
   completionReason: null,
@@ -118,5 +119,21 @@ describe('project run selectors', () => {
     expect(
       selectEligibleRunPreview(state, projectId).map(({ id }) => id),
     ).toEqual(['task-a', 'task-a-later']);
+  });
+
+  it('matches the server code-unit ordering for case and supplementary Unicode', () => {
+    const state = projection({
+      tasksById: Object.fromEntries(
+        [
+          task('private-use', '\ue000'),
+          task('emoji', '😀'),
+          task('ascii', 'A'),
+        ].map((candidate) => [candidate.id, candidate]),
+      ),
+    });
+
+    expect(
+      selectEligibleRunPreview(state, projectId).map(({ id }) => id),
+    ).toEqual(['ascii', 'emoji', 'private-use']);
   });
 });

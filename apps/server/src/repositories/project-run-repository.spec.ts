@@ -721,7 +721,7 @@ describe('ProjectRunRepository', () => {
         startedAt: at,
         state: 'completed',
         completedAt: at,
-        completionReason: 'rolled back',
+        completionReason: 'stopped',
         items: [],
       });
       expect(() =>

@@ -57,6 +57,11 @@ import {
 } from './tasks/reconcile-attempts.js';
 import { ReviewAutomationService } from './tasks/review-automation-service.js';
 import { ProjectRunService } from './tasks/project-run-service.js';
+import { createProjectRunPreflight } from './tasks/project-run-preflight.js';
+import {
+  createProjectRunWorkspacePlanner,
+  projectRunWorkspaceRoot,
+} from './tasks/project-run-workspace.js';
 import { reconcileProjectRuns } from './tasks/reconcile-project-runs.js';
 import { TaskService } from './tasks/task-service.js';
 
@@ -417,6 +422,7 @@ export const startServer = async (
     resolveIdentity,
     billingConflicts,
   });
+  const runWorkspaceRoot = projectRunWorkspaceRoot(config.baseDirectory);
   const projectRunService = new ProjectRunService({
     database,
     projects,
@@ -427,6 +433,14 @@ export const startServer = async (
     projectEvents,
     commands,
     attemptService,
+    preflight: createProjectRunPreflight({
+      billingConflicts,
+      resolveIdentity,
+      pathOptions,
+      workspaceRoot: runWorkspaceRoot,
+      ensureWorkspaceRoot: (path) => mkdirSync(path, { recursive: true }),
+    }),
+    planWorkspace: createProjectRunWorkspacePlanner(config.baseDirectory),
     publisher: registry.publisher,
     canLaunch: () => originPolicy.accepting,
     maxConcurrency: config.projectRunMaxConcurrency,

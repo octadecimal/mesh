@@ -154,6 +154,14 @@ describe('executeCommand', () => {
     const projectRunService = new ProjectRunService({
       ...repositories,
       attemptService,
+      preflight: async () => undefined,
+      planWorkspace: (project, run, item) => ({
+        type: 'worktree',
+        repositoryPath: project.repositoryPath,
+        path: join(baseDirectory, `${run.id}-${item.id}`),
+        branch: `mesh/${run.id}/${item.id}`,
+        startPoint: 'HEAD',
+      }),
       publisher: registry.publisher,
       now: () => now,
       createId,
@@ -233,7 +241,7 @@ describe('executeCommand', () => {
       });
     const inputs: unknown[] = [];
     const projectRunService = {
-      startRun: (input: unknown) => {
+      startRun: async (input: unknown) => {
         inputs.push(input);
         return { run: run('running', 1), events: [] };
       },
@@ -241,7 +249,7 @@ describe('executeCommand', () => {
         inputs.push(input);
         return { run: run('paused', 2), events: [] };
       },
-      resumeRun: (input: unknown) => {
+      resumeRun: async (input: unknown) => {
         inputs.push(input);
         return { run: run('running', 3), events: [] };
       },
@@ -262,7 +270,15 @@ describe('executeCommand', () => {
       payload: {
         projectId: 'project-run',
         concurrency: 2,
-        expectedTasks: [{ taskId: 'task-1', revision: 3 }],
+        expectedPolicyRevision: 1,
+        expectedTasks: [
+          {
+            taskId: 'task-1',
+            revision: 3,
+            automationStatus: 'disabled',
+            automationGeneration: 0,
+          },
+        ],
         actor,
       },
     });
@@ -287,7 +303,15 @@ describe('executeCommand', () => {
       {
         projectId: 'project-run',
         concurrency: 2,
-        expectedTasks: [{ taskId: 'task-1', revision: 3 }],
+        expectedPolicyRevision: 1,
+        expectedTasks: [
+          {
+            taskId: 'task-1',
+            revision: 3,
+            automationStatus: 'disabled',
+            automationGeneration: 0,
+          },
+        ],
         actor,
         idempotencyKey: 'start-run-command',
       },
@@ -349,6 +373,14 @@ describe('executeCommand', () => {
     const projectRunService = new ProjectRunService({
       ...fixture.repositories,
       attemptService: fixture.dependencies.attemptService,
+      preflight: async () => undefined,
+      planWorkspace: (workspaceProject, run, item) => ({
+        type: 'worktree',
+        repositoryPath: workspaceProject.repositoryPath,
+        path: join(tmpdir(), `${run.id}-${item.id}`),
+        branch: `mesh/${run.id}/${item.id}`,
+        startPoint: 'HEAD',
+      }),
       publisher: fixture.dependencies.registry.publisher,
       scheduleDrain: () => {
         scheduled += 1;
@@ -364,7 +396,15 @@ describe('executeCommand', () => {
       payload: {
         projectId: project.id,
         concurrency: 1,
-        expectedTasks: [{ taskId: 'task-run-idempotent', revision: 1 }],
+        expectedPolicyRevision: project.qaConfiguration.revision,
+        expectedTasks: [
+          {
+            taskId: 'task-run-idempotent',
+            revision: 1,
+            automationStatus: 'disabled',
+            automationGeneration: 0,
+          },
+        ],
         actor,
       },
     });
@@ -396,6 +436,7 @@ describe('executeCommand', () => {
         payload: {
           projectId: 'project-run',
           concurrency: 1,
+          expectedPolicyRevision: 1,
           expectedTasks: [],
           actor: { type: 'system', id: 'scheduler' },
         },

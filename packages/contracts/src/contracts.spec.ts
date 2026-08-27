@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   blockedConditionSchema,
+  compareCodeUnits,
   commandSchema,
   commandEnvelopeSchema,
   developerBlockerReportSchema,
@@ -1289,6 +1290,9 @@ describe('session platform contracts', () => {
   });
 
   describe('project run contracts', () => {
+    const claimedAt = '2026-08-27T00:00:10.000Z';
+    const startedAt = '2026-08-27T00:00:20.000Z';
+    const finishedAt = '2026-08-27T00:01:00.000Z';
     const run = {
       id: 'run-1',
       projectId: 'project-1',
@@ -1308,6 +1312,7 @@ describe('session platform contracts', () => {
           taskId: 'task-1',
           taskRevision: 3,
           policyRevision: 2,
+          taskAutomationStatus: 'enabled' as const,
           taskAutomationGeneration: 4,
           queuePosition: 0,
           status: 'queued' as const,
@@ -1322,31 +1327,55 @@ describe('session platform contracts', () => {
       ],
     };
 
-    it.each([
-      ['queued', null],
-      ['launch_pending', null],
-      ['active', null],
-      ['completed', 'completed'],
-      ['attention_required', 'launch_failed'],
-      ['not_started', 'stopped'],
-    ] as const)(
-      'parses the %s project run item state',
-      (status, outcomeReason) => {
-        expect(
-          projectRunItemSchema.parse({
-            ...run.items[0],
-            status,
-            outcomeReason,
-          }).status,
-        ).toBe(status);
+    const itemStates = [
+      run.items[0],
+      {
+        ...run.items[0],
+        status: 'launch_pending' as const,
+        claimedAt,
       },
-    );
+      {
+        ...run.items[0],
+        status: 'active' as const,
+        claimedAt,
+        startedAt,
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+      },
+      {
+        ...run.items[0],
+        status: 'completed' as const,
+        outcomeReason: 'task_done',
+        claimedAt,
+        startedAt,
+        finishedAt,
+        attemptId: 'attempt-1',
+        sessionId: 'session-1',
+      },
+      {
+        ...run.items[0],
+        status: 'attention_required' as const,
+        outcomeReason: 'launch_failed',
+        claimedAt,
+        finishedAt,
+      },
+      {
+        ...run.items[0],
+        status: 'not_started' as const,
+        outcomeReason: 'stopped',
+        finishedAt,
+      },
+    ];
+
+    it.each(itemStates)('parses the $status project run item state', (item) => {
+      expect(projectRunItemSchema.parse(item)).toEqual(item);
+    });
 
     it.each([
       ['running', null, null, null],
       ['paused', 'operator_paused', null, null],
       ['draining', null, null, null],
-      ['completed', null, 'finished', '2026-08-27T00:01:00.000Z'],
+      ['completed', null, 'queue_finished', finishedAt],
     ] as const)(
       'parses the %s project run state',
       (state, pauseReason, completionReason, completedAt) => {
@@ -1382,9 +1411,105 @@ describe('session platform contracts', () => {
           ...run,
           state: 'completed',
           completedAt: null,
-          completionReason: 'finished',
+          completionReason: 'queue_finished',
         }),
       ).toThrow();
+      for (const item of [
+        { ...run.items[0], attemptId: 'attempt-1' },
+        { ...run.items[0], status: 'launch_pending', claimedAt: null },
+        { ...run.items[0], status: 'active', claimedAt, startedAt },
+        {
+          ...run.items[0],
+          status: 'completed',
+          outcomeReason: 'task_done',
+          claimedAt,
+          startedAt,
+          finishedAt,
+        },
+        {
+          ...run.items[0],
+          status: 'attention_required',
+          outcomeReason: 'launch_failed',
+          claimedAt,
+          finishedAt,
+          attemptId: 'attempt-1',
+        },
+        {
+          ...run.items[0],
+          status: 'not_started',
+          outcomeReason: 'stopped',
+          claimedAt,
+          finishedAt,
+        },
+      ]) {
+        expect(() => projectRunItemSchema.parse(item)).toThrow();
+      }
+    });
+
+    it('rejects inconsistent aggregate ownership, identity, order, and lifecycle', () => {
+      for (const items of [
+        [{ ...run.items[0], runId: 'run-other' }],
+        [{ ...run.items[0], projectId: 'project-other' }],
+        [run.items[0], { ...run.items[0] }],
+        [run.items[0], { ...run.items[0], id: 'item-2' }],
+        [
+          run.items[0],
+          {
+            ...run.items[0],
+            id: 'item-2',
+            taskId: 'task-2',
+          },
+        ],
+      ]) {
+        expect(() => projectRunSchema.parse({ ...run, items })).toThrow();
+      }
+
+      expect(() =>
+        projectRunSchema.parse({ ...run, pauseReason: 'operator_paused' }),
+      ).toThrow();
+      expect(
+        projectRunSchema.parse({
+          ...run,
+          state: 'paused',
+          pauseReason: null,
+        }).pauseReason,
+      ).toBe('operator_paused');
+      expect(() =>
+        projectRunSchema.parse({
+          ...run,
+          state: 'completed',
+          completionReason: 'queue_finished',
+          completedAt: finishedAt,
+          items: [itemStates[2]],
+        }),
+      ).toThrow();
+    });
+
+    it('decodes legitimate run payloads from before pause and automation snapshots', () => {
+      const oldItem = {
+        ...run.items[0],
+        taskAutomationStatus: undefined,
+      };
+      expect(
+        projectRunSchema.parse({
+          ...run,
+          state: 'paused',
+          pauseReason: undefined,
+          items: [oldItem],
+        }),
+      ).toMatchObject({
+        pauseReason: 'operator_paused',
+        items: [{ taskAutomationStatus: 'disabled' }],
+      });
+    });
+
+    it('orders run preview text by deterministic UTF-16 code units', () => {
+      expect(['\ue000', '😀', 'A'].sort(compareCodeUnits)).toEqual([
+        'A',
+        '😀',
+        '\ue000',
+      ]);
+      expect(compareCodeUnits('same', 'same')).toBe(0);
     });
 
     it('parses runs, run commands, and authoritative run events', () => {
@@ -1396,9 +1521,20 @@ describe('session platform contracts', () => {
           payload: {
             projectId: 'project-1',
             concurrency: 2,
+            expectedPolicyRevision: 2,
             expectedTasks: [
-              { taskId: 'task-2', revision: 5 },
-              { taskId: 'task-1', revision: 3 },
+              {
+                taskId: 'task-2',
+                revision: 5,
+                automationStatus: 'disabled',
+                automationGeneration: 0,
+              },
+              {
+                taskId: 'task-1',
+                revision: 3,
+                automationStatus: 'enabled',
+                automationGeneration: 4,
+              },
             ],
             actor,
           },
