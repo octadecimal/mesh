@@ -186,8 +186,10 @@ type SourceMutationContext = {
 };
 
 type VerificationFailureCode =
+  | 'qa_workspace_search_cancelled'
   | 'qa_verification_cancelled'
   | 'qa_verification_output_limit_exceeded'
+  | 'qa_verification_termination_failed'
   | 'qa_verification_timed_out';
 
 const verificationCommandSchema = z.object({
@@ -304,8 +306,10 @@ const safeQaControlErrorCodes = new Set([
   'qa_source_mutation_detected',
   'qa_control_busy',
   'qa_workspace_path_rejected',
+  'qa_workspace_search_cancelled',
   'qa_verification_cancelled',
   'qa_verification_output_limit_exceeded',
+  'qa_verification_termination_failed',
   'qa_verification_timed_out',
 ]);
 
@@ -1168,6 +1172,7 @@ export class QaExecutionService {
                   verification.workspacePath,
                   parsed.data.path,
                   parsed.data.query,
+                  { signal: verification.abortController.signal },
                 );
                 return {
                   content: [
@@ -1175,6 +1180,20 @@ export class QaExecutionService {
                   ],
                 };
               } catch (error) {
+                const code = this.verificationInterruptionCode(error);
+                if (code) {
+                  await this.pauseForVerificationFailure(
+                    {
+                      taskId: prepared.task.id,
+                      cycleId: prepared.cycle.id,
+                      sessionId: prepared.session.id,
+                      workspaceBaseline: prepared.cycle.workspaceBaseline,
+                    },
+                    capability,
+                    code,
+                    verification,
+                  );
+                }
                 return qaControlFailure(error);
               }
             },
@@ -1357,8 +1376,10 @@ export class QaExecutionService {
     if (typeof error !== 'object' || error === null || !('code' in error)) {
       return undefined;
     }
-    return error.code === 'qa_verification_cancelled' ||
+    return error.code === 'qa_workspace_search_cancelled' ||
+      error.code === 'qa_verification_cancelled' ||
       error.code === 'qa_verification_output_limit_exceeded' ||
+      error.code === 'qa_verification_termination_failed' ||
       error.code === 'qa_verification_timed_out'
       ? error.code
       : undefined;
@@ -1384,11 +1405,15 @@ export class QaExecutionService {
             ...task.reviewAutomation,
             status: 'paused',
             pauseReason:
-              code === 'qa_verification_timed_out'
-                ? 'QA verification timed out; human inspection is required.'
-                : code === 'qa_verification_output_limit_exceeded'
-                  ? 'QA verification exceeded its output limit; human inspection is required.'
-                  : 'QA verification was interrupted; human inspection is required.',
+              code === 'qa_workspace_search_cancelled'
+                ? 'QA workspace search was interrupted; human inspection is required.'
+                : code === 'qa_verification_timed_out'
+                  ? 'QA verification timed out; human inspection is required.'
+                  : code === 'qa_verification_output_limit_exceeded'
+                    ? 'QA verification exceeded its output limit; human inspection is required.'
+                    : code === 'qa_verification_termination_failed'
+                      ? 'QA verification process ownership failed; human inspection is required.'
+                      : 'QA verification was interrupted; human inspection is required.',
             updatedAt: occurredAt,
           },
           updatedAt: occurredAt,
@@ -1434,7 +1459,10 @@ export class QaExecutionService {
     verification.failureRecorded = true;
     if (event) this.dependencies.registry.publisher.publishProject(event);
     this.dependencies.capabilities.invalidate(capability);
-    if (code !== 'qa_verification_cancelled') {
+    if (
+      code !== 'qa_verification_cancelled' &&
+      code !== 'qa_workspace_search_cancelled'
+    ) {
       await this.dependencies.registry.interrupt(context.sessionId);
     }
   }

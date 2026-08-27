@@ -3,6 +3,7 @@ import { lstat, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 const defaultMaxOutputBytes = 16 * 1024 * 1024;
+const defaultTerminationDeadlineMs = 2_000;
 
 export interface ProcessResult {
   exitCode: number;
@@ -35,6 +36,35 @@ export class ProcessOutputLimitError extends Error {
     this.name = 'ProcessOutputLimitError';
   }
 }
+
+export class ProcessTerminationUnavailableError extends Error {
+  readonly code = 'process_termination_unavailable';
+
+  constructor() {
+    super('Owned process-tree termination is unavailable.');
+    this.name = 'ProcessTerminationUnavailableError';
+  }
+}
+
+export class ProcessTerminationFailedError extends Error {
+  readonly code = 'process_termination_failed';
+
+  constructor() {
+    super('The owned process tree could not be terminated safely.');
+    this.name = 'ProcessTerminationFailedError';
+  }
+}
+
+export type NodeProcessRunnerOptions = {
+  platform?: NodeJS.Platform;
+  resolveWindowsTreeTerminator?: () => Promise<string | undefined>;
+  runWindowsTreeTerminator?: (
+    executable: string,
+    args: readonly string[],
+    deadlineMs: number,
+  ) => Promise<number>;
+  terminationDeadlineMs?: number;
+};
 
 const inside = (root: string, candidate: string) => {
   const child = relative(root, candidate);
@@ -89,41 +119,38 @@ const windowsTaskkillPath = async (): Promise<string | undefined> => {
   }
 };
 
-const runTaskkill = async (pid: number): Promise<void> => {
-  const taskkill = await windowsTaskkillPath();
-  if (!taskkill) return;
-  await new Promise<void>((done) => {
-    const killer = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], {
+const spawnWindowsTreeTerminator = async (
+  executable: string,
+  args: readonly string[],
+  deadlineMs: number,
+): Promise<number> =>
+  new Promise<number>((resolveExit, rejectExit) => {
+    const killer = spawn(executable, [...args], {
       shell: false,
       stdio: 'ignore',
       windowsHide: true,
     });
-    killer.once('error', () => done());
-    killer.once('close', () => done());
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      killer.kill();
+      rejectExit(new Error('Windows tree terminator timed out.'));
+    }, deadlineMs);
+    timer.unref?.();
+    killer.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      rejectExit(error);
+    });
+    killer.once('close', (exitCode) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveExit(exitCode ?? -1);
+    });
   });
-};
-
-const terminateOwnedTree = async (
-  child: ChildProcessWithoutNullStreams,
-): Promise<void> => {
-  const pid = child.pid;
-  if (!pid) return;
-  if (process.platform === 'win32') {
-    await runTaskkill(pid);
-    return;
-  }
-  try {
-    process.kill(-pid, 'SIGTERM');
-  } catch {
-    child.kill('SIGTERM');
-  }
-  await new Promise((done) => setTimeout(done, 250));
-  try {
-    process.kill(-pid, 'SIGKILL');
-  } catch {
-    // The owned group already exited.
-  }
-};
 
 const abortError = (signal: AbortSignal) =>
   signal.reason instanceof Error
@@ -134,11 +161,145 @@ const abortError = (signal: AbortSignal) =>
       });
 
 export class NodeProcessRunner implements ProcessRunner {
+  private readonly platform: NodeJS.Platform;
+  private readonly resolveWindowsTreeTerminator: () => Promise<
+    string | undefined
+  >;
+  private readonly runWindowsTreeTerminator: (
+    executable: string,
+    args: readonly string[],
+    deadlineMs: number,
+  ) => Promise<number>;
+  private readonly terminationDeadlineMs: number;
+  private windowsTerminatorCapability?: Promise<string>;
+
+  constructor(options: NodeProcessRunnerOptions = {}) {
+    this.platform = options.platform ?? process.platform;
+    this.resolveWindowsTreeTerminator =
+      options.resolveWindowsTreeTerminator ?? windowsTaskkillPath;
+    this.runWindowsTreeTerminator =
+      options.runWindowsTreeTerminator ?? spawnWindowsTreeTerminator;
+    this.terminationDeadlineMs =
+      options.terminationDeadlineMs ?? defaultTerminationDeadlineMs;
+  }
+
+  private async runTerminatorBounded(
+    executable: string,
+    args: readonly string[],
+  ): Promise<number> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.runWindowsTreeTerminator(
+          executable,
+          args,
+          this.terminationDeadlineMs,
+        ),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('Windows tree terminator timed out.')),
+            this.terminationDeadlineMs,
+          );
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private requireWindowsTerminator(): Promise<string> {
+    this.windowsTerminatorCapability ??= (async () => {
+      const executable = await this.resolveWindowsTreeTerminator();
+      if (!executable) throw new ProcessTerminationUnavailableError();
+      try {
+        if ((await this.runTerminatorBounded(executable, ['/?'])) !== 0) {
+          throw new ProcessTerminationUnavailableError();
+        }
+      } catch (error) {
+        if (error instanceof ProcessTerminationUnavailableError) throw error;
+        throw new ProcessTerminationUnavailableError();
+      }
+      return executable;
+    })();
+    return this.windowsTerminatorCapability;
+  }
+
+  private async terminateOwnedTree(
+    child: ChildProcessWithoutNullStreams,
+    windowsTerminator: string | undefined,
+  ): Promise<void> {
+    const pid = child.pid;
+    if (!pid) return;
+    if (this.platform === 'win32') {
+      try {
+        if (
+          !windowsTerminator ||
+          (await this.runTerminatorBounded(windowsTerminator, [
+            '/PID',
+            String(pid),
+            '/T',
+            '/F',
+          ])) !== 0
+        ) {
+          throw new ProcessTerminationFailedError();
+        }
+      } catch {
+        const closed = this.waitForOwnedChildClose(child);
+        try {
+          child.kill();
+        } catch {
+          // The exact owned child already exited.
+        }
+        await closed;
+        throw new ProcessTerminationFailedError();
+      }
+      return;
+    }
+    try {
+      process.kill(-pid, 'SIGTERM');
+    } catch {
+      child.kill('SIGTERM');
+    }
+    await new Promise((done) => setTimeout(done, 250));
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      // The owned group already exited.
+    }
+  }
+
+  private waitForOwnedChildClose(
+    child: ChildProcessWithoutNullStreams,
+  ): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      return Promise.resolve();
+    }
+    return new Promise((resolveClose) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.removeListener('close', done);
+        resolveClose();
+      };
+      const timer = setTimeout(done, this.terminationDeadlineMs);
+      timer.unref?.();
+      child.once('close', done);
+    });
+  }
+
   async run(
     executable: string,
     args: readonly string[],
     options: ProcessRunOptions,
   ): Promise<ProcessResult> {
+    if (options.signal?.aborted) throw abortError(options.signal);
+    const windowsTerminator =
+      this.platform === 'win32'
+        ? await this.requireWindowsTerminator()
+        : undefined;
     if (options.signal?.aborted) throw abortError(options.signal);
     const launch = await trustedWindowsLauncher(executable, args);
     const maxOutputBytes = options.maxOutputBytes ?? defaultMaxOutputBytes;
@@ -149,7 +310,7 @@ export class NodeProcessRunner implements ProcessRunner {
     return new Promise((resolveResult, rejectResult) => {
       const child = spawn(launch.executable, [...launch.args], {
         cwd: options.cwd,
-        detached: process.platform !== 'win32',
+        detached: this.platform !== 'win32',
         shell: false,
         windowsHide: true,
       });
@@ -168,7 +329,15 @@ export class NodeProcessRunner implements ProcessRunner {
         terminalError = error;
         child.stdout.pause();
         child.stderr.pause();
-        termination = terminateOwnedTree(child);
+        termination = this.terminateOwnedTree(child, windowsTerminator).catch(
+          (terminationError: unknown) => {
+            terminalError =
+              terminationError instanceof Error
+                ? terminationError
+                : new ProcessTerminationFailedError();
+          },
+        );
+        void termination.then(() => settle(null));
       };
       const collect = (stream: 'stderr' | 'stdout', chunk: Buffer) => {
         if (terminalError) return;

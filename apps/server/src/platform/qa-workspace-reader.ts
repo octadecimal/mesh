@@ -11,6 +11,9 @@ const maxReadBytes = 32_000;
 const maxSearchFileBytes = 128_000;
 const maxSearchFiles = 500;
 const maxSearchMatches = 100;
+const maxSearchDirectories = 128;
+const maxSearchEntries = 1_000;
+const maxSearchPending = 256;
 
 type FileSystemStat = {
   dev: bigint | number;
@@ -71,6 +74,19 @@ export class QaWorkspacePathRejectedError extends Error {
     this.name = 'QaWorkspacePathRejectedError';
   }
 }
+
+export class QaWorkspaceSearchCancelledError extends Error {
+  readonly code = 'qa_workspace_search_cancelled';
+
+  constructor() {
+    super('QA workspace search was cancelled with its owning runtime.');
+    this.name = 'QaWorkspaceSearchCancelledError';
+  }
+}
+
+const throwIfSearchAborted = (signal?: AbortSignal) => {
+  if (signal?.aborted) throw new QaWorkspaceSearchCancelledError();
+};
 
 const within = (root: string, candidate: string) => {
   const child = relative(root, candidate);
@@ -197,27 +213,42 @@ export class QaWorkspaceReader {
     }
   }
 
-  private async readSnapshot(snapshot: BoundSnapshot, limit: number) {
+  private async readSnapshot(
+    snapshot: BoundSnapshot,
+    limit: number,
+    signal?: AbortSignal,
+  ) {
+    throwIfSearchAborted(signal);
     if (!snapshot.stat.isFile()) throw new QaWorkspacePathRejectedError();
     const handle = await this.fileSystem.open(snapshot.path, 'r');
     try {
+      throwIfSearchAborted(signal);
       const openedStat = await handle.stat();
       if (!openedStat.isFile() || identity(openedStat) !== snapshot.identity) {
         throw new QaWorkspacePathRejectedError();
       }
       await this.revalidate(snapshot);
+      throwIfSearchAborted(signal);
       const result = await readBounded(handle, limit);
+      throwIfSearchAborted(signal);
       await this.revalidate(snapshot);
+      throwIfSearchAborted(signal);
       return result;
     } finally {
       await handle.close();
     }
   }
 
-  private async readDirectory(snapshot: BoundSnapshot): Promise<Dirent[]> {
+  private async readDirectory(
+    snapshot: BoundSnapshot,
+    signal?: AbortSignal,
+  ): Promise<Dirent[]> {
+    throwIfSearchAborted(signal);
     if (!snapshot.stat.isDirectory()) throw new QaWorkspacePathRejectedError();
     const entries = await this.fileSystem.readdir(snapshot.path);
+    throwIfSearchAborted(signal);
     await this.revalidate(snapshot);
+    throwIfSearchAborted(signal);
     return entries;
   }
 
@@ -248,7 +279,13 @@ export class QaWorkspaceReader {
     };
   }
 
-  async search(workspacePath: string, inputPath: string, query: string) {
+  async search(
+    workspacePath: string,
+    inputPath: string,
+    query: string,
+    options: { signal?: AbortSignal } = {},
+  ) {
+    throwIfSearchAborted(options.signal);
     const start = await this.resolveBound(workspacePath, inputPath);
     const root: RootSnapshot = {
       lexicalRoot: start.lexicalRoot,
@@ -256,27 +293,53 @@ export class QaWorkspaceReader {
     };
     const pending = [start.path];
     const files: BoundSnapshot[] = [];
-    while (pending.length > 0 && files.length < maxSearchFiles) {
+    let directories = 0;
+    let entriesVisited = 0;
+    let traversalTruncated = false;
+    while (
+      pending.length > 0 &&
+      files.length < maxSearchFiles &&
+      directories < maxSearchDirectories &&
+      entriesVisited < maxSearchEntries
+    ) {
+      throwIfSearchAborted(options.signal);
       const current = pending.pop();
       if (!current) break;
       const snapshot = await this.captureBound(root, current);
+      throwIfSearchAborted(options.signal);
       if (snapshot.stat.isFile()) {
         files.push(snapshot);
         continue;
       }
       if (!snapshot.stat.isDirectory()) continue;
-      const entries = await this.readDirectory(snapshot);
-      for (const entry of entries.reverse()) {
+      directories += 1;
+      const entries = await this.readDirectory(snapshot, options.signal);
+      const remainingEntries = maxSearchEntries - entriesVisited;
+      if (entries.length > remainingEntries) traversalTruncated = true;
+      for (const entry of entries.slice(0, remainingEntries).reverse()) {
+        throwIfSearchAborted(options.signal);
+        entriesVisited += 1;
         if (entry.isSymbolicLink()) continue;
+        if (pending.length >= maxSearchPending) {
+          traversalTruncated = true;
+          break;
+        }
         pending.push(resolve(snapshot.path, entry.name));
       }
     }
+    if (pending.length > 0) traversalTruncated = true;
 
     const matches: Array<{ path: string; line: number; text: string }> = [];
     for (const file of files) {
-      const read = await this.readSnapshot(file, maxSearchFileBytes);
+      throwIfSearchAborted(options.signal);
+      const read = await this.readSnapshot(
+        file,
+        maxSearchFileBytes,
+        options.signal,
+      );
       if (read.content.includes('\0')) continue;
       for (const [index, line] of read.content.split(/\r?\n/).entries()) {
+        throwIfSearchAborted(options.signal);
         if (!line.includes(query)) continue;
         matches.push({
           path: relative(root.root, file.path),
@@ -291,7 +354,9 @@ export class QaWorkspaceReader {
       path: relative(root.root, start.path) || '.',
       matches,
       truncated:
-        files.length >= maxSearchFiles || matches.length >= maxSearchMatches,
+        traversalTruncated ||
+        files.length >= maxSearchFiles ||
+        matches.length >= maxSearchMatches,
     };
   }
 }

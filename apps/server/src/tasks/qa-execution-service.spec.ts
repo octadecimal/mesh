@@ -19,6 +19,7 @@ import {
 
 import type { RepositoryIdentity } from '../projects/repository-identity.js';
 import type { ProcessRunner } from '../platform/process-runner.js';
+import type { QaWorkspaceReader } from '../platform/qa-workspace-reader.js';
 import {
   QaVerificationRunner,
   type QaVerificationResult,
@@ -82,6 +83,7 @@ describe('QaExecutionService', () => {
       ): Promise<QaVerificationResult>;
     };
     reserveRepair?: (sessionId: string) => (() => void) | undefined;
+    workspaceReader?: Pick<QaWorkspaceReader, 'read' | 'list' | 'search'>;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-qa-launch-'));
     const repositories = createTestRepositories();
@@ -368,6 +370,7 @@ describe('QaExecutionService', () => {
         ? [{ variable: 'ANTHROPIC_API_KEY' }]
         : [],
       verificationRunner,
+      workspaceReader: options?.workspaceReader,
       now: () => now,
       createId,
     });
@@ -709,6 +712,58 @@ describe('QaExecutionService', () => {
     expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
   });
 
+  it('pauses QA when owned verification process termination cannot be enforced', async () => {
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => 'sha256:developer-source',
+        run: async () => {
+          throw Object.assign(new Error('termination failed'), {
+            code: 'qa_verification_termination_failed',
+          });
+        },
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const response = await control.execute({
+      executable: 'pnpm',
+      args: ['test'],
+    });
+
+    expect(response).toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('qa_verification_termination_failed'),
+        },
+      ],
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_termination_failed',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+  });
+
   it('cancels a hanging verification with its runtime and records the pause', async () => {
     const started = deferred();
     let activeChildren = 0;
@@ -773,6 +828,76 @@ describe('QaExecutionService', () => {
         payload: expect.objectContaining({
           kind: 'qa_verification_failure',
           code: 'qa_verification_cancelled',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('cancels a workspace search with its runtime and records the pause', async () => {
+    const started = deferred();
+    let activeSearches = 0;
+    const context = setup({
+      workspaceReader: {
+        read: async () => ({ path: 'unused', content: '', truncated: false }),
+        list: async () => ({ path: '.', entries: [], truncated: false }),
+        search: async (_workspace, _path, _query, options) => {
+          started.resolve();
+          if (!options?.signal) {
+            return { path: '.', matches: [], truncated: false };
+          }
+          activeSearches += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeSearches -= 1;
+                reject(
+                  Object.assign(new Error('search cancelled'), {
+                    code: 'qa_workspace_search_cancelled',
+                  }),
+                );
+              },
+              { once: true },
+            );
+          });
+        },
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'search_workspace_text',
+    );
+    if (!control) throw new Error('Expected workspace search control');
+
+    const pending = control.execute({ path: '.', query: 'evidence' });
+    await started.promise;
+    context.service.cancelRuntime(launched.session.id);
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('qa_workspace_search_cancelled'),
+        },
+      ],
+    });
+    expect(activeSearches).toBe(0);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_workspace_search_cancelled',
         }),
       }),
     );

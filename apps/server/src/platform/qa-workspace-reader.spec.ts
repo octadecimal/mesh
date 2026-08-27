@@ -173,4 +173,50 @@ describe('QaWorkspaceReader', () => {
       }
     },
   );
+
+  it('truncates a large empty directory tree at the traversal budget', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-tree-'));
+    try {
+      for (let index = 0; index < 300; index += 1) {
+        mkdirSync(join(root, `empty-${index.toString().padStart(3, '0')}`));
+      }
+      const reader = new QaWorkspaceReader();
+
+      await expect(reader.search(root, '.', 'not present')).resolves.toEqual({
+        path: '.',
+        matches: [],
+        truncated: true,
+      });
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('stops search when its owning cycle aborts during directory traversal', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-cancel-'));
+    try {
+      mkdirSync(join(root, 'src'));
+      writeFileSync(join(root, 'src', 'app.ts'), 'const searched = true;');
+      const controller = new AbortController();
+      let enumerated = false;
+      const reader = readerWithFileSystem({
+        readdir: async (path) => {
+          const entries = await readdir(path, { withFileTypes: true });
+          if (!enumerated) {
+            enumerated = true;
+            controller.abort();
+          }
+          return entries;
+        },
+      });
+
+      await expect(
+        reader.search(root, '.', 'searched', {
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({ code: 'qa_workspace_search_cancelled' });
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
 });

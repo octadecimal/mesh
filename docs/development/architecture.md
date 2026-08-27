@@ -91,6 +91,9 @@ resolve requested paths canonically inside the assigned workspace and reject
 absolute paths, traversal, and links whose targets escape it. Handle-backed
 reads and directory enumerations revalidate the canonical root, object, and
 parent identities before returning data so a link or file swap fails closed.
+Workspace search also caps visited directories, directory entries, queued
+paths, files, and matches, and checks the owning QA cycle's cancellation signal
+throughout traversal and file reads.
 The constrained runner treats ambiguous joined option values as workspace
 paths unless they are explicitly safe non-path values, and validates missing
 paths through their deepest existing ancestor. It admits only non-interactive
@@ -98,8 +101,11 @@ verification commands, gives each child a five-minute wall-clock bound, caps
 each output stream at 64,000 bytes, and cancels owned process trees when the QA
 runtime is interrupted, closes, or exceeds a bound. On Windows, vetted package
 manager commands resolve to canonical bundled JavaScript entries and run via
-the installed Node executable with the shell disabled. The runner never exposes
-a general shell or source-authoring control.
+the installed Node executable with the shell disabled. Mesh proves that its
+canonical owned-tree terminator works before launching a child; a missing,
+failing, or unresponsive terminator refuses launch or durably pauses the QA
+cycle after an exact-owned-PID fallback. The runner never exposes a general
+shell or source-authoring control.
 
 The server captures Git-tracked source before launch, after every verification
 command, and immediately before verdict persistence instead of accepting an
@@ -113,8 +119,13 @@ mutation, so the verdict transaction begins immediately after capture without
 claiming
 filesystem-transaction atomicity. Tracked symbolic links are hashed as link
 identity and target text without following the target; regular tracked files
-must resolve inside the workspace, and an indexed link's canonical parent must
-also remain there. Timeout, cancellation, output overflow, or confinement
+are opened by handle and checked with pre/post handle metadata while their
+content is streamed into the hash. Mesh then revalidates the canonical
+workspace root, full path, and parent identity, so a restored parent swap cannot
+hide an external read. Every component of a requested path is inspected;
+broken links whose lexical target escapes the workspace fail closed even when
+the target does not exist. An indexed link's canonical parent must also remain
+inside the workspace. Timeout, cancellation, output overflow, or confinement
 failure pauses review and prevents a verdict. Verification may create ordinary
 ignored build or test artifacts.
 

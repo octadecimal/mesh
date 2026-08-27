@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstat, readFile, readlink, realpath } from 'node:fs/promises';
+import { lstat, open, readlink, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 import type { ProcessResult, ProcessRunner } from './process-runner.js';
@@ -58,6 +58,15 @@ export class QaVerificationOutputLimitError extends Error {
   }
 }
 
+export class QaVerificationTerminationFailedError extends Error {
+  readonly code = 'qa_verification_termination_failed';
+
+  constructor() {
+    super('QA verification process ownership could not be enforced.');
+    this.name = 'QaVerificationTerminationFailedError';
+  }
+}
+
 type TrackedFileStat = {
   dev: bigint | number;
   ino: bigint | number;
@@ -71,6 +80,17 @@ type TrackedFileStat = {
 type TrackedFileIdentity = {
   key: string;
   symbolicLink: boolean;
+};
+
+type TrackedFileHandle = {
+  close(): Promise<void>;
+  read(
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ bytesRead: number }>;
+  stat(options: { bigint: true }): Promise<TrackedFileStat>;
 };
 
 type TrackedParentIdentity = {
@@ -310,6 +330,11 @@ const isMissingFile = (error: unknown): boolean =>
   'code' in error &&
   error.code === 'ENOENT';
 
+const pathStatIdentity = (stat: TrackedFileStat) =>
+  [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].join(
+    ':',
+  );
+
 const canonicalEscapesWorkspace = async (
   workspacePath: string,
   candidate: string,
@@ -321,17 +346,69 @@ const canonicalEscapesWorkspace = async (
     if (isMissingFile(error)) return false;
     throw error;
   }
-  let current = resolve(workspacePath, candidate.replace(/\\/g, '/'));
-  while (true) {
+  const lexicalWorkspace = resolve(workspacePath);
+  const lexicalCandidate = resolve(
+    lexicalWorkspace,
+    candidate.replace(/\\/g, '/'),
+  );
+  let pending = relative(lexicalWorkspace, lexicalCandidate)
+    .split(/[\\/]+/)
+    .filter(Boolean);
+  let current = canonicalWorkspace;
+  let followedLinks = 0;
+  while (pending.length > 0) {
+    const component = pending.shift();
+    if (!component) continue;
+    const next = resolve(current, component);
+    let before: Awaited<ReturnType<typeof lstat>>;
     try {
-      return escapesWorkspace(canonicalWorkspace, await realpath(current));
+      before = await lstat(next, { bigint: true });
     } catch (error) {
       if (!isMissingFile(error)) throw error;
-      const parent = dirname(current);
-      if (parent === current) return true;
-      current = parent;
+      return escapesWorkspace(canonicalWorkspace, resolve(next, ...pending));
     }
+    if (before.isSymbolicLink()) {
+      let target: string;
+      try {
+        target = await readlink(next);
+      } catch {
+        return true;
+      }
+      let after: Awaited<ReturnType<typeof lstat>>;
+      try {
+        after = await lstat(next, { bigint: true });
+      } catch (error) {
+        if (isMissingFile(error)) return true;
+        throw error;
+      }
+      if (
+        !after.isSymbolicLink() ||
+        pathStatIdentity(before) !== pathStatIdentity(after) ||
+        (await readlink(next).catch(() => undefined)) !== target
+      ) {
+        return true;
+      }
+      const targetPath = resolve(dirname(next), target.replace(/\\/g, '/'));
+      if (escapesWorkspace(canonicalWorkspace, targetPath)) return true;
+      followedLinks += 1;
+      if (followedLinks > 32) return true;
+      pending = [
+        ...relative(canonicalWorkspace, targetPath)
+          .split(/[\\/]+/)
+          .filter(Boolean),
+        ...pending,
+      ];
+      current = canonicalWorkspace;
+    } else {
+      try {
+        current = await realpath(next);
+      } catch {
+        return true;
+      }
+    }
+    if (escapesWorkspace(canonicalWorkspace, current)) return true;
   }
+  return false;
 };
 
 const assertWorkspaceBoundValue = async (
@@ -404,25 +481,30 @@ const assertWorkspaceBoundArguments = async (
 };
 
 export class QaVerificationRunner {
+  private readonly openTrackedFile: (
+    path: string,
+  ) => Promise<TrackedFileHandle>;
   private readonly readTrackedLink: (path: string) => Promise<string>;
   private readonly resolveRealPath: (path: string) => Promise<string>;
   private readonly verificationTimeoutMs: number;
 
   constructor(
     private readonly processes: ProcessRunner,
-    private readonly readTrackedFile: (
-      path: string,
-    ) => Promise<Uint8Array> = readFile,
+    openTrackedFile: (path: string) => Promise<TrackedFileHandle> = async (
+      path,
+    ) => open(path, 'r'),
     private readonly statTrackedFile: (
       path: string,
     ) => Promise<TrackedFileStat> = async (path) =>
       lstat(path, { bigint: true }),
     options: {
+      openTrackedFile?: (path: string) => Promise<TrackedFileHandle>;
       readTrackedLink?: (path: string) => Promise<string>;
       resolveRealPath?: (path: string) => Promise<string>;
       verificationTimeoutMs?: number;
     } = {},
   ) {
+    this.openTrackedFile = options.openTrackedFile ?? openTrackedFile;
     this.readTrackedLink = options.readTrackedLink ?? readlink;
     this.resolveRealPath = options.resolveRealPath ?? realpath;
     this.verificationTimeoutMs =
@@ -474,6 +556,10 @@ export class QaVerificationRunner {
     signal?: AbortSignal,
   ): Promise<string | undefined> {
     const canonicalWorkspace = await this.tryRealPath(workspacePath);
+    const rootBefore = canonicalWorkspace
+      ? await this.readCanonicalIdentity(canonicalWorkspace)
+      : undefined;
+    if (rootBefore === 'missing') return undefined;
     const trackedPaths = await this.listTrackedPaths(workspacePath, signal);
     const pathsToRead =
       direction === 'forward' ? trackedPaths : [...trackedPaths].reverse();
@@ -541,33 +627,45 @@ export class QaVerificationRunner {
       const canonicalPath = await this.tryRealPath(absolutePath);
       if (
         canonicalWorkspace &&
-        canonicalPath &&
-        escapesWorkspace(canonicalWorkspace, canonicalPath)
+        (!canonicalPath || escapesWorkspace(canonicalWorkspace, canonicalPath))
       ) {
         throw new Error('Tracked source path escaped the verified workspace.');
       }
-      let content: Uint8Array;
-      try {
-        content = await this.readTrackedFile(canonicalPath ?? absolutePath);
-      } catch (error) {
-        if (isMissingFile(error)) return undefined;
-        throw error;
-      }
+      const contentHash = await this.hashOpenedTrackedFile(
+        canonicalPath ?? absolutePath,
+        before,
+        signal,
+      );
+      if (!contentHash) return undefined;
       const after = await this.readFileIdentity(absolutePath);
       if (
         after === 'missing' ||
         after.symbolicLink ||
-        before.key !== after.key
+        before.key !== after.key ||
+        (canonicalWorkspace &&
+          (!(await this.regularFileBoundaryMatches(
+            workspacePath,
+            canonicalWorkspace,
+            absolutePath,
+            canonicalPath,
+            parentBefore,
+            rootBefore,
+          )) ||
+            escapesWorkspace(canonicalWorkspace, canonicalPath ?? '')))
       ) {
         return undefined;
       }
-      records.set(
-        trackedPath,
-        `${before.key}\0${createHash('sha256').update(content).digest('hex')}`,
-      );
+      records.set(trackedPath, `${before.key}\0${contentHash}`);
     }
     const pathsAfterRead = await this.listTrackedPaths(workspacePath, signal);
-    if (trackedPaths.join('\0') !== pathsAfterRead.join('\0')) return undefined;
+    if (
+      trackedPaths.join('\0') !== pathsAfterRead.join('\0') ||
+      (canonicalWorkspace &&
+        rootBefore &&
+        !(await this.canonicalIdentityMatches(workspacePath, rootBefore)))
+    ) {
+      return undefined;
+    }
 
     const hash = createHash('sha256');
     for (const trackedPath of trackedPaths) {
@@ -579,26 +677,133 @@ export class QaVerificationRunner {
     return `sha256:${hash.digest('hex')}`;
   }
 
+  private async hashOpenedTrackedFile(
+    path: string,
+    expected: TrackedFileIdentity,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    let handle: TrackedFileHandle;
+    try {
+      handle = await this.openTrackedFile(path);
+    } catch (error) {
+      if (isMissingFile(error)) return undefined;
+      throw error;
+    }
+    try {
+      const opened = this.fileIdentity(await handle.stat({ bigint: true }));
+      if (opened.symbolicLink || opened.key !== expected.key) return undefined;
+      const hash = createHash('sha256');
+      const buffer = Buffer.alloc(64 * 1024);
+      let position = 0;
+      while (true) {
+        if (signal?.aborted) throw new QaVerificationCancelledError();
+        const { bytesRead } = await handle.read(
+          buffer,
+          0,
+          buffer.length,
+          position,
+        );
+        if (bytesRead === 0) break;
+        hash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+      }
+      const after = this.fileIdentity(await handle.stat({ bigint: true }));
+      return after.symbolicLink || after.key !== opened.key
+        ? undefined
+        : hash.digest('hex');
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async regularFileBoundaryMatches(
+    workspacePath: string,
+    canonicalWorkspace: string,
+    absolutePath: string,
+    expectedPath: string | undefined,
+    expectedParent: TrackedParentIdentity | undefined,
+    expectedRoot: TrackedParentIdentity | undefined,
+  ): Promise<boolean> {
+    if (!expectedPath || escapesWorkspace(canonicalWorkspace, expectedPath)) {
+      return false;
+    }
+    const currentPath = await this.tryRealPath(absolutePath);
+    if (
+      !currentPath ||
+      relative(expectedPath, currentPath) !== '' ||
+      escapesWorkspace(canonicalWorkspace, currentPath)
+    ) {
+      return false;
+    }
+    return (
+      (!expectedParent ||
+        (await this.trackedParentMatches(
+          canonicalWorkspace,
+          absolutePath,
+          expectedParent,
+        ))) &&
+      (!expectedRoot ||
+        (await this.canonicalIdentityMatches(workspacePath, expectedRoot)))
+    );
+  }
+
+  private fileIdentity(current: TrackedFileStat): TrackedFileIdentity {
+    return {
+      key: [
+        current.dev,
+        current.ino,
+        current.mode,
+        current.size,
+        current.mtimeNs,
+        current.ctimeNs,
+      ].join(':'),
+      symbolicLink: current.isSymbolicLink?.() === true,
+    };
+  }
+
   private async readFileIdentity(
     path: string,
   ): Promise<TrackedFileIdentity | 'missing'> {
     try {
-      const current = await this.statTrackedFile(path);
+      return this.fileIdentity(await this.statTrackedFile(path));
+    } catch (error) {
+      if (isMissingFile(error)) return 'missing';
+      throw error;
+    }
+  }
+
+  private async readCanonicalIdentity(
+    path: string,
+  ): Promise<TrackedParentIdentity | 'missing'> {
+    try {
+      const canonicalPath = await this.resolveRealPath(path);
+      const current = await lstat(canonicalPath, { bigint: true });
       return {
+        path: canonicalPath,
         key: [
           current.dev,
           current.ino,
           current.mode,
-          current.size,
           current.mtimeNs,
           current.ctimeNs,
         ].join(':'),
-        symbolicLink: current.isSymbolicLink?.() === true,
       };
     } catch (error) {
       if (isMissingFile(error)) return 'missing';
       throw error;
     }
+  }
+
+  private async canonicalIdentityMatches(
+    path: string,
+    expected: TrackedParentIdentity,
+  ): Promise<boolean> {
+    const current = await this.readCanonicalIdentity(path);
+    return (
+      current !== 'missing' &&
+      relative(expected.path, current.path) === '' &&
+      expected.key === current.key
+    );
   }
 
   private async readTrackedParentIdentity(
@@ -738,15 +943,17 @@ export class QaVerificationRunner {
   ): Promise<ProcessResult> {
     if (parentSignal?.aborted) throw new QaVerificationCancelledError();
     const controller = new AbortController();
-    let abortReason: QaVerificationCancelledError | QaVerificationTimedOutError;
+    const abortWith = (
+      reason: QaVerificationCancelledError | QaVerificationTimedOutError,
+    ) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    };
     const cancel = () => {
-      abortReason = new QaVerificationCancelledError();
-      controller.abort(abortReason);
+      abortWith(new QaVerificationCancelledError());
     };
     parentSignal?.addEventListener('abort', cancel, { once: true });
     const timeout = setTimeout(() => {
-      abortReason = new QaVerificationTimedOutError();
-      controller.abort(abortReason);
+      abortWith(new QaVerificationTimedOutError());
     }, this.verificationTimeoutMs);
     timeout.unref?.();
     try {
@@ -756,12 +963,16 @@ export class QaVerificationRunner {
         signal: controller.signal,
       });
       if (controller.signal.aborted) {
-        throw abortReason ?? new QaVerificationCancelledError();
+        throw controller.signal.reason instanceof Error
+          ? controller.signal.reason
+          : new QaVerificationCancelledError();
       }
       return result;
     } catch (error) {
       if (controller.signal.aborted) {
-        throw abortReason ?? new QaVerificationCancelledError();
+        throw controller.signal.reason instanceof Error
+          ? controller.signal.reason
+          : new QaVerificationCancelledError();
       }
       if (
         typeof error === 'object' &&
@@ -770,6 +981,15 @@ export class QaVerificationRunner {
         error.code === 'process_output_limit_exceeded'
       ) {
         throw new QaVerificationOutputLimitError();
+      }
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error.code === 'process_termination_unavailable' ||
+          error.code === 'process_termination_failed')
+      ) {
+        throw new QaVerificationTerminationFailedError();
       }
       throw error;
     } finally {

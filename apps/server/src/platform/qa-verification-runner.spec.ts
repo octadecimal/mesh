@@ -1,4 +1,12 @@
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,6 +25,38 @@ const deferred = () => {
   });
   return { promise, resolve };
 };
+
+const openTrackedFileFrom =
+  (
+    readTrackedFile: (path: string) => Promise<Uint8Array>,
+    statTrackedFile: (path: string) => Promise<{
+      dev: number;
+      ino: number;
+      mode: number;
+      size: number;
+      mtimeNs: number;
+      ctimeNs: number;
+      isSymbolicLink?: () => boolean;
+    }>,
+  ) =>
+  async (path: string) => {
+    let content: Uint8Array | undefined;
+    return {
+      close: async () => undefined,
+      read: async (
+        buffer: Uint8Array,
+        offset: number,
+        length: number,
+        position: number,
+      ) => {
+        content ??= await readTrackedFile(path);
+        const chunk = content.subarray(position, position + length);
+        buffer.set(chunk, offset);
+        return { bytesRead: chunk.byteLength };
+      },
+      stat: async () => statTrackedFile(path),
+    };
+  };
 
 describe('QaVerificationRunner', () => {
   it('runs a direct verification executable without a shell', async () => {
@@ -336,6 +376,89 @@ describe('QaVerificationRunner', () => {
     );
   });
 
+  it.each(['process_termination_unavailable', 'process_termination_failed'])(
+    'maps %s to a stable QA termination failure',
+    async (code) => {
+      const runner = new QaVerificationRunner({
+        run: async () => {
+          throw Object.assign(new Error('controlled termination failure'), {
+            code,
+          });
+        },
+      });
+
+      await expect(
+        runner.run('C:\\repo', { executable: 'pnpm', args: ['test'] }),
+      ).rejects.toMatchObject({
+        code: 'qa_verification_termination_failed',
+      });
+    },
+  );
+
+  it.each([
+    {
+      name: 'runtime cancellation',
+      first: 'cancel' as const,
+      expected: 'qa_verification_cancelled',
+    },
+    {
+      name: 'verification timeout',
+      first: 'timeout' as const,
+      expected: 'qa_verification_timed_out',
+    },
+  ])('keeps $name as the first abort reason', async ({ first, expected }) => {
+    vi.useFakeTimers();
+    try {
+      const started = deferred();
+      const release = deferred();
+      let observedReason: unknown;
+      const runner = new QaVerificationRunner(
+        {
+          run: async (_executable, _args, options) => {
+            const aborted = new Promise<void>((resolveAbort) => {
+              options.signal?.addEventListener(
+                'abort',
+                () => {
+                  observedReason = options.signal?.reason;
+                  resolveAbort();
+                },
+                { once: true },
+              );
+            });
+            started.resolve();
+            await aborted;
+            await release.promise;
+            throw options.signal?.reason;
+          },
+        },
+        undefined,
+        undefined,
+        { verificationTimeoutMs: 10 },
+      );
+      const controller = new AbortController();
+      const pending = runner.run(
+        'C:\\repo',
+        { executable: 'pnpm', args: ['test'] },
+        { signal: controller.signal },
+      );
+      await started.promise;
+
+      if (first === 'cancel') {
+        controller.abort();
+        await vi.advanceTimersByTimeAsync(10);
+      } else {
+        await vi.advanceTimersByTimeAsync(10);
+        controller.abort();
+      }
+      release.resolve();
+
+      await expect(pending).rejects.toMatchObject({ code: expected });
+      expect(observedReason).toMatchObject({ code: expected });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('rejects a test config reached through an external directory link', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-root-'));
     const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-outside-'));
@@ -391,6 +514,43 @@ describe('QaVerificationRunner', () => {
     }
   });
 
+  it.each([
+    'broken/missing/vitest.config.ts',
+    'broken\\missing\\vitest.config.ts',
+    'indirect/vitest.config.ts',
+  ])(
+    'rejects config path %s beneath a broken external directory link',
+    async (configPath) => {
+      const root = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-root-'));
+      const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-outside-'));
+      try {
+        symlinkSync(
+          join(outside, 'nonexistent-target'),
+          join(root, 'broken'),
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        symlinkSync(
+          join(root, 'broken', 'nested'),
+          join(root, 'indirect'),
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        const run = vi.fn();
+        const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+        await expect(
+          runner.run(root, {
+            executable: 'pnpm',
+            args: ['test', '--', `--config=${configPath}`],
+          }),
+        ).rejects.toBeInstanceOf(QaVerificationCommandRejectedError);
+        expect(run).not.toHaveBeenCalled();
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+        rmSync(outside, { force: true, recursive: true });
+      }
+    },
+  );
+
   it('derives an opaque tracked-source state from Git rather than agent input', async () => {
     const run = vi.fn(async () => ({
       exitCode: 0,
@@ -398,17 +558,18 @@ describe('QaVerificationRunner', () => {
       stderr: '',
     }));
     const readTrackedFile = vi.fn(async () => Buffer.from('tracked source'));
+    const statTrackedFile = async () => ({
+      dev: 1,
+      ino: 1,
+      mode: 0o100644,
+      size: 14,
+      mtimeNs: 0,
+      ctimeNs: 0,
+    });
     const runner = new QaVerificationRunner(
       { run } as ProcessRunner,
-      readTrackedFile,
-      async () => ({
-        dev: 1,
-        ino: 1,
-        mode: 0o100644,
-        size: 14,
-        mtimeNs: 0,
-        ctimeNs: 0,
-      }),
+      openTrackedFileFrom(readTrackedFile, statTrackedFile),
+      statTrackedFile,
     );
 
     const first = await runner.captureTrackedSource('C:\\repo');
@@ -499,7 +660,7 @@ describe('QaVerificationRunner', () => {
     });
     const runner = new QaVerificationRunner(
       { run } as ProcessRunner,
-      async () => Buffer.from('must not be read'),
+      undefined,
       async () => ({
         dev: 1,
         ino: 1,
@@ -546,7 +707,7 @@ describe('QaVerificationRunner', () => {
     }));
     const runner = new QaVerificationRunner(
       { run } as ProcessRunner,
-      readTrackedFile,
+      openTrackedFileFrom(readTrackedFile, statTrackedFile),
       statTrackedFile,
     );
     const baseline = await runner.captureTrackedSource('C:\\repo');
@@ -555,6 +716,52 @@ describe('QaVerificationRunner', () => {
     const current = await runner.captureTrackedSource('C:\\repo');
 
     expect(current).not.toBe(baseline);
+  });
+
+  it('rejects a regular tracked file opened through a restored external parent swap', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-source-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-source-outside-'));
+    const sourceParent = join(root, 'src');
+    const parkedParent = join(root, 'src-parked');
+    try {
+      mkdirSync(sourceParent);
+      writeFileSync(join(sourceParent, 'app.ts'), 'trusted source');
+      writeFileSync(join(outside, 'app.ts'), 'external replacement');
+      const run = vi.fn(async () => ({
+        exitCode: 0,
+        stdout: 'src/app.ts\0',
+        stderr: '',
+      }));
+      const fileSystem = {
+        openTrackedFile: async (path: string) => {
+          renameSync(sourceParent, parkedParent);
+          symlinkSync(
+            outside,
+            sourceParent,
+            process.platform === 'win32' ? 'junction' : 'dir',
+          );
+          try {
+            return await open(path, 'r');
+          } finally {
+            rmSync(sourceParent, { force: true, recursive: true });
+            renameSync(parkedParent, sourceParent);
+          }
+        },
+      };
+      const runner = new QaVerificationRunner(
+        { run } as ProcessRunner,
+        undefined,
+        undefined,
+        fileSystem,
+      );
+
+      await expect(runner.captureTrackedSource(root)).rejects.toMatchObject({
+        code: 'qa_source_snapshot_unstable',
+      });
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+      rmSync(outside, { force: true, recursive: true });
+    }
   });
 
   it('fails closed when tracked source never stabilizes', async () => {
@@ -581,7 +788,7 @@ describe('QaVerificationRunner', () => {
     }));
     const runner = new QaVerificationRunner(
       { run } as ProcessRunner,
-      readTrackedFile,
+      openTrackedFileFrom(readTrackedFile, statTrackedFile),
       statTrackedFile,
     );
 
