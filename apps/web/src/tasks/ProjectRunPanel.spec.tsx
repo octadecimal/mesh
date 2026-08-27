@@ -166,6 +166,51 @@ describe('ProjectRunPanel', () => {
     );
   });
 
+  it('clears start pending when the first projected run is already completed', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<unknown>();
+    const rendered = renderPanel({
+      tasks: [task()],
+      onCommand: vi.fn().mockReturnValue(pending.promise),
+    });
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await user.click(
+      screen.getByRole('checkbox', { name: /subscription capacity/i }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Authorize run' }));
+
+    pending.resolve(undefined);
+    rendered.rerender(
+      <ProjectRunPanel
+        project={project}
+        projection={projection({
+          tasks: [task()],
+          runs: [
+            run({
+              id: 'run-direct-completed',
+              revision: 2,
+              state: 'completed',
+              completionReason: 'queue_finished',
+              completedAt: timestamp,
+            }),
+          ],
+        })}
+        connected
+        maxConcurrency={3}
+        onCommand={vi.fn()}
+        onSelectTask={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Authorize run' }),
+      ).toBeEnabled(),
+    );
+    expect(screen.queryByText('Authorizing run…')).toBeNull();
+    expect(screen.getByText('Queue finished')).toBeVisible();
+  });
+
   it('explains empty, disconnected, and archived authorization states', async () => {
     const user = userEvent.setup();
     const rendered = renderPanel({ tasks: [] });

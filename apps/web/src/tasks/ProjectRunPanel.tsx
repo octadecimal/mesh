@@ -205,10 +205,9 @@ export function ProjectRunPanel({
   onCommand,
   onSelectTask,
 }: ProjectRunPanelProps) {
+  const projectRuns = selectProjectRuns(projection, project.id);
   const activeRun = selectActiveProjectRun(projection, project.id);
-  const history = selectProjectRuns(projection, project.id).filter(
-    ({ state }) => state === 'completed',
-  );
+  const history = projectRuns.filter(({ state }) => state === 'completed');
   const eligibleTasks = selectEligibleRunPreview(projection, project.id);
   const previewFingerprint = eligibleTasks
     .map(({ id, revision }) => `${id}:${revision}`)
@@ -223,7 +222,7 @@ export function ProjectRunPanel({
   const [confirmingStop, setConfirmingStop] = useState(false);
   const currentProjectId = useRef(project.id);
   currentProjectId.current = project.id;
-  const projectionFingerprint = runProjectionFingerprint(activeRun);
+  const projectionFingerprint = runProjectionFingerprint(projectRuns.at(-1));
   const controlsDisabled =
     !connected || Boolean(project.archivedAt) || Boolean(pendingAction);
 
