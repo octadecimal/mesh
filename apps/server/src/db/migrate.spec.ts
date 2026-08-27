@@ -17,6 +17,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Database } from './database.js';
 import { migrate } from './migrate.js';
 import { CommandRepository } from '../repositories/command-repository.js';
+import { ProjectRepository } from '../repositories/project-repository.js';
+import { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import { waitForWorkerMessage } from '../test/wait-for-worker-message.js';
 
 const runProductionBuild = (
@@ -130,6 +132,9 @@ describe('migrate', () => {
       { id: '006-task-attempt-launch-recovery' },
       { id: '007-developer-execution' },
       { id: '008-developer-cycle-task-title' },
+      { id: '009-qa-execution' },
+      { id: '010-review-automation-state' },
+      { id: '011-qa-interruption-repair' },
     ]);
     expect(
       database
@@ -164,6 +169,211 @@ describe('migrate', () => {
     );
   });
 
+  it('upgrades Milestone 3 projects with the manual QA defaults', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-qa-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-26T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+    database
+      .prepare(
+        `INSERT INTO projects (
+          id, display_name, repository_path, discovered_at, discovery_metadata_json,
+          repository_identity, revision, created_at, updated_at, archived_at,
+          developer_instructions_content, developer_instructions_revision,
+          developer_instructions_updated_at, developer_instructions_updated_by_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'project-qa-upgrade',
+        'QA upgrade',
+        'C:/code/qa-upgrade',
+        appliedAt,
+        '{}',
+        'C:/code/qa-upgrade',
+        1,
+        appliedAt,
+        appliedAt,
+        null,
+        '',
+        1,
+        appliedAt,
+        null,
+      );
+
+    migrate(database);
+
+    const migratedProject = new ProjectRepository(database).get(
+      'project-qa-upgrade',
+    );
+    expect(migratedProject?.qaConfiguration.reviewPolicy).toBe('manual');
+    expect(migratedProject?.qaConfiguration.instructions).toEqual({
+      content: '',
+      revision: 1,
+      updatedAt: appliedAt,
+      updatedBy: null,
+    });
+  });
+
+  it('preserves 009 automation actions while expanding source-cycle foreign keys', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-review-automation-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-26T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+      '009-qa-execution.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+    database.exec('PRAGMA foreign_keys = OFF');
+    database
+      .prepare(
+        `INSERT INTO review_automation_actions (
+          id, idempotency_key, project_id, task_id, attempt_id, source_cycle_id,
+          action_kind, generation, status, error_code, created_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'legacy-action',
+        'legacy-action-key',
+        'legacy-project',
+        'legacy-task',
+        'legacy-attempt',
+        'legacy-qa-cycle',
+        'resume_developer',
+        3,
+        'pending',
+        null,
+        appliedAt,
+        null,
+      );
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare(
+          `SELECT id, source_developer_cycle_id, source_qa_cycle_id, generation, status
+           FROM review_automation_actions_v2 WHERE id = ?`,
+        )
+        .get('legacy-action'),
+    ).toEqual({
+      id: 'legacy-action',
+      source_developer_cycle_id: null,
+      source_qa_cycle_id: 'legacy-qa-cycle',
+      generation: 3,
+      status: 'pending',
+    });
+    expect(
+      database
+        .prepare("SELECT name FROM pragma_table_info('tasks')")
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        'review_automation_status',
+        'review_automation_generation',
+        'review_automation_rejection_count',
+        'review_automation_pause_reason',
+        'review_automation_updated_at',
+      ]),
+    );
+
+    const currentActions = new QaExecutionRepository(database);
+    expect(
+      currentActions.completeAutomationAction('legacy-action', {
+        status: 'completed',
+        errorCode: null,
+        completedAt: '2026-08-26T01:00:00.000Z',
+      }),
+    ).toMatchObject({ status: 'completed' });
+    expect(
+      database
+        .prepare(
+          'SELECT status, error_code, completed_at FROM review_automation_actions WHERE id = ?',
+        )
+        .get('legacy-action'),
+    ).toEqual({
+      status: 'completed',
+      error_code: null,
+      completed_at: '2026-08-26T01:00:00.000Z',
+    });
+
+    database
+      .prepare(
+        `INSERT INTO review_automation_actions (
+          id, idempotency_key, project_id, task_id, attempt_id, source_cycle_id,
+          action_kind, generation, status, error_code, created_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'rollback-action',
+        'rollback-action-key',
+        'legacy-project',
+        'legacy-task',
+        'legacy-attempt',
+        'legacy-qa-cycle',
+        'resume_developer',
+        3,
+        'pending',
+        null,
+        appliedAt,
+        null,
+      );
+    database
+      .prepare(
+        `UPDATE review_automation_actions
+         SET status = 'failed', error_code = 'rollback_failure', completed_at = ?
+         WHERE id = ?`,
+      )
+      .run('2026-08-26T02:00:00.000Z', 'rollback-action');
+
+    migrate(database);
+
+    expect(
+      new QaExecutionRepository(database).getAutomationAction(
+        'rollback-action',
+      ),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'rollback_failure',
+      completedAt: '2026-08-26T02:00:00.000Z',
+    });
+  });
+
   it('allows two connections to apply startup migrations without a duplicate ledger entry', () => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-session-platform-'));
     directories.push(directory);
@@ -186,6 +396,9 @@ describe('migrate', () => {
       { id: '006-task-attempt-launch-recovery' },
       { id: '007-developer-execution' },
       { id: '008-developer-cycle-task-title' },
+      { id: '009-qa-execution' },
+      { id: '010-review-automation-state' },
+      { id: '011-qa-interruption-repair' },
     ]);
   });
 
@@ -385,6 +598,18 @@ describe('migrate', () => {
       join(__dirname, 'migrations', '008-developer-cycle-task-title.sql'),
       join(directory, 'migrations', '008-developer-cycle-task-title.sql'),
     );
+    copyFileSync(
+      join(__dirname, 'migrations', '009-qa-execution.sql'),
+      join(directory, 'migrations', '009-qa-execution.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '010-review-automation-state.sql'),
+      join(directory, 'migrations', '010-review-automation-state.sql'),
+    );
+    copyFileSync(
+      join(__dirname, 'migrations', '011-qa-interruption-repair.sql'),
+      join(directory, 'migrations', '011-qa-interruption-repair.sql'),
+    );
     buildSync({
       bundle: true,
       entryPoints: [join(__dirname, 'migrate.ts')],
@@ -438,6 +663,9 @@ describe('migrate', () => {
         { id: '006-task-attempt-launch-recovery' },
         { id: '007-developer-execution' },
         { id: '008-developer-cycle-task-title' },
+        { id: '009-qa-execution' },
+        { id: '010-review-automation-state' },
+        { id: '011-qa-interruption-repair' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -512,6 +740,9 @@ describe('migrate', () => {
       { id: '006-task-attempt-launch-recovery' },
       { id: '007-developer-execution' },
       { id: '008-developer-cycle-task-title' },
+      { id: '009-qa-execution' },
+      { id: '010-review-automation-state' },
+      { id: '011-qa-interruption-repair' },
     ]);
   });
 
@@ -954,6 +1185,9 @@ describe('migrate', () => {
         { id: '006-task-attempt-launch-recovery' },
         { id: '007-developer-execution' },
         { id: '008-developer-cycle-task-title' },
+        { id: '009-qa-execution' },
+        { id: '010-review-automation-state' },
+        { id: '011-qa-interruption-repair' },
       ]);
       expect(
         database

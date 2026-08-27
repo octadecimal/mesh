@@ -1,0 +1,2639 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  developerCompletionReportSchema,
+  developerExecutionCycleSchema,
+  projectSchema,
+  qaExecutionCycleSchema,
+  reviewAutomationActionSchema,
+  sessionSchema,
+  taskActorSchema,
+  taskSchema,
+  workspaceSchema,
+  type QaReportInput,
+  type Task,
+} from '@mesh-session-platform/contracts';
+
+import type { RepositoryIdentity } from '../projects/repository-identity.js';
+import type { ProcessRunner } from '../platform/process-runner.js';
+import type { QaWorkspaceReader } from '../platform/qa-workspace-reader.js';
+import {
+  QaVerificationExecutableUnavailableError,
+  QaVerificationRunner,
+  type QaVerificationResult,
+} from '../platform/qa-verification-runner.js';
+import { EventPublisher } from '../runtime/event-publisher.js';
+import { createTestRepositories } from '../test/create-test-database.js';
+import { AttemptService } from './attempt-service.js';
+import { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
+import { DeveloperExecutionService } from './developer-execution-service.js';
+import { DeveloperReworkService } from './developer-rework-service.js';
+import { QaCapabilityRegistry } from './qa-capability-registry.js';
+import {
+  QaExecutionService,
+  type QaRuntimeConfiguration,
+} from './qa-execution-service.js';
+import { TaskService } from './task-service.js';
+
+const now = '2026-08-26T12:00:00.000Z';
+const humanActor = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
+const policyActor = taskActorSchema.parse({
+  type: 'system',
+  id: 'review-loop',
+});
+const qaActor = taskActorSchema.parse({ type: 'agent', id: 'qa-agent-1' });
+
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+};
+
+describe('QaExecutionService', () => {
+  const cleanups: Array<() => void> = [];
+
+  afterEach(() => {
+    cleanups.splice(0).forEach((cleanup) => cleanup());
+  });
+
+  const setup = (options?: {
+    workspaceType?: 'shared' | 'worktree';
+    permissionMode?: 'interactive' | 'safe_auto' | 'inherit';
+    reviewPolicy?: 'manual' | 'autonomous_review';
+    task?: Partial<Task>;
+    billingConflict?: boolean;
+    startupFailure?: Error;
+    repositoryIdentity?: 'matching' | 'mismatched' | 'ambiguous';
+    missingDeveloperReport?: boolean;
+    afterRejectedVerdict?: (input: {
+      taskId: string;
+      cycleId: string;
+    }) => Promise<void>;
+    trackedSourceStates?: string[];
+    verificationRunner?: {
+      preflightTrackedSource?(path: string): Promise<void>;
+      captureTrackedSource(path: string): Promise<string>;
+      run(
+        path: string,
+        input: { executable: string; args: string[] },
+        options?: { signal?: AbortSignal },
+      ): Promise<QaVerificationResult>;
+    };
+    reserveRepair?: (sessionId: string) => (() => void) | undefined;
+    workspaceReader?: Pick<QaWorkspaceReader, 'read' | 'list' | 'search'>;
+  }) => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-qa-launch-'));
+    const repositories = createTestRepositories();
+    cleanups.push(() => {
+      repositories.dispose();
+      rmSync(directory, { force: true, recursive: true });
+    });
+
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'project-1',
+        displayName: 'Project one',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+        qaConfiguration: {
+          instructions: {
+            content: 'Run the focused server tests.',
+            revision: 3,
+            updatedAt: now,
+            updatedBy: humanActor,
+          },
+          reviewPolicy: options?.reviewPolicy ?? 'manual',
+          revision: 4,
+          updatedAt: now,
+          updatedBy: humanActor,
+        },
+      }),
+    );
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'task-1',
+        projectId: project.id,
+        title: 'Launch QA',
+        description: 'Verify the Developer submission.',
+        acceptanceCriteria: ['QA reuses the Developer workspace.'],
+        priority: 'normal',
+        rank: 'm',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 3,
+        createdAt: now,
+        updatedAt: now,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 1,
+          pauseReason: null,
+          updatedAt: now,
+        },
+        ...options?.task,
+      }),
+    );
+    const workspacePath =
+      options?.workspaceType === 'worktree'
+        ? join(directory, 'developer-worktree')
+        : directory;
+    const workspace = repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'developer-workspace',
+        projectId: project.id,
+        type: options?.workspaceType ?? 'shared',
+        path: workspacePath,
+        ...(options?.workspaceType === 'worktree'
+          ? {
+              gitBranch: 'mesh/developer',
+              gitWorktreePath: workspacePath,
+              owner: 'mesh',
+            }
+          : {}),
+        cleanupState: 'active',
+      }),
+    );
+    const developerSession = repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'developer-session',
+        projectId: project.id,
+        workspaceId: workspace.id,
+        title: 'Developer',
+        permissionMode: options?.permissionMode ?? 'safe_auto',
+        lifecycleState: 'interrupted',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const attempt = repositories.attempts.createForTask(
+      task.id,
+      developerSession.id,
+      'launched',
+      humanActor,
+      'developer',
+    );
+    const developerCycle = repositories.developerExecutions.createCycle(
+      developerExecutionCycleSchema.parse({
+        id: 'developer-cycle',
+        attemptId: attempt.id,
+        ordinal: 1,
+        mode: 'new',
+        authorizedBy: humanActor,
+        authorizationCommandId: 'developer-launch',
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: task.title,
+          description: task.description,
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: task.acceptanceCriteria[0] },
+          ],
+        },
+        workspaceId: workspace.id,
+        permissionMode: developerSession.permissionMode,
+        startedAt: now,
+        endedAt: now,
+        terminalDisposition: 'submitted_for_review',
+        completionReportId: 'developer-report',
+        blockerReportId: null,
+        terminalCommandId: 'developer-submit',
+        terminalEventId: 'developer-event',
+      }),
+    );
+    const developerReport = developerCompletionReportSchema.parse({
+      id: 'developer-report',
+      cycleId: developerCycle.id,
+      summary: 'Ready for QA.',
+      criterionResults: [
+        { criterionId: 'criterion-1', status: 'met', evidence: 'Test passed.' },
+      ],
+      verification: [
+        { command: 'pnpm test', outcome: 'passed', output: 'pass' },
+      ],
+      limitations: '',
+      workspaceState: {
+        summary: 'Developer changes are present.',
+        hasUncommittedChanges: false,
+        commitsCreated: true,
+      },
+      reviewerNotes: null,
+      createdAt: now,
+    });
+    if (!options?.missingDeveloperReport) {
+      repositories.developerExecutions.appendCompletionReport(developerReport);
+    }
+
+    let nextId = 0;
+    const createId = () => `qa-generated-${++nextId}`;
+    const taskService = new TaskService({
+      ...repositories,
+      now: () => now,
+      createId,
+    });
+    const developerCapabilities = new DeveloperCapabilityRegistry();
+    const developerExecutionService = new DeveloperExecutionService({
+      ...repositories,
+      taskService,
+      capabilities: developerCapabilities,
+      now: () => now,
+      createId,
+    });
+    const publisher = new EventPublisher();
+    const publicationSnapshots: Array<{
+      cycleEndedAt: string | null | undefined;
+      reportPersisted: boolean;
+      transactionOpen: boolean;
+      type: string;
+    }> = [];
+    const publishProject = publisher.publishProject.bind(publisher);
+    vi.spyOn(publisher, 'publishProject').mockImplementation((event) => {
+      const cycle =
+        event.type === 'task.qa_execution_changed'
+          ? repositories.qaExecutions.getCycle(event.payload.cycle.id)
+          : undefined;
+      publicationSnapshots.push({
+        cycleEndedAt: cycle?.endedAt,
+        reportPersisted:
+          event.type === 'task.qa_execution_changed' &&
+          event.payload.report !== null &&
+          repositories.qaExecutions.getReport(event.payload.report.id) !==
+            undefined,
+        transactionOpen: repositories.database.inTransaction,
+        type: event.type,
+      });
+      publishProject(event);
+    });
+    const developerReworkService = new DeveloperReworkService({
+      ...repositories,
+      taskService,
+      capabilities: developerCapabilities,
+      developerExecutionService,
+      registry: {
+        resume: async () => undefined,
+        interrupt: async () => undefined,
+        emergencyClose: async () => undefined,
+        publisher,
+      },
+      now: () => now,
+      createId,
+    });
+    const resolveIdentity = async (
+      path: string,
+    ): Promise<RepositoryIdentity> => {
+      if (
+        options?.repositoryIdentity === 'ambiguous' &&
+        path === workspacePath
+      ) {
+        throw new Error('ambiguous repository identity');
+      }
+      return {
+        canonicalPath: path,
+        commonDirectory: directory,
+        repositoryIdentity:
+          options?.repositoryIdentity === 'mismatched' && path === workspacePath
+            ? 'other-repository'
+            : 'repository-identity',
+      } as RepositoryIdentity;
+    };
+    const attemptService = new AttemptService({
+      ...repositories,
+      taskService,
+      capabilities: developerCapabilities,
+      developerReworkService,
+      registry: {
+        create: async () => undefined,
+        interrupt: async () => undefined,
+        publisher,
+      },
+      pathOptions: { baseDirectory: directory },
+      resolveIdentity,
+      now: () => now,
+      createId,
+    });
+    const starts: Array<{
+      sessionId: string;
+      configuration: QaRuntimeConfiguration;
+    }> = [];
+    const durableAtStart: boolean[] = [];
+    const create = vi.fn(
+      async (sessionId: string, configuration: QaRuntimeConfiguration) => {
+        starts.push({ sessionId, configuration });
+        durableAtStart.push(
+          repositories.sessions.get(sessionId) !== undefined &&
+            repositories.qaExecutions
+              .listCyclesForAttempts([attempt.id])
+              .some((cycle) => cycle.sessionId === sessionId),
+        );
+        if (options?.startupFailure) throw options.startupFailure;
+      },
+    );
+    const interrupt = vi.fn(async () => undefined);
+    const qaCapabilities = new QaCapabilityRegistry();
+    const trackedSourceStates = [
+      ...(options?.trackedSourceStates ?? ['sha256:developer-source']),
+    ];
+    const captureTrackedSource = vi.fn(async () => {
+      const state = trackedSourceStates.shift();
+      return state ?? 'sha256:developer-source';
+    });
+    const preflightTrackedSource = vi.fn(async () => undefined);
+    const runVerification = vi.fn(async (_path, input) => ({
+      command: [input.executable, ...input.args].join(' '),
+      exitCode: 0,
+      stdout: 'verification passed',
+      stderr: '',
+    }));
+    const verificationRunner = options?.verificationRunner
+      ? {
+          preflightTrackedSource:
+            options.verificationRunner.preflightTrackedSource?.bind(
+              options.verificationRunner,
+            ) ?? preflightTrackedSource,
+          captureTrackedSource:
+            options.verificationRunner.captureTrackedSource.bind(
+              options.verificationRunner,
+            ),
+          run: options.verificationRunner.run.bind(options.verificationRunner),
+        }
+      : {
+          preflightTrackedSource,
+          captureTrackedSource,
+          run: runVerification,
+        };
+    const registry = {
+      create,
+      interrupt,
+      publisher,
+      reserveRepair: options?.reserveRepair ?? (() => () => undefined),
+    };
+    const service = new QaExecutionService({
+      ...repositories,
+      attemptService,
+      capabilities: qaCapabilities,
+      registry,
+      afterRejectedVerdict: options?.afterRejectedVerdict,
+      billingConflicts: options?.billingConflict
+        ? [{ variable: 'ANTHROPIC_API_KEY' }]
+        : [],
+      verificationRunner,
+      workspaceReader: options?.workspaceReader,
+      now: () => now,
+      createId,
+    });
+
+    return {
+      attempt,
+      create,
+      developerCycle,
+      developerReport,
+      developerSession,
+      directory,
+      durableAtStart,
+      project,
+      publicationSnapshots,
+      qaCapabilities,
+      repositories,
+      service,
+      starts,
+      interrupt,
+      preflightTrackedSource,
+      captureTrackedSource,
+      runVerification,
+      task,
+      workspace,
+    };
+  };
+
+  const launchInput = (task: Task) => ({
+    commandId: 'qa-launch-1',
+    taskId: task.id,
+    expectedRevision: task.revision,
+    actor: humanActor,
+    trigger: 'manual' as const,
+  });
+
+  it.each(['shared', 'worktree'] as const)(
+    'launches manual QA in the exact %s Developer workspace',
+    async (workspaceType) => {
+      const context = setup({ workspaceType });
+
+      const result = await context.service.launch(launchInput(context.task));
+
+      expect(result).toMatchObject({
+        task: { lifecycleState: 'review', revision: context.task.revision },
+        attempt: { id: context.attempt.id },
+        cycle: {
+          attemptId: context.attempt.id,
+          developerCompletionReportId: context.developerReport.id,
+          workspaceId: context.workspace.id,
+          reviewPolicy: 'manual',
+          reviewPolicyRevision: 4,
+          workspaceBaseline: 'sha256:developer-source',
+          automationGeneration: context.task.reviewAutomation.generation,
+          rejectionOrdinal: context.task.reviewAutomation.rejectionCount,
+        },
+        session: {
+          workspaceId: context.developerSession.workspaceId,
+          permissionMode: context.developerSession.permissionMode,
+        },
+      });
+      expect(
+        context.repositories.workspaces.listByProject('project-1'),
+      ).toEqual([context.workspace]);
+      expect(context.starts).toHaveLength(1);
+      expect(context.durableAtStart).toEqual([true]);
+      expect(context.starts[0]?.configuration).toMatchObject({
+        role: 'qa',
+        availableTools: [],
+        allowedTools: [
+          'mcp__mesh_qa__read_workspace_file',
+          'mcp__mesh_qa__list_workspace_files',
+          'mcp__mesh_qa__search_workspace_text',
+          'mcp__mesh_qa__run_verification',
+          'mcp__mesh_qa__submit_qa_verdict',
+        ],
+        disallowedTools: [
+          'Bash',
+          'Read',
+          'Glob',
+          'Grep',
+          'Write',
+          'Edit',
+          'NotebookEdit',
+        ],
+        controlServer: {
+          name: 'mesh_qa',
+          version: '1',
+        },
+      });
+      expect(context.starts[0]?.configuration.initialPrompt).toContain(
+        context.workspace.path,
+      );
+      const start = context.starts[0];
+      if (!start) throw new Error('Expected QA startup request');
+      const binding = context.qaCapabilities.resolve(
+        start.configuration.capability,
+      );
+      expect(binding).toEqual({
+        sessionId: result.session.id,
+        taskId: context.task.id,
+        attemptId: context.attempt.id,
+        cycleId: result.cycle.id,
+      });
+      expect(
+        start.configuration.controlServer.tools.map(({ name }) => name),
+      ).toEqual([
+        'read_workspace_file',
+        'list_workspace_files',
+        'search_workspace_text',
+        'run_verification',
+        'submit_qa_verdict',
+      ]);
+    },
+  );
+
+  it('leaves no command reservation and retries the same launch key after Git is restored', async () => {
+    let gitAvailable = false;
+    const preflightTrackedSource = vi.fn(async () => {
+      if (!gitAvailable) throw new QaVerificationExecutableUnavailableError();
+    });
+    const captureTrackedSource = vi.fn(async () => 'sha256:developer-source');
+    const context = setup({
+      verificationRunner: {
+        preflightTrackedSource,
+        captureTrackedSource,
+        run: async () => {
+          throw new Error('verification must not start');
+        },
+      },
+    });
+    const projectEventsBefore =
+      context.repositories.projectEvents.latestSequence(context.project.id);
+    const sessionsBefore = context.repositories.sessions.listByProject(
+      context.project.id,
+    );
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).rejects.toMatchObject({
+      code: 'qa_verification_executable_unavailable',
+    });
+
+    expect(
+      context.repositories.sessions.listByProject(context.project.id),
+    ).toEqual(sessionsBefore);
+    expect(
+      context.repositories.qaExecutions.listCyclesForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.projectEvents.latestSequence(context.project.id),
+    ).toBe(projectEventsBefore);
+    expect(context.publicationSnapshots).toEqual([]);
+    expect(context.starts).toEqual([]);
+    expect(
+      context.repositories.database
+        .prepare('SELECT COUNT(*) AS count FROM processed_commands')
+        .get(),
+    ).toEqual({ count: 0 });
+
+    gitAvailable = true;
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).resolves.toMatchObject({
+      task: { id: context.task.id },
+      cycle: { workspaceBaseline: 'sha256:developer-source' },
+    });
+    expect(preflightTrackedSource).toHaveBeenCalledTimes(2);
+    expect(captureTrackedSource).toHaveBeenCalledOnce();
+    expect(context.starts).toHaveLength(1);
+    expect(
+      context.repositories.database
+        .prepare(
+          'SELECT state, COUNT(*) AS count FROM processed_commands GROUP BY state',
+        )
+        .all(),
+    ).toEqual([{ state: 'completed', count: 1 }]);
+  });
+
+  it('keeps inherited QA authority inside bounded workspace controls', async () => {
+    const context = setup({ permissionMode: 'inherit' });
+    writeFileSync(
+      join(context.directory, 'qa-evidence.txt'),
+      'inside evidence',
+    );
+    await context.service.launch(launchInput(context.task));
+    const configuration = context.starts[0]?.configuration;
+    if (!configuration) throw new Error('Expected QA runtime configuration');
+    const controls = Object.fromEntries(
+      configuration.controlServer.tools.map((control) => [
+        control.name,
+        control,
+      ]),
+    );
+
+    expect(configuration.availableTools).toEqual([]);
+    expect(configuration.disallowedTools).toEqual(
+      expect.arrayContaining(['Bash', 'Read', 'Glob', 'Grep']),
+    );
+    await expect(
+      controls.read_workspace_file?.execute({ path: 'qa-evidence.txt' }),
+    ).resolves.toMatchObject({
+      content: [
+        { type: 'text', text: expect.stringContaining('inside evidence') },
+      ],
+    });
+    await expect(
+      controls.list_workspace_files?.execute({ path: '.' }),
+    ).resolves.toMatchObject({
+      content: [
+        { type: 'text', text: expect.stringContaining('qa-evidence.txt') },
+      ],
+    });
+    await expect(
+      controls.search_workspace_text?.execute({
+        path: '.',
+        query: 'inside evidence',
+      }),
+    ).resolves.toMatchObject({
+      content: [
+        { type: 'text', text: expect.stringContaining('qa-evidence.txt') },
+      ],
+    });
+    await expect(
+      controls.read_workspace_file?.execute({ path: '../outside.txt' }),
+    ).resolves.toMatchObject({ isError: true });
+    await expect(
+      controls.read_workspace_file?.execute({
+        path: join(context.directory, '..', 'outside.txt'),
+      }),
+    ).resolves.toMatchObject({ isError: true });
+  });
+
+  it('rejects an adversarial source-writing verification request before process execution', async () => {
+    const process = vi.fn(async (_executable, args: readonly string[]) => ({
+      exitCode: 0,
+      stdout: args.includes('rev-parse') ? 'true\n' : '',
+      stderr: '',
+    }));
+    const context = setup({
+      verificationRunner: new QaVerificationRunner({ run: process }),
+    });
+    await context.service.launch(launchInput(context.task));
+    const configuration = context.starts[0]?.configuration;
+    const control = configuration?.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const response = await control.execute({
+      executable: 'node',
+      args: ['-e', "require('fs').writeFileSync('src/app.ts','owned')"],
+    });
+
+    expect(response).toMatchObject({ isError: true });
+    expect(process).toHaveBeenCalled();
+    expect(process.mock.calls).toEqual(
+      expect.arrayContaining([
+        ['git', expect.arrayContaining(['ls-files']), expect.any(Object)],
+      ]),
+    );
+    expect(
+      process.mock.calls.every(
+        (call) => (call as unknown as [string])[0] === 'git',
+      ),
+    ).toBe(true);
+  });
+
+  it('times out a hanging verification, pauses QA, and leaves no owned child', async () => {
+    vi.useFakeTimers();
+    try {
+      const started = deferred();
+      let activeChildren = 0;
+      const process = vi.fn(
+        async (
+          executable: string,
+          args: readonly string[],
+          options: { signal?: AbortSignal },
+        ) => {
+          if (executable === 'git') {
+            return {
+              exitCode: 0,
+              stdout: args.includes('rev-parse') ? 'true\n' : '',
+              stderr: '',
+            };
+          }
+          started.resolve();
+          if (!options.signal) {
+            return { exitCode: 0, stdout: 'not bounded', stderr: '' };
+          }
+          activeChildren += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeChildren -= 1;
+                reject(options.signal?.reason);
+              },
+              { once: true },
+            );
+          });
+        },
+      );
+      const context = setup({
+        verificationRunner: new QaVerificationRunner(
+          { run: process } as ProcessRunner,
+          undefined,
+          undefined,
+          { verificationTimeoutMs: 100 },
+        ),
+      });
+      const launched = await context.service.launch(launchInput(context.task));
+      const control = context.starts[0]?.configuration.controlServer.tools.find(
+        ({ name }) => name === 'run_verification',
+      );
+      if (!control) throw new Error('Expected verification control');
+
+      const pending = control.execute({ executable: 'pnpm', args: ['test'] });
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(100);
+      const response = await pending;
+      expect(response).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: expect.stringContaining('qa_verification_timed_out'),
+          },
+        ],
+      });
+
+      expect(activeChildren).toBe(0);
+      expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+        reviewAutomation: { status: 'paused' },
+      });
+      expect(
+        context.repositories.diagnostics.list(launched.session.id),
+      ).toContainEqual(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            kind: 'qa_verification_failure',
+            code: 'qa_verification_timed_out',
+          }),
+        }),
+      );
+      expect(
+        context.repositories.qaExecutions.listReportsForAttempts([
+          context.attempt.id,
+        ]),
+      ).toEqual([]);
+      expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('pauses QA with a stable diagnostic when verification output overflows', async () => {
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => 'sha256:developer-source',
+        run: async () => {
+          throw Object.assign(new Error('output limit exceeded'), {
+            code: 'qa_verification_output_limit_exceeded',
+          });
+        },
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const response = await control.execute({
+      executable: 'pnpm',
+      args: ['test'],
+    });
+
+    expect(response).toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining(
+            'qa_verification_output_limit_exceeded',
+          ),
+        },
+      ],
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_output_limit_exceeded',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+  });
+
+  it('pauses QA when owned verification process termination cannot be enforced', async () => {
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => 'sha256:developer-source',
+        run: async () => {
+          throw Object.assign(new Error('termination failed'), {
+            code: 'qa_verification_termination_failed',
+          });
+        },
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const response = await control.execute({
+      executable: 'pnpm',
+      args: ['test'],
+    });
+
+    expect(response).toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('qa_verification_termination_failed'),
+        },
+      ],
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_termination_failed',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+  });
+
+  it('cancels a hanging verification with its runtime and records the pause', async () => {
+    const started = deferred();
+    let activeChildren = 0;
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => 'sha256:developer-source',
+        run: async (_path, _input, options) => {
+          started.resolve();
+          if (!options?.signal) {
+            return {
+              command: 'pnpm test',
+              exitCode: 0,
+              stdout: 'not cancellable',
+              stderr: '',
+            };
+          }
+          activeChildren += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeChildren -= 1;
+                reject(
+                  Object.assign(new Error('cancelled'), {
+                    code: 'qa_verification_cancelled',
+                  }),
+                );
+              },
+              { once: true },
+            );
+          });
+        },
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const pending = control.execute({ executable: 'pnpm', args: ['test'] });
+    await started.promise;
+    context.service.cancelRuntime(launched.session.id);
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('qa_verification_cancelled'),
+        },
+      ],
+    });
+
+    expect(activeChildren).toBe(0);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_cancelled',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('cancels a workspace search with its runtime and records the pause', async () => {
+    const started = deferred();
+    let activeSearches = 0;
+    const context = setup({
+      workspaceReader: {
+        read: async () => ({ path: 'unused', content: '', truncated: false }),
+        list: async () => ({ path: '.', entries: [], truncated: false }),
+        search: async (_workspace, _path, _query, options) => {
+          started.resolve();
+          if (!options?.signal) {
+            return { path: '.', matches: [], truncated: false };
+          }
+          activeSearches += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeSearches -= 1;
+                reject(
+                  Object.assign(new Error('search cancelled'), {
+                    code: 'qa_workspace_operation_cancelled',
+                  }),
+                );
+              },
+              { once: true },
+            );
+          });
+        },
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'search_workspace_text',
+    );
+    if (!control) throw new Error('Expected workspace search control');
+
+    const pending = control.execute({ path: '.', query: 'evidence' });
+    await started.promise;
+    context.service.cancelRuntime(launched.session.id);
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('qa_workspace_operation_cancelled'),
+        },
+      ],
+    });
+    expect(activeSearches).toBe(0);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_workspace_operation_cancelled',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('cancels a workspace listing with its runtime and records the pause', async () => {
+    const started = deferred();
+    let activeListings = 0;
+    const context = setup({
+      workspaceReader: {
+        read: async () => ({ path: 'unused', content: '', truncated: false }),
+        list: async (_workspace, _path, options) => {
+          started.resolve();
+          if (!options?.signal) {
+            return { path: '.', entries: [], truncated: false };
+          }
+          activeListings += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeListings -= 1;
+                reject(
+                  Object.assign(new Error('listing cancelled'), {
+                    code: 'qa_workspace_operation_cancelled',
+                  }),
+                );
+              },
+              { once: true },
+            );
+          });
+        },
+        search: async () => ({ path: '.', matches: [], truncated: false }),
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'list_workspace_files',
+    );
+    if (!control) throw new Error('Expected workspace listing control');
+
+    const pending = control.execute({ path: '.' });
+    await started.promise;
+    context.service.cancelRuntime(launched.session.id);
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('qa_workspace_operation_cancelled'),
+        },
+      ],
+    });
+    expect(activeListings).toBe(0);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_workspace_operation_cancelled',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('pauses and interrupts QA when authoritative tracked source changes after verification', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      trackedSourceStates: ['sha256:before', 'sha256:after'],
+    });
+    await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const response = await control.execute({
+      executable: 'corepack',
+      args: ['pnpm', 'test'],
+    });
+
+    expect(response).toMatchObject({ isError: true });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      lifecycleState: 'review',
+      reviewAutomation: {
+        status: 'paused',
+        pauseReason: expect.stringContaining('tracked source'),
+      },
+    });
+    expect(context.interrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks authoritative tracked source at the verdict boundary', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      trackedSourceStates: ['sha256:before', 'sha256:after'],
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+
+    const response = await control.execute(reportFor(launched.cycle));
+
+    expect(response).toMatchObject({ isError: true });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(context.interrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a parallel verdict and catches post-verification mutation before commit', async () => {
+    let markRunStarted!: () => void;
+    const runStarted = new Promise<void>((resolve) => {
+      markRunStarted = resolve;
+    });
+    let finishRun!: (result: QaVerificationResult) => void;
+    const runFinished = new Promise<QaVerificationResult>((resolve) => {
+      finishRun = resolve;
+    });
+    const sourceStates = ['sha256:before', 'sha256:before', 'sha256:after'];
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      verificationRunner: {
+        captureTrackedSource: async () =>
+          sourceStates.shift() ?? 'sha256:after',
+        run: async () => {
+          markRunStarted();
+          return runFinished;
+        },
+      },
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const controls = context.starts[0]?.configuration.controlServer.tools;
+    const verification = controls?.find(
+      ({ name }) => name === 'run_verification',
+    );
+    const verdict = controls?.find(({ name }) => name === 'submit_qa_verdict');
+    if (!verification || !verdict) throw new Error('Expected QA controls');
+
+    const running = verification.execute({
+      executable: 'pnpm',
+      args: ['test'],
+    });
+    await runStarted;
+
+    const parallelVerdict = await verdict.execute(reportFor(launched.cycle));
+
+    expect(parallelVerdict).toMatchObject({ isError: true });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+
+    finishRun({
+      command: 'pnpm test',
+      exitCode: 0,
+      stdout: 'passed',
+      stderr: '',
+    });
+    await expect(running).resolves.not.toMatchObject({ isError: true });
+
+    const finalVerdict = await verdict.execute(reportFor(launched.cycle));
+
+    expect(finalVerdict).toMatchObject({ isError: true });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+  });
+
+  it('binds the only QA control to server-owned cycle context and closes the runtime after one verdict', async () => {
+    const context = setup();
+    const launched = await context.service.launch(launchInput(context.task));
+    const configuration = context.starts[0]?.configuration;
+    if (!configuration) throw new Error('Expected QA runtime configuration');
+    const control = configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+    const report = reportFor(launched.cycle);
+
+    const response = await control.execute(report);
+
+    expect(response).toMatchObject({
+      content: [{ type: 'text', text: '{"status":"submitted_qa_verdict"}' }],
+    });
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+    expect(
+      context.repositories.qaExecutions.getReport(
+        context.repositories.qaExecutions.getCycle(launched.cycle.id)
+          ?.reportId ?? '',
+      ),
+    ).toMatchObject({
+      ...report,
+      workspaceBefore: expect.stringMatching(/^sha256:/),
+      workspaceAfter: expect.stringMatching(/^sha256:/),
+      verificationCommands: [],
+    });
+    expect(JSON.stringify(configuration.controlServer)).not.toContain(
+      configuration.capability,
+    );
+    expect(JSON.stringify(configuration.controlServer)).not.toContain(
+      launched.cycle.id,
+    );
+  });
+
+  it('continues an eligible autonomous rejection before stopping the QA runtime', async () => {
+    const afterRejectedVerdict = vi.fn(async () => undefined);
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      afterRejectedVerdict,
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+
+    await control.execute(
+      reportFor(launched.cycle, {
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Focused verification failed.',
+          },
+        ],
+      }),
+    );
+
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+    expect(afterRejectedVerdict).toHaveBeenCalledWith({
+      taskId: context.task.id,
+      cycleId: launched.cycle.id,
+    });
+    expect(afterRejectedVerdict.mock.invocationCallOrder[0]).toBeLessThan(
+      context.interrupt.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it('still stops the QA runtime when autonomous rejection follow-up fails', async () => {
+    const afterRejectedVerdict = vi.fn(async () => {
+      throw new Error('resume failed');
+    });
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      afterRejectedVerdict,
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+
+    const result = await control.execute(
+      reportFor(launched.cycle, {
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Focused verification failed.',
+          },
+        ],
+      }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+  });
+
+  it('does not continue a rejected manual review when automation state is stale', async () => {
+    const afterRejectedVerdict = vi.fn(async () => undefined);
+    const context = setup({ afterRejectedVerdict });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+
+    await control.execute(
+      reportFor(launched.cycle, {
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Focused verification failed.',
+          },
+        ],
+      }),
+    );
+
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+    expect(afterRejectedVerdict).not.toHaveBeenCalled();
+  });
+
+  it('persists a running QA verdict after a human pauses automation without following up', async () => {
+    const afterRejectedVerdict = vi.fn(async () => undefined);
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      afterRejectedVerdict,
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const current = context.repositories.tasks.get(context.task.id);
+    if (!current) throw new Error('Expected current task');
+    const paused = context.repositories.tasks.update(
+      {
+        ...current,
+        reviewAutomation: {
+          ...current.reviewAutomation,
+          status: 'paused',
+          generation: current.reviewAutomation.generation + 1,
+          pauseReason: 'Operator paused while QA was running.',
+          updatedAt: now,
+        },
+      },
+      current.revision,
+    );
+    if (!paused) throw new Error('Expected paused task');
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+
+    const response = await control.execute(
+      reportFor(launched.cycle, {
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'A focused check failed.',
+          },
+        ],
+      }),
+    );
+
+    expect(response).toMatchObject({
+      content: [{ type: 'text', text: '{"status":"submitted_qa_verdict"}' }],
+    });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ terminalDisposition: 'rejected' });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: {
+        status: 'paused',
+        pauseReason: 'Operator paused while QA was running.',
+      },
+    });
+    expect(afterRejectedVerdict).not.toHaveBeenCalled();
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+  });
+
+  it('launches only an enabled autonomous-review policy as a system actor', async () => {
+    const context = setup({ reviewPolicy: 'autonomous_review' });
+
+    const result = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+
+    expect(result.cycle).toMatchObject({
+      authorizedBy: policyActor,
+      reviewPolicy: 'autonomous_review',
+    });
+  });
+
+  it.each(['paused', 'disabled'] as const)(
+    'rejects autonomous launch when task review automation is %s without side effects',
+    async (status) => {
+      const context = setup({
+        reviewPolicy: 'autonomous_review',
+        task: {
+          reviewAutomation: {
+            status,
+            generation: 2,
+            rejectionCount: 1,
+            pauseReason:
+              status === 'paused' ? 'Operator paused review automation.' : null,
+            updatedAt: now,
+          },
+        },
+      });
+      const sessionsBefore = context.repositories.sessions.listByProject(
+        context.project.id,
+        { includeArchived: true },
+      );
+      const eventsBefore = context.repositories.projectEvents.after(
+        context.project.id,
+        0,
+      );
+
+      await expect(
+        context.service.launch({
+          ...launchInput(context.task),
+          actor: policyActor,
+          trigger: 'autonomous_policy',
+        }),
+      ).rejects.toMatchObject({ code: 'review_automation_paused' });
+
+      expect(
+        context.repositories.sessions.listByProject(context.project.id, {
+          includeArchived: true,
+        }),
+      ).toEqual(sessionsBefore);
+      expect(
+        context.repositories.qaExecutions.listCyclesForAttempts([
+          context.attempt.id,
+        ]),
+      ).toEqual([]);
+      expect(
+        context.repositories.projectEvents.after(context.project.id, 0),
+      ).toEqual(eventsBefore);
+      expect(context.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('audits a human repair for a dead QA runtime without inventing a verdict', async () => {
+    const context = setup();
+    const launched = await context.service.launch(launchInput(context.task));
+    context.repositories.database
+      .prepare(
+        "UPDATE sessions SET lifecycle_state = 'failed', updated_at = ? WHERE id = ?",
+      )
+      .run(now, launched.session.id);
+    context.repositories.qaExecutions.insertAutomationAction(
+      reviewAutomationActionSchema.parse({
+        id: 'qa-launch-action',
+        idempotencyKey: 'qa-launch-action-key',
+        projectId: context.task.projectId,
+        taskId: context.task.id,
+        attemptId: context.attempt.id,
+        sourceCycleId: context.developerCycle.id,
+        actionKind: 'launch_qa',
+        generation: 0,
+        status: 'pending',
+        errorCode: null,
+        createdAt: now,
+        completedAt: null,
+      }),
+    );
+
+    const result = context.service.repairInterrupted({
+      commandId: 'repair-interrupted-qa',
+      taskId: context.task.id,
+      cycleId: launched.cycle.id,
+      expectedRevision: context.task.revision,
+      actor: humanActor,
+    });
+
+    expect(result.cycle).toMatchObject({
+      terminalDisposition: 'interrupted',
+      reportId: null,
+      terminalCommandId: 'repair-interrupted-qa',
+    });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toEqual(result.cycle);
+    expect(
+      context.repositories.qaExecutions.getAutomationAction('qa-launch-action'),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'qa_cycle_interrupted',
+    });
+    expect(result.events.map(({ type }) => type)).toEqual([
+      'task.qa_execution_changed',
+      'task.review_automation_changed',
+    ]);
+    expect(
+      context.service.repairInterrupted({
+        commandId: 'repair-interrupted-qa',
+        taskId: context.task.id,
+        cycleId: launched.cycle.id,
+        expectedRevision: context.task.revision,
+        actor: humanActor,
+      }),
+    ).toEqual(result);
+  });
+
+  it('refuses to repair a QA cycle while its runtime is live', async () => {
+    const context = setup();
+    const launched = await context.service.launch(launchInput(context.task));
+    context.repositories.database
+      .prepare(
+        "UPDATE sessions SET lifecycle_state = 'running', updated_at = ? WHERE id = ?",
+      )
+      .run(now, launched.session.id);
+
+    expect(() =>
+      context.service.repairInterrupted({
+        commandId: 'repair-live-qa',
+        taskId: context.task.id,
+        cycleId: launched.cycle.id,
+        expectedRevision: context.task.revision,
+        actor: humanActor,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'qa_cycle_active' }));
+  });
+
+  it('keeps a QA cycle active when runtime ownership refuses repair reservation', async () => {
+    const reserveRepair = vi.fn(() => undefined);
+    const context = setup({ reserveRepair });
+    const launched = await context.service.launch(launchInput(context.task));
+    context.repositories.database
+      .prepare(
+        "UPDATE sessions SET lifecycle_state = 'failed', updated_at = ? WHERE id = ?",
+      )
+      .run(now, launched.session.id);
+
+    expect(() =>
+      context.service.repairInterrupted({
+        commandId: 'repair-pending-attach',
+        taskId: context.task.id,
+        cycleId: launched.cycle.id,
+        expectedRevision: context.task.revision,
+        actor: humanActor,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'qa_cycle_active' }));
+    expect(reserveRepair).toHaveBeenCalledWith(launched.session.id);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ endedAt: null, terminalDisposition: null });
+  });
+
+  it.each([
+    ['manual', policyActor],
+    ['autonomous_policy', humanActor],
+  ] as const)(
+    'rejects %s launch by the wrong actor kind',
+    async (trigger, actor) => {
+      const context = setup({ reviewPolicy: 'autonomous_review' });
+
+      await expect(
+        context.service.launch({
+          ...launchInput(context.task),
+          trigger,
+          actor,
+        }),
+      ).rejects.toMatchObject({ code: 'task_transition_unauthorized' });
+      expect(context.preflightTrackedSource).not.toHaveBeenCalled();
+      expect(context.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects autonomous launch when the project policy is manual', async () => {
+    const context = setup();
+
+    await expect(
+      context.service.launch({
+        ...launchInput(context.task),
+        actor: policyActor,
+        trigger: 'autonomous_policy',
+      }),
+    ).rejects.toMatchObject({ code: 'task_transition_unauthorized' });
+  });
+
+  it('rejects manual launch when the project policy is autonomous-review', async () => {
+    const context = setup({ reviewPolicy: 'autonomous_review' });
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).rejects.toMatchObject({ code: 'task_transition_unauthorized' });
+  });
+
+  it.each(['paused', 'disabled'] as const)(
+    'allows an audited human QA launch when autonomous review is %s',
+    async (status) => {
+      const context = setup({
+        reviewPolicy: 'autonomous_review',
+        task: {
+          reviewAutomation: {
+            status,
+            generation: 2,
+            rejectionCount: 1,
+            pauseReason: status === 'paused' ? 'Operator paused.' : null,
+            updatedAt: now,
+          },
+        },
+      });
+
+      await expect(
+        context.service.launch(launchInput(context.task)),
+      ).resolves.toMatchObject({
+        cycle: { authorizedBy: humanActor, reviewPolicy: 'autonomous_review' },
+      });
+    },
+  );
+
+  it.each([
+    [
+      'non-review task',
+      { lifecycleState: 'in_progress' as const },
+      'task_transition_invalid',
+    ],
+    [
+      'blocked task',
+      { blocked: { reason: 'Blocked.', actor: humanActor, blockedAt: now } },
+      'task_blocked',
+    ],
+  ])('rejects a %s', async (_name, taskOverride, code) => {
+    const context = setup({ task: taskOverride });
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).rejects.toMatchObject({
+      code,
+    });
+    expect(context.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a stale task revision', async () => {
+    const context = setup();
+
+    await expect(
+      context.service.launch({
+        ...launchInput(context.task),
+        expectedRevision: context.task.revision - 1,
+      }),
+    ).rejects.toMatchObject({ code: 'task_revision_conflict' });
+  });
+
+  it('rejects when the terminal Developer attempt is no longer current', async () => {
+    const context = setup();
+    context.repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'newer-session',
+        projectId: context.project.id,
+        workspaceId: context.workspace.id,
+        title: 'Newer Developer',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'interrupted',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    context.repositories.attempts.createForTask(
+      context.task.id,
+      'newer-session',
+      'launched',
+      humanActor,
+      'developer',
+    );
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).rejects.toMatchObject({ code: 'developer_cycle_invalid' });
+  });
+
+  it('requires the terminal Developer completion report', async () => {
+    const context = setup({ missingDeveloperReport: true });
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).rejects.toMatchObject({ code: 'developer_report_invalid' });
+  });
+
+  it('rejects any active Developer or QA role cycle', async () => {
+    const developerActive = setup();
+    developerActive.repositories.database
+      .prepare(
+        'UPDATE developer_execution_cycles SET ended_at = NULL, terminal_disposition = NULL, completion_report_id = NULL, terminal_command_id = NULL, terminal_event_id = NULL WHERE id = ?',
+      )
+      .run(developerActive.developerCycle.id);
+    await expect(
+      developerActive.service.launch(launchInput(developerActive.task)),
+    ).rejects.toMatchObject({ code: 'qa_already_active' });
+
+    const qaActive = setup();
+    qaActive.repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'existing-qa-session',
+        projectId: qaActive.project.id,
+        workspaceId: qaActive.workspace.id,
+        title: 'Existing QA',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'interrupted',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    qaActive.repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'existing-qa-cycle',
+        taskId: qaActive.task.id,
+        attemptId: qaActive.attempt.id,
+        sessionId: 'existing-qa-session',
+        ordinal: 1,
+        authorizedBy: humanActor,
+        authorizationCommandId: 'prior-launch',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: qaActive.task.revision,
+          title: qaActive.task.title,
+          description: qaActive.task.description,
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: qaActive.task.acceptanceCriteria[0] },
+          ],
+        },
+        developerCompletionReportId: qaActive.developerReport.id,
+        workspaceId: qaActive.workspace.id,
+        reviewPolicy: 'manual',
+        reviewPolicyRevision: 1,
+        automationGeneration: 0,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    await expect(
+      qaActive.service.launch(launchInput(qaActive.task)),
+    ).rejects.toMatchObject({ code: 'qa_already_active' });
+  });
+
+  it.each(['mismatched', 'ambiguous'] as const)(
+    'rejects a %s Developer workspace repository identity',
+    async (repositoryIdentity) => {
+      const context = setup({
+        repositoryIdentity,
+        workspaceType: 'worktree',
+      });
+
+      await expect(
+        context.service.launch(launchInput(context.task)),
+      ).rejects.toMatchObject({ code: 'unsafe_qa_workspace' });
+      expect(context.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('blocks QA startup when API billing configuration conflicts', async () => {
+    const context = setup({ billingConflict: true });
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).rejects.toMatchObject({ code: 'billing_configuration_conflict' });
+    expect(
+      context.repositories.qaExecutions.listCyclesForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('retains durable QA truth and diagnostics when startup fails', async () => {
+    const context = setup({ startupFailure: new Error('driver unavailable') });
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).rejects.toMatchObject({ code: 'review_automation_paused' });
+
+    const [cycle] = context.repositories.qaExecutions.listCyclesForAttempts([
+      context.attempt.id,
+    ]);
+    if (!cycle) throw new Error('Expected durable QA cycle');
+    expect(cycle).toMatchObject({ endedAt: null, terminalDisposition: null });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      lifecycleState: 'review',
+      revision: context.task.revision,
+    });
+    expect(
+      context.repositories.diagnostics.list(cycle.sessionId),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_execution_launch',
+          stage: 'startup',
+          outcome: 'failed',
+        }),
+      }),
+    );
+    const start = context.starts[0];
+    if (!start) throw new Error('Expected failed QA startup request');
+    expect(() =>
+      context.qaCapabilities.resolve(start.configuration.capability),
+    ).toThrow();
+  });
+
+  it('returns the original result for a duplicate successful idempotency key', async () => {
+    const context = setup();
+    const input = launchInput(context.task);
+
+    const first = await context.service.launch(input);
+    const duplicate = await context.service.launch(input);
+
+    expect(duplicate).toEqual(first);
+    expect(context.create).toHaveBeenCalledTimes(1);
+    expect(
+      context.repositories.qaExecutions.listCyclesForAttempts([
+        context.attempt.id,
+      ]),
+    ).toHaveLength(1);
+  });
+
+  const launchForVerdict = async (context: ReturnType<typeof setup>) => {
+    const launch = await context.service.launch(launchInput(context.task));
+    const start = context.starts.at(-1);
+    if (!start) throw new Error('Expected QA startup request');
+    return { launch, capability: start.configuration.capability };
+  };
+
+  const reportFor = (
+    cycle: { taskSnapshot: { acceptanceCriteria: { id: string }[] } },
+    overrides: Partial<QaReportInput> = {},
+  ): QaReportInput => ({
+    disposition: 'verified',
+    criterionResults: cycle.taskSnapshot.acceptanceCriteria.map(({ id }) => ({
+      criterionId: id,
+      status: 'passed' as const,
+      evidence: `${id} passed focused verification.`,
+    })),
+    limitations: [],
+    residualRisks: [],
+    ...overrides,
+  });
+
+  const verdictInput = (
+    context: ReturnType<typeof setup>,
+    launched: Awaited<ReturnType<typeof launchForVerdict>>,
+    overrides: Partial<
+      Parameters<typeof context.service.submitVerdict>[0]
+    > = {},
+  ) => ({
+    commandId: 'qa-verdict-1',
+    capability: launched.capability,
+    expectedRevision: context.task.revision,
+    actor: qaActor,
+    report: reportFor(launched.launch.cycle),
+    ...overrides,
+  });
+
+  it('records a verified manual verdict atomically and publishes only after commit', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const taskBefore = context.repositories.tasks.get(context.task.id);
+    context.publicationSnapshots.splice(0);
+
+    const outcome = await context.service.submitVerdict(
+      verdictInput(context, launched),
+    );
+
+    expect(outcome).toMatchObject({
+      task: {
+        id: context.task.id,
+        lifecycleState: 'review',
+        revision: context.task.revision,
+      },
+      attempt: { id: context.attempt.id },
+      cycle: {
+        id: launched.launch.cycle.id,
+        terminalDisposition: 'verified',
+        reportId: outcome.report.id,
+        terminalCommandId: 'qa-verdict-1',
+        terminalEventId: outcome.event.id,
+      },
+      report: {
+        cycleId: launched.launch.cycle.id,
+        disposition: 'verified',
+      },
+      event: {
+        type: 'task.qa_execution_changed',
+        payload: { report: { disposition: 'verified' } },
+      },
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toEqual(taskBefore);
+    expect(
+      context.repositories.qaExecutions.getReport(outcome.report.id),
+    ).toEqual(outcome.report);
+    expect(context.publicationSnapshots).toEqual([
+      {
+        cycleEndedAt: now,
+        reportPersisted: true,
+        transactionOpen: false,
+        type: 'task.qa_execution_changed',
+      },
+    ]);
+    expect(() => context.qaCapabilities.resolve(launched.capability)).toThrow();
+  });
+
+  it('rechecks tracked source for direct verdict submission before persistence', async () => {
+    const context = setup({
+      trackedSourceStates: ['sha256:before', 'sha256:after'],
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_source_mutation_detected' });
+
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.launch.session.id);
+  });
+
+  it('pauses without committing a verdict when tracked source never stabilizes', async () => {
+    let captureCount = 0;
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => {
+          captureCount += 1;
+          if (captureCount === 1) return 'sha256:stable-baseline';
+          throw Object.assign(new Error('Tracked source kept changing'), {
+            code: 'qa_source_snapshot_unstable',
+          });
+        },
+        run: async () => ({
+          command: 'pnpm test',
+          exitCode: 0,
+          stdout: 'passed',
+          stderr: '',
+        }),
+      },
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_source_mutation_detected' });
+
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(context.interrupt).toHaveBeenCalledWith(launched.launch.session.id);
+  });
+
+  it('pauses without a verdict when commit-boundary source capture times out', async () => {
+    let captureCount = 0;
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => {
+          captureCount += 1;
+          if (captureCount === 1) return 'sha256:developer-source';
+          throw Object.assign(new Error('capture timed out'), {
+            code: 'qa_verification_timed_out',
+          });
+        },
+        run: async () => ({
+          command: 'pnpm test',
+          exitCode: 0,
+          stdout: 'passed',
+          stderr: '',
+        }),
+      },
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_verification_timed_out' });
+
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.launch.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_timed_out',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+  });
+
+  it('pauses without a verdict when trusted Git becomes unavailable', async () => {
+    let captureCount = 0;
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => {
+          captureCount += 1;
+          if (captureCount === 1) return 'sha256:developer-source';
+          throw Object.assign(new Error('trusted Git unavailable'), {
+            code: 'qa_verification_executable_unavailable',
+          });
+        },
+        run: async () => ({
+          command: 'pnpm test',
+          exitCode: 0,
+          stdout: 'passed',
+          stderr: '',
+        }),
+      },
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({
+      code: 'qa_verification_executable_unavailable',
+    });
+
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.launch.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_executable_unavailable',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+  });
+
+  it('pauses without a verdict when final source revalidation is cancelled', async () => {
+    let canonicalWorkspace = '';
+    let armed = false;
+    let rootRevalidations = 0;
+    let cancelRuntime = () => undefined;
+    const run = vi.fn(async (_executable, args: readonly string[]) => ({
+      exitCode: 0,
+      stdout: args.includes('rev-parse') ? 'true\n' : 'source.ts\0',
+      stderr: '',
+    }));
+    const verificationRunner = new QaVerificationRunner(
+      { run } as ProcessRunner,
+      undefined,
+      undefined,
+      {
+        resolveRealPath: async (path) => {
+          const resolved = await realpath(path);
+          if (armed && resolved === canonicalWorkspace) {
+            rootRevalidations += 1;
+            if (rootRevalidations === 8) cancelRuntime();
+          }
+          return resolved;
+        },
+      },
+    );
+    const context = setup({ verificationRunner });
+    writeFileSync(join(context.workspace.path, 'source.ts'), 'trusted source');
+    canonicalWorkspace = await realpath(context.workspace.path);
+    const launched = await launchForVerdict(context);
+    cancelRuntime = () =>
+      context.service.cancelRuntime(launched.launch.session.id);
+    armed = true;
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_verification_cancelled' });
+
+    expect(rootRevalidations).toBe(8);
+    expect(context.repositories.database.inTransaction).toBe(false);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+  });
+
+  it('records a rejected manual verdict without transitioning the task', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const taskBefore = context.repositories.tasks.get(context.task.id);
+
+    const outcome = await context.service.submitVerdict(
+      verdictInput(context, launched, {
+        report: reportFor(launched.launch.cycle, {
+          disposition: 'rejected',
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: 'failed',
+              evidence: 'Focused verification failed.',
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(outcome).toMatchObject({
+      task: { lifecycleState: 'review', revision: context.task.revision },
+      cycle: { terminalDisposition: 'rejected' },
+      report: { disposition: 'rejected' },
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toEqual(taskBefore);
+  });
+
+  const launchAutonomousForVerdict = async (
+    context: ReturnType<typeof setup>,
+  ) => {
+    const launch = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const start = context.starts.at(-1);
+    if (!start) throw new Error('Expected QA startup request');
+    return { launch, capability: start.configuration.capability };
+  };
+
+  it('atomically completes a verified autonomous-review task', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      task: {
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 0,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+    });
+    const launched = await launchAutonomousForVerdict(context);
+    context.publicationSnapshots.splice(0);
+
+    const outcome = await context.service.submitVerdict(
+      verdictInput(context, launched),
+    );
+
+    expect(outcome.task).toMatchObject({
+      lifecycleState: 'done',
+      revision: context.task.revision + 1,
+    });
+    expect(context.repositories.tasks.get(context.task.id)).toEqual(
+      outcome.task,
+    );
+    expect(
+      context.repositories.qaExecutions.listPendingAutomationActions(),
+    ).toEqual([]);
+    expect(
+      context.repositories.projectEvents
+        .after(context.project.id, 0)
+        .slice(-3)
+        .map(({ type }) => type),
+    ).toEqual([
+      'task.qa_execution_changed',
+      'task.transitioned',
+      'task.review_automation_changed',
+    ]);
+    expect(context.publicationSnapshots.map(({ type }) => type)).toEqual([
+      'task.qa_execution_changed',
+      'task.transitioned',
+      'task.review_automation_changed',
+    ]);
+  });
+
+  it.each([
+    [0, 1],
+    [1, 2],
+  ] as const)(
+    'records autonomous rejection %i and schedules same-session resume',
+    async (priorCount, expectedCount) => {
+      const context = setup({
+        reviewPolicy: 'autonomous_review',
+        task: {
+          reviewAutomation: {
+            status: 'enabled',
+            generation: 2,
+            rejectionCount: priorCount,
+            pauseReason: null,
+            updatedAt: now,
+          },
+        },
+      });
+      const launched = await launchAutonomousForVerdict(context);
+
+      const outcome = await context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, {
+            disposition: 'rejected',
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status: 'failed',
+                evidence: 'Focused verification failed.',
+              },
+            ],
+          }),
+        }),
+      );
+
+      expect(outcome.task).toMatchObject({
+        lifecycleState: 'review',
+        reviewAutomation: {
+          status: 'enabled',
+          rejectionCount: expectedCount,
+        },
+      });
+      expect(
+        context.repositories.qaExecutions.listPendingAutomationActions(),
+      ).toEqual([
+        expect.objectContaining({
+          sourceCycleId: outcome.cycle.id,
+          actionKind: 'resume_developer',
+          generation: 2,
+        }),
+      ]);
+    },
+  );
+
+  it('pauses on the third autonomous rejection without scheduling resume', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      task: {
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 2,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+    });
+    const launched = await launchAutonomousForVerdict(context);
+
+    const outcome = await context.service.submitVerdict(
+      verdictInput(context, launched, {
+        report: reportFor(launched.launch.cycle, {
+          disposition: 'rejected',
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: 'failed',
+              evidence: 'Third focused verification failed.',
+            },
+          ],
+        }),
+      }),
+    );
+
+    expect(outcome.task).toMatchObject({
+      lifecycleState: 'review',
+      reviewAutomation: {
+        status: 'paused',
+        rejectionCount: 3,
+        pauseReason: expect.stringContaining('Three'),
+      },
+    });
+    expect(
+      context.repositories.qaExecutions.listPendingAutomationActions(),
+    ).toEqual([]);
+  });
+
+  it('rolls back an autonomous verdict when action persistence fails', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      task: {
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 0,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+    });
+    const launched = await launchAutonomousForVerdict(context);
+    context.repositories.database.exec(`
+      CREATE TRIGGER fail_automation_action
+      BEFORE INSERT ON review_automation_actions_v2
+      BEGIN
+        SELECT RAISE(FAIL, 'automation action insert failed');
+      END;
+    `);
+
+    await expect(
+      context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, {
+            disposition: 'rejected',
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status: 'failed',
+                evidence: 'Focused verification failed.',
+              },
+            ],
+          }),
+        }),
+      ),
+    ).rejects.toThrow('automation action insert failed');
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      lifecycleState: 'review',
+      revision: context.task.revision,
+      reviewAutomation: { rejectionCount: 0, status: 'enabled' },
+    });
+  });
+
+  it.each([
+    [
+      'missing criterion',
+      [
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'First criterion passed.',
+        },
+      ],
+    ],
+    [
+      'duplicate criterion',
+      [
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'First result.',
+        },
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'Duplicate result.',
+        },
+      ],
+    ],
+    [
+      'unknown criterion',
+      [
+        {
+          criterionId: 'criterion-1',
+          status: 'passed' as const,
+          evidence: 'First criterion passed.',
+        },
+        {
+          criterionId: 'criterion-3',
+          status: 'passed' as const,
+          evidence: 'Unknown criterion passed.',
+        },
+      ],
+    ],
+  ])('rejects a report with a %s', async (_name, criterionResults) => {
+    const context = setup({
+      task: {
+        acceptanceCriteria: ['First criterion.', 'Second criterion.'],
+      },
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, { criterionResults }),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'qa_report_incomplete' });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+  });
+
+  it.each([
+    [
+      'verified with a failed criterion',
+      'verified' as const,
+      'failed' as const,
+    ],
+    [
+      'verified with a skipped criterion',
+      'verified' as const,
+      'skipped' as const,
+    ],
+    [
+      'rejected with every criterion passing',
+      'rejected' as const,
+      'passed' as const,
+    ],
+  ])('rejects an outcome that is %s', async (_name, disposition, status) => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(
+        verdictInput(context, launched, {
+          report: reportFor(launched.launch.cycle, {
+            disposition,
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status,
+                evidence: 'Observed criterion outcome.',
+              },
+            ],
+          }),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'qa_report_incomplete' });
+  });
+
+  it('rejects a capability whose binding does not match durable QA ownership', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const mismatchedCapability = context.qaCapabilities.issue({
+      sessionId: launched.launch.session.id,
+      taskId: context.task.id,
+      attemptId: 'other-attempt',
+      cycleId: launched.launch.cycle.id,
+    });
+
+    await expect(
+      context.service.submitVerdict(
+        verdictInput(context, launched, { capability: mismatchedCapability }),
+      ),
+    ).rejects.toMatchObject({ code: 'qa_capability_invalid' });
+  });
+
+  it('rejects a verdict when the bound Developer attempt is no longer current', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    context.repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'later-developer-session',
+        projectId: context.project.id,
+        workspaceId: context.workspace.id,
+        title: 'Later Developer',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'interrupted',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    context.repositories.attempts.createForTask(
+      context.task.id,
+      'later-developer-session',
+      'launched',
+      humanActor,
+      'developer',
+    );
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_capability_invalid' });
+  });
+
+  it('rejects a verdict when the task is no longer in review', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const changed = context.repositories.tasks.update(
+      { ...context.task, lifecycleState: 'done', updatedAt: now },
+      context.task.revision,
+    );
+    if (!changed) throw new Error('Expected task update');
+
+    await expect(
+      context.service.submitVerdict(
+        verdictInput(context, launched, { expectedRevision: changed.revision }),
+      ),
+    ).rejects.toMatchObject({ code: 'task_transition_invalid' });
+  });
+
+  it('rejects a verdict after a material task edit despite the bound cycle', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const current = context.repositories.tasks.get(context.task.id);
+    if (!current) throw new Error('Expected current task');
+    const changed = context.repositories.tasks.update(
+      { ...current, notes: 'Acceptance scope changed.', updatedAt: now },
+      current.revision,
+    );
+    if (!changed) throw new Error('Expected task update');
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'task_revision_conflict' });
+  });
+
+  it('rolls back report, cycle, and publication when audit persistence fails', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    context.publicationSnapshots.splice(0);
+    context.repositories.database.exec(`
+      CREATE TRIGGER fail_qa_verdict_event
+      BEFORE INSERT ON project_events
+      BEGIN
+        SELECT RAISE(FAIL, 'QA verdict event insert failed');
+      END;
+    `);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toThrow('QA verdict event insert failed');
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(context.publicationSnapshots).toEqual([]);
+    expect(context.qaCapabilities.resolve(launched.capability)).toBeDefined();
+  });
+
+  it('returns the stored outcome for a duplicate terminal command without republishing', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    const input = verdictInput(context, launched);
+    context.publicationSnapshots.splice(0);
+
+    const first = await context.service.submitVerdict(input);
+    const duplicate = await context.service.submitVerdict(input);
+
+    expect(duplicate).toEqual(first);
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([first.report]);
+    expect(context.publicationSnapshots).toHaveLength(1);
+    await expect(
+      context.service.submitVerdict({
+        ...input,
+        commandId: 'qa-verdict-replay',
+      }),
+    ).rejects.toMatchObject({ code: 'qa_capability_invalid' });
+  });
+
+  it('rejects a fresh capability bound to a durably closed cycle before persistence', async () => {
+    const context = setup();
+    const launched = await launchForVerdict(context);
+    context.publicationSnapshots.splice(0);
+    const first = await context.service.submitVerdict(
+      verdictInput(context, launched),
+    );
+    const eventsBeforeReplay = context.repositories.projectEvents.after(
+      context.project.id,
+      0,
+    );
+    context.repositories.database.exec(`
+      CREATE TRIGGER fail_terminal_qa_report_replay
+      BEFORE INSERT ON qa_reports
+      BEGIN
+        SELECT RAISE(FAIL, 'terminal replay reached report persistence');
+      END;
+    `);
+    const freshCapability = context.qaCapabilities.issue({
+      sessionId: first.cycle.sessionId,
+      taskId: first.task.id,
+      attemptId: first.attempt.id,
+      cycleId: first.cycle.id,
+    });
+
+    await expect(
+      context.service.submitVerdict({
+        ...verdictInput(context, launched),
+        commandId: 'qa-verdict-closed-cycle-replay',
+        capability: freshCapability,
+      }),
+    ).rejects.toMatchObject({ code: 'qa_capability_invalid' });
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([first.report]);
+    expect(context.repositories.qaExecutions.getCycle(first.cycle.id)).toEqual(
+      first.cycle,
+    );
+    expect(
+      context.repositories.projectEvents.after(context.project.id, 0),
+    ).toEqual(eventsBeforeReplay);
+    expect(context.publicationSnapshots).toHaveLength(1);
+    expect(context.qaCapabilities.resolve(freshCapability)).toBeDefined();
+  });
+});

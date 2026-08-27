@@ -7,6 +7,7 @@ import {
   stableTaskErrorCodeSchema,
   taskActorSchema,
   workspaceSchema,
+  UnsafeQaWorkspaceError,
   type MutatingCommand,
   type DeveloperExecutionCycle,
   type DeveloperReviewFeedback,
@@ -23,6 +24,7 @@ import type { DeveloperRuntimeConfiguration } from '../claude/driver.js';
 import { DEVELOPER_POLICY_VERSION } from '../domain/developer-policy.js';
 import { authorizeTaskTransition } from '../domain/task-lifecycle.js';
 import type { GitAdapter } from '../platform/git.js';
+import { ProcessTrustedExecutableUnavailableError } from '../platform/process-runner.js';
 import {
   resolveWorkspacePath,
   type ResolveWorkspacePathOptions,
@@ -45,6 +47,7 @@ import type { Database } from '../db/database.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
 import type {
+  DeveloperAttemptResumeInput as DeveloperReworkResumeInput,
   DeveloperReworkService,
   PreparedDeveloperRecovery,
 } from './developer-rework-service.js';
@@ -78,14 +81,7 @@ export type DeveloperAttemptLaunchInput = Omit<AttemptLaunchInput, 'actor'> & {
 
 export type DeveloperRecoveryKind = 'rejection' | 'unblock';
 
-export type DeveloperAttemptResumeInput = {
-  commandId: string;
-  taskId: string;
-  expectedRevision: number;
-  kind: DeveloperRecoveryKind;
-  feedback: string;
-  actor: Omit<AttemptActorInput, 'type'> & { type: 'human' };
-};
+export type DeveloperAttemptResumeInput = DeveloperReworkResumeInput;
 
 export type DeveloperAttemptReworkInput = DeveloperAttemptLaunchInput & {
   kind: DeveloperRecoveryKind;
@@ -116,6 +112,18 @@ export type AttemptMutationResult = {
   session?: Session;
   cycle?: DeveloperExecutionCycle;
   feedback?: DeveloperReviewFeedback;
+};
+
+export type QaWorkspaceInput = {
+  taskId: string;
+  attemptId: string;
+  workspaceId: string;
+};
+
+export type VerifiedQaWorkspace = {
+  attempt: TaskAttempt;
+  session: Session;
+  workspace: Workspace;
 };
 
 type AttemptRegistry = {
@@ -273,6 +281,60 @@ export class AttemptService {
   ): Promise<AttemptMutationResult> {
     this.assertBillingSafe();
     return this.dependencies.developerReworkService.resume(input);
+  }
+
+  async requireQaWorkspace(
+    input: QaWorkspaceInput,
+  ): Promise<VerifiedQaWorkspace> {
+    const task = this.dependencies.tasks.get(input.taskId);
+    if (!task) throw new TaskNotFoundError(input.taskId);
+    this.requireActiveProject(task.projectId);
+    const currentAttempt = this.dependencies.attempts
+      .listByTask(task.id)
+      .filter((attempt) => attempt.unlinkedAt === null)
+      .at(-1);
+    if (
+      !currentAttempt ||
+      currentAttempt.id !== input.attemptId ||
+      currentAttempt.role !== 'developer'
+    ) {
+      throw new UnsafeQaWorkspaceError(
+        'QA requires the current Developer attempt.',
+      );
+    }
+    const session = this.dependencies.sessions.get(currentAttempt.sessionId);
+    if (!session || session.workspaceId !== input.workspaceId) {
+      throw new UnsafeQaWorkspaceError(
+        'The Developer session no longer uses its recorded workspace.',
+      );
+    }
+    const workspace = this.dependencies.workspaces.get(input.workspaceId);
+    if (
+      !workspace ||
+      workspace.projectId !== task.projectId ||
+      workspace.cleanupState !== 'active' ||
+      (workspace.type === 'worktree' &&
+        (workspace.owner !== 'mesh' ||
+          workspace.gitWorktreePath !== workspace.path))
+    ) {
+      throw new UnsafeQaWorkspaceError(
+        'The Developer workspace is missing, inactive, or not owned by Mesh.',
+      );
+    }
+    try {
+      await this.assertSameRepository(task, session);
+    } catch (error) {
+      if (
+        error instanceof ProjectNotFoundError ||
+        error instanceof ProcessTrustedExecutableUnavailableError
+      ) {
+        throw error;
+      }
+      throw new UnsafeQaWorkspaceError(
+        'The Developer workspace repository identity is unsafe or ambiguous.',
+      );
+    }
+    return { attempt: currentAttempt, session, workspace };
   }
 
   private async launchAttempt(

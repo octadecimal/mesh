@@ -39,6 +39,8 @@ export class SessionRepository {
   private readonly archiveById;
   private readonly configureResumeById;
   private readonly deleteById;
+  private readonly hasTaskAttempt;
+  private readonly hasQaCycle;
 
   constructor(private readonly database: Database) {
     this.insert = database.prepare(`
@@ -64,6 +66,12 @@ export class SessionRepository {
       'UPDATE sessions SET workspace_id = ?, permission_mode = ?, updated_at = ? WHERE id = ?',
     );
     this.deleteById = database.prepare('DELETE FROM sessions WHERE id = ?');
+    this.hasTaskAttempt = database.prepare(
+      'SELECT 1 FROM task_attempts WHERE session_id = ? LIMIT 1',
+    );
+    this.hasQaCycle = database.prepare(
+      'SELECT 1 FROM qa_execution_cycles WHERE session_id = ? LIMIT 1',
+    );
   }
 
   create(session: Session): Session {
@@ -107,6 +115,12 @@ export class SessionRepository {
   }
 
   remove(id: string): boolean {
+    if (this.hasTaskAttempt.get(id)) {
+      throw new Error('session has task attempt history');
+    }
+    if (this.hasQaCycle.get(id)) {
+      throw new Error('session has QA execution history');
+    }
     return this.deleteById.run(id).changes === 1;
   }
 }

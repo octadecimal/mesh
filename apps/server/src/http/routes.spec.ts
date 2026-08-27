@@ -3,15 +3,19 @@ import { dirname, join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  QaCapabilityInvalidError,
   idSchema,
   projectSchema,
+  taskAttemptSchema,
   taskSchema,
 } from '@mesh-session-platform/contracts';
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { GitAdapter } from '../platform/git.js';
+import { QaVerificationExecutableUnavailableError } from '../platform/qa-verification-runner.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
+import type { QaExecutionService } from '../tasks/qa-execution-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { buildApp } from '../app.js';
 
@@ -27,6 +31,10 @@ const setup = (options?: {
   withGit?: boolean;
   gitExitCode?: number;
   seedProject?: boolean;
+  qaExecutionService?: Pick<
+    QaExecutionService,
+    'launch' | 'submitVerdict' | 'repairInterrupted'
+  >;
 }) => {
   const repositories = createTestRepositories();
   const workspacePath = options?.useDatabaseDirectoryAsWorkspace
@@ -127,6 +135,110 @@ describe('HTTP command routes', () => {
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  });
+
+  it('maps a rejected QA capability to the stable forbidden envelope', async () => {
+    const fixture = setup({
+      qaExecutionService: {
+        launch: async () => {
+          throw new Error('unused');
+        },
+        submitVerdict: () => {
+          throw new QaCapabilityInvalidError();
+        },
+        repairInterrupted: () => {
+          throw new Error('unused');
+        },
+      },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'qa-verdict-invalid-capability',
+        command: {
+          type: 'task.qa.submit_verdict',
+          payload: {
+            capability: 'invalid-qa-capability',
+            expectedRevision: 2,
+            report: {
+              disposition: 'rejected',
+              criterionResults: [
+                {
+                  criterionId: 'criterion-1',
+                  status: 'failed',
+                  evidence: 'Focused test failed.',
+                },
+              ],
+              limitations: [],
+              residualRisks: ['The change remains unverified.'],
+            },
+            actor: { type: 'agent', id: 'qa-agent-1' },
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({
+      error: {
+        code: 'qa_capability_invalid',
+        message: 'The QA capability is invalid.',
+      },
+    });
+  });
+
+  it('maps a manual QA baseline without approved Git to service unavailable', async () => {
+    const fixture = setup({
+      qaExecutionService: {
+        launch: async () => {
+          throw new QaVerificationExecutableUnavailableError();
+        },
+        submitVerdict: () => {
+          throw new Error('unused');
+        },
+        repairInterrupted: () => {
+          throw new Error('unused');
+        },
+      },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'qa-launch-git-unavailable',
+        command: {
+          type: 'task.qa.launch',
+          payload: {
+            taskId: 'task-ready-for-qa',
+            expectedRevision: 4,
+            actor: { type: 'human', id: 'operator-1' },
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      error: {
+        code: 'qa_verification_executable_unavailable',
+        message: expect.stringContaining('MESH_GIT_EXECUTABLE'),
+      },
+    });
   });
 
   it('does not persist a project while discovering a fresh workspace', async () => {
@@ -917,32 +1029,36 @@ describe('HTTP command routes', () => {
     const selectedTask = fixture.repositories.tasks.create(task('t1', 'p1'));
     const otherTask = fixture.repositories.tasks.create(task('t2', 'p2'));
     const actor = { type: 'human' as const, id: id('human-1') };
-    fixture.repositories.attempts.create({
-      id: id('a1'),
-      taskId: selectedTask.id,
-      sessionId: id('s1'),
-      ordinal: 1,
-      source: 'linked',
-      actor,
-      createdAt: now,
-      unlinkedAt: null,
-      unlinkedBy: null,
-      unlinkReason: null,
-      role: null,
-    });
-    fixture.repositories.attempts.create({
-      id: id('a2'),
-      taskId: otherTask.id,
-      sessionId: id('s2'),
-      ordinal: 1,
-      source: 'linked',
-      actor,
-      createdAt: now,
-      unlinkedAt: null,
-      unlinkedBy: null,
-      unlinkReason: null,
-      role: null,
-    });
+    fixture.repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: id('a1'),
+        taskId: selectedTask.id,
+        sessionId: id('s1'),
+        ordinal: 1,
+        source: 'linked',
+        actor,
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: null,
+      }),
+    );
+    fixture.repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: id('a2'),
+        taskId: otherTask.id,
+        sessionId: id('s2'),
+        ordinal: 1,
+        source: 'linked',
+        actor,
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: null,
+      }),
+    );
     fixture.repositories.transitions.append({
       id: id('transition-1'),
       taskId: selectedTask.id,

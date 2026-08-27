@@ -4,7 +4,10 @@ import {
   type AttemptRepair,
   type Project,
   type ProjectEvent,
+  type QaExecutionCycle,
+  type QaReport,
   type RawDiagnostic,
+  type Task,
   type TaskAttempt,
 } from '@mesh-session-platform/contracts';
 
@@ -13,9 +16,12 @@ import type { DiagnosticRepository } from '../repositories/diagnostic-repository
 import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
+import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
+import type { QaCapabilityRegistry } from './qa-capability-registry.js';
 
 const liveSessionStates = new Set([
   'starting',
@@ -32,10 +38,16 @@ export type ReconciliationResult = {
 type ReconciliationDependencies = {
   database: Database;
   projects: Pick<ProjectRepository, 'list'>;
-  tasks: Pick<TaskRepository, 'listByProject'>;
+  tasks: Pick<TaskRepository, 'get' | 'listByProject' | 'update'>;
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
   developerExecutions: Pick<DeveloperExecutionRepository, 'listByTask'>;
+  qaExecutions?: Pick<
+    QaExecutionRepository,
+    'getReport' | 'listCyclesForAttempts' | 'listPendingAutomationActions'
+  >;
   sessions: Pick<SessionRepository, 'get'>;
+  workspaces?: Pick<WorkspaceRepository, 'get'>;
+  qaCapabilities?: Pick<QaCapabilityRegistry, 'invalidateSession'>;
   diagnostics: Pick<DiagnosticRepository, 'insert' | 'list'>;
   projectEvents: Pick<ProjectEventRepository, 'after' | 'appendInTransaction'>;
   now?: () => string;
@@ -185,18 +197,179 @@ const developerRepairsFor = (
     ];
   });
 
+const hasTrustworthyTerminalReport = (
+  cycle: QaExecutionCycle,
+  report: QaReport | undefined,
+): boolean => {
+  if (cycle.terminalDisposition === 'interrupted') {
+    return (
+      cycle.endedAt !== null &&
+      cycle.reportId === null &&
+      cycle.terminalCommandId !== null &&
+      cycle.terminalEventId !== null
+    );
+  }
+  return (
+    cycle.terminalDisposition !== null &&
+    cycle.endedAt !== null &&
+    cycle.reportId !== null &&
+    cycle.terminalCommandId !== null &&
+    cycle.terminalEventId !== null &&
+    report?.id === cycle.reportId &&
+    report.cycleId === cycle.id &&
+    report.disposition === cycle.terminalDisposition
+  );
+};
+
+const qaRepairsFor = (
+  dependencies: ReconciliationDependencies,
+  task: Task,
+  attempts: TaskAttempt[],
+): AttemptRepair[] => {
+  if (!dependencies.qaExecutions || !dependencies.workspaces) return [];
+
+  const cycles = dependencies.qaExecutions.listCyclesForAttempts(
+    attempts.map((attempt) => attempt.id),
+  );
+  const repairs: AttemptRepair[] = [];
+  for (const cycle of cycles) {
+    const session = dependencies.sessions.get(cycle.sessionId);
+    const report = cycle.reportId
+      ? dependencies.qaExecutions.getReport(cycle.reportId)
+      : undefined;
+    if (hasTrustworthyTerminalReport(cycle, report)) {
+      dependencies.qaCapabilities?.invalidateSession(cycle.sessionId);
+      continue;
+    }
+
+    const attempt = attempts.find(
+      (candidate) => candidate.id === cycle.attemptId,
+    );
+    const developerSession = attempt
+      ? dependencies.sessions.get(attempt.sessionId)
+      : undefined;
+    const workspace = dependencies.workspaces.get(cycle.workspaceId);
+    const workspaceMismatch =
+      !workspace ||
+      workspace.projectId !== task.projectId ||
+      (session !== undefined &&
+        (session.workspaceId !== cycle.workspaceId ||
+          session.projectId !== task.projectId)) ||
+      (developerSession !== undefined &&
+        (developerSession.workspaceId !== cycle.workspaceId ||
+          developerSession.projectId !== task.projectId));
+
+    if (
+      cycle.terminalDisposition === null &&
+      session !== undefined &&
+      liveSessionStates.has(session.lifecycleState) &&
+      !workspaceMismatch
+    ) {
+      continue;
+    }
+
+    dependencies.qaCapabilities?.invalidateSession(cycle.sessionId);
+    repairs.push(
+      attemptRepairSchema.parse({
+        taskId: task.id,
+        attemptId: cycle.attemptId,
+        sessionId: cycle.sessionId,
+        reason:
+          cycle.terminalDisposition === null && workspaceMismatch
+            ? 'qa_session_workspace_mismatch'
+            : 'qa_cycle_without_trustworthy_outcome',
+      }),
+    );
+  }
+
+  for (const action of dependencies.qaExecutions
+    .listPendingAutomationActions()
+    .filter((candidate) => candidate.taskId === task.id)) {
+    const attempt = attempts.find(
+      (candidate) => candidate.id === action.attemptId,
+    );
+    if (!attempt) continue;
+    const sourceCycle = cycles.find(
+      (candidate) => candidate.id === action.sourceCycleId,
+    );
+    const sessionId = sourceCycle?.sessionId ?? attempt.sessionId;
+    dependencies.qaCapabilities?.invalidateSession(sessionId);
+    repairs.push(
+      attemptRepairSchema.parse({
+        taskId: task.id,
+        attemptId: attempt.id,
+        sessionId,
+        reason: 'review_automation_action_incomplete',
+      }),
+    );
+  }
+
+  return repairs;
+};
+
+const qaRepairReasons = new Set<AttemptRepair['reason']>([
+  'qa_cycle_without_trustworthy_outcome',
+  'qa_session_workspace_mismatch',
+  'review_automation_action_incomplete',
+]);
+
+const pauseReviewAutomation = (
+  dependencies: ReconciliationDependencies,
+  repair: AttemptRepair,
+  occurredAt: string,
+): ProjectEvent | undefined => {
+  if (!qaRepairReasons.has(repair.reason)) return undefined;
+  const task = dependencies.tasks.get(repair.taskId);
+  if (!task || task.reviewAutomation.status !== 'enabled') return undefined;
+  const updated = dependencies.tasks.update(
+    {
+      ...task,
+      reviewAutomation: {
+        ...task.reviewAutomation,
+        status: 'paused',
+        pauseReason:
+          'Review automation paused because runtime reconciliation found an outcome that requires human repair.',
+        updatedAt: occurredAt,
+      },
+      updatedAt: occurredAt,
+    },
+    task.revision,
+  );
+  if (!updated) {
+    throw new Error('Task changed during QA runtime reconciliation');
+  }
+  return dependencies.projectEvents.appendInTransaction(updated.projectId, {
+    protocolVersion: 1,
+    id: `review-automation-repair-${repair.attemptId}-${repair.sessionId}-${repair.reason}-${updated.reviewAutomation.generation}`,
+    projectId: updated.projectId,
+    occurredAt,
+    type: 'task.review_automation_changed',
+    payload: {
+      task: updated,
+      automation: updated.reviewAutomation,
+      action: null,
+    },
+  });
+};
+
 const persistRepair = (
   dependencies: ReconciliationDependencies,
   projectId: Project['id'],
   repair: AttemptRepair,
   occurredAt: string,
   diagnosticRecorded: boolean,
-): ProjectEvent => {
-  const eventId = `attempt-repair-event-v2-${repair.attemptId}-${repair.reason}`;
-  const diagnosticId = `attempt-repair-diagnostic-${repair.attemptId}-${repair.reason}`;
+  recordDiagnostic: boolean,
+): ProjectEvent[] => {
+  const repairIdentity = `${repair.attemptId}-${repair.sessionId}-${repair.reason}`;
+  const eventId = qaRepairReasons.has(repair.reason)
+    ? `attempt-repair-event-v3-${repairIdentity}`
+    : `attempt-repair-event-v2-${repair.attemptId}-${repair.reason}`;
+  const diagnosticId = qaRepairReasons.has(repair.reason)
+    ? `attempt-repair-diagnostic-v2-${repairIdentity}`
+    : `attempt-repair-diagnostic-${repair.attemptId}-${repair.reason}`;
   dependencies.database.exec('BEGIN IMMEDIATE');
   try {
-    if (!diagnosticRecorded) {
+    if (recordDiagnostic && !diagnosticRecorded) {
       dependencies.diagnostics.insert(
         rawDiagnosticSchema.parse({
           id: diagnosticId,
@@ -214,8 +387,13 @@ const persistRepair = (
       type: 'task.attempt_repair_detected',
       payload: { repair },
     });
+    const automationEvent = pauseReviewAutomation(
+      dependencies,
+      repair,
+      occurredAt,
+    );
     dependencies.database.exec('COMMIT');
-    return event;
+    return automationEvent ? [event, automationEvent] : [event];
   } catch (error) {
     dependencies.database.exec('ROLLBACK');
     throw error;
@@ -252,6 +430,7 @@ export const reconcileTaskAttempts = (
         task.id,
         taskAttempts,
       );
+      const qaRepairs = qaRepairsFor(dependencies, task, taskAttempts);
       const intentionallyDeveloperBlocked = Boolean(
         task.blocked &&
           dependencies.developerExecutions
@@ -268,23 +447,31 @@ export const reconcileTaskAttempts = (
         intentionallyDeveloperBlocked,
         attempts,
       );
-      const taskRepairs =
+      const attemptRepairs =
         developerRepairs.length > 0
           ? developerRepairs
           : taskRepair
             ? [taskRepair]
             : [];
+      const taskRepairs = [...attemptRepairs, ...qaRepairs].filter(
+        (repair, index, all) =>
+          all.findIndex(
+            (candidate) =>
+              candidate.taskId === repair.taskId &&
+              candidate.attemptId === repair.attemptId &&
+              candidate.sessionId === repair.sessionId &&
+              candidate.reason === repair.reason,
+          ) === index,
+      );
       for (const repair of taskRepairs) {
         repairs.push(repair);
-        const diagnostics =
-          attempts.find(({ attempt }) => attempt.id === repair.attemptId)
-            ?.diagnostics ?? [];
+        const diagnostics = dependencies.diagnostics.list(repair.sessionId);
         if (
           recordedEvents.some((event) => isRecordedRepairEvent(event, repair))
         ) {
           continue;
         }
-        const event = persistRepair(
+        const persistedEvents = persistRepair(
           dependencies,
           project.id,
           repair,
@@ -292,9 +479,10 @@ export const reconcileTaskAttempts = (
           diagnostics.some((diagnostic) =>
             isRecordedRepair(diagnostic, repair),
           ),
+          dependencies.sessions.get(repair.sessionId) !== undefined,
         );
-        recordedEvents.push(event);
-        events.push(event);
+        recordedEvents.push(...persistedEvents);
+        events.push(...persistedEvents);
       }
     }
   }

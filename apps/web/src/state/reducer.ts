@@ -8,6 +8,10 @@ import type {
   Project,
   ProjectEvent,
   ProjectSnapshot,
+  QaExecutionCycle,
+  QaReport,
+  ReviewAutomationAction,
+  ReviewAutomationState,
   Session,
   SessionEvent,
   SessionSnapshot,
@@ -24,6 +28,10 @@ export type Notification = {
   message: string;
 };
 
+export type ReviewAutomationProjection = ReviewAutomationState & {
+  actions: ReviewAutomationAction[];
+};
+
 export type MeshProjection = {
   projects: SessionSnapshot['projects'];
   projectsById: Record<string, Project>;
@@ -38,6 +46,9 @@ export type MeshProjection = {
   >;
   developerBlockerReportsByCycleId: Record<string, DeveloperBlockerReport>;
   developerReviewFeedbackByCycleId: Record<string, DeveloperReviewFeedback>;
+  qaCyclesByAttemptId: Record<string, QaExecutionCycle[]>;
+  qaReportsByCycleId: Record<string, QaReport>;
+  reviewAutomationByTaskId: Record<string, ReviewAutomationProjection>;
   projectCursors: Record<string, number>;
   workspaces: SessionSnapshot['workspaces'];
   sessions: Session[];
@@ -107,6 +118,9 @@ export const createProjection = (
   developerCompletionReportsByCycleId: {},
   developerBlockerReportsByCycleId: {},
   developerReviewFeedbackByCycleId: {},
+  qaCyclesByAttemptId: {},
+  qaReportsByCycleId: {},
+  reviewAutomationByTaskId: {},
   projectCursors: Object.fromEntries(
     snapshot.projects.map((project) => [project.id, 0]),
   ),
@@ -182,6 +196,9 @@ export const replaceSnapshot = (
     state.developerCompletionReportsByCycleId,
   developerBlockerReportsByCycleId: state.developerBlockerReportsByCycleId,
   developerReviewFeedbackByCycleId: state.developerReviewFeedbackByCycleId,
+  qaCyclesByAttemptId: state.qaCyclesByAttemptId,
+  qaReportsByCycleId: state.qaReportsByCycleId,
+  reviewAutomationByTaskId: state.reviewAutomationByTaskId,
   projectCursors: Object.fromEntries(
     snapshot.projects.map((project) => [
       project.id,
@@ -222,6 +239,12 @@ const cyclesByAttempt = (cycles: readonly DeveloperExecutionCycle[]) =>
     return result;
   }, {});
 
+const qaCyclesByAttempt = (cycles: readonly QaExecutionCycle[]) =>
+  cycles.reduce<Record<string, QaExecutionCycle[]>>((result, cycle) => {
+    result[cycle.attemptId] = [...(result[cycle.attemptId] ?? []), cycle];
+    return result;
+  }, {});
+
 const byCycleId = <Value extends { cycleId: string }>(
   items: readonly Value[],
 ) =>
@@ -229,6 +252,32 @@ const byCycleId = <Value extends { cycleId: string }>(
     string,
     Value
   >;
+
+const upsertById = <Value extends { id: string }>(
+  items: readonly Value[],
+  value: Value,
+) =>
+  items.some(({ id }) => id === value.id)
+    ? items.map((item) => (item.id === value.id ? value : item))
+    : [...items, value];
+
+const automationByTask = (
+  tasks: readonly Task[],
+  actions: readonly ReviewAutomationAction[],
+) => {
+  const actionsByTaskId = actions.reduce<
+    Record<string, ReviewAutomationAction[]>
+  >((result, action) => {
+    result[action.taskId] = [...(result[action.taskId] ?? []), action];
+    return result;
+  }, {});
+  return Object.fromEntries(
+    tasks.map((task) => [
+      task.id,
+      { ...task.reviewAutomation, actions: actionsByTaskId[task.id] ?? [] },
+    ]),
+  ) as Record<string, ReviewAutomationProjection>;
+};
 
 export const replaceProjectSnapshot = (
   state: MeshProjection,
@@ -238,6 +287,9 @@ export const replaceProjectSnapshot = (
   const developerCompletionReports = snapshot.developerCompletionReports ?? [];
   const developerBlockerReports = snapshot.developerBlockerReports ?? [];
   const developerReviewFeedback = snapshot.developerReviewFeedback ?? [];
+  const qaCycles = snapshot.qaCycles ?? [];
+  const qaReports = snapshot.qaReports ?? [];
+  const reviewAutomationActions = snapshot.reviewAutomationActions ?? [];
   const replacedTaskIds = new Set<string>([
     ...Object.values(state.tasksById)
       .filter((task) => task.projectId === snapshot.project.id)
@@ -266,6 +318,12 @@ export const replaceProjectSnapshot = (
       .flatMap(([, cycles]) => cycles.map((cycle) => cycle.id)),
     ...developerCycles.map((cycle) => cycle.id),
   ]);
+  const replacedQaCycleIds = new Set<string>([
+    ...Object.entries(state.qaCyclesByAttemptId)
+      .filter(([attemptId]) => replacedAttemptIds.has(attemptId))
+      .flatMap(([, cycles]) => cycles.map((cycle) => cycle.id)),
+    ...qaCycles.map((cycle) => cycle.id),
+  ]);
   const developerCyclesByAttemptId = Object.fromEntries(
     Object.entries(state.developerCyclesByAttemptId).filter(
       ([attemptId]) => !replacedAttemptIds.has(attemptId),
@@ -286,6 +344,21 @@ export const replaceProjectSnapshot = (
       ([, feedback]) => !replacedCycleIds.has(feedback.cycleId),
     ),
   ) as Record<string, DeveloperReviewFeedback>;
+  const qaCyclesByAttemptId = Object.fromEntries(
+    Object.entries(state.qaCyclesByAttemptId).filter(
+      ([attemptId]) => !replacedAttemptIds.has(attemptId),
+    ),
+  ) as Record<string, QaExecutionCycle[]>;
+  const qaReportsByCycleId = Object.fromEntries(
+    Object.entries(state.qaReportsByCycleId).filter(
+      ([cycleId]) => !replacedQaCycleIds.has(cycleId),
+    ),
+  ) as Record<string, QaReport>;
+  const reviewAutomationByTaskId = Object.fromEntries(
+    Object.entries(state.reviewAutomationByTaskId).filter(
+      ([taskId]) => !replacedTaskIds.has(taskId),
+    ),
+  ) as Record<string, ReviewAutomationProjection>;
   const transitionsByTaskId = Object.fromEntries(
     Object.entries(state.transitionsByTaskId).filter(
       ([taskId]) => !replacedTaskIds.has(taskId),
@@ -325,6 +398,18 @@ export const replaceProjectSnapshot = (
       ...developerReviewFeedbackByCycleId,
       ...byId(developerReviewFeedback),
     },
+    qaCyclesByAttemptId: {
+      ...qaCyclesByAttemptId,
+      ...qaCyclesByAttempt(qaCycles),
+    },
+    qaReportsByCycleId: {
+      ...qaReportsByCycleId,
+      ...byCycleId(qaReports),
+    },
+    reviewAutomationByTaskId: {
+      ...reviewAutomationByTaskId,
+      ...automationByTask(snapshot.tasks, reviewAutomationActions),
+    },
     projectCursors: {
       ...state.projectCursors,
       [snapshot.project.id]: snapshot.cursor,
@@ -352,7 +437,8 @@ export const applyProjectEvent = (
 
   if (
     event.type === 'project.changed' ||
-    event.type === 'project.developer_instructions_changed'
+    event.type === 'project.developer_instructions_changed' ||
+    event.type === 'project.qa_configuration_changed'
   ) {
     next = {
       ...next,
@@ -463,6 +549,94 @@ export const applyProjectEvent = (
             [event.payload.reviewFeedback.id]: event.payload.reviewFeedback,
           }
         : next.developerReviewFeedbackByCycleId,
+    };
+  }
+
+  if (event.type === 'task.qa_execution_changed') {
+    const cycles =
+      next.qaCyclesByAttemptId[event.payload.cycle.attemptId] ?? [];
+    next = {
+      ...next,
+      tasksById: {
+        ...next.tasksById,
+        [event.payload.task.id]: event.payload.task,
+      },
+      attemptsById: {
+        ...next.attemptsById,
+        [event.payload.attempt.id]: event.payload.attempt,
+      },
+      qaCyclesByAttemptId: {
+        ...next.qaCyclesByAttemptId,
+        [event.payload.cycle.attemptId]: upsertById(
+          cycles,
+          event.payload.cycle,
+        ),
+      },
+      qaReportsByCycleId: event.payload.report
+        ? {
+            ...next.qaReportsByCycleId,
+            [event.payload.report.cycleId]: event.payload.report,
+          }
+        : next.qaReportsByCycleId,
+      repairsByProjectId:
+        event.payload.cycle.terminalDisposition === 'interrupted'
+          ? {
+              ...next.repairsByProjectId,
+              [event.projectId]: (
+                next.repairsByProjectId[event.projectId] ?? []
+              ).filter(
+                (repair) =>
+                  !(
+                    repair.taskId === event.payload.task.id &&
+                    repair.attemptId === event.payload.attempt.id &&
+                    (repair.reason === 'review_automation_action_incomplete' ||
+                      (repair.sessionId === event.payload.cycle.sessionId &&
+                        [
+                          'qa_cycle_without_trustworthy_outcome',
+                          'qa_session_workspace_mismatch',
+                        ].includes(repair.reason)))
+                  ),
+              ),
+            }
+          : next.repairsByProjectId,
+    };
+  }
+
+  if (event.type === 'task.review_automation_changed') {
+    const current = next.reviewAutomationByTaskId[event.payload.task.id];
+    const action = event.payload.action;
+    const actions = action
+      ? upsertById(current?.actions ?? [], action)
+      : (current?.actions ?? []);
+    next = {
+      ...next,
+      tasksById: {
+        ...next.tasksById,
+        [event.payload.task.id]: event.payload.task,
+      },
+      reviewAutomationByTaskId: {
+        ...next.reviewAutomationByTaskId,
+        [event.payload.task.id]: {
+          ...event.payload.automation,
+          actions,
+        },
+      },
+      repairsByProjectId:
+        action?.status === 'failed'
+          ? {
+              ...next.repairsByProjectId,
+              [event.projectId]: (
+                next.repairsByProjectId[event.projectId] ?? []
+              ).filter(
+                (repair) =>
+                  !(
+                    repair.reason === 'review_automation_action_incomplete' &&
+                    repair.taskId === action.taskId &&
+                    repair.attemptId === action.attemptId
+                  ),
+              ),
+            }
+          : next.repairsByProjectId,
     };
   }
 

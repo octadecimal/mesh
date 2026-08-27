@@ -21,6 +21,7 @@ import type { CommandRepository } from '../repositories/command-repository.js';
 import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
@@ -71,6 +72,7 @@ type Dependencies = {
   tasks: TaskRepository;
   attempts: TaskAttemptRepository;
   developerExecutions: DeveloperExecutionRepository;
+  qaExecutions: QaExecutionRepository;
   transitions: TaskTransitionRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
@@ -100,6 +102,7 @@ export class DeveloperExecutionService {
   }
 
   async accept(input: DeveloperAcceptInput): Promise<TaskMutationResult> {
+    this.requireQaDisposition(input.taskId, 'verified');
     const result = await this.dependencies.taskService.transition({
       commandId: idSchema.parse(input.commandId),
       taskId: idSchema.parse(input.taskId),
@@ -109,6 +112,47 @@ export class DeveloperExecutionService {
     });
     this.dependencies.publisher?.publishProject(result.event);
     return result;
+  }
+
+  private requireQaDisposition(
+    taskId: string,
+    requiredDisposition: 'verified' | 'rejected',
+  ): void {
+    const attempts = this.dependencies.attempts.listByTask(taskId);
+    const qaCycles = this.dependencies.qaExecutions.listCyclesForAttempts(
+      attempts.map(({ id }) => id),
+    );
+    if (qaCycles.length === 0) return;
+    if (qaCycles.some(({ endedAt }) => endedAt === null)) {
+      throw new DeveloperExecutionOutcomeInvalidError(
+        `Task '${taskId}' has an active QA cycle`,
+      );
+    }
+    const latestSubmission = [
+      ...this.dependencies.developerExecutions.listByTask(taskId),
+    ]
+      .reverse()
+      .find(
+        (cycle) =>
+          cycle.terminalDisposition === 'submitted_for_review' &&
+          cycle.completionReportId !== null,
+      );
+    const latestQaCycle = [...qaCycles]
+      .reverse()
+      .find(
+        ({ developerCompletionReportId }) =>
+          developerCompletionReportId === latestSubmission?.completionReportId,
+      );
+    if (
+      !latestSubmission ||
+      !latestQaCycle ||
+      latestQaCycle.terminalDisposition !== requiredDisposition ||
+      latestQaCycle.reportId === null
+    ) {
+      throw new DeveloperExecutionOutcomeInvalidError(
+        `Task '${taskId}' requires a matching ${requiredDisposition} QA verdict`,
+      );
+    }
   }
 
   submitForReview(

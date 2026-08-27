@@ -36,9 +36,11 @@ truth.
 Project task-board state follows a parallel durable flow. Each imported project
 has its own ordered project-event sequence and cursor, separate from every
 session event stream. Project snapshots contain that project's tasks, attempts,
-transition history, and repair conditions. A project gap triggers only that
-project's snapshot refresh; importing a project establishes its cursor before
-the browser resubscribes. Session snapshots and cursors continue independently.
+transition history, Developer and QA cycles and reports, QA configuration,
+review-automation state, and repair conditions. A project gap triggers only
+that project's snapshot refresh; importing a project establishes its cursor
+before the browser resubscribes. Session snapshots and cursors continue
+independently.
 
 Ownership is explicit. A durable project represents one explicitly imported Git
 repository. A task belongs to exactly one project. An attempt belongs to exactly
@@ -75,6 +77,101 @@ The capability registry is not durable or replayable. It invalidates tokens when
 a cycle closes, a session ends, startup or recovery fails, or the registry is
 cleared during shutdown/restart; the durable cycle and session state determine
 what recovery is allowed next.
+
+QA execution extends the current Developer attempt rather than creating another
+attempt or workspace. `QaExecutionService` accepts a human launch in manual mode
+or a system-policy launch in autonomous-review mode only after the current
+Developer cycle has submitted a complete report and the task is unblocked in
+`review`. It revalidates and reuses that cycle's exact active workspace; a fresh
+worktree would not contain the submission being verified. The QA SDK query has
+no built-in tools and does not load filesystem settings or inherited MCP
+servers. It receives only Mesh's structured verdict, constrained verification,
+and bounded workspace read, list, and search controls. Those workspace controls
+resolve requested paths canonically inside the assigned workspace and reject
+absolute paths, traversal, and links whose targets escape it. Handle-backed
+reads and directory enumerations revalidate the canonical root, object, and
+parent identities before returning data so a link or file swap fails closed.
+Workspace search also caps visited directories, directory entries, queued
+paths, files, and matches, and checks the owning QA cycle's cancellation signal
+throughout traversal and file reads. Directory traversal streams entries and
+closes the handle at the entry or queue budget instead of materializing an
+unbounded directory first. Workspace listing uses the same streaming boundary,
+returns at most 500 entries, reads at most one additional entry to report
+truncation, and closes promptly when the owning cycle is cancelled.
+Cancellation of either listing or search reports the shared
+`qa_workspace_operation_cancelled` diagnostic because both operations use the
+same runtime-owned traversal boundary.
+The constrained runner treats ambiguous joined option values as workspace
+paths unless they are explicitly safe non-path values, and validates missing
+paths through their deepest existing ancestor. It admits only non-interactive
+verification commands, gives each child a five-minute wall-clock bound, caps
+each output stream at 64,000 bytes, and cancels owned process trees when the QA
+runtime is interrupted, closes, or exceeds a bound. On Windows, vetted package
+manager commands resolve to canonical bundled JavaScript entries and run via
+the installed Node executable with the shell disabled. At server startup, Mesh
+approves one absolute canonical Git executable for both ordinary repository and
+QA commands. An explicit `MESH_GIT_EXECUTABLE` must be absolute; otherwise Mesh
+examines only absolute entries from the startup `PATH`, ignoring empty,
+relative, and workspace-contained entries. The approval records canonical file
+identity outside the configured workspace root and is revalidated before every
+Git spawn. Runtime code never searches `PATH`, trusts `SystemRoot`, or consults
+repository-controlled configuration. A missing or changed approval fails closed
+before launch. Before reserving a new QA launch command, the service repeats
+actor, lifecycle, and exact-workspace authorization and runs one bounded,
+read-only Git capability probe. This avoids probing an unauthorized path and
+leaves no command reservation when the approved executable is unavailable, so
+the same idempotency key can be retried after operator repair. The full
+authoritative tracked-source capture remains inside the reserved launch command.
+Mesh proves that its canonical owned-tree terminator works before launching a
+child; a missing, failing, or unresponsive terminator refuses launch or durably
+pauses the QA cycle after an exact-owned-PID fallback. The runner never exposes
+a general shell or source-authoring control.
+
+The server captures Git-tracked source before launch, after every verification
+command, and immediately before verdict persistence instead of accepting an
+agent-reported workspace state. Each accepted capture requires matching forward
+and reverse observations of the tracked path set, per-file metadata, and
+content. A mutation or failure to stabilize within the bounded retry limit
+invalidates QA authority and pauses the review loop for inspection. This
+protocol defines the source-stability boundary; it is not a cross-file
+filesystem lock. A write after the accepted observation is a new concurrent
+mutation, so the verdict transaction begins immediately after capture without
+claiming
+filesystem-transaction atomicity. Tracked symbolic links are hashed as link
+identity and target text without following the target; regular tracked files
+are opened by handle and checked with pre/post handle metadata while their
+content is streamed into the hash. Mesh then revalidates the canonical
+workspace root, full path, and parent identity, so a restored parent swap cannot
+hide an external read. Every component of a requested path is inspected;
+broken links whose lexical target escapes the workspace fail closed even when
+the target does not exist. An indexed link's canonical parent must also remain
+inside the workspace. Capture checks cancellation after final canonical
+revalidation and immediately before accepting either an observation or its
+stable hash. Timeout, cancellation, output overflow, or confinement failure
+pauses review and prevents a verdict. Verification may create ordinary ignored
+build or test artifacts.
+
+QA controls use a separate ephemeral capability bound to the QA session, task,
+current attempt, and open QA cycle. The only task-domain control exposed to the
+runtime is one structured verdict submission covering every snapshotted
+criterion. The capability becomes invalid when the verdict closes the cycle,
+startup or cleanup fails, the session stops, or the server restarts. A
+transcript, process exit, or stale capability is never interpreted as a QA
+outcome. If reconciliation finds a dead runtime with an open cycle, a human may
+terminalize it as `interrupted` through an audited repair command. That state
+has command, event, and end-time evidence but deliberately has no verdict
+report.
+
+`ReviewAutomationService` is the narrow policy boundary after committed
+Developer and QA outcomes. Manual policy records the verdict and performs no
+follow-up. With explicit task automation enabled under the
+`autonomous_review` project policy, it durably launches QA after Developer
+submission, completes verified work, resumes the same Developer session after
+the first two rejections, and pauses on the third rejection or any unsafe
+failure. Its action keys make duplicate delivery, replay, and restart
+idempotent. It does not select ready tasks, own a queue, lease work, control
+concurrency, or implement quota scheduling; a future scheduler may invoke the
+same explicit launch and resume commands under its own audited policy.
 
 Not every browser action enters this flow. Selection, filters, and drafts stay
 local. Layout, archive, and delete commands take repository-backed paths that do
@@ -117,14 +214,38 @@ tests.
 
 `apps/server/src/tasks` owns task readiness, legal task transitions, attempt
 launch/link/unlink composition, Developer cycles and rework, and restart
-reconciliation. `DeveloperExecutionService` owns the two agent-authorized
+reconciliation. `DeveloperExecutionService` owns the two Developer-authorized
 terminal outcomes. It validates the capability, actor, current attempt, open
 cycle, and expected task revision before accepting a complete criterion report
 or blocker report. In one transaction it appends the report, closes the cycle,
 updates the task, appends its transition, and appends the project event; only
 then does it publish the event and invalidate the capability. Human commands
-separately own accepting review as done, rejecting with feedback, and resolving
-a blocker by choosing resume or a new attempt.
+separately own accepting manual review as done, choosing rework, and resolving a
+blocker.
+
+Once a QA cycle exists for the current Developer submission, the older human
+commands are gated by that evidence: acceptance requires the latest matching
+verified verdict, rework requires the latest matching rejection, and neither is
+valid while QA is active. Tasks with no QA history retain the pre-QA manual
+decision path.
+
+`QaExecutionService` owns QA launch, authority checks, runtime composition, and
+verdict validation. A verdict transaction appends the complete QA report,
+closes the cycle, applies the policy-owned task outcome, records any transition
+or durable automatic-action intent, and appends ordered
+`task.qa_execution_changed`, `task.review_automation_changed`, or task
+transition events before anything is published. The QA capability is then
+invalidated. `ReviewAutomationService` executes a committed pending action only
+after re-reading current durable task, attempt, cycle, policy, and automation-
+generation truth; completion or failure is persisted and published as another
+ordered project event.
+
+Startup reconciliation compares open Developer and QA cycles and pending review
+actions with durable session truth. An interrupted or outcome-unknown QA cycle,
+a missing live session, or an action whose safe result cannot be proven becomes
+an explicit paused repair condition. Reconciliation neither manufactures a
+verdict nor silently repeats QA or Developer work. State-specific recovery
+preserves the workspace, cycles, reports, diagnostics, and action history.
 
 ### Persistence
 
@@ -136,9 +257,11 @@ State-bearing driver input is written with its raw diagnostic before it is
 published. This audit barrier is intentional: if durable persistence fails,
 Mesh must not continue presenting an unaudited state as successful.
 
-Projects, project instructions, tasks, attempts, Developer cycles, completion
-and blocker reports, review or unblock feedback, task transitions, and ordered
-project events are durable repository state. Their foreign keys preserve
+Projects, Developer and QA instructions, review policy, tasks, attempts,
+Developer and QA cycles, completion, blocker, and verdict reports, review or
+unblock feedback, review-automation actions and pause state, task transitions,
+and ordered project events are durable repository state. Writes representing
+one Developer or QA outcome commit atomically. Their foreign keys preserve
 project, session, workspace, and layout identities when an existing database is
 upgraded. Capability tokens and live MCP handler state are deliberately absent
 from persistence.
@@ -152,7 +275,8 @@ cover both fresh and upgraded databases.
 `apps/web/src/api` owns transport clients. `apps/web/src/state` owns projection,
 replay/resync behavior, selection, filters, drafts, and connection health.
 `apps/web/src/projects` and `apps/web/src/tasks` render project import, board,
-drawer, Developer execution history and reports, attempt, and repair states.
+drawer, Developer and QA execution history and reports, automation budget,
+attempt, and repair states.
 `apps/web/src/sessions` and `apps/web/src/workspace` render and compose session
 states. Components should express interaction and presentation rather than
 reimplementing server lifecycle rules.
@@ -180,8 +304,8 @@ apps/server/                     Fastify API, runtime, drivers, persistence
   src/realtime/                  WebSocket hub and durable replay
   src/repositories/              persistent data access
   src/runtime/                   lifecycle, registry, recovery, publication
-  src/tasks/                     task lifecycle, attempts, Developer execution
-                                 and rework, restart repair
+  src/tasks/                     task lifecycle, attempts, Developer and QA
+                                 execution, review automation, restart repair
 apps/web/                        React/Vite client
   src/api/                       HTTP and WebSocket clients
   src/projects/                  explicit project import

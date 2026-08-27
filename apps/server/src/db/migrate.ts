@@ -56,6 +56,27 @@ const developerCycleTaskTitleMigration = {
     'utf8',
   ),
 };
+const qaExecutionMigration = {
+  id: '009-qa-execution',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '009-qa-execution.sql'),
+    'utf8',
+  ),
+};
+const reviewAutomationStateMigration = {
+  id: '010-review-automation-state',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '010-review-automation-state.sql'),
+    'utf8',
+  ),
+};
+const qaInterruptionRepairMigration = {
+  id: '011-qa-interruption-repair',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '011-qa-interruption-repair.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -66,6 +87,9 @@ const migrations = [
   taskAttemptLaunchRecoveryMigration,
   developerExecutionMigration,
   developerCycleTaskTitleMigration,
+  qaExecutionMigration,
+  reviewAutomationStateMigration,
+  qaInterruptionRepairMigration,
 ];
 
 export const migrate = (database: Database): void => {

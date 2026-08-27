@@ -4,6 +4,8 @@ import {
   developerCompletionReportSchema,
   developerExecutionCycleSchema,
   projectSchema,
+  qaExecutionCycleSchema,
+  qaReportSchema,
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
@@ -571,5 +573,101 @@ describe('DeveloperExecutionService', () => {
     });
     expect(duplicate).toEqual(accepted);
     expect(repositories.transitions.listByTask(task.id)).toHaveLength(1);
+  });
+
+  it('accepts only the latest matching verified QA outcome once QA has run', async () => {
+    for (const disposition of ['active', 'rejected', 'verified'] as const) {
+      const context = setup();
+      const submitted = context.service.submitForReview({
+        commandId: `command-review-${disposition}`,
+        capability: context.capability,
+        expectedRevision: context.task.revision,
+        report: completion(),
+        actor: developer,
+      });
+      context.repositories.sessions.create(
+        sessionSchema.parse({
+          id: `qa-session-${disposition}`,
+          projectId: context.task.projectId,
+          workspaceId: 'workspace-1',
+          title: 'QA review',
+          permissionMode: 'safe_auto',
+          lifecycleState: disposition === 'active' ? 'running' : 'completed',
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+      const qaCycle = context.repositories.qaExecutions.createCycle(
+        qaExecutionCycleSchema.parse({
+          id: `qa-cycle-${disposition}`,
+          taskId: context.task.id,
+          attemptId: context.attempt.id,
+          sessionId: `qa-session-${disposition}`,
+          ordinal: 1,
+          authorizedBy: human,
+          authorizationCommandId: `qa-launch-${disposition}`,
+          policyVersion: 'qa-policy-v1',
+          qaInstructions: { content: '', revision: 1 },
+          taskSnapshot: context.cycle.taskSnapshot,
+          developerCompletionReportId: submitted.report.id,
+          workspaceId: 'workspace-1',
+          reviewPolicy: 'manual',
+          reviewPolicyRevision: 1,
+          automationGeneration: 0,
+          rejectionOrdinal: 0,
+          startedAt: now,
+          endedAt: null,
+          terminalDisposition: null,
+          reportId: null,
+          terminalCommandId: null,
+          terminalEventId: null,
+        }),
+      );
+      if (disposition !== 'active') {
+        const report = context.repositories.qaExecutions.insertReport(
+          qaReportSchema.parse({
+            id: `qa-report-${disposition}`,
+            cycleId: qaCycle.id,
+            disposition,
+            criterionResults: context.cycle.taskSnapshot.acceptanceCriteria.map(
+              ({ id }) => ({
+                criterionId: id,
+                status: disposition === 'verified' ? 'passed' : 'failed',
+                evidence: `${disposition} evidence`,
+              }),
+            ),
+            verificationCommands: [],
+            limitations: [],
+            residualRisks: [],
+            workspaceBefore: 'sha256:source',
+            workspaceAfter: 'sha256:source',
+            createdAt: now,
+          }),
+        );
+        context.repositories.qaExecutions.completeCycle(qaCycle.id, {
+          endedAt: now,
+          terminalDisposition: disposition,
+          reportId: report.id,
+          terminalCommandId: `qa-verdict-${disposition}`,
+          terminalEventId: `qa-event-${disposition}`,
+        });
+      }
+
+      const acceptance = context.service.accept({
+        commandId: `command-accept-${disposition}`,
+        taskId: context.task.id,
+        expectedRevision: submitted.task.revision,
+        actor: human,
+      });
+      if (disposition === 'verified') {
+        await expect(acceptance).resolves.toMatchObject({
+          task: { lifecycleState: 'done' },
+        });
+      } else {
+        await expect(acceptance).rejects.toMatchObject({
+          code: 'developer_execution_outcome_invalid',
+        });
+      }
+    }
   });
 });

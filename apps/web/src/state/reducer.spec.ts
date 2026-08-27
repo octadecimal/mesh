@@ -6,6 +6,9 @@ import type {
   DeveloperReviewFeedback,
   ProjectEvent,
   ProjectSnapshot,
+  QaExecutionCycle,
+  QaReport,
+  ReviewAutomationAction,
   SessionEvent,
   SessionSnapshot,
   Task,
@@ -74,6 +77,13 @@ const task = (overrides: Partial<Task> = {}): Task => ({
   revision: 1,
   createdAt: timestamp,
   updatedAt: timestamp,
+  reviewAutomation: {
+    status: 'disabled',
+    generation: 0,
+    rejectionCount: 0,
+    pauseReason: null,
+    updatedAt: timestamp,
+  },
   ...overrides,
 });
 
@@ -174,6 +184,72 @@ const reviewFeedback: DeveloperReviewFeedback = {
   createdAt: timestamp,
 };
 
+const qaCycle: QaExecutionCycle = {
+  id: 'qa-cycle-1',
+  taskId: task().id,
+  attemptId: attempt.id,
+  sessionId: 'qa-session-1',
+  ordinal: 1,
+  authorizedBy: { type: 'human', id: 'operator' },
+  authorizationCommandId: 'command-qa-1',
+  policyVersion: 'qa-policy-v1',
+  qaInstructions: { content: 'Verify reconnect.', revision: 1 },
+  taskSnapshot: {
+    revision: 1,
+    title: 'Task one',
+    description: '',
+    acceptanceCriteria: [
+      { id: 'criterion-1', text: 'Reconnect preserves QA history.' },
+    ],
+  },
+  developerCompletionReportId: completionReport.id,
+  workspaceId: 'workspace-1',
+  reviewPolicy: 'autonomous_review',
+  reviewPolicyRevision: 1,
+  automationGeneration: 1,
+  rejectionOrdinal: 0,
+  startedAt: timestamp,
+  endedAt: null,
+  terminalDisposition: null,
+  reportId: null,
+  terminalCommandId: null,
+  terminalEventId: null,
+};
+
+const qaReport: QaReport = {
+  id: 'qa-report-1',
+  cycleId: qaCycle.id,
+  disposition: 'rejected',
+  criterionResults: [
+    {
+      criterionId: 'criterion-1',
+      status: 'failed',
+      evidence: 'The reconnect assertion failed.',
+    },
+  ],
+  verificationCommands: [{ command: 'pnpm test', outcome: 'failed' }],
+  limitations: [],
+  residualRisks: ['QA history could disappear after reconnect.'],
+  workspaceBefore: 'clean',
+  workspaceAfter: 'clean',
+  createdAt: timestamp,
+};
+
+const automationAction: ReviewAutomationAction = {
+  id: 'automation-action-1',
+  idempotencyKey: 'task-1:attempt-1:qa-cycle-1:resume:1',
+  projectId: project.id,
+  taskId: task().id,
+  attemptId: attempt.id,
+  sourceCycleId: qaCycle.id,
+  actionKind: 'resume_developer',
+  generation: 1,
+  status: 'pending',
+  errorCode: null,
+  createdAt: timestamp,
+  completedAt: null,
+};
+
 const projectSnapshot = (
   overrides: Partial<ProjectSnapshot> = {},
 ): ProjectSnapshot => ({
@@ -187,6 +263,9 @@ const projectSnapshot = (
   developerCompletionReports: [completionReport],
   developerBlockerReports: [blockerReport],
   developerReviewFeedback: [reviewFeedback],
+  qaCycles: [qaCycle],
+  qaReports: [qaReport],
+  reviewAutomationActions: [automationAction],
   cursor: 3,
   ...overrides,
 });
@@ -303,9 +382,133 @@ describe('replaceSnapshot', () => {
     expect(next.selectedSessionId).toBe('session-1');
     expect(next.unreadSessionIds).toEqual({ 'session-1': true });
   });
+
+  it('keeps project QA state independent from a session snapshot refresh', () => {
+    const current = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot(),
+    );
+
+    const next = replaceSnapshot(current, snapshot(7));
+
+    expect(next.qaCyclesByAttemptId).toEqual(current.qaCyclesByAttemptId);
+    expect(next.qaReportsByCycleId).toEqual(current.qaReportsByCycleId);
+    expect(next.reviewAutomationByTaskId).toEqual(
+      current.reviewAutomationByTaskId,
+    );
+  });
 });
 
 describe('project projection', () => {
+  it('replaces QA records by stable identity for only the snapshotted project', () => {
+    const otherProject = {
+      ...project,
+      id: 'project-2',
+      displayName: 'Project two',
+    };
+    const otherTask = task({
+      id: 'task-2',
+      projectId: otherProject.id,
+      reviewAutomation: {
+        status: 'enabled',
+        generation: 2,
+        rejectionCount: 1,
+        pauseReason: null,
+        updatedAt: timestamp,
+      },
+    });
+    const otherAttempt = { ...attempt, id: 'attempt-2', taskId: otherTask.id };
+    const otherQaCycle = {
+      ...qaCycle,
+      id: 'qa-cycle-2',
+      taskId: otherTask.id,
+      attemptId: otherAttempt.id,
+      sessionId: 'qa-session-2',
+    };
+    const otherQaReport = {
+      ...qaReport,
+      id: 'qa-report-2',
+      cycleId: otherQaCycle.id,
+    };
+    const otherAction = {
+      ...automationAction,
+      id: 'automation-action-2',
+      idempotencyKey: 'task-2:attempt-2:qa-cycle-2:resume:2',
+      projectId: otherProject.id,
+      taskId: otherTask.id,
+      attemptId: otherAttempt.id,
+      sourceCycleId: otherQaCycle.id,
+      generation: 2,
+    };
+    const withBothProjects = replaceProjectSnapshot(
+      replaceProjectSnapshot(createProjection(snapshot()), projectSnapshot()),
+      projectSnapshot({
+        project: otherProject,
+        tasks: [otherTask],
+        attempts: [otherAttempt],
+        transitions: [],
+        repairs: [],
+        developerCycles: [],
+        developerCompletionReports: [],
+        developerBlockerReports: [],
+        developerReviewFeedback: [],
+        qaCycles: [otherQaCycle],
+        qaReports: [otherQaReport],
+        reviewAutomationActions: [otherAction],
+      }),
+    );
+    const terminalCycle = {
+      ...qaCycle,
+      endedAt: timestamp,
+      terminalDisposition: 'rejected' as const,
+      reportId: qaReport.id,
+      terminalCommandId: 'qa-verdict-1',
+      terminalEventId: 'qa-event-1',
+    };
+    const completedAction = {
+      ...automationAction,
+      status: 'completed' as const,
+      completedAt: timestamp,
+    };
+
+    const next = replaceProjectSnapshot(
+      withBothProjects,
+      projectSnapshot({
+        tasks: [
+          task({
+            reviewAutomation: {
+              status: 'paused',
+              generation: 1,
+              rejectionCount: 3,
+              pauseReason: 'Human decision required.',
+              updatedAt: timestamp,
+            },
+          }),
+        ],
+        qaCycles: [terminalCycle],
+        qaReports: [qaReport],
+        reviewAutomationActions: [completedAction],
+      }),
+    );
+
+    expect(next.qaCyclesByAttemptId[attempt.id]).toEqual([terminalCycle]);
+    expect(next.qaReportsByCycleId[qaCycle.id]).toEqual(qaReport);
+    expect(next.reviewAutomationByTaskId[task().id]).toEqual({
+      status: 'paused',
+      generation: 1,
+      rejectionCount: 3,
+      pauseReason: 'Human decision required.',
+      updatedAt: timestamp,
+      actions: [completedAction],
+    });
+    expect(next.qaCyclesByAttemptId[otherAttempt.id]).toEqual([otherQaCycle]);
+    expect(next.qaReportsByCycleId[otherQaCycle.id]).toEqual(otherQaReport);
+    expect(next.reviewAutomationByTaskId[otherTask.id]).toEqual({
+      ...otherTask.reviewAutomation,
+      actions: [otherAction],
+    });
+  });
+
   it('replaces developer records for only the snapshotted project', () => {
     const otherProject = {
       ...project,
@@ -554,6 +757,329 @@ describe('project projection', () => {
           .content,
       ).toBe('Use focused tests.');
     }
+  });
+
+  it('projects ordered QA, configuration, and automation events by stable identity', () => {
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({
+        qaCycles: [],
+        qaReports: [],
+        reviewAutomationActions: [],
+      }),
+    );
+    const configuredProject = {
+      ...project,
+      revision: 2,
+      qaConfiguration: {
+        instructions: {
+          content: 'Run the reconnect suite.',
+          revision: 2,
+          updatedAt: timestamp,
+          updatedBy: { type: 'human' as const, id: 'operator' },
+        },
+        reviewPolicy: 'autonomous_review' as const,
+        revision: 2,
+        updatedAt: timestamp,
+        updatedBy: { type: 'human' as const, id: 'operator' },
+      },
+    };
+    const configured = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'project.qa_configuration_changed',
+      payload: { project: configuredProject },
+    });
+    expect(configured.kind).toBe('applied');
+    if (configured.kind !== 'applied') return;
+    expect(
+      configured.state.projectsById[project.id].qaConfiguration.reviewPolicy,
+    ).toBe('autonomous_review');
+
+    const active = applyProjectEvent(configured.state, {
+      protocolVersion: 1,
+      id: 'project-event-5',
+      projectId: project.id,
+      sequence: 5,
+      occurredAt: timestamp,
+      type: 'task.qa_execution_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        attempt,
+        cycle: qaCycle,
+        report: null,
+      },
+    });
+    expect(active.kind).toBe('applied');
+    if (active.kind !== 'applied') return;
+
+    const terminalCycle = {
+      ...qaCycle,
+      endedAt: timestamp,
+      terminalDisposition: 'rejected' as const,
+      reportId: qaReport.id,
+      terminalCommandId: 'qa-verdict-1',
+      terminalEventId: 'qa-event-1',
+    };
+    const terminal = applyProjectEvent(active.state, {
+      protocolVersion: 1,
+      id: 'project-event-6',
+      projectId: project.id,
+      sequence: 6,
+      occurredAt: timestamp,
+      type: 'task.qa_execution_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        attempt,
+        cycle: terminalCycle,
+        report: qaReport,
+      },
+    });
+    expect(terminal.kind).toBe('applied');
+    if (terminal.kind !== 'applied') return;
+    expect(terminal.state.qaCyclesByAttemptId[attempt.id]).toEqual([
+      terminalCycle,
+    ]);
+    expect(terminal.state.qaReportsByCycleId[qaCycle.id]).toEqual(qaReport);
+
+    const pausedTask = task({
+      reviewAutomation: {
+        status: 'paused',
+        generation: 1,
+        rejectionCount: 3,
+        pauseReason: 'Three rejections require a human decision.',
+        updatedAt: timestamp,
+      },
+    });
+    const failedAction = {
+      ...automationAction,
+      status: 'failed' as const,
+      errorCode: 'resume_failed',
+      completedAt: timestamp,
+    };
+    const paused = applyProjectEvent(terminal.state, {
+      protocolVersion: 1,
+      id: 'project-event-7',
+      projectId: project.id,
+      sequence: 7,
+      occurredAt: timestamp,
+      type: 'task.review_automation_changed',
+      payload: {
+        task: pausedTask,
+        automation: pausedTask.reviewAutomation,
+        action: automationAction,
+      },
+    });
+    expect(paused.kind).toBe('applied');
+    if (paused.kind !== 'applied') return;
+    const actionUpdated = applyProjectEvent(paused.state, {
+      protocolVersion: 1,
+      id: 'project-event-8',
+      projectId: project.id,
+      sequence: 8,
+      occurredAt: timestamp,
+      type: 'task.review_automation_changed',
+      payload: {
+        task: pausedTask,
+        automation: pausedTask.reviewAutomation,
+        action: failedAction,
+      },
+    });
+    expect(actionUpdated.kind).toBe('applied');
+    if (actionUpdated.kind !== 'applied') return;
+    expect(actionUpdated.state.reviewAutomationByTaskId[task().id]).toEqual({
+      ...pausedTask.reviewAutomation,
+      actions: [failedAction],
+    });
+    expect(
+      applyProjectEvent(actionUpdated.state, {
+        protocolVersion: 1,
+        id: 'project-event-8',
+        projectId: project.id,
+        sequence: 8,
+        occurredAt: timestamp,
+        type: 'task.review_automation_changed',
+        payload: {
+          task: pausedTask,
+          automation: pausedTask.reviewAutomation,
+          action: failedAction,
+        },
+      }),
+    ).toEqual({ kind: 'duplicate' });
+    expect(
+      applyProjectEvent(actionUpdated.state, {
+        protocolVersion: 1,
+        id: 'project-event-10',
+        projectId: project.id,
+        sequence: 10,
+        occurredAt: timestamp,
+        type: 'task.qa_execution_changed',
+        payload: {
+          task: pausedTask,
+          attempt,
+          cycle: terminalCycle,
+          report: qaReport,
+        },
+      }),
+    ).toEqual({ kind: 'gap', expected: 9, received: 10 });
+  });
+
+  it('clears every repaired QA warning and keeps it cleared after reconnect', () => {
+    const qaRepairs: AttemptRepair[] = [
+      'qa_cycle_without_trustworthy_outcome',
+      'qa_session_workspace_mismatch',
+      'review_automation_action_incomplete',
+    ].map((reason) => ({
+      taskId: task().id,
+      attemptId: attempt.id,
+      sessionId: qaCycle.sessionId,
+      reason: reason as AttemptRepair['reason'],
+    }));
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({ repairs: qaRepairs }),
+    );
+    const interruptedCycle: QaExecutionCycle = {
+      ...qaCycle,
+      endedAt: timestamp,
+      terminalDisposition: 'interrupted',
+      terminalCommandId: 'repair-qa-cycle-1',
+      terminalEventId: 'project-event-4',
+    };
+
+    const repaired = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'task.qa_execution_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        attempt,
+        cycle: interruptedCycle,
+        report: null,
+      },
+    });
+
+    expect(repaired.kind).toBe('applied');
+    if (repaired.kind !== 'applied') return;
+    expect(repaired.state.repairsByProjectId[project.id]).toEqual([]);
+
+    const reconnected = replaceProjectSnapshot(
+      repaired.state,
+      projectSnapshot({
+        repairs: [],
+        qaCycles: [interruptedCycle],
+        qaReports: [],
+        cursor: 4,
+      }),
+    );
+    expect(reconnected.repairsByProjectId[project.id]).toEqual([]);
+  });
+
+  it('clears an interrupted action repair across Developer and QA sessions', () => {
+    const actionRepair: AttemptRepair = {
+      taskId: task().id,
+      attemptId: attempt.id,
+      sessionId: attempt.sessionId,
+      reason: 'review_automation_action_incomplete',
+    };
+    const unrelatedTaskRepair: AttemptRepair = {
+      taskId: 'task-2',
+      attemptId: 'attempt-2',
+      sessionId: 'session-2',
+      reason: 'review_automation_action_incomplete',
+    };
+    const unrelatedAttemptRepair: AttemptRepair = {
+      taskId: task().id,
+      attemptId: 'attempt-3',
+      sessionId: 'session-3',
+      reason: 'review_automation_action_incomplete',
+    };
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({
+        repairs: [actionRepair, unrelatedTaskRepair, unrelatedAttemptRepair],
+      }),
+    );
+    const interruptedCycle: QaExecutionCycle = {
+      ...qaCycle,
+      endedAt: timestamp,
+      terminalDisposition: 'interrupted',
+      terminalCommandId: 'repair-qa-cycle-mismatched-session',
+      terminalEventId: 'project-event-4',
+    };
+
+    const repaired = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'task.qa_execution_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        attempt,
+        cycle: interruptedCycle,
+        report: null,
+      },
+    });
+
+    expect(repaired.kind).toBe('applied');
+    if (repaired.kind !== 'applied') return;
+    expect(repaired.state.repairsByProjectId[project.id]).toEqual([
+      unrelatedTaskRepair,
+      unrelatedAttemptRepair,
+    ]);
+  });
+
+  it('clears an action repair when its failed automation event arrives', () => {
+    const actionRepair: AttemptRepair = {
+      taskId: task().id,
+      attemptId: attempt.id,
+      sessionId: attempt.sessionId,
+      reason: 'review_automation_action_incomplete',
+    };
+    const unrelatedRepair: AttemptRepair = {
+      taskId: task().id,
+      attemptId: 'attempt-3',
+      sessionId: 'session-3',
+      reason: 'review_automation_action_incomplete',
+    };
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({ repairs: [actionRepair, unrelatedRepair] }),
+    );
+    const failedAction: ReviewAutomationAction = {
+      ...automationAction,
+      status: 'failed',
+      errorCode: 'qa_cycle_interrupted',
+      completedAt: timestamp,
+    };
+
+    const repaired = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'task.review_automation_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        automation: task().reviewAutomation,
+        action: failedAction,
+      },
+    });
+
+    expect(repaired.kind).toBe('applied');
+    if (repaired.kind !== 'applied') return;
+    expect(repaired.state.repairsByProjectId[project.id]).toEqual([
+      unrelatedRepair,
+    ]);
   });
 });
 

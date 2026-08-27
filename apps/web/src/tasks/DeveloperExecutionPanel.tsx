@@ -8,6 +8,8 @@ import {
   type MutatingCommand,
   type PermissionMode,
   type Project,
+  type QaExecutionCycle,
+  type QaReport,
   type Session,
   type Task,
   type TaskActor,
@@ -114,6 +116,8 @@ export function DeveloperExecutionPanel({
   attempts,
   cycles,
   completionReports,
+  qaCycles = [],
+  qaReports = [],
   blockerReports,
   feedback,
   repairs,
@@ -127,6 +131,8 @@ export function DeveloperExecutionPanel({
   attempts: readonly TimelineAttempt[];
   cycles: readonly DeveloperExecutionCycle[];
   completionReports: readonly DeveloperCompletionReport[];
+  qaCycles?: readonly QaExecutionCycle[];
+  qaReports?: readonly QaReport[];
   blockerReports: readonly DeveloperBlockerReport[];
   feedback: readonly DeveloperReviewFeedback[];
   repairs: readonly AttemptRepair[];
@@ -163,6 +169,42 @@ export function DeveloperExecutionPanel({
     () => new Map(blockerReports.map((report) => [report.cycleId, report])),
     [blockerReports],
   );
+  const qaReportByCycleId = useMemo(
+    () => new Map(qaReports.map((report) => [report.cycleId, report])),
+    [qaReports],
+  );
+  const attemptOrdinal = useMemo(
+    () =>
+      new Map<string, number>(
+        attempts.map(({ attempt }) => [attempt.id, attempt.ordinal]),
+      ),
+    [attempts],
+  );
+  const historyItems = useMemo(
+    () =>
+      [
+        ...orderedCycles.map((cycle) => ({
+          role: 'developer' as const,
+          cycle,
+          startedAt: cycle.startedAt,
+        })),
+        ...qaCycles.map((cycle) => ({
+          role: 'qa' as const,
+          cycle,
+          startedAt: cycle.startedAt,
+        })),
+      ].sort(
+        (left, right) =>
+          left.startedAt.localeCompare(right.startedAt) ||
+          (attemptOrdinal.get(left.cycle.attemptId) ??
+            Number.MAX_SAFE_INTEGER) -
+            (attemptOrdinal.get(right.cycle.attemptId) ??
+              Number.MAX_SAFE_INTEGER) ||
+          (left.role === right.role ? 0 : left.role === 'developer' ? -1 : 1) ||
+          left.cycle.ordinal - right.cycle.ordinal,
+      ),
+    [attemptOrdinal, orderedCycles, qaCycles],
+  );
   const developerRepairs = repairs.filter(
     (repair) => repair.reason === 'developer_cycle_without_live_session',
   );
@@ -183,6 +225,29 @@ export function DeveloperExecutionPanel({
     );
   const hasDeveloperReview = Boolean(
     task.lifecycleState === 'review' && latestReviewCycle,
+  );
+  const latestCompletionReport = latestReviewCycle
+    ? completionByCycleId.get(latestReviewCycle.id)
+    : undefined;
+  const hasActiveQa = qaCycles.some(({ endedAt }) => endedAt === null);
+  const latestMatchingQa = [...qaCycles]
+    .reverse()
+    .find(
+      ({ developerCompletionReportId }) =>
+        developerCompletionReportId === latestCompletionReport?.id,
+    );
+  const legacyHumanDecision = qaCycles.length === 0;
+  const canAcceptReview = Boolean(
+    hasDeveloperReview &&
+      !hasActiveQa &&
+      (legacyHumanDecision ||
+        latestMatchingQa?.terminalDisposition === 'verified'),
+  );
+  const canRequestRework = Boolean(
+    hasDeveloperReview &&
+      !hasActiveQa &&
+      (legacyHumanDecision ||
+        latestMatchingQa?.terminalDisposition === 'rejected'),
   );
   const hasDeveloperBlocker = Boolean(task.blocked && latestBlockerCycle);
 
@@ -397,78 +462,85 @@ export function DeveloperExecutionPanel({
         </div>
       ) : null}
 
-      {task.lifecycleState === 'review' && hasDeveloperReview ? (
+      {task.lifecycleState === 'review' &&
+      (canAcceptReview || canRequestRework) ? (
         <div className="developer-action developer-review">
           <h4>Human review</h4>
-          <button
-            className="button button-primary"
-            type="button"
-            disabled={controlsDisabled}
-            onClick={() =>
-              execute('accept', {
-                type: 'task.developer.accept',
-                payload: {
-                  taskId: task.id,
-                  expectedRevision: task.revision,
-                  actor: operator,
-                },
-              })
-            }
-          >
-            Accept as done
-          </button>
-          <label>
-            Rejection feedback
-            <textarea
-              aria-label="Rejection feedback"
+          {canAcceptReview ? (
+            <button
+              className="button button-primary"
+              type="button"
               disabled={controlsDisabled}
-              value={rejectionFeedback}
-              onChange={(event) => setRejectionFeedback(event.target.value)}
-            />
-          </label>
-          <fieldset disabled={controlsDisabled}>
-            <legend>Rework path</legend>
-            <label>
-              <input
-                type="radio"
-                name="rejection-path"
-                checked={rejectionPath === 'resume'}
-                onChange={() => setRejectionPath('resume')}
-              />
-              Resume the same Developer attempt
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="rejection-path"
-                checked={rejectionPath === 'new'}
-                onChange={() => setRejectionPath('new')}
-              />
-              Start a new Developer attempt
-            </label>
-          </fieldset>
-          {rejectionPath === 'new' ? (
-            <FreshExecutionFields
-              workspace={workspace}
-              onWorkspaceChange={setWorkspace}
-              permissionMode={permissionMode}
-              onPermissionModeChange={setPermissionMode}
-              disabled={controlsDisabled}
-            />
+              onClick={() =>
+                execute('accept', {
+                  type: 'task.developer.accept',
+                  payload: {
+                    taskId: task.id,
+                    expectedRevision: task.revision,
+                    actor: operator,
+                  },
+                })
+              }
+            >
+              Accept as done
+            </button>
           ) : null}
-          <button
-            className="button button-secondary"
-            type="button"
-            disabled={
-              controlsDisabled ||
-              !rejectionFeedback.trim() ||
-              !rejectionPath ||
-              (rejectionPath === 'new' && !freshReady)
-            }
-            onClick={reject}
-          >
-            Reject submission
-          </button>
+          {canRequestRework ? (
+            <>
+              <label>
+                Rejection feedback
+                <textarea
+                  aria-label="Rejection feedback"
+                  disabled={controlsDisabled}
+                  value={rejectionFeedback}
+                  onChange={(event) => setRejectionFeedback(event.target.value)}
+                />
+              </label>
+              <fieldset disabled={controlsDisabled}>
+                <legend>Rework path</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name="rejection-path"
+                    checked={rejectionPath === 'resume'}
+                    onChange={() => setRejectionPath('resume')}
+                  />
+                  Resume the same Developer attempt
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="rejection-path"
+                    checked={rejectionPath === 'new'}
+                    onChange={() => setRejectionPath('new')}
+                  />
+                  Start a new Developer attempt
+                </label>
+              </fieldset>
+              {rejectionPath === 'new' ? (
+                <FreshExecutionFields
+                  workspace={workspace}
+                  onWorkspaceChange={setWorkspace}
+                  permissionMode={permissionMode}
+                  onPermissionModeChange={setPermissionMode}
+                  disabled={controlsDisabled}
+                />
+              ) : null}
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={
+                  controlsDisabled ||
+                  !rejectionFeedback.trim() ||
+                  !rejectionPath ||
+                  (rejectionPath === 'new' && !freshReady)
+                }
+                onClick={reject}
+              >
+                Reject submission
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
 
@@ -535,14 +607,71 @@ export function DeveloperExecutionPanel({
         aria-label="Developer execution history"
       >
         <div className="task-section-heading">
-          <h4>Execution history</h4>
-          <span>{orderedCycles.length}</span>
+          <h4>Developer and QA history</h4>
+          <span>{historyItems.length}</span>
         </div>
-        {orderedCycles.length === 0 ? (
-          <p className="task-empty-state">No Developer cycles yet.</p>
+        {historyItems.length === 0 ? (
+          <p className="task-empty-state">No Developer or QA cycles yet.</p>
         ) : (
           <ol>
-            {orderedCycles.map((cycle) => {
+            {historyItems.map((item) => {
+              if (item.role === 'qa') {
+                const qaCycle = item.cycle;
+                const qaReport = qaReportByCycleId.get(qaCycle.id);
+                return (
+                  <li key={`qa:${qaCycle.id}`}>
+                    <article
+                      className="developer-cycle qa-history-cycle"
+                      aria-label={`QA attempt ${attemptOrdinal.get(qaCycle.attemptId) ?? '?'} cycle ${qaCycle.ordinal}`}
+                    >
+                      <header>
+                        <div>
+                          <strong>
+                            QA · Attempt{' '}
+                            {attemptOrdinal.get(qaCycle.attemptId) ?? '?'} ·
+                            Cycle {qaCycle.ordinal}
+                          </strong>
+                          <span>{statusLabel(qaCycle.reviewPolicy)}</span>
+                        </div>
+                        <span className="task-state">
+                          {qaReport
+                            ? qaReport.disposition === 'verified'
+                              ? 'QA verified'
+                              : 'QA rejected'
+                            : qaCycle.endedAt
+                              ? 'Ended without report'
+                              : 'Active'}
+                        </span>
+                      </header>
+                      <dl className="developer-cycle-metadata">
+                        <div>
+                          <dt>Session</dt>
+                          <dd>Session {qaCycle.sessionId}</dd>
+                        </div>
+                        <div>
+                          <dt>Workspace</dt>
+                          <dd>Workspace {qaCycle.workspaceId}</dd>
+                        </div>
+                        <div>
+                          <dt>Snapshot</dt>
+                          <dd>
+                            Task r{qaCycle.taskSnapshot.revision} · QA
+                            instructions r{qaCycle.qaInstructions.revision}
+                          </dd>
+                        </div>
+                      </dl>
+                      {qaReport ? (
+                        <p>
+                          {qaReport.criterionResults.length} criterion results ·{' '}
+                          {qaReport.verificationCommands.length} verification
+                          commands
+                        </p>
+                      ) : null}
+                    </article>
+                  </li>
+                );
+              }
+              const cycle = item.cycle;
               const attempt = attemptById.get(cycle.attemptId);
               const cycleSession = attempt?.session;
               const completion = completionByCycleId.get(cycle.id);
@@ -551,7 +680,7 @@ export function DeveloperExecutionPanel({
                 (entry) => entry.cycleId === cycle.id,
               );
               return (
-                <li key={cycle.id}>
+                <li key={`developer:${cycle.id}`}>
                   <article
                     className="developer-cycle"
                     aria-label={`Developer attempt ${attempt?.attempt.ordinal ?? '?'} cycle ${cycle.ordinal}`}

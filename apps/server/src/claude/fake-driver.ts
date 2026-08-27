@@ -1,6 +1,7 @@
 import type {
   DeveloperBlockerReportInput,
   DeveloperCompletionReportInput,
+  QaReportInput,
 } from '@mesh-session-platform/contracts';
 
 import type {
@@ -10,6 +11,7 @@ import type {
   DiscoveredClaudeSession,
   DriverEvent,
   DriverSession,
+  RoleRuntimeConfiguration,
   ResumeClaudeSessionRequest,
   StartClaudeSessionRequest,
 } from './driver.js';
@@ -35,7 +37,12 @@ export class FakeDriverSession implements DriverSession {
   private streamError: Error | undefined;
   private wake: (() => void) | undefined;
 
-  constructor(readonly claudeResumeId: string | undefined) {}
+  private started = false;
+
+  constructor(
+    readonly claudeResumeId: string | undefined,
+    private readonly onStart?: () => Promise<void>,
+  ) {}
 
   enqueue(event: DriverEvent): void {
     this.queuedEvents.push(event);
@@ -57,6 +64,10 @@ export class FakeDriverSession implements DriverSession {
   }
 
   async *events(): AsyncIterable<DriverEvent> {
+    if (!this.started) {
+      this.started = true;
+      await this.onStart?.();
+    }
     while (!this.closed) {
       if (this.streamError) throw this.streamError;
       if (!this.paused && this.queuedEvents.length > 0) {
@@ -98,6 +109,12 @@ export class FakeDriverSession implements DriverSession {
   }
 }
 
+export type FakeQaStep =
+  | { type: 'qa.verified'; report: QaReportInput }
+  | { type: 'qa.rejected'; report: QaReportInput }
+  | { type: 'qa.wait' }
+  | { type: 'qa.startup_failure'; message: string };
+
 export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
   readonly createdRequests: StartClaudeSessionRequest[] = [];
   readonly createdSessions: FakeDriverSession[] = [];
@@ -105,14 +122,19 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
   private readonly developerConfigurations: Array<
     DeveloperRuntimeConfiguration | undefined
   > = [];
+  private readonly qaSteps: FakeQaStep[];
+  private readonly qaActions: Promise<void>[] = [];
   private createdCount = 0;
 
   constructor(
     private readonly options: {
       discovered?: DiscoveredClaudeSession[];
       subscriptionLimit?: number;
+      qaSteps?: readonly FakeQaStep[];
     } = {},
-  ) {}
+  ) {
+    this.qaSteps = [...(options.qaSteps ?? [])];
+  }
 
   async discover(
     _request: DiscoverClaudeSessionsRequest,
@@ -128,11 +150,17 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
       throw new FakeSubscriptionLimitError();
     }
     this.createdCount += 1;
+    const qaStart = this.prepareQaStart(request.role);
     this.createdRequests.push({ ...request });
     this.developerConfigurations.push(request.developer);
-    const session = new FakeDriverSession(`fake-resume-${this.createdCount}`);
+    const session = new FakeDriverSession(
+      `fake-resume-${this.createdCount}`,
+      qaStart,
+    );
     if (request.developer) {
       await session.sendPrompt(request.developer.initialPrompt);
+    } else if (request.role) {
+      await session.sendPrompt(request.role.initialPrompt);
     }
     this.createdSessions.push(session);
     return session;
@@ -143,9 +171,14 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
   ): Promise<FakeDriverSession> {
     this.resumedRequests.push({ ...request });
     this.developerConfigurations.push(request.developer);
-    const session = new FakeDriverSession(request.claudeResumeId);
+    const session = new FakeDriverSession(
+      request.claudeResumeId,
+      this.prepareQaStart(request.role),
+    );
     if (request.developer) {
       await session.sendPrompt(request.developer.initialPrompt);
+    } else if (request.role) {
+      await session.sendPrompt(request.role.initialPrompt);
     }
     return session;
   }
@@ -164,10 +197,56 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
     await this.developerConfiguration(index).controls.markBlocked(report);
   }
 
+  async drainQaSteps(): Promise<void> {
+    await Promise.all(this.qaActions);
+  }
+
   private developerConfiguration(index: number): DeveloperRuntimeConfiguration {
     const configuration = this.developerConfigurations[index];
     if (!configuration)
       throw new Error(`No Developer runtime configuration at index ${index}`);
     return configuration;
+  }
+
+  private prepareQaStart(
+    configuration: RoleRuntimeConfiguration | undefined,
+  ): (() => Promise<void>) | undefined {
+    if (!configuration || configuration.role !== 'qa') return undefined;
+    const step = this.qaSteps.shift();
+    if (!step) return undefined;
+    if (step.type === 'qa.startup_failure') {
+      throw new Error(step.message);
+    }
+    if (step.type === 'qa.wait') {
+      this.qaActions.push(Promise.resolve());
+      return undefined;
+    }
+    const controls = configuration.controlServer.tools.filter(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (controls.length !== 1) {
+      throw new Error('QA runtime must expose exactly one verdict control');
+    }
+    const control = controls[0];
+    if (!control) throw new Error('QA verdict control is unavailable');
+    let resolveAction!: () => void;
+    let rejectAction!: (error: unknown) => void;
+    const action = new Promise<void>((resolve, reject) => {
+      resolveAction = resolve;
+      rejectAction = reject;
+    });
+    this.qaActions.push(action);
+    return async () => {
+      try {
+        const result = await control.execute(step.report);
+        if (result.isError) {
+          throw new Error('Scripted QA verdict control failed');
+        }
+        resolveAction();
+      } catch (error) {
+        rejectAction(error);
+        throw error;
+      }
+    };
   }
 }

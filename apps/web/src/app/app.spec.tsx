@@ -263,6 +263,43 @@ describe('App', () => {
     await waitFor(() => expect(instructions).toBeDisabled());
   });
 
+  it('wires revision-safe QA settings through the connected command path', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    const instructions = await screen.findByLabelText('QA instructions');
+    await user.clear(instructions);
+    await user.type(instructions, 'Run the focused web gate.');
+    await user.click(screen.getByRole('button', { name: 'Save QA settings' }));
+
+    await waitFor(() =>
+      expect(api.command).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'project.qa_configuration.update',
+          payload: expect.objectContaining({
+            projectId: project.id,
+            expectedRevision: project.revision,
+            content: 'Run the focused web gate.',
+            reviewPolicy: 'manual',
+          }),
+        }),
+      ),
+    );
+  });
+
   it('routes Developer launch through MeshApi and disables it after disconnect', async () => {
     const user = userEvent.setup();
     const store = createMeshStore(snapshot);

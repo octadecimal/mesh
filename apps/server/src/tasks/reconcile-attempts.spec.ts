@@ -4,7 +4,10 @@ import {
   idSchema,
   developerBlockerReportSchema,
   projectSchema,
+  qaExecutionCycleSchema,
+  qaReportSchema,
   rawDiagnosticSchema,
+  reviewAutomationActionSchema,
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
@@ -21,6 +24,7 @@ import {
   reconcileTaskAttemptLaunchReservations,
   reconcileTaskAttempts,
 } from './reconcile-attempts.js';
+import { QaCapabilityRegistry } from './qa-capability-registry.js';
 
 const now = '2026-08-25T12:00:00.000Z';
 const actor = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
@@ -39,6 +43,7 @@ describe('reconcileTaskAttempts', () => {
     source?: TaskAttemptSource;
     repositories?: Parameters<typeof createTestRepositories>[0];
     blocked?: boolean;
+    automationStatus?: 'disabled' | 'enabled' | 'paused';
   }) => {
     const repositories = createTestRepositories(options.repositories);
     disposals.push(repositories.dispose);
@@ -67,6 +72,16 @@ describe('reconcileTaskAttempts', () => {
         blocked: options.blocked
           ? { reason: 'Waiting for input', actor, blockedAt: now }
           : null,
+        reviewAutomation: {
+          status: options.automationStatus ?? 'disabled',
+          generation: 1,
+          rejectionCount: 0,
+          pauseReason:
+            options.automationStatus === 'paused'
+              ? 'Already paused for operator review.'
+              : null,
+          updatedAt: now,
+        },
         revision: 1,
         createdAt: now,
         updatedAt: now,
@@ -164,6 +179,97 @@ describe('reconcileTaskAttempts', () => {
       ...repositories,
       now: () => '2026-08-25T12:01:00.000Z',
     });
+
+  const addQaCycle = (
+    repositories: ReturnType<typeof setup>,
+    options: {
+      sessionId?: string;
+      sessionState?: LifecycleState;
+      sessionWorkspaceId?: string;
+      terminal?: boolean;
+    } = {},
+  ) => {
+    const sessionId = options.sessionId ?? 'qa-session-1';
+    const sessionWorkspaceId = options.sessionWorkspaceId ?? 'workspace-1';
+    if (!repositories.sessions.get(sessionId)) {
+      repositories.sessions.create(
+        sessionSchema.parse({
+          id: sessionId,
+          projectId: 'project-1',
+          workspaceId: sessionWorkspaceId,
+          title: 'QA cycle one',
+          permissionMode: 'safe_auto',
+          lifecycleState: options.sessionState ?? 'interrupted',
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+    }
+    const active = repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'qa-cycle-1',
+        taskId: 'task-1',
+        attemptId: 'attempt-1',
+        sessionId,
+        ordinal: 1,
+        authorizedBy: actor,
+        authorizationCommandId: 'start-qa-1',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: 'Recover attempt state',
+          description: 'Keep task outcomes under human control.',
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'Restart state is explicit.' },
+          ],
+        },
+        developerCompletionReportId: 'completion-report-1',
+        workspaceId: 'workspace-1',
+        reviewPolicy: 'autonomous_review',
+        reviewPolicyRevision: 1,
+        automationGeneration: 1,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    if (!options.terminal) return active;
+
+    const report = repositories.qaExecutions.insertReport(
+      qaReportSchema.parse({
+        id: 'qa-report-1',
+        cycleId: active.id,
+        disposition: 'verified',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'passed',
+            evidence: 'Focused restart test passed.',
+          },
+        ],
+        verificationCommands: [{ command: 'pnpm test', outcome: 'passed' }],
+        limitations: [],
+        residualRisks: [],
+        workspaceBefore: 'workspace-state-1',
+        workspaceAfter: 'workspace-state-1',
+        createdAt: now,
+      }),
+    );
+    const completed = repositories.qaExecutions.completeCycle(active.id, {
+      endedAt: now,
+      terminalDisposition: 'verified',
+      reportId: report.id,
+      terminalCommandId: 'qa-verdict-1',
+      terminalEventId: 'qa-event-1',
+    });
+    if (!completed) throw new Error('Expected QA cycle completion');
+    return completed;
+  };
 
   it('releases a crash-stale reservation before attempt persistence', () => {
     const repositories = setup({
@@ -651,4 +757,241 @@ describe('reconcileTaskAttempts', () => {
     expect(reconcile(repositories)).toEqual({ repairs: [], events: [] });
     expect(repositories.tasks.get('task-1')?.lifecycleState).toBe('ready');
   });
+
+  it.each([
+    ['interrupted', 'interrupted'],
+    ['completed', 'completed'],
+    ['missing', 'interrupted'],
+  ] as const)(
+    'reports an active QA cycle with a %s session without inventing a verdict',
+    (condition, sessionState) => {
+      const repositories = setup({
+        taskState: 'review',
+        sessionState: 'completed',
+        automationStatus: 'enabled',
+      });
+      const cycle = addQaCycle(repositories, { sessionState });
+      const capabilities = new QaCapabilityRegistry();
+      const token = capabilities.issue({
+        sessionId: cycle.sessionId,
+        taskId: cycle.taskId,
+        attemptId: cycle.attemptId,
+        cycleId: cycle.id,
+      });
+      const sessions =
+        condition === 'missing'
+          ? {
+              get: (sessionId: string) =>
+                sessionId === cycle.sessionId
+                  ? undefined
+                  : repositories.sessions.get(sessionId),
+            }
+          : repositories.sessions;
+
+      const first = reconcileTaskAttempts({
+        ...repositories,
+        sessions,
+        qaExecutions: repositories.qaExecutions,
+        workspaces: repositories.workspaces,
+        qaCapabilities: capabilities,
+        now: () => '2026-08-25T12:01:00.000Z',
+      });
+      const second = reconcileTaskAttempts({
+        ...repositories,
+        sessions,
+        qaExecutions: repositories.qaExecutions,
+        workspaces: repositories.workspaces,
+        qaCapabilities: capabilities,
+        now: () => '2026-08-25T12:02:00.000Z',
+      });
+
+      expect(first.repairs).toContainEqual({
+        taskId: 'task-1',
+        attemptId: 'attempt-1',
+        sessionId: cycle.sessionId,
+        reason: 'qa_cycle_without_trustworthy_outcome',
+      });
+      expect(
+        first.events.filter(
+          (event) => event.type === 'task.attempt_repair_detected',
+        ),
+      ).toHaveLength(1);
+      expect(second.events).toEqual([]);
+      expect(repositories.qaExecutions.getCycle(cycle.id)).toEqual(cycle);
+      expect(
+        repositories.qaExecutions.getReport('qa-report-1'),
+      ).toBeUndefined();
+      expect(repositories.tasks.get('task-1')).toMatchObject({
+        lifecycleState: 'review',
+        reviewAutomation: { status: 'paused' },
+      });
+      expect(() => capabilities.resolve(token)).toThrow(
+        'The QA capability is invalid.',
+      );
+    },
+  );
+
+  it('reports a QA session bound to a different workspace and preserves both workspaces', () => {
+    const repositories = setup({
+      taskState: 'review',
+      sessionState: 'completed',
+      automationStatus: 'enabled',
+    });
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-other',
+        projectId: 'project-1',
+        type: 'shared',
+        path: 'C:/work/project-1/other',
+      }),
+    );
+    const cycle = addQaCycle(repositories, {
+      sessionState: 'running',
+      sessionWorkspaceId: 'workspace-other',
+    });
+
+    const first = reconcileTaskAttempts({
+      ...repositories,
+      qaExecutions: repositories.qaExecutions,
+      workspaces: repositories.workspaces,
+      qaCapabilities: new QaCapabilityRegistry(),
+      now: () => '2026-08-25T12:01:00.000Z',
+    });
+    const second = reconcileTaskAttempts({
+      ...repositories,
+      qaExecutions: repositories.qaExecutions,
+      workspaces: repositories.workspaces,
+      qaCapabilities: new QaCapabilityRegistry(),
+      now: () => '2026-08-25T12:02:00.000Z',
+    });
+
+    expect(first.repairs).toContainEqual({
+      taskId: 'task-1',
+      attemptId: 'attempt-1',
+      sessionId: cycle.sessionId,
+      reason: 'qa_session_workspace_mismatch',
+    });
+    expect(second.events).toEqual([]);
+    expect(repositories.qaExecutions.getCycle(cycle.id)).toEqual(cycle);
+    expect(repositories.workspaces.get('workspace-1')).toBeDefined();
+    expect(repositories.workspaces.get('workspace-other')).toBeDefined();
+  });
+
+  it('lets a valid terminal QA report win over a completed session', () => {
+    const repositories = setup({
+      taskState: 'review',
+      sessionState: 'completed',
+      automationStatus: 'enabled',
+    });
+    const cycle = addQaCycle(repositories, {
+      sessionState: 'completed',
+      terminal: true,
+    });
+
+    expect(
+      reconcileTaskAttempts({
+        ...repositories,
+        qaExecutions: repositories.qaExecutions,
+        workspaces: repositories.workspaces,
+        qaCapabilities: new QaCapabilityRegistry(),
+      }),
+    ).toEqual({ repairs: [], events: [] });
+    expect(repositories.qaExecutions.getCycle(cycle.id)).toEqual(cycle);
+    expect(repositories.qaExecutions.getReport('qa-report-1')).toMatchObject({
+      disposition: 'verified',
+    });
+    expect(repositories.tasks.get('task-1')).toMatchObject({
+      lifecycleState: 'review',
+      reviewAutomation: { status: 'enabled' },
+    });
+  });
+
+  it('treats an audited interrupted QA cycle as terminal without a verdict', () => {
+    const repositories = setup({
+      taskState: 'review',
+      sessionState: 'completed',
+      automationStatus: 'paused',
+    });
+    const active = addQaCycle(repositories, { sessionState: 'completed' });
+    const interrupted = repositories.qaExecutions.interruptCycle(active.id, {
+      endedAt: now,
+      terminalCommandId: 'repair-qa-1',
+      terminalEventId: 'repair-event-1',
+    });
+    if (!interrupted) throw new Error('Expected interrupted QA cycle');
+
+    expect(
+      reconcileTaskAttempts({
+        ...repositories,
+        qaExecutions: repositories.qaExecutions,
+        workspaces: repositories.workspaces,
+        qaCapabilities: new QaCapabilityRegistry(),
+      }),
+    ).toEqual({ repairs: [], events: [] });
+    expect(repositories.qaExecutions.getReport('qa-report-1')).toBeUndefined();
+    expect(repositories.qaExecutions.getCycle(active.id)).toEqual(interrupted);
+  });
+
+  it.each(['review', 'done'] as const)(
+    'reports a pending automatic action when its target task is %s and never replays it',
+    (taskState) => {
+      const repositories = setup({
+        taskState,
+        sessionState: 'completed',
+        automationStatus: 'enabled',
+      });
+      const cycle = addQaCycle(repositories, {
+        sessionState: 'completed',
+        terminal: true,
+      });
+      const action = repositories.qaExecutions.insertAutomationAction(
+        reviewAutomationActionSchema.parse({
+          id: 'automation-action-1',
+          idempotencyKey: 'task-1:attempt-1:qa-cycle-1:complete_task:1',
+          projectId: 'project-1',
+          taskId: 'task-1',
+          attemptId: 'attempt-1',
+          sourceCycleId: cycle.id,
+          actionKind: 'complete_task',
+          generation: 1,
+          status: 'pending',
+          errorCode: null,
+          createdAt: now,
+          completedAt: null,
+        }),
+      );
+
+      const first = reconcileTaskAttempts({
+        ...repositories,
+        qaExecutions: repositories.qaExecutions,
+        workspaces: repositories.workspaces,
+        qaCapabilities: new QaCapabilityRegistry(),
+        now: () => '2026-08-25T12:01:00.000Z',
+      });
+      const second = reconcileTaskAttempts({
+        ...repositories,
+        qaExecutions: repositories.qaExecutions,
+        workspaces: repositories.workspaces,
+        qaCapabilities: new QaCapabilityRegistry(),
+        now: () => '2026-08-25T12:02:00.000Z',
+      });
+
+      expect(first.repairs).toEqual([
+        {
+          taskId: 'task-1',
+          attemptId: 'attempt-1',
+          sessionId: cycle.sessionId,
+          reason: 'review_automation_action_incomplete',
+        },
+      ]);
+      expect(second).toEqual({ repairs: first.repairs, events: [] });
+      expect(repositories.qaExecutions.listPendingAutomationActions()).toEqual([
+        action,
+      ]);
+      expect(repositories.tasks.get('task-1')).toMatchObject({
+        lifecycleState: taskState,
+        reviewAutomation: { status: 'paused' },
+      });
+    },
+  );
 });

@@ -2,9 +2,11 @@ import type { PermissionMode } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
 import type {
+  AgentRuntimeConfiguration,
   ClaudeSessionDriver,
   DeveloperRuntimeConfiguration,
   DriverSession,
+  RoleRuntimeConfiguration,
 } from '../claude/driver.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { EventRepository } from '../repositories/event-repository.js';
@@ -39,6 +41,7 @@ export class SessionRegistry {
   readonly publisher: EventPublisher;
   private readonly runtimes = new Map<string, SessionRuntime>();
   private readonly pendingAttaches = new Map<string, PendingAttach>();
+  private readonly repairReservations = new Set<string>();
   private unavailable = false;
   private shuttingDown = false;
 
@@ -52,15 +55,15 @@ export class SessionRegistry {
 
   async create(
     sessionId: string,
-    developer?: DeveloperRuntimeConfiguration,
+    configuration?: AgentRuntimeConfiguration,
   ): Promise<void> {
-    await this.attach(sessionId, 'create', developer);
+    await this.attach(sessionId, 'create', configuration);
   }
 
   async resume(
     sessionId: string,
     configuration: { workspaceId: string; permissionMode: PermissionMode },
-    developer?: DeveloperRuntimeConfiguration,
+    runtimeConfiguration?: AgentRuntimeConfiguration,
   ): Promise<void> {
     const configured = this.dependencies.sessions.configureResume(
       sessionId,
@@ -68,7 +71,7 @@ export class SessionRegistry {
       configuration.permissionMode,
     );
     if (!configured) throw { code: 'session_not_found', sessionId };
-    await this.attach(sessionId, 'resume', developer);
+    await this.attach(sessionId, 'resume', runtimeConfiguration);
   }
 
   async sendPrompt(sessionId: string, prompt: string): Promise<void> {
@@ -93,6 +96,24 @@ export class SessionRegistry {
     if (!runtime) return;
     runtime.emergencyInterrupt();
     await runtime.forceClose();
+  }
+
+  reserveRepair(sessionId: string): (() => void) | undefined {
+    this.assertWritable();
+    if (
+      this.runtimes.has(sessionId) ||
+      this.pendingAttaches.has(sessionId) ||
+      this.repairReservations.has(sessionId)
+    ) {
+      return undefined;
+    }
+    this.repairReservations.add(sessionId);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.repairReservations.delete(sessionId);
+    };
   }
 
   async resolvePermission(
@@ -154,10 +175,14 @@ export class SessionRegistry {
   private async attach(
     sessionId: string,
     mode: 'create' | 'resume',
-    developer?: DeveloperRuntimeConfiguration,
+    configuration?: AgentRuntimeConfiguration,
   ): Promise<void> {
     this.assertWritable();
-    if (this.runtimes.has(sessionId) || this.pendingAttaches.has(sessionId)) {
+    if (
+      this.runtimes.has(sessionId) ||
+      this.pendingAttaches.has(sessionId) ||
+      this.repairReservations.has(sessionId)
+    ) {
       const state =
         this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
       throw { code: 'invalid_session_state', from: state, trigger: mode };
@@ -207,6 +232,12 @@ export class SessionRegistry {
       }
     };
     let placeholder: DriverSession | undefined;
+    const role = isRoleRuntimeConfiguration(configuration)
+      ? configuration
+      : undefined;
+    const developer = isDeveloperRuntimeConfiguration(configuration)
+      ? configuration
+      : undefined;
     try {
       placeholder = await (mode === 'create'
         ? this.dependencies.driver.create({
@@ -214,12 +245,14 @@ export class SessionRegistry {
             workspacePath: workspace.path,
             permissionMode: session.permissionMode,
             developer,
+            role,
           })
         : this.dependencies.driver.resume({
             claudeResumeId: session.claudeResumeId!,
             workspacePath: workspace.path,
             permissionMode: session.permissionMode,
             developer,
+            role,
           }));
       this.assertPendingAttachCurrent(sessionId, pending);
       const runtime = new SessionRuntime({
@@ -337,3 +370,15 @@ export class SessionRegistry {
     this.dependencies.invalidateDeveloperCapability?.(sessionId);
   }
 }
+
+const isRoleRuntimeConfiguration = (
+  configuration: AgentRuntimeConfiguration | undefined,
+): configuration is RoleRuntimeConfiguration =>
+  configuration !== undefined &&
+  'role' in configuration &&
+  configuration.role === 'qa';
+
+const isDeveloperRuntimeConfiguration = (
+  configuration: AgentRuntimeConfiguration | undefined,
+): configuration is DeveloperRuntimeConfiguration =>
+  configuration !== undefined && 'controls' in configuration;

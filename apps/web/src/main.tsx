@@ -2,7 +2,7 @@ import { StrictMode } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import App from './app/app';
 import { MeshApi } from './api/client';
-import { MeshSocket } from './api/socket';
+import { commandCreatesSession, MeshSocket } from './api/socket';
 import { createResyncCoordinator } from './state/resync';
 import { createMeshStore } from './state/store';
 import 'dockview-react/dist/styles/dockview.css';
@@ -112,11 +112,7 @@ const start = async () => {
         await coordinator.refreshProject(project.id);
         socket.resubscribe();
       }
-      if (
-        args[0].type === 'session.create' ||
-        args[0].type === 'task.attempt.launch'
-      )
-        socket.resubscribe();
+      if (commandCreatesSession(args[0].type)) socket.resubscribe();
       return response;
     },
   };

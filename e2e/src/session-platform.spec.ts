@@ -7,6 +7,7 @@ import {
   type DeveloperExecutionCycle,
   type MutatingCommand,
   type ProjectSnapshot,
+  type QaReportInput,
 } from '@mesh-session-platform/contracts';
 
 import {
@@ -264,6 +265,36 @@ const saveDeveloperInstructions = async (
   return projectId;
 };
 
+const saveQaSettings = async (
+  page: Page,
+  harness: FakeClaudeHarness,
+  input: {
+    content: string;
+    reviewPolicy: 'manual' | 'autonomous_review';
+  },
+) => {
+  const settings = page.getByRole('region', { name: 'QA settings' });
+  await settings.getByLabel('QA instructions').fill(input.content);
+  await settings.getByLabel('Review policy').selectOption(input.reviewPolicy);
+  await settings.getByRole('button', { name: 'Save QA settings' }).click();
+  if (input.reviewPolicy === 'autonomous_review') {
+    await page
+      .getByRole('dialog', { name: 'Enable autonomous review' })
+      .getByRole('button', { name: 'Enable autonomous review' })
+      .click();
+  }
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.project.qaConfiguration.instructions.content === input.content &&
+      snapshot.project.qaConfiguration.reviewPolicy === input.reviewPolicy,
+    `QA settings were not persisted for project ${projectId}`,
+  );
+  return projectId;
+};
+
 const launchDeveloper = async (
   taskDialog: ReturnType<Page['getByRole']>,
   harness: FakeClaudeHarness,
@@ -327,6 +358,51 @@ const blockerReport = (
   suggestedHumanAction: 'Provide the missing fixture before retrying.',
   preserveWorkspace: true,
 });
+
+const qaReport = (
+  cycle: DeveloperExecutionCycle,
+  disposition: 'verified' | 'rejected',
+  marker: string,
+): QaReportInput => ({
+  disposition,
+  criterionResults: cycle.taskSnapshot.acceptanceCriteria.map(
+    (criterion, index) => ({
+      criterionId: criterion.id,
+      status:
+        disposition === 'verified' || index > 0
+          ? 'passed'
+          : ('failed' as const),
+      evidence: `${marker}: ${criterion.text}`,
+    }),
+  ),
+  limitations: [],
+  residualRisks: disposition === 'rejected' ? [`${marker} needs rework`] : [],
+});
+
+const currentDeveloperCycle = (snapshot: ProjectSnapshot) => {
+  const cycle = snapshot.developerCycles.at(-1);
+  if (!cycle) throw new Error('Expected a current Developer cycle');
+  return cycle;
+};
+
+const enableTaskAutomation = async (
+  taskDialog: ReturnType<Page['getByRole']>,
+  harness: FakeClaudeHarness,
+  projectId: string,
+  title: string,
+) => {
+  await taskDialog.getByRole('button', { name: 'Enable automation' }).click();
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.tasks.some(
+        (task) =>
+          task.title === title && task.reviewAutomation.status === 'enabled',
+      ),
+    `Review automation was not enabled for ${title}`,
+  );
+};
 
 test('keeps the empty cockpit usable at a narrow viewport', async ({
   page,
@@ -1010,6 +1086,319 @@ test('Developer blocker stops its runtime and fresh recovery retains blocked his
   await expect(
     history.getByRole('article', { name: 'Developer attempt 2 cycle 1' }),
   ).toContainText('Fresh recovery completed with the fixture available.');
+});
+
+test('QA review autonomously rejects, resumes the same Developer, verifies, and restores one alternating history', async ({
+  page,
+  harness,
+}) => {
+  const title = 'Autonomously verify the reconnect fix';
+  await importTemporaryRepository(page, harness, 'Autonomous QA acceptance');
+  const projectId = await saveQaSettings(page, harness, {
+    content: 'Read the implementation, run the fake verification, and report.',
+    reviewPolicy: 'autonomous_review',
+  });
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  await saveDeveloperInstructions(
+    page,
+    harness,
+    'Implement the task and submit literal verification evidence.',
+  );
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  const taskDialog = await createReadyTask(page, {
+    title,
+    description: 'Exercise one autonomous rejection and successful re-review.',
+    acceptanceCriteria: ['The reconnect behavior remains deterministic.'],
+  });
+  await enableTaskAutomation(taskDialog, harness, projectId, title);
+  const workflow = await launchDeveloper(taskDialog, harness, 1);
+  const firstSnapshot = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.developerCycles.length === 1,
+    'The initial Developer cycle did not start',
+  );
+  const firstCycle = currentDeveloperCycle(firstSnapshot);
+  harness.driver.queueQaStep({
+    type: 'qa.rejected',
+    report: qaReport(firstCycle, 'rejected', 'qa-rejection-one'),
+  });
+  await harness.driver.submitLatestDeveloperForReview(
+    completionReport(firstCycle, {
+      id: 'qa-e2e-autonomous-developer-report-1',
+      summary: 'The initial reconnect implementation is ready.',
+      evidence: 'The initial fake reconnect verification passed.',
+      command: 'fake-developer verify reconnect-one',
+      output: 'Initial scripted Developer verification passed.',
+      createdAt: '2026-08-26T03:00:00.000Z',
+    }),
+  );
+
+  const resumedSnapshot = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.qaCycles.length === 1 &&
+      snapshot.qaCycles[0]?.terminalDisposition === 'rejected' &&
+      snapshot.developerCycles.length === 2 &&
+      snapshot.tasks.some(
+        (task) => task.title === title && task.lifecycleState === 'in_progress',
+      ),
+    'Autonomous rejection did not resume the Developer cycle',
+  );
+  await harness.waitForResumed(1);
+  expect(harness.driver.latestDeveloperResumeId()).toBe(
+    harness.driver.initialDeveloperResumeId(),
+  );
+  await expect(workflow.getByText('QA rejected')).toBeVisible();
+
+  const resumedCycle = currentDeveloperCycle(resumedSnapshot);
+  harness.driver.queueQaStep({
+    type: 'qa.verified',
+    report: qaReport(resumedCycle, 'verified', 'qa-verification-two'),
+  });
+  await harness.driver.submitLatestDeveloperForReview(
+    completionReport(resumedCycle, {
+      id: 'qa-e2e-autonomous-developer-report-2',
+      summary: 'The reconnect implementation is reworked and ready.',
+      evidence: 'The reworked fake reconnect verification passed.',
+      command: 'fake-developer verify reconnect-two',
+      output: 'Reworked scripted Developer verification passed.',
+      createdAt: '2026-08-26T03:30:00.000Z',
+    }),
+  );
+  await harness.driver.drainQaSteps();
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.qaCycles.length === 2 &&
+      snapshot.qaCycles[1]?.terminalDisposition === 'verified' &&
+      snapshot.tasks.some(
+        (task) => task.title === title && task.lifecycleState === 'done',
+      ),
+    'Autonomous verification did not complete the task',
+  );
+
+  await expect(workflow.getByText('QA verified')).toBeVisible();
+  const automationHistory = taskDialog.getByRole('region', {
+    name: 'Automation audit',
+  });
+  await expect(
+    automationHistory.getByText('Resume developer', { exact: true }),
+  ).toHaveCount(1);
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  await page.getByRole('button', { name: 'Show completed tasks' }).click();
+  const completedCard = page
+    .getByRole('region', { name: 'Completed tasks' })
+    .getByRole('article', { name: `${title} task card` });
+  await expect(completedCard).toBeVisible();
+  await completedCard.getByRole('button', { name: `Open ${title}` }).click();
+
+  const restoredHistory = page
+    .getByRole('dialog', { name: title })
+    .getByRole('region', { name: 'Developer execution history' });
+  expect(
+    await restoredHistory
+      .getByRole('article')
+      .evaluateAll((articles) =>
+        articles.map((article) => article.getAttribute('aria-label')),
+      ),
+  ).toEqual([
+    'Developer attempt 1 cycle 1',
+    'QA attempt 1 cycle 1',
+    'Developer attempt 1 cycle 2',
+    'QA attempt 1 cycle 2',
+  ]);
+});
+
+test('QA review manual verification waits for human acceptance', async ({
+  page,
+  harness,
+}) => {
+  const title = 'Manually accept verified QA work';
+  await importTemporaryRepository(page, harness, 'Manual QA verification');
+  const projectId = await saveQaSettings(page, harness, {
+    content: 'Verify every acceptance criterion without changing source.',
+    reviewPolicy: 'manual',
+  });
+  const taskDialog = await createReadyTask(page, {
+    title,
+    description: 'Require a human click after a verified QA report.',
+    acceptanceCriteria: ['Verified work remains in review until accepted.'],
+  });
+  await launchDeveloper(taskDialog, harness, 1);
+  const active = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.developerCycles.length === 1,
+    'The manual verification Developer cycle did not start',
+  );
+  const cycle = currentDeveloperCycle(active);
+  await harness.driver.submitLatestDeveloperForReview(
+    completionReport(cycle, {
+      id: 'qa-e2e-manual-verified-developer-report',
+      summary: 'Manual verification candidate is ready.',
+      evidence: 'The fake Developer verification passed.',
+      command: 'fake-developer verify manual-verified',
+      output: 'Manual candidate verification passed.',
+      createdAt: '2026-08-26T04:00:00.000Z',
+    }),
+  );
+  harness.driver.queueQaStep({
+    type: 'qa.verified',
+    report: qaReport(cycle, 'verified', 'manual-qa-verified'),
+  });
+  await taskDialog.getByRole('button', { name: 'Start QA' }).click();
+  await harness.driver.drainQaSteps();
+
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.qaCycles.length === 1 &&
+      snapshot.qaCycles[0]?.terminalDisposition === 'verified' &&
+      snapshot.tasks.some(
+        (task) => task.title === title && task.lifecycleState === 'review',
+      ),
+    'Manual verified work advanced without human acceptance',
+  );
+  await expect(
+    taskDialog.getByRole('button', { name: 'Accept verified work' }),
+  ).toBeVisible();
+  expect(harness.driver.resumedRequests).toHaveLength(0);
+});
+
+test('QA review manual rejection waits for a human rework choice', async ({
+  page,
+  harness,
+}) => {
+  const title = 'Manually choose rejected QA rework';
+  await importTemporaryRepository(page, harness, 'Manual QA rejection');
+  const projectId = await saveQaSettings(page, harness, {
+    content: 'Reject incomplete evidence and preserve the review state.',
+    reviewPolicy: 'manual',
+  });
+  const taskDialog = await createReadyTask(page, {
+    title,
+    description: 'Require a human rework decision after rejection.',
+    acceptanceCriteria: ['Rejected work remains in review without a resume.'],
+  });
+  await launchDeveloper(taskDialog, harness, 1);
+  const active = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.developerCycles.length === 1,
+    'The manual rejection Developer cycle did not start',
+  );
+  const cycle = currentDeveloperCycle(active);
+  await harness.driver.submitLatestDeveloperForReview(
+    completionReport(cycle, {
+      id: 'qa-e2e-manual-rejected-developer-report',
+      summary: 'Manual rejection candidate is ready.',
+      evidence: 'The incomplete fake verification produced evidence.',
+      command: 'fake-developer verify manual-rejected',
+      output: 'The scripted verification exposed a gap.',
+      createdAt: '2026-08-26T04:30:00.000Z',
+    }),
+  );
+  harness.driver.queueQaStep({
+    type: 'qa.rejected',
+    report: qaReport(cycle, 'rejected', 'manual-qa-rejected'),
+  });
+  await taskDialog.getByRole('button', { name: 'Start QA' }).click();
+  await harness.driver.drainQaSteps();
+
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.qaCycles.length === 1 &&
+      snapshot.qaCycles[0]?.terminalDisposition === 'rejected' &&
+      snapshot.tasks.some(
+        (task) => task.title === title && task.lifecycleState === 'review',
+      ),
+    'Manual rejected work resumed without a human decision',
+  );
+  await expect(
+    taskDialog.getByRole('button', { name: 'Resume Developer rework' }),
+  ).toBeVisible();
+  expect(harness.driver.resumedRequests).toHaveLength(0);
+});
+
+test('QA review pauses after the third autonomous rejection without another Developer resume', async ({
+  page,
+  harness,
+}) => {
+  const title = 'Pause after three QA rejections';
+  await importTemporaryRepository(page, harness, 'QA ceiling acceptance');
+  const projectId = await saveQaSettings(page, harness, {
+    content: 'Reject each scripted incomplete verification.',
+    reviewPolicy: 'autonomous_review',
+  });
+  const taskDialog = await createReadyTask(page, {
+    title,
+    description: 'Bound autonomous review to three QA rejections.',
+    acceptanceCriteria: ['The third rejection starts no Developer cycle.'],
+  });
+  await enableTaskAutomation(taskDialog, harness, projectId, title);
+  await launchDeveloper(taskDialog, harness, 1);
+
+  for (let rejection = 1; rejection <= 3; rejection += 1) {
+    const before = await waitForProjectSnapshot(
+      harness,
+      projectId,
+      (snapshot) => snapshot.developerCycles.length === rejection,
+      `Developer cycle ${rejection} did not become available`,
+    );
+    const cycle = currentDeveloperCycle(before);
+    harness.driver.queueQaStep({
+      type: 'qa.rejected',
+      report: qaReport(cycle, 'rejected', `qa-ceiling-${rejection}`),
+    });
+    await harness.driver.submitLatestDeveloperForReview(
+      completionReport(cycle, {
+        id: `qa-e2e-ceiling-developer-report-${rejection}`,
+        summary: `Autonomous rejection candidate ${rejection} is ready.`,
+        evidence: `Scripted Developer evidence ${rejection}.`,
+        command: `fake-developer verify ceiling-${rejection}`,
+        output: `Scripted ceiling verification ${rejection} completed.`,
+        createdAt: `2026-08-26T0${4 + rejection}:00:00.000Z`,
+      }),
+    );
+    await harness.driver.drainQaSteps();
+    await waitForProjectSnapshot(
+      harness,
+      projectId,
+      (snapshot) =>
+        snapshot.qaCycles.length === rejection &&
+        snapshot.qaCycles.at(-1)?.terminalDisposition === 'rejected' &&
+        (rejection < 3
+          ? snapshot.developerCycles.length === rejection + 1
+          : snapshot.tasks.some(
+              (task) =>
+                task.title === title &&
+                task.lifecycleState === 'review' &&
+                task.reviewAutomation.status === 'paused' &&
+                task.reviewAutomation.rejectionCount === 3,
+            )),
+      `Autonomous rejection ${rejection} did not reach its durable outcome`,
+    );
+  }
+
+  expect(harness.driver.resumedRequests).toHaveLength(2);
+  await expect(
+    taskDialog.getByText(
+      /Automation paused: Three autonomous QA rejections require a human decision/i,
+    ),
+  ).toBeVisible();
+  await expect(
+    taskDialog.getByText('0 autonomous rejections remaining'),
+  ).toBeVisible();
 });
 
 test('imports a project and preserves an attempted task across refresh', async ({

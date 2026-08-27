@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   SdkClaudeSessionDriver,
   UnsupportedSdkCapabilityError,
+  UnsafeClaudeCredentialError,
+  type SdkAccountInfo,
   type SdkFacade,
   type SdkPermissionRequest,
   type SdkQuery,
@@ -22,7 +24,15 @@ class ScriptedQuery implements SdkQuery {
   interrupted = false;
   closed = false;
 
-  constructor(private readonly scriptedEvents: readonly SdkStreamEvent[]) {}
+  constructor(
+    private readonly scriptedEvents: readonly SdkStreamEvent[],
+    private readonly account: SdkAccountInfo = {
+      apiKeySource: 'none',
+      apiProvider: 'firstParty',
+      subscriptionType: 'max',
+      tokenSource: 'oauth',
+    },
+  ) {}
 
   async *events(): AsyncIterable<SdkStreamEvent> {
     yield* this.scriptedEvents;
@@ -36,6 +46,10 @@ class ScriptedQuery implements SdkQuery {
     this.interrupted = true;
   }
 
+  async accountInfo(): Promise<SdkAccountInfo> {
+    return this.account;
+  }
+
   close(): void {
     this.closed = true;
   }
@@ -45,8 +59,8 @@ class ScriptedFacade implements SdkFacade {
   readonly queryCalls: SdkQueryOptions[] = [];
   readonly query: ScriptedQuery;
 
-  constructor(events: readonly SdkStreamEvent[]) {
-    this.query = new ScriptedQuery(events);
+  constructor(events: readonly SdkStreamEvent[], account?: SdkAccountInfo) {
+    this.query = new ScriptedQuery(events, account);
   }
 
   async listSessions(): Promise<Array<{ sessionId: string; title?: string }>> {
@@ -64,6 +78,44 @@ class ScriptedFacade implements SdkFacade {
 }
 
 describe('SdkClaudeSessionDriver contract', () => {
+  it.each(['ANTHROPIC_API_KEY', 'apiKeyHelper', '/login managed key'])(
+    'fails closed when SDK initialization reports the API-billed %s source',
+    async (apiKeySource) => {
+      const sdk = new ScriptedFacade(
+        [{ kind: 'started', sessionId: 'unsafe', apiKeySource }],
+        {
+          apiKeySource,
+          apiProvider: 'firstParty',
+          subscriptionType: 'max',
+          tokenSource: 'oauth',
+        },
+      );
+
+      await expect(
+        new SdkClaudeSessionDriver(sdk).create({ title: 'Session' }),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<UnsafeClaudeCredentialError>>({
+          code: 'billing_configuration_conflict',
+          apiKeySource,
+        }),
+      );
+      expect(sdk.query.closed).toBe(true);
+      expect(sdk.query.prompts).toEqual([]);
+    },
+  );
+
+  it('fails closed when account metadata does not positively establish a first-party subscription', async () => {
+    const sdk = new ScriptedFacade(
+      [{ kind: 'started', sessionId: 'ambiguous', apiKeySource: 'none' }],
+      { apiKeySource: 'none', apiProvider: 'gateway' },
+    );
+
+    await expect(
+      new SdkClaudeSessionDriver(sdk).create({ title: 'Session' }),
+    ).rejects.toMatchObject({ code: 'billing_configuration_conflict' });
+    expect(sdk.query.closed).toBe(true);
+  });
+
   it('keeps consuming events after a completed turn', async () => {
     const sdk = new ScriptedFacade([
       { kind: 'started', sessionId: 'resume-multi', apiKeySource: 'none' },
@@ -179,6 +231,99 @@ describe('SdkClaudeSessionDriver contract', () => {
     expect(resumeSdk.queryCalls[0]?.developer).toBe(developer);
     expect(createSdk.query.prompts).toEqual(['Execute the assigned task.']);
     expect(resumeSdk.query.prompts).toEqual(['Execute the assigned task.']);
+  });
+
+  it('forwards an isolated QA role with the exact workspace and only verification controls', async () => {
+    const qa = {
+      role: 'qa' as const,
+      initialPrompt: 'Verify the assigned Developer submission.',
+      availableTools: [] as string[],
+      allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+      disallowedTools: [
+        'Bash',
+        'Read',
+        'Glob',
+        'Grep',
+        'Write',
+        'Edit',
+        'NotebookEdit',
+      ],
+      controlServer: {
+        name: 'mesh_qa',
+        version: '1',
+        tools: [
+          {
+            name: 'submit_qa_verdict',
+            description: 'Submit one structured QA verdict.',
+            inputSchema: {},
+            execute: async () => ({
+              content: [{ type: 'text' as const, text: '{"status":"ok"}' }],
+            }),
+          },
+        ],
+      },
+    };
+    const sdk = new ScriptedFacade([
+      { kind: 'started', sessionId: 'resume-qa', apiKeySource: 'none' },
+    ]);
+
+    await new SdkClaudeSessionDriver(sdk).create({
+      title: 'QA',
+      workspacePath: 'C:\\repo\\developer-workspace',
+      permissionMode: 'inherit',
+      role: qa,
+    });
+
+    expect(sdk.queryCalls[0]).toMatchObject({
+      cwd: 'C:\\repo\\developer-workspace',
+      role: qa,
+    });
+    expect(sdk.queryCalls[0]?.developer).toBeUndefined();
+    expect(sdk.queryCalls[0]).not.toHaveProperty('onPermission');
+    expect(qa.availableTools).toEqual([]);
+    expect(qa.disallowedTools).toContain('Bash');
+    expect(sdk.query.prompts).toEqual([
+      'Verify the assigned Developer submission.',
+    ]);
+    expect(qa.controlServer.tools.map(({ name }) => name)).toEqual([
+      'submit_qa_verdict',
+    ]);
+    expect(qa.allowedTools).not.toEqual(
+      expect.arrayContaining([
+        'Write',
+        'Edit',
+        'submit_for_review',
+        'mark_blocked',
+      ]),
+    );
+  });
+
+  it('rejects a runtime request that mixes Developer and QA authority', async () => {
+    const sdk = new ScriptedFacade([
+      { kind: 'started', sessionId: 'resume-mixed', apiKeySource: 'none' },
+    ]);
+
+    await expect(
+      new SdkClaudeSessionDriver(sdk).create({
+        title: 'Mixed',
+        developer: {
+          initialPrompt: 'Develop.',
+          controls: {
+            submitForReview: async () => undefined,
+            markBlocked: async () => undefined,
+          },
+        },
+        role: {
+          role: 'qa',
+          initialPrompt: 'Verify.',
+          availableTools: [],
+          allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+          disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'NotebookEdit'],
+          controlServer: { name: 'mesh_qa', version: '1', tools: [] },
+        },
+      }),
+    ).rejects.toThrow('cannot combine Developer and QA runtime controls');
+    expect(sdk.queryCalls).toEqual([]);
   });
 
   it('blocks an interactive permission callback until the driver resolves it', async () => {

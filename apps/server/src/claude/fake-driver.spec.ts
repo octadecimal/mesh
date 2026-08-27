@@ -2,10 +2,12 @@ import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
   idSchema,
+  qaReportInputSchema,
 } from '@mesh-session-platform/contracts';
 import { describe, expect, it, vi } from 'vitest';
 
 import { FakeClaudeSessionDriver } from './fake-driver.js';
+import type { RoleControlResponse } from './driver.js';
 
 const completionReport = developerCompletionReportSchema.parse({
   id: 'report-complete',
@@ -134,4 +136,102 @@ describe('FakeClaudeSessionDriver', () => {
       ...blockerEvidence,
     });
   });
+
+  it.each(['verified', 'rejected'] as const)(
+    'consumes an explicitly configured QA %s step through the one role control',
+    async (disposition) => {
+      const report = qaReportInputSchema.parse({
+        disposition,
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: disposition === 'verified' ? 'passed' : 'failed',
+            evidence: `${disposition} evidence`,
+          },
+        ],
+        limitations: [],
+        residualRisks: [],
+      });
+      const execute = vi.fn(async () => ({
+        content: [{ type: 'text' as const, text: '{"status":"submitted"}' }],
+      }));
+      const driver = new FakeClaudeSessionDriver({
+        qaSteps: [{ type: `qa.${disposition}`, report }],
+      });
+      const session = await driver.create({
+        title: 'QA',
+        role: qaRole(execute),
+      });
+
+      const consuming = consume(session.events());
+      await driver.drainQaSteps();
+      await session.close();
+      await consuming;
+
+      expect(execute).toHaveBeenCalledOnce();
+      expect(execute).toHaveBeenCalledWith(report);
+    },
+  );
+
+  it('keeps an explicit QA wait step idle and reports an explicit startup failure', async () => {
+    const execute = vi.fn(async () => ({
+      content: [{ type: 'text' as const, text: '{"status":"submitted"}' }],
+    }));
+    const waitingDriver = new FakeClaudeSessionDriver({
+      qaSteps: [{ type: 'qa.wait' }],
+    });
+    const waitingSession = await waitingDriver.create({
+      title: 'QA wait',
+      role: qaRole(execute),
+    });
+    const consuming = consume(waitingSession.events());
+
+    await waitingDriver.drainQaSteps();
+    await waitingSession.close();
+    await consuming;
+
+    expect(execute).not.toHaveBeenCalled();
+
+    const failingDriver = new FakeClaudeSessionDriver({
+      qaSteps: [{ type: 'qa.startup_failure', message: 'QA could not start' }],
+    });
+    await expect(
+      failingDriver.create({ title: 'QA failure', role: qaRole(execute) }),
+    ).rejects.toThrow('QA could not start');
+  });
 });
+
+const qaRole = (execute: (input: unknown) => Promise<RoleControlResponse>) => ({
+  role: 'qa' as const,
+  initialPrompt: 'Verify the Developer submission.',
+  availableTools: [],
+  allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+  disallowedTools: [
+    'Bash',
+    'Read',
+    'Glob',
+    'Grep',
+    'Write',
+    'Edit',
+    'NotebookEdit',
+  ],
+  controlServer: {
+    name: 'mesh_qa',
+    version: '1',
+    tools: [
+      {
+        name: 'submit_qa_verdict',
+        description: 'Submit one structured QA verdict.',
+        inputSchema: qaReportInputSchema.shape,
+        execute,
+      },
+    ],
+  },
+});
+
+const consume = async (events: AsyncIterable<unknown>): Promise<void> => {
+  const iterator = events[Symbol.asyncIterator]();
+  while (!(await iterator.next()).done) {
+    // QA fake steps use the role control rather than synthetic transcript events.
+  }
+};

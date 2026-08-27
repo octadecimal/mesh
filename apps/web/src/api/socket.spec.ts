@@ -6,7 +6,7 @@ import type {
 } from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
 
-import { MeshSocket } from './socket';
+import { commandCreatesSession, MeshSocket } from './socket';
 import { createResyncCoordinator } from '../state/resync';
 import { createMeshStore } from '../state/store';
 
@@ -112,6 +112,14 @@ const nextProjectEvent: ProjectEvent = {
 };
 
 describe('MeshSocket', () => {
+  it('identifies every command that creates a session for resubscription', () => {
+    expect(commandCreatesSession('session.create')).toBe(true);
+    expect(commandCreatesSession('task.attempt.launch')).toBe(true);
+    expect(commandCreatesSession('task.developer.launch')).toBe(true);
+    expect(commandCreatesSession('task.qa.launch')).toBe(true);
+    expect(commandCreatesSession('task.review_automation.pause')).toBe(false);
+  });
+
   afterEach(() => {
     FakeSocket.instances = [];
   });

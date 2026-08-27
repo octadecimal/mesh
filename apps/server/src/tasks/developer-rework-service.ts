@@ -7,6 +7,7 @@ import {
   developerReviewFeedbackSchema,
   rawDiagnosticSchema,
   taskActorSchema,
+  taskTransitionSchema,
   type DeveloperExecutionCycle,
   type DeveloperReviewFeedback,
   type ProjectEvent,
@@ -28,9 +29,11 @@ import type { DeveloperExecutionRepository } from '../repositories/developer-exe
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
+import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
 import type { DeveloperExecutionService } from './developer-execution-service.js';
@@ -42,11 +45,6 @@ import {
   type TaskService,
 } from './task-service.js';
 
-type HumanActor = Omit<TaskActor, 'id' | 'type'> & {
-  id: string;
-  type: 'human';
-};
-
 export type DeveloperRecoveryKind = 'rejection' | 'unblock';
 
 export type DeveloperAttemptResumeInput = {
@@ -55,7 +53,11 @@ export type DeveloperAttemptResumeInput = {
   expectedRevision: number;
   kind: DeveloperRecoveryKind;
   feedback: string;
-  actor: HumanActor;
+  actor: TaskActor;
+  automation?: {
+    sourceCycleId: string;
+    generation: number;
+  };
 };
 
 export type DeveloperRecoveryContext = {
@@ -98,12 +100,18 @@ type Dependencies = {
   sessions: SessionRepository;
   diagnostics: DiagnosticRepository;
   developerExecutions: DeveloperExecutionRepository;
+  qaExecutions: QaExecutionRepository;
+  transitions: TaskTransitionRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
   taskService: TaskService;
   registry: Registry;
   capabilities: DeveloperCapabilityRegistry;
   developerExecutionService: DeveloperExecutionService;
+  afterDeveloperSubmission?: (input: {
+    taskId: string;
+    cycleId: string;
+  }) => Promise<void>;
   now?: () => string;
   createId?: () => string;
 };
@@ -256,13 +264,18 @@ export class DeveloperReworkService {
   requireRecovery(
     input: Pick<
       DeveloperAttemptResumeInput,
-      'taskId' | 'expectedRevision' | 'kind' | 'feedback'
+      'taskId' | 'expectedRevision' | 'kind' | 'feedback' | 'automation'
     >,
     actor: TaskActor,
   ): DeveloperRecoveryContext {
-    if (actor.type !== 'human') {
+    const automated =
+      actor.type === 'system' &&
+      actor.id === 'review-loop' &&
+      input.kind === 'rejection' &&
+      input.automation !== undefined;
+    if (actor.type !== 'human' && !automated) {
       throw new DeveloperRecoveryInvalidError(
-        'Only a human may request Developer recovery',
+        'Only a human or the bounded review policy may request Developer recovery',
       );
     }
     if (!input.feedback.trim()) {
@@ -271,13 +284,15 @@ export class DeveloperReworkService {
       );
     }
     const task = this.requireTask(input.taskId, input.expectedRevision);
-    authorizeTaskTransition({
-      task,
-      nextState: 'in_progress',
-      actor,
-      reason: input.feedback,
-      ...(input.kind === 'unblock' ? { blocked: false } : {}),
-    });
+    if (actor.type === 'human') {
+      authorizeTaskTransition({
+        task,
+        nextState: 'in_progress',
+        actor,
+        reason: input.feedback,
+        ...(input.kind === 'unblock' ? { blocked: false } : {}),
+      });
+    }
     if (
       (input.kind === 'rejection' &&
         (task.lifecycleState !== 'review' || task.blocked !== null)) ||
@@ -315,6 +330,34 @@ export class DeveloperReworkService {
       throw new DeveloperRecoveryInvalidError(
         `Developer attempt '${previousCycle.attemptId}' is not current`,
       );
+    }
+    if (input.kind === 'rejection') {
+      const qaCycles = this.dependencies.qaExecutions.listCyclesForAttempts(
+        this.dependencies.attempts.listByTask(task.id).map(({ id }) => id),
+      );
+      if (qaCycles.some(({ endedAt }) => endedAt === null)) {
+        throw new DeveloperRecoveryInvalidError(
+          `Task '${task.id}' has an active QA cycle`,
+        );
+      }
+      const latestQaCycle = [...qaCycles]
+        .reverse()
+        .find(
+          ({ developerCompletionReportId }) =>
+            developerCompletionReportId === previousCycle.completionReportId,
+        );
+      if (
+        (qaCycles.length > 0 || automated) &&
+        (latestQaCycle?.terminalDisposition !== 'rejected' ||
+          latestQaCycle.reportId === null)
+      ) {
+        throw new DeveloperRecoveryInvalidError(
+          `Task '${task.id}' requires a matching rejected QA verdict`,
+        );
+      }
+    }
+    if (automated) {
+      this.assertAutomationRecovery(task, attempt, input.automation!);
     }
     return { task, attempt, previousCycle };
   }
@@ -373,19 +416,24 @@ export class DeveloperReworkService {
             .update(JSON.stringify(evidence))
             .digest('hex');
           const commandId = `${cycle.id}-${idempotencyKey}-${fingerprint}`;
-          this.dependencies.developerExecutionService.submitForReview({
-            commandId,
-            capability,
-            expectedRevision,
-            report: developerCompletionReportSchema.parse({
-              id: commandId,
-              cycleId: cycle.id,
-              ...evidence,
-              createdAt: new Date().toISOString(),
-            }),
-            actor: agentActor,
-          });
+          const outcome =
+            this.dependencies.developerExecutionService.submitForReview({
+              commandId,
+              capability,
+              expectedRevision,
+              report: developerCompletionReportSchema.parse({
+                id: commandId,
+                cycleId: cycle.id,
+                ...evidence,
+                createdAt: new Date().toISOString(),
+              }),
+              actor: agentActor,
+            });
           await this.closeTerminalRuntime(attempt.sessionId, cycle.id);
+          await this.dependencies.afterDeveloperSubmission?.({
+            taskId: outcome.task.id,
+            cycleId: outcome.cycle.id,
+          });
         },
         markBlocked: async (report) => {
           const { idempotencyKey, ...evidence } = report;
@@ -414,27 +462,96 @@ export class DeveloperReworkService {
   complete(
     input: Pick<
       DeveloperAttemptResumeInput,
-      'commandId' | 'taskId' | 'expectedRevision' | 'kind' | 'feedback'
+      | 'commandId'
+      | 'taskId'
+      | 'expectedRevision'
+      | 'kind'
+      | 'feedback'
+      | 'automation'
     >,
     actor: TaskActor,
   ) {
     const commandId = `${input.commandId}:task-recovery`;
-    return input.kind === 'rejection'
-      ? this.dependencies.taskService.transition({
-          commandId,
-          taskId: input.taskId,
-          expectedRevision: input.expectedRevision,
-          nextState: 'in_progress',
-          reason: input.feedback,
-          actor,
-        })
-      : this.dependencies.taskService.unblock({
-          commandId,
-          taskId: input.taskId,
-          expectedRevision: input.expectedRevision,
-          reason: input.feedback,
-          actor,
-        });
+    return this.dependencies.commands.executeOnceInImmediateTransaction(
+      commandId,
+      () => {
+        const task = this.requireTask(input.taskId, input.expectedRevision);
+        const automated = actor.type === 'system';
+        if (automated) {
+          const attempt = this.dependencies.attempts
+            .listByTask(task.id)
+            .filter(({ unlinkedAt }) => unlinkedAt === null)
+            .at(-1);
+          if (!attempt || attempt.role !== 'developer' || !input.automation) {
+            throw new DeveloperRecoveryInvalidError(
+              'Autonomous Developer recovery attempt is unavailable',
+            );
+          }
+          this.assertAutomationRecovery(task, attempt, input.automation);
+        } else {
+          authorizeTaskTransition({
+            task,
+            nextState: 'in_progress',
+            actor,
+            reason: input.feedback,
+            ...(input.kind === 'unblock' ? { blocked: false } : {}),
+          });
+        }
+        const occurredAt = this.now();
+        const project = this.requireActiveProject(task.projectId);
+        const reviewAutomation = automated
+          ? task.reviewAutomation
+          : {
+              status:
+                project.qaConfiguration.reviewPolicy === 'autonomous_review'
+                  ? ('enabled' as const)
+                  : ('disabled' as const),
+              generation: task.reviewAutomation.generation + 1,
+              rejectionCount: 0,
+              pauseReason: null,
+              updatedAt: occurredAt,
+            };
+        const updated = this.dependencies.tasks.update(
+          {
+            ...task,
+            lifecycleState: 'in_progress',
+            ...(input.kind === 'unblock' ? { blocked: null } : {}),
+            reviewAutomation,
+            updatedAt: occurredAt,
+          },
+          input.expectedRevision,
+        );
+        if (!updated) {
+          throw new TaskRevisionConflictError(
+            this.dependencies.tasks.get(task.id) ?? task,
+          );
+        }
+        const transition = this.dependencies.transitions.append(
+          taskTransitionSchema.parse({
+            id: this.createId(),
+            taskId: updated.id,
+            commandId,
+            previousState: task.lifecycleState,
+            nextState: updated.lifecycleState,
+            actor,
+            reason: input.feedback,
+            occurredAt,
+          }),
+        );
+        const event = this.dependencies.projectEvents.appendInTransaction(
+          updated.projectId,
+          {
+            protocolVersion: 1,
+            id: this.createId(),
+            projectId: updated.projectId,
+            occurredAt,
+            type: 'task.transitioned',
+            payload: { task: updated, transition },
+          },
+        );
+        return { task: updated, transition, event };
+      },
+    );
   }
 
   closeFailed(
@@ -664,6 +781,41 @@ export class DeveloperReworkService {
     });
   }
 
+  private assertAutomationRecovery(
+    task: Task,
+    attempt: TaskAttempt,
+    automation: NonNullable<DeveloperAttemptResumeInput['automation']>,
+  ): void {
+    const project = this.requireActiveProject(task.projectId);
+    const qaCycle = this.dependencies.qaExecutions.getCycle(
+      automation.sourceCycleId,
+    );
+    const key = `${task.id}:${attempt.id}:${automation.sourceCycleId}:resume_developer:${automation.generation}`;
+    const action =
+      this.dependencies.qaExecutions.getAutomationActionByIdempotencyKey(key);
+    if (
+      project.qaConfiguration.reviewPolicy !== 'autonomous_review' ||
+      task.reviewAutomation.status !== 'enabled' ||
+      task.reviewAutomation.generation !== automation.generation ||
+      task.reviewAutomation.rejectionCount < 1 ||
+      task.reviewAutomation.rejectionCount > 2 ||
+      !qaCycle ||
+      qaCycle.taskId !== task.id ||
+      qaCycle.attemptId !== attempt.id ||
+      qaCycle.terminalDisposition !== 'rejected' ||
+      qaCycle.endedAt === null ||
+      qaCycle.automationGeneration !== automation.generation ||
+      qaCycle.rejectionOrdinal + 1 !== task.reviewAutomation.rejectionCount ||
+      !action ||
+      action.status !== 'pending' ||
+      action.actionKind !== 'resume_developer'
+    ) {
+      throw new DeveloperRecoveryInvalidError(
+        'Autonomous Developer recovery is stale or unauthorized',
+      );
+    }
+  }
+
   private requireTask(taskId: string, expectedRevision: number): Task {
     const task = this.dependencies.tasks.get(taskId);
     if (!task) throw new TaskNotFoundError(taskId);
@@ -708,6 +860,52 @@ export class DeveloperReworkService {
     }
     const commandId = `${input.commandId}:command-completion-recovery`;
     if (input.kind === 'rejection') {
+      if (actor.type === 'system') {
+        return this.dependencies.commands.executeOnceInImmediateTransaction(
+          commandId,
+          () => {
+            const occurredAt = this.now();
+            const restored = this.dependencies.tasks.update(
+              {
+                ...current,
+                lifecycleState: 'review',
+                updatedAt: occurredAt,
+              },
+              current.revision,
+            );
+            if (!restored) {
+              throw new TaskRevisionConflictError(
+                this.dependencies.tasks.get(current.id) ?? current,
+              );
+            }
+            const transition = this.dependencies.transitions.append(
+              taskTransitionSchema.parse({
+                id: this.createId(),
+                taskId: restored.id,
+                commandId,
+                previousState: current.lifecycleState,
+                nextState: restored.lifecycleState,
+                actor,
+                reason:
+                  'Restore review after automated recovery command completion failed',
+                occurredAt,
+              }),
+            );
+            const event = this.dependencies.projectEvents.appendInTransaction(
+              restored.projectId,
+              {
+                protocolVersion: 1,
+                id: this.createId(),
+                projectId: restored.projectId,
+                occurredAt,
+                type: 'task.transitioned',
+                payload: { task: restored, transition },
+              },
+            );
+            return { task: restored, transition, event };
+          },
+        );
+      }
       return this.dependencies.taskService.transition({
         commandId,
         taskId: input.taskId,

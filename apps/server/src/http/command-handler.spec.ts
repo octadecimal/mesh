@@ -4,24 +4,47 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
+  DeveloperResumeUnavailableError,
+  QaAlreadyActiveError,
+  QaCapabilityInvalidError,
+  QaRejectionCeilingReachedError,
+  QaReportIncompleteError,
+  ReviewAutomationPausedError,
+  UnsafeQaWorkspaceError,
   developerExecutionCycleSchema,
   idSchema,
   projectSchema,
+  qaExecutionCycleSchema,
+  qaReportSchema,
+  reviewAutomationActionSchema,
   sessionSchema,
+  taskActorSchema,
   taskAttemptSchema,
   taskSchema,
   workspaceSchema,
 } from '@mesh-session-platform/contracts';
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
+import {
+  NodeProcessRunner,
+  resolveGitExecutableAtStartup,
+} from '../platform/process-runner.js';
+import { QaVerificationRunner } from '../platform/qa-verification-runner.js';
+import {
+  resolveRepositoryIdentity,
+  type RepositoryIdentityResolver,
+} from '../projects/repository-identity.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
 import { AttemptService } from '../tasks/attempt-service.js';
 import { DeveloperCapabilityRegistry } from '../tasks/developer-capability-registry.js';
 import { DeveloperExecutionService } from '../tasks/developer-execution-service.js';
 import { DeveloperReworkService } from '../tasks/developer-rework-service.js';
+import { QaCapabilityRegistry } from '../tasks/qa-capability-registry.js';
+import { QaExecutionService } from '../tasks/qa-execution-service.js';
+import { ReviewAutomationService } from '../tasks/review-automation-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
 import { toHttpError } from './errors.js';
@@ -35,6 +58,20 @@ const runGit = async (cwd: string, ...args: string[]) => {
 
 describe('executeCommand', () => {
   const cleanups: Array<() => Promise<void> | void> = [];
+  let resolveIdentity: RepositoryIdentityResolver;
+
+  beforeAll(async () => {
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: tmpdir(),
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    const processRunner = new NodeProcessRunner({ trustedGitExecutable });
+    resolveIdentity = (repositoryPath, pathOptions) =>
+      resolveRepositoryIdentity(repositoryPath, pathOptions, processRunner);
+  });
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -67,11 +104,14 @@ describe('executeCommand', () => {
     const repositories = createTestRepositories();
     const driver = new FakeClaudeSessionDriver();
     const capabilities = new DeveloperCapabilityRegistry();
+    const qaCapabilities = new QaCapabilityRegistry();
     const registry = new SessionRegistry({
       ...repositories,
       driver,
-      invalidateDeveloperCapability: (sessionId) =>
-        capabilities.invalidateSession(sessionId),
+      invalidateDeveloperCapability: (sessionId) => {
+        capabilities.invalidateSession(sessionId);
+        qaCapabilities.invalidateSession(sessionId);
+      },
       closeDatabase: () => undefined,
     });
     const taskService = new TaskService({
@@ -104,6 +144,30 @@ describe('executeCommand', () => {
       developerReworkService,
       registry,
       pathOptions,
+      resolveIdentity,
+      now: () => now,
+      createId,
+    });
+    const qaExecutionService = new QaExecutionService({
+      ...repositories,
+      attemptService,
+      capabilities: qaCapabilities,
+      registry,
+      verificationRunner: new QaVerificationRunner({
+        run: async (_executable, args) => ({
+          exitCode: 0,
+          stdout: args.includes('rev-parse') ? 'true\n' : '',
+          stderr: '',
+        }),
+      }),
+      now: () => now,
+      createId,
+    });
+    const reviewAutomationService = new ReviewAutomationService({
+      ...repositories,
+      qaExecutionService,
+      developerReworkService,
+      publisher: registry.publisher,
       now: () => now,
       createId,
     });
@@ -118,9 +182,12 @@ describe('executeCommand', () => {
         taskService,
         attemptService,
         developerExecutionService,
+        qaExecutionService,
+        reviewAutomationService,
         registry,
         driver,
         pathOptions,
+        resolveIdentity,
         now: () => now,
         createId,
       },
@@ -131,6 +198,660 @@ describe('executeCommand', () => {
     protocolVersion: 1,
     idempotencyKey,
     command,
+  });
+
+  it('dispatches manual QA launch without exposing runtime capabilities', async () => {
+    const { directory } = await createRepository();
+    const { dependencies } = commandDependencies(directory);
+    let launchInput: unknown;
+    (dependencies as { qaExecutionService: unknown }).qaExecutionService = {
+      launch: async (input: unknown) => {
+        launchInput = input;
+        return {
+          task: { id: 'task-1' },
+          attempt: { id: 'attempt-1' },
+          session: { id: 'qa-session-1' },
+          cycle: { id: 'qa-cycle-1' },
+          event: { sequence: 7 },
+          capability: 'must-not-leak',
+          driver: { internal: true },
+        };
+      },
+      submitVerdict: () => undefined,
+    };
+
+    const result = await executeCommand(
+      projectCommand('qa-launch-command', {
+        type: 'task.qa.launch',
+        payload: {
+          taskId: 'task-1',
+          expectedRevision: 4,
+          actor: { type: 'human', id: 'operator-1' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(launchInput).toEqual({
+      commandId: 'qa-launch-command',
+      taskId: 'task-1',
+      expectedRevision: 4,
+      actor: { type: 'human', id: 'operator-1' },
+      trigger: 'manual',
+    });
+    expect(result).toEqual({
+      protocolVersion: 1,
+      commandType: 'task.qa.launch',
+      result: {
+        task: { id: 'task-1' },
+        attempt: { id: 'attempt-1' },
+        session: { id: 'qa-session-1' },
+        cycle: { id: 'qa-cycle-1' },
+        event: { sequence: 7 },
+        projectEventCursor: 7,
+      },
+      warnings: [],
+    });
+  });
+
+  it('routes an audited human interrupted-cycle repair', async () => {
+    const { directory } = await createRepository();
+    const { dependencies } = commandDependencies(directory);
+    let repairInput: unknown;
+    (dependencies as { qaExecutionService: unknown }).qaExecutionService = {
+      launch: async () => undefined,
+      submitVerdict: () => undefined,
+      repairInterrupted: (input: unknown) => {
+        repairInput = input;
+        return {
+          task: { id: 'task-1' },
+          attempt: { id: 'attempt-1' },
+          cycle: { id: 'qa-cycle-1', terminalDisposition: 'interrupted' },
+          event: { sequence: 8 },
+          events: [{ sequence: 8 }],
+        };
+      },
+    };
+
+    const result = await executeCommand(
+      projectCommand('qa-repair-command', {
+        type: 'task.qa.repair_interrupted',
+        payload: {
+          taskId: 'task-1',
+          cycleId: 'qa-cycle-1',
+          expectedRevision: 4,
+          actor: { type: 'human', id: 'operator-1' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(repairInput).toEqual({
+      commandId: 'qa-repair-command',
+      taskId: 'task-1',
+      cycleId: 'qa-cycle-1',
+      expectedRevision: 4,
+      actor: { type: 'human', id: 'operator-1' },
+    });
+    expect(result).toMatchObject({
+      commandType: 'task.qa.repair_interrupted',
+      result: { projectEventCursor: 8 },
+    });
+  });
+
+  it('routes human automation enable and pause through the domain service', async () => {
+    const { directory } = await createRepository();
+    let nextId = 0;
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => `automation-http-${++nextId}`,
+    );
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'project-automation',
+        displayName: 'Automation project',
+        repositoryPath: directory,
+        discoveredAt: now,
+        discoveryMetadata: {},
+        qaConfiguration: {
+          instructions: {
+            content: 'Verify the task.',
+            revision: 1,
+            updatedAt: now,
+            updatedBy: { type: 'human', id: 'operator-1' },
+          },
+          reviewPolicy: 'autonomous_review',
+          revision: 1,
+          updatedAt: now,
+          updatedBy: { type: 'human', id: 'operator-1' },
+        },
+      }),
+    );
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'task-automation',
+        projectId: project.id,
+        title: 'Control automation',
+        description: '',
+        acceptanceCriteria: ['Controls are durable.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const actor = { type: 'human' as const, id: 'operator-1' };
+    const enable = projectCommand('enable-automation-command', {
+      type: 'task.review_automation.enable',
+      payload: {
+        taskId: task.id,
+        expectedRevision: task.revision,
+        actor,
+      },
+    });
+
+    const enabled = await executeCommand(enable, dependencies);
+    const duplicate = await executeCommand(enable, dependencies);
+    const enabledTask = repositories.tasks.get(task.id);
+    if (!enabledTask) throw new Error('Expected enabled task');
+    const paused = await executeCommand(
+      projectCommand('pause-automation-command', {
+        type: 'task.review_automation.pause',
+        payload: {
+          taskId: task.id,
+          expectedRevision: enabledTask.revision,
+          actor,
+        },
+      }),
+      dependencies,
+    );
+
+    expect(duplicate).toEqual(enabled);
+    expect(enabled).toMatchObject({
+      commandType: 'task.review_automation.enable',
+      result: { task: { reviewAutomation: { status: 'enabled' } } },
+    });
+    expect(paused).toMatchObject({
+      commandType: 'task.review_automation.pause',
+      result: { task: { reviewAutomation: { status: 'paused' } } },
+    });
+
+    const conflict = await executeCommand(
+      projectCommand('pause-automation-stale', {
+        type: 'task.review_automation.pause',
+        payload: {
+          taskId: task.id,
+          expectedRevision: task.revision,
+          actor,
+        },
+      }),
+      dependencies,
+    ).catch((error: unknown) => error);
+    expect(toHttpError(conflict)).toMatchObject({
+      statusCode: 409,
+      body: {
+        error: {
+          code: 'task_revision_conflict',
+          details: {
+            task: {
+              id: task.id,
+              revision: task.revision + 2,
+              reviewAutomation: { status: 'paused' },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it('delegates verdict follow-up ownership and returns durable pause truth on failure', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'project-rejected',
+        displayName: 'Rejected project',
+        repositoryPath: directory,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'task-rejected',
+        projectId: 'project-rejected',
+        title: 'Rejected task',
+        description: '',
+        acceptanceCriteria: ['QA evidence is retained.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 3,
+        createdAt: now,
+        updatedAt: now,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 1,
+          rejectionCount: 1,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      }),
+    );
+    const committed = {
+      task,
+      attempt: { id: 'attempt-1' },
+      cycle: {
+        id: 'qa-cycle-rejected',
+        reviewPolicy: 'manual',
+        rejectionOrdinal: 0,
+      },
+      report: { disposition: 'rejected' },
+      event: { sequence: 8 },
+      events: [{ sequence: 8 }],
+    };
+    (dependencies as { qaExecutionService: unknown }).qaExecutionService = {
+      launch: async () => undefined,
+      submitVerdict: () => committed,
+    };
+    (
+      dependencies as { reviewAutomationService: unknown }
+    ).reviewAutomationService = {
+      afterQaVerdict: async () => {
+        const current = repositories.tasks.get(task.id);
+        if (!current) throw new Error('Expected current task');
+        repositories.tasks.update(
+          {
+            ...current,
+            reviewAutomation: {
+              ...current.reviewAutomation,
+              status: 'paused',
+              pauseReason: 'Developer resume unavailable.',
+            },
+          },
+          current.revision,
+        );
+        throw new DeveloperResumeUnavailableError();
+      },
+    };
+
+    const result = await executeCommand(
+      projectCommand('qa-verdict-command', {
+        type: 'task.qa.submit_verdict',
+        payload: {
+          capability: 'qa-capability-1',
+          expectedRevision: task.revision,
+          report: {
+            disposition: 'rejected',
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status: 'failed',
+                evidence: 'Focused test failed.',
+              },
+            ],
+            limitations: [],
+            residualRisks: ['Regression remains.'],
+          },
+          actor: { type: 'agent', id: 'qa-agent-1' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(result).toMatchObject({
+      commandType: 'task.qa.submit_verdict',
+      result: {
+        task: {
+          id: task.id,
+          reviewAutomation: {
+            status: 'paused',
+            pauseReason: 'Developer resume unavailable.',
+          },
+        },
+        report: { disposition: 'rejected' },
+        projectEventCursor: 8,
+      },
+      warnings: [{ code: 'developer_resume_unavailable' }],
+    });
+  });
+
+  it('replays a failed verdict follow-up without resuming or emitting again', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'project-replay',
+        displayName: 'Replay project',
+        repositoryPath: directory,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    repositories.projects.updateQaConfiguration(
+      project.id,
+      project.qaConfiguration.revision,
+      {
+        instructions: { content: 'Verify replay.' },
+        reviewPolicy: 'autonomous_review',
+      },
+      taskActorSchema.parse({ type: 'human', id: 'operator-1' }),
+    );
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'task-replay',
+        projectId: project.id,
+        title: 'Replay failed follow-up',
+        description: '',
+        acceptanceCriteria: ['Failure replay remains stable.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 3,
+        createdAt: now,
+        updatedAt: now,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 1,
+          rejectionCount: 1,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      }),
+    );
+    const workspace = repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-replay',
+        projectId: project.id,
+        type: 'shared',
+        path: directory,
+      }),
+    );
+    const developerSession = repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'developer-session-replay',
+        projectId: project.id,
+        workspaceId: workspace.id,
+        title: 'Developer replay',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'interrupted',
+        claudeResumeId: 'claude-developer-replay',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const attempt = repositories.attempts.createForTask(
+      task.id,
+      developerSession.id,
+      'launched',
+      taskActorSchema.parse({ type: 'human', id: 'operator-1' }),
+      'developer',
+    );
+    const qaSession = repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'qa-session-replay',
+        projectId: project.id,
+        workspaceId: workspace.id,
+        title: 'QA replay',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'interrupted',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const startedCycle = repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'qa-cycle-replay',
+        taskId: task.id,
+        attemptId: attempt.id,
+        sessionId: qaSession.id,
+        ordinal: 1,
+        authorizedBy: { type: 'system', id: 'review-loop' },
+        authorizationCommandId: 'qa-launch-replay',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: 'Verify replay.', revision: 1 },
+        taskSnapshot: {
+          revision: task.revision,
+          title: task.title,
+          description: task.description,
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: task.acceptanceCriteria[0] },
+          ],
+        },
+        developerCompletionReportId: 'developer-report-replay',
+        workspaceId: workspace.id,
+        reviewPolicy: 'autonomous_review',
+        reviewPolicyRevision: 1,
+        automationGeneration: 1,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    const report = repositories.qaExecutions.insertReport(
+      qaReportSchema.parse({
+        id: 'qa-report-replay',
+        cycleId: startedCycle.id,
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Focused test failed.',
+          },
+        ],
+        verificationCommands: [],
+        limitations: [],
+        residualRisks: ['Regression remains.'],
+        workspaceBefore: 'source-state-1',
+        workspaceAfter: 'source-state-1',
+        createdAt: now,
+      }),
+    );
+    const cycle = repositories.qaExecutions.completeCycle(startedCycle.id, {
+      endedAt: now,
+      terminalDisposition: 'rejected',
+      reportId: report.id,
+      terminalCommandId: 'qa-verdict-replay',
+      terminalEventId: 'qa-event-replay',
+    });
+    if (!cycle) throw new Error('Expected completed QA cycle');
+    const action = repositories.qaExecutions.insertAutomationAction(
+      reviewAutomationActionSchema.parse({
+        id: 'resume-action-replay',
+        idempotencyKey: `${task.id}:${attempt.id}:${cycle.id}:resume_developer:1`,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        sourceCycleId: cycle.id,
+        actionKind: 'resume_developer',
+        generation: 1,
+        status: 'pending',
+        errorCode: null,
+        createdAt: now,
+        completedAt: null,
+      }),
+    );
+    const committed = {
+      task,
+      attempt,
+      cycle,
+      report,
+      event: { sequence: 8 },
+      events: [{ sequence: 8 }],
+    };
+    (dependencies as { qaExecutionService: unknown }).qaExecutionService = {
+      launch: async () => undefined,
+      submitVerdict: () => committed,
+    };
+    let resumeAttempts = 0;
+    (
+      dependencies as { reviewAutomationService: unknown }
+    ).reviewAutomationService = new ReviewAutomationService({
+      ...repositories,
+      qaExecutionService: { launch: async () => undefined },
+      developerReworkService: {
+        resume: async () => {
+          resumeAttempts += 1;
+          throw new DeveloperResumeUnavailableError();
+        },
+      },
+      publisher: dependencies.registry.publisher,
+      now: () => now,
+      createId: () => 'automation-failed-event',
+    });
+    const command = projectCommand('qa-verdict-replay', {
+      type: 'task.qa.submit_verdict',
+      payload: {
+        capability: 'qa-capability-replay',
+        expectedRevision: task.revision,
+        report: {
+          disposition: 'rejected',
+          criterionResults: report.criterionResults,
+          limitations: [],
+          residualRisks: report.residualRisks,
+        },
+        actor: { type: 'agent', id: 'qa-agent-replay' },
+      },
+    });
+
+    const first = await executeCommand(command, dependencies);
+    const eventCountAfterFailure = repositories.projectEvents.after(
+      project.id,
+      0,
+    ).length;
+    const duplicate = await executeCommand(command, dependencies);
+
+    expect(duplicate).toEqual(first);
+    expect(first).toMatchObject({
+      result: {
+        task: {
+          id: task.id,
+          reviewAutomation: { status: 'paused' },
+        },
+      },
+      warnings: [{ code: 'developer_resume_unavailable' }],
+    });
+    expect(resumeAttempts).toBe(1);
+    expect(eventCountAfterFailure).toBe(1);
+    expect(
+      repositories.qaExecutions.getAutomationAction(action.id),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'developer_resume_unavailable',
+    });
+    expect(repositories.projectEvents.after(project.id, 0)).toHaveLength(
+      eventCountAfterFailure,
+    );
+  });
+
+  it('starts review automation only after a committed Developer submission', async () => {
+    const { directory } = await createRepository();
+    const { dependencies } = commandDependencies(directory);
+    const committed = {
+      task: { id: 'task-submitted' },
+      attempt: { id: 'attempt-submitted' },
+      cycle: { id: 'developer-cycle-submitted' },
+      report: { id: 'developer-report-submitted' },
+      event: { sequence: 5 },
+    };
+    let followUp: unknown;
+    (
+      dependencies as { developerExecutionService: unknown }
+    ).developerExecutionService = {
+      submitForReview: () => committed,
+      accept: () => undefined,
+      block: () => undefined,
+    };
+    (
+      dependencies as { reviewAutomationService: unknown }
+    ).reviewAutomationService = {
+      afterDeveloperSubmission: async (input: unknown) => {
+        followUp = input;
+      },
+    };
+
+    const result = await executeCommand(
+      projectCommand('developer-submit-command', {
+        type: 'task.developer.submit_review',
+        payload: {
+          capability: 'developer-capability-1',
+          expectedRevision: 2,
+          report: {
+            id: 'developer-report-submitted',
+            cycleId: 'developer-cycle-submitted',
+            summary: 'Ready for QA.',
+            criterionResults: [
+              {
+                criterionId: 'criterion-1',
+                status: 'met',
+                evidence: 'Focused test passed.',
+              },
+            ],
+            verification: [],
+            limitations: '',
+            workspaceState: {
+              summary: 'Committed changes.',
+              hasUncommittedChanges: false,
+              commitsCreated: true,
+            },
+            reviewerNotes: null,
+            createdAt: now,
+          },
+          actor: { type: 'agent', id: 'developer-agent-1' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(followUp).toEqual({
+      taskId: 'task-submitted',
+      cycleId: 'developer-cycle-submitted',
+    });
+    expect(result).toMatchObject({
+      commandType: 'task.developer.submit_review',
+      result: { projectEventCursor: 5 },
+    });
+  });
+
+  it('maps QA authorization and validation failures to stable HTTP errors', () => {
+    for (const [error, statusCode, code] of [
+      [new QaCapabilityInvalidError(), 403, 'qa_capability_invalid'],
+      [new QaReportIncompleteError(), 422, 'qa_report_incomplete'],
+      [new QaAlreadyActiveError(), 409, 'qa_already_active'],
+      [new ReviewAutomationPausedError(), 409, 'review_automation_paused'],
+      [
+        new QaRejectionCeilingReachedError(),
+        409,
+        'qa_rejection_ceiling_reached',
+      ],
+      [new UnsafeQaWorkspaceError(), 409, 'unsafe_qa_workspace'],
+      [
+        new DeveloperResumeUnavailableError(),
+        409,
+        'developer_resume_unavailable',
+      ],
+    ] as const) {
+      expect(toHttpError(error)).toMatchObject({
+        statusCode,
+        body: { error: { code } },
+      });
+    }
   });
 
   it.each(['system', 'agent'] as const)(
@@ -265,7 +986,10 @@ describe('executeCommand', () => {
           content: 'Run the narrowest relevant checks.',
           revision: 2,
           updatedAt: now,
-          updatedBy: { type: 'human', id: 'operator' },
+          updatedBy: taskActorSchema.parse({
+            type: 'human',
+            id: 'operator',
+          }),
         },
       },
     });
@@ -312,6 +1036,194 @@ describe('executeCommand', () => {
           code: 'project_revision_conflict',
           details: {
             project: expect.objectContaining({ id: 'p1', revision: 1 }),
+          },
+        },
+      },
+    });
+  });
+
+  it.each(['system', 'agent'] as const)(
+    'rejects %s actors from updating QA configuration',
+    async (actorType) => {
+      const { directory } = await createRepository();
+      const { repositories, dependencies } = commandDependencies(directory);
+      repositories.projects.create(
+        projectSchema.parse({
+          id: 'p1',
+          displayName: 'Project',
+          repositoryPath: directory,
+          repositoryIdentity: 'repository-p1',
+          discoveredAt: now,
+          discoveryMetadata: {},
+        }),
+      );
+
+      const error = await executeCommand(
+        projectCommand(`qa-configuration-${actorType}`, {
+          type: 'project.qa_configuration.update',
+          payload: {
+            projectId: 'p1',
+            expectedRevision: 1,
+            content: 'Do not mutate this project.',
+            reviewPolicy: 'autonomous_review',
+            actor: { type: actorType, id: `${actorType}-1` },
+          },
+        }),
+        dependencies,
+      ).catch((caught: unknown) => caught);
+
+      expect(toHttpError(error)).toMatchObject({
+        statusCode: 400,
+        body: { error: { code: 'invalid_command' } },
+      });
+      expect(repositories.projects.get('p1')?.qaConfiguration).toMatchObject({
+        instructions: { content: '', revision: 1, updatedBy: null },
+        reviewPolicy: 'manual',
+        revision: 1,
+        updatedBy: null,
+      });
+    },
+  );
+
+  it('updates QA configuration by its own revision before publishing and reuses the original response', async () => {
+    const { directory } = await createRepository();
+    const ids = ['qa-configuration-event'];
+    const { repositories, dependencies } = commandDependencies(
+      directory,
+      () => ids.shift() ?? 'unexpected-id',
+    );
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const renamedInstructions =
+      repositories.projects.updateDeveloperInstructions(
+        project.id,
+        project.revision,
+        {
+          content: 'The project revision can change independently.',
+          updatedAt: now,
+          updatedBy: taskActorSchema.parse({
+            type: 'human',
+            id: 'operator',
+          }),
+        },
+      );
+    if (!renamedInstructions) throw new Error('Expected project update');
+
+    const publishedAfterPersistence: boolean[] = [];
+    dependencies.registry.publisher.subscribeProject('p1', (event) => {
+      publishedAfterPersistence.push(
+        repositories.projectEvents
+          .after('p1', 0)
+          .some(({ id }) => id === event.id),
+      );
+    });
+    const command = projectCommand('qa-configuration-update', {
+      type: 'project.qa_configuration.update',
+      payload: {
+        projectId: 'p1',
+        expectedRevision: 1,
+        content: 'Run the focused server test before handoff.',
+        reviewPolicy: 'autonomous_review',
+        actor: { type: 'human', id: 'qa-operator', displayName: 'QA Operator' },
+      },
+    });
+
+    const first = await executeCommand(command, dependencies);
+    const duplicate = await executeCommand(command, dependencies);
+
+    expect(duplicate).toEqual(first);
+    expect(first).toMatchObject({
+      commandType: 'project.qa_configuration.update',
+      result: {
+        id: 'p1',
+        revision: 3,
+        qaConfiguration: {
+          instructions: {
+            content: 'Run the focused server test before handoff.',
+            revision: 2,
+            updatedBy: {
+              type: 'human',
+              id: 'qa-operator',
+              displayName: 'QA Operator',
+            },
+          },
+          reviewPolicy: 'autonomous_review',
+          revision: 2,
+          updatedBy: {
+            type: 'human',
+            id: 'qa-operator',
+            displayName: 'QA Operator',
+          },
+        },
+      },
+    });
+    expect(repositories.projectEvents.after('p1', 0)).toEqual([
+      expect.objectContaining({
+        id: 'qa-configuration-event',
+        type: 'project.qa_configuration_changed',
+      }),
+    ]);
+    expect(publishedAfterPersistence).toEqual([true]);
+  });
+
+  it('returns the current project for a stale QA configuration revision', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+        qaConfiguration: {
+          instructions: {
+            content: 'Current configuration.',
+            revision: 2,
+            updatedAt: now,
+            updatedBy: { type: 'human', id: 'operator' },
+          },
+          reviewPolicy: 'autonomous_review',
+          revision: 2,
+          updatedAt: now,
+          updatedBy: { type: 'human', id: 'operator' },
+        },
+      }),
+    );
+
+    const error = await executeCommand(
+      projectCommand('qa-configuration-stale', {
+        type: 'project.qa_configuration.update',
+        payload: {
+          projectId: 'p1',
+          expectedRevision: 1,
+          content: 'Stale content.',
+          reviewPolicy: 'manual',
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(toHttpError(error)).toMatchObject({
+      statusCode: 409,
+      body: {
+        error: {
+          code: 'project_revision_conflict',
+          details: {
+            project: expect.objectContaining({
+              id: 'p1',
+              qaConfiguration: expect.objectContaining({ revision: 2 }),
+            }),
           },
         },
       },
@@ -558,6 +1470,142 @@ describe('executeCommand', () => {
       ),
     ).rejects.toMatchObject({ code: 'project_has_running_attempt' });
     expect(repositories.projects.get('p1')?.archivedAt).toBeNull();
+  });
+
+  it('blocks archive and deletion through QA cycle session ownership', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'qa-owned-project',
+        displayName: 'QA owned',
+        repositoryPath: directory,
+        discoveredAt: now,
+      }),
+    );
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'qa-owned-workspace',
+        projectId: 'qa-owned-project',
+        type: 'shared',
+        path: directory,
+      }),
+    );
+    for (const [id, title] of [
+      ['qa-owned-developer', 'Developer'],
+      ['qa-owned-session', 'QA'],
+    ] as const) {
+      repositories.sessions.create(
+        sessionSchema.parse({
+          id,
+          projectId: 'qa-owned-project',
+          workspaceId: 'qa-owned-workspace',
+          title,
+          permissionMode: 'safe_auto',
+          lifecycleState: 'completed',
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+    }
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'qa-owned-task',
+        projectId: 'qa-owned-project',
+        title: 'QA owned task',
+        description: 'Preserve QA history.',
+        acceptanceCriteria: ['History is durable'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const attempt = repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: 'qa-owned-attempt',
+        taskId: task.id,
+        sessionId: 'qa-owned-developer',
+        ordinal: 1,
+        source: 'launched',
+        actor: { type: 'human', id: 'operator' },
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: 'developer',
+      }),
+    );
+    repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'qa-owned-cycle',
+        taskId: task.id,
+        attemptId: attempt.id,
+        sessionId: 'qa-owned-session',
+        ordinal: 1,
+        authorizedBy: { type: 'human', id: 'operator' },
+        authorizationCommandId: 'qa-owned-launch',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: task.title,
+          description: task.description,
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'History is durable' },
+          ],
+        },
+        developerCompletionReportId: 'qa-owned-report',
+        workspaceId: 'qa-owned-workspace',
+        reviewPolicy: 'manual',
+        reviewPolicyRevision: 1,
+        automationGeneration: 0,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+
+    for (const command of [
+      {
+        type: 'session.archive',
+        payload: { sessionId: 'qa-owned-session' },
+      },
+      {
+        type: 'session.delete',
+        payload: { sessionId: 'qa-owned-session', confirmed: true },
+      },
+      {
+        type: 'project.archive',
+        payload: {
+          projectId: 'qa-owned-project',
+          expectedRevision: 1,
+          actor: { type: 'human', id: 'operator' },
+        },
+      },
+    ]) {
+      await expect(
+        executeCommand(
+          projectCommand(`qa-ownership-${command.type}`, command),
+          dependencies,
+        ),
+      ).rejects.toMatchObject({
+        code:
+          command.type === 'project.archive'
+            ? 'project_has_running_attempt'
+            : 'invalid_session_state',
+      });
+    }
+    expect(repositories.qaExecutions.getCycle('qa-owned-cycle')).toBeDefined();
   });
 
   it('restores an archived project with the next revision', async () => {

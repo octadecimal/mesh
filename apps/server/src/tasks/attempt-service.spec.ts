@@ -9,6 +9,9 @@ import {
   developerExecutionCycleSchema,
   idSchema,
   projectSchema,
+  qaExecutionCycleSchema,
+  qaReportSchema,
+  reviewAutomationActionSchema,
   sessionSchema,
   taskActorSchema,
   taskSchema,
@@ -18,12 +21,16 @@ import {
 
 import type { ClaudeSessionDriver } from '../claude/driver.js';
 import type { GitAdapter } from '../platform/git.js';
+import { ProcessTrustedExecutableUnavailableError } from '../platform/process-runner.js';
 import {
   FakeClaudeSessionDriver,
   FakeDriverSession,
 } from '../claude/fake-driver.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
-import type { RepositoryIdentity } from '../projects/repository-identity.js';
+import type {
+  RepositoryIdentity,
+  RepositoryIdentityResolver,
+} from '../projects/repository-identity.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { AttemptService } from './attempt-service.js';
 import { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
@@ -51,6 +58,11 @@ describe('AttemptService', () => {
     interrupt?: (sessionId: string) => Promise<void>;
     terminalInterrupt?: (sessionId: string) => Promise<void>;
     emergencyClose?: (sessionId: string) => Promise<void>;
+    afterDeveloperSubmission?: (input: {
+      taskId: string;
+      cycleId: string;
+    }) => Promise<void>;
+    resolveIdentity?: RepositoryIdentityResolver;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-attempt-service-'));
     const repositories = createTestRepositories(options?.repositories);
@@ -83,6 +95,7 @@ describe('AttemptService', () => {
       taskService,
       capabilities,
       developerExecutionService,
+      afterDeveloperSubmission: options?.afterDeveloperSubmission,
       registry: {
         resume: (sessionId, configuration, developer) =>
           registry.resume(sessionId, configuration, developer),
@@ -110,15 +123,17 @@ describe('AttemptService', () => {
       },
       git: options?.git,
       pathOptions: { baseDirectory: directory },
-      resolveIdentity: async (path) =>
-        ({
-          canonicalPath: path,
-          commonDirectory: path,
-          repositoryIdentity:
-            path === directory || path.endsWith('/project-1')
-              ? directory
-              : path,
-        }) as RepositoryIdentity,
+      resolveIdentity:
+        options?.resolveIdentity ??
+        (async (path) =>
+          ({
+            canonicalPath: path,
+            commonDirectory: path,
+            repositoryIdentity:
+              path === directory || path.endsWith('/project-1')
+                ? directory
+                : path,
+          }) as RepositoryIdentity),
       now: () => now,
       createId,
     });
@@ -347,6 +362,80 @@ describe('AttemptService', () => {
     return { task, attempt, cycle };
   };
 
+  const seedQaDecision = (
+    repositories: ReturnType<typeof createTestRepositories>,
+    prior: ReturnType<typeof seedRecovery>,
+    disposition: 'active' | 'verified' | 'rejected',
+  ) => {
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: `qa-session-${disposition}`,
+        projectId: prior.task.projectId,
+        workspaceId: 'workspace-recovery',
+        title: 'QA decision',
+        permissionMode: 'safe_auto',
+        lifecycleState: disposition === 'active' ? 'running' : 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const qaCycle = repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: `qa-cycle-${disposition}`,
+        taskId: prior.task.id,
+        attemptId: prior.attempt.id,
+        sessionId: `qa-session-${disposition}`,
+        ordinal: 1,
+        authorizedBy: actor,
+        authorizationCommandId: `qa-launch-${disposition}`,
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: prior.cycle.taskSnapshot,
+        developerCompletionReportId: 'report-prior',
+        workspaceId: 'workspace-recovery',
+        reviewPolicy: 'manual',
+        reviewPolicyRevision: 1,
+        automationGeneration: 0,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    if (disposition !== 'active') {
+      const report = repositories.qaExecutions.insertReport(
+        qaReportSchema.parse({
+          id: `qa-report-${disposition}`,
+          cycleId: qaCycle.id,
+          disposition,
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: disposition === 'verified' ? 'passed' : 'failed',
+              evidence: `${disposition} evidence`,
+            },
+          ],
+          verificationCommands: [],
+          limitations: [],
+          residualRisks: [],
+          workspaceBefore: 'sha256:source',
+          workspaceAfter: 'sha256:source',
+          createdAt: now,
+        }),
+      );
+      repositories.qaExecutions.completeCycle(qaCycle.id, {
+        endedAt: now,
+        terminalDisposition: disposition,
+        reportId: report.id,
+        terminalCommandId: `qa-verdict-${disposition}`,
+        terminalEventId: `qa-event-${disposition}`,
+      });
+    }
+  };
+
   it('persists the launched attempt, starts its runtime, then audits in_progress', async () => {
     const { directory, driver, repositories, service } = setup();
     seedTask(repositories);
@@ -393,7 +482,16 @@ describe('AttemptService', () => {
     const cycles = repositories.developerExecutions.listByTask(prior.task.id);
 
     expect(resumed).toMatchObject({
-      task: { lifecycleState: 'in_progress', blocked: null, revision: 4 },
+      task: {
+        lifecycleState: 'in_progress',
+        blocked: null,
+        revision: 4,
+        reviewAutomation: {
+          generation: 1,
+          rejectionCount: 0,
+          pauseReason: null,
+        },
+      },
       attempt: { id: prior.attempt.id, sessionId: prior.attempt.sessionId },
       cycle: {
         ordinal: 2,
@@ -416,6 +514,155 @@ describe('AttemptService', () => {
       (driver as FakeClaudeSessionDriver).resumedRequests[0]?.developer
         ?.initialPrompt,
     ).toContain(input.feedback);
+  });
+
+  it.each(['active', 'verified'] as const)(
+    'blocks human rejection rework for a %s QA outcome',
+    async (disposition) => {
+      const { directory, repositories, service } = setup();
+      const prior = seedRecovery(repositories, directory, 'rejection');
+      seedQaDecision(repositories, prior, disposition);
+
+      await expect(
+        service.resumeDeveloper({
+          commandId: `command-reject-${disposition}`,
+          taskId: prior.task.id,
+          expectedRevision: prior.task.revision,
+          kind: 'rejection',
+          feedback: 'Address the rejected QA evidence.',
+          actor,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_command' });
+    },
+  );
+
+  it('resumes the same Claude session for an authorized autonomous rejection', async () => {
+    const { directory, driver, repositories, service } = setup();
+    const prior = seedRecovery(repositories, directory, 'rejection');
+    const project = repositories.projects.get(prior.task.projectId);
+    if (!project) throw new Error('Expected project');
+    repositories.projects.updateQaConfiguration(
+      project.id,
+      project.qaConfiguration.revision,
+      {
+        instructions: { content: 'Run focused verification.' },
+        reviewPolicy: 'autonomous_review',
+      },
+      actor,
+    );
+    const automatedTask = repositories.tasks.update(
+      {
+        ...prior.task,
+        reviewAutomation: {
+          status: 'enabled',
+          generation: 2,
+          rejectionCount: 1,
+          pauseReason: null,
+          updatedAt: now,
+        },
+      },
+      prior.task.revision,
+    );
+    if (!automatedTask) throw new Error('Expected automation task update');
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'qa-session-rejected',
+        projectId: prior.task.projectId,
+        workspaceId: 'workspace-recovery',
+        title: 'QA rejected',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const qaCycle = repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'qa-cycle-rejected',
+        taskId: prior.task.id,
+        attemptId: prior.attempt.id,
+        sessionId: 'qa-session-rejected',
+        ordinal: 1,
+        authorizedBy: { type: 'system', id: 'review-loop' },
+        authorizationCommandId: 'qa-launch-rejected',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: prior.cycle.taskSnapshot,
+        developerCompletionReportId: 'report-prior',
+        workspaceId: 'workspace-recovery',
+        reviewPolicy: 'autonomous_review',
+        reviewPolicyRevision: 2,
+        automationGeneration: 2,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    const report = repositories.qaExecutions.insertReport(
+      qaReportSchema.parse({
+        id: 'qa-report-rejected',
+        cycleId: qaCycle.id,
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Regression failed.',
+          },
+        ],
+        verificationCommands: [],
+        limitations: [],
+        residualRisks: [],
+        workspaceBefore: 'state-1',
+        workspaceAfter: 'state-1',
+        createdAt: now,
+      }),
+    );
+    repositories.qaExecutions.completeCycle(qaCycle.id, {
+      endedAt: now,
+      terminalDisposition: 'rejected',
+      reportId: report.id,
+      terminalCommandId: 'qa-verdict-rejected',
+      terminalEventId: 'qa-event-rejected',
+    });
+    const commandId = `${prior.task.id}:${prior.attempt.id}:${qaCycle.id}:resume_developer:2`;
+    repositories.qaExecutions.insertAutomationAction(
+      reviewAutomationActionSchema.parse({
+        id: 'resume-action-rejected',
+        idempotencyKey: commandId,
+        projectId: prior.task.projectId,
+        taskId: prior.task.id,
+        attemptId: prior.attempt.id,
+        sourceCycleId: qaCycle.id,
+        actionKind: 'resume_developer',
+        generation: 2,
+        status: 'pending',
+        errorCode: null,
+        createdAt: now,
+        completedAt: null,
+      }),
+    );
+
+    const resumed = await service.resumeDeveloper({
+      commandId,
+      taskId: prior.task.id,
+      expectedRevision: automatedTask.revision,
+      kind: 'rejection',
+      feedback: 'criterion-1: Regression failed.',
+      actor: taskActorSchema.parse({ type: 'system', id: 'review-loop' }),
+      automation: { sourceCycleId: qaCycle.id, generation: 2 },
+    });
+
+    expect(resumed.task).toMatchObject({ lifecycleState: 'in_progress' });
+    expect(
+      (driver as FakeClaudeSessionDriver).resumedRequests.at(-1)
+        ?.claudeResumeId,
+    ).toBe('claude-resume-1');
+    expect(repositories.attempts.listByTask(prior.task.id)).toHaveLength(1);
   });
 
   it('closes a failed resume cycle and retains the prior review truth', async () => {
@@ -560,7 +807,11 @@ describe('AttemptService', () => {
     const cycles = repositories.developerExecutions.listByTask(prior.task.id);
 
     expect(fresh).toMatchObject({
-      task: { lifecycleState: 'in_progress', revision: 4 },
+      task: {
+        lifecycleState: 'in_progress',
+        revision: 4,
+        reviewAutomation: { generation: 1, rejectionCount: 0 },
+      },
       attempt: { ordinal: 2, role: 'developer' },
       cycle: { ordinal: 1, mode: 'new', taskSnapshot: { revision: 3 } },
       feedback: { kind: 'rejection', feedback: input.feedback },
@@ -877,7 +1128,10 @@ describe('AttemptService', () => {
   });
 
   it('binds installed Developer controls to the launched task and cycle', async () => {
-    const { directory, driver, repositories, service } = setup();
+    const afterDeveloperSubmission = vi.fn(async () => undefined);
+    const { directory, driver, repositories, service } = setup({
+      afterDeveloperSubmission,
+    });
     seedTask(repositories);
     const launched = await service.launchDeveloper(
       developerLaunchInput(directory),
@@ -929,6 +1183,10 @@ describe('AttemptService', () => {
     expect(repositories.sessions.get(session.id)?.lifecycleState).toBe(
       'interrupted',
     );
+    expect(afterDeveloperSubmission).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      cycleId: cycle.id,
+    });
   });
 
   it('keeps submit-for-review durable when runtime interruption fails', async () => {
@@ -1678,5 +1936,57 @@ describe('AttemptService', () => {
     expect(
       repositories.attempts.listByTask('task-1')[0]?.unlinkedAt,
     ).toBeNull();
+  });
+
+  it('verifies the current Developer attempt workspace without creating another workspace', async () => {
+    const { directory, repositories, service } = setup();
+    seedTask(repositories);
+    const launched = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+    if (!launched.session) throw new Error('Expected Developer session');
+
+    const verified = await service.requireQaWorkspace({
+      taskId: launched.task.id,
+      attemptId: launched.attempt.id,
+      workspaceId: launched.session.workspaceId,
+    });
+
+    expect(verified).toEqual({
+      attempt: launched.attempt,
+      session: launched.session,
+      workspace: repositories.workspaces.get(launched.session.workspaceId),
+    });
+    expect(repositories.workspaces.listByProject('project-1')).toHaveLength(1);
+  });
+
+  it('preserves trusted Git unavailability during QA workspace validation', async () => {
+    let gitAvailable = true;
+    const { directory, repositories, service } = setup({
+      resolveIdentity: async (path) => {
+        if (!gitAvailable) {
+          throw new ProcessTrustedExecutableUnavailableError('Git');
+        }
+        return {
+          canonicalPath: path,
+          commonDirectory: path,
+          repositoryIdentity: 'repository-identity',
+        } as RepositoryIdentity;
+      },
+    });
+    seedTask(repositories);
+    const launched = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+    if (!launched.session) throw new Error('Expected Developer session');
+    gitAvailable = false;
+
+    await expect(
+      service.requireQaWorkspace({
+        taskId: launched.task.id,
+        attemptId: launched.attempt.id,
+        workspaceId: launched.session.workspaceId,
+      }),
+    ).rejects.toBeInstanceOf(ProcessTrustedExecutableUnavailableError);
   });
 });

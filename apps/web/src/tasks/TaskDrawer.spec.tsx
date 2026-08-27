@@ -20,6 +20,12 @@ import { vi } from 'vitest';
 import { TaskDrawer } from './TaskDrawer';
 
 describe('TaskDrawer', () => {
+  it('composes the QA workflow into task detail', () => {
+    renderDrawer();
+
+    expect(screen.getByRole('region', { name: 'QA workflow' })).toBeVisible();
+  });
+
   it('creates a lightweight backlog task from its title', async () => {
     const user = userEvent.setup();
     const onCommand = vi.fn().mockResolvedValue(undefined);
@@ -729,6 +735,9 @@ const drawerElement = (options: DrawerOptions = {}) => {
       developerCompletionReports={options.developerCompletionReports ?? []}
       developerBlockerReports={[]}
       developerReviewFeedback={[]}
+      qaCycles={[]}
+      qaReports={[]}
+      reviewAutomation={undefined}
       connected={options.connected ?? true}
       onOpenChange={() => undefined}
       onCommand={onCommand}

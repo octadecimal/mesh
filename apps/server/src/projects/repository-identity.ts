@@ -5,13 +5,21 @@ import {
   type AbsolutePath,
   type ResolveWorkspacePathOptions,
 } from '../platform/paths.js';
-import { NodeProcessRunner } from '../platform/process-runner.js';
+import {
+  NodeProcessRunner,
+  type ProcessRunner,
+} from '../platform/process-runner.js';
 
 export interface RepositoryIdentity {
   canonicalPath: AbsolutePath;
   commonDirectory: AbsolutePath;
   repositoryIdentity: string;
 }
+
+export type RepositoryIdentityResolver = (
+  repositoryPath: string,
+  pathOptions: ResolveWorkspacePathOptions,
+) => Promise<RepositoryIdentity>;
 
 export class RepositoryIdentityError extends Error {
   constructor(
@@ -53,6 +61,7 @@ const resolveGitPath = async (
 export const resolveRepositoryIdentity = async (
   repositoryPath: string,
   pathOptions: ResolveWorkspacePathOptions,
+  processRunner: ProcessRunner = new NodeProcessRunner(),
 ): Promise<RepositoryIdentity> => {
   let canonicalPath: AbsolutePath;
   let canonicalBaseDirectory: AbsolutePath;
@@ -76,7 +85,7 @@ export const resolveRepositoryIdentity = async (
     );
   }
 
-  const result = await new NodeProcessRunner().run(
+  const result = await processRunner.run(
     'git',
     [
       '-c',

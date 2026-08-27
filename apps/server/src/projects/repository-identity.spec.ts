@@ -4,8 +4,12 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
+import {
+  NodeProcessRunner,
+  resolveGitExecutableAtStartup,
+} from '../platform/process-runner.js';
 import { resolveRepositoryIdentity } from './repository-identity.js';
 
 const exec = promisify(execFile);
@@ -16,6 +20,18 @@ const runGit = async (cwd: string, ...args: string[]) => {
 
 describe('resolveRepositoryIdentity', () => {
   const temporaryDirectories: string[] = [];
+  let processRunner: NodeProcessRunner;
+
+  beforeAll(async () => {
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: tmpdir(),
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    processRunner = new NodeProcessRunner({ trustedGitExecutable });
+  });
 
   afterEach(async () => {
     await Promise.all(
@@ -49,12 +65,17 @@ describe('resolveRepositoryIdentity', () => {
 
   it('resolves equivalent repository path spellings to one identity', async () => {
     const { directory, repositoryPath } = await createRepository();
-    const first = await resolveRepositoryIdentity(repositoryPath, {
-      baseDirectory: directory,
-    });
+    const first = await resolveRepositoryIdentity(
+      repositoryPath,
+      {
+        baseDirectory: directory,
+      },
+      processRunner,
+    );
     const second = await resolveRepositoryIdentity(
       join(repositoryPath, '..', basename(repositoryPath)),
       { baseDirectory: directory },
+      processRunner,
     );
 
     expect(first).toMatchObject({
@@ -76,12 +97,20 @@ describe('resolveRepositoryIdentity', () => {
       'HEAD',
     );
 
-    const repository = await resolveRepositoryIdentity(repositoryPath, {
-      baseDirectory: directory,
-    });
-    const worktree = await resolveRepositoryIdentity(worktreePath, {
-      baseDirectory: directory,
-    });
+    const repository = await resolveRepositoryIdentity(
+      repositoryPath,
+      {
+        baseDirectory: directory,
+      },
+      processRunner,
+    );
+    const worktree = await resolveRepositoryIdentity(
+      worktreePath,
+      {
+        baseDirectory: directory,
+      },
+      processRunner,
+    );
 
     expect(worktree.canonicalPath).toBe(await realpath(worktreePath));
     expect(worktree.commonDirectory).toBe(repository.commonDirectory);
@@ -95,7 +124,11 @@ describe('resolveRepositoryIdentity', () => {
     temporaryDirectories.push(directory);
 
     await expect(
-      resolveRepositoryIdentity(directory, { baseDirectory: directory }),
+      resolveRepositoryIdentity(
+        directory,
+        { baseDirectory: directory },
+        processRunner,
+      ),
     ).rejects.toMatchObject({ code: 'repository_invalid' });
   });
 
@@ -107,9 +140,13 @@ describe('resolveRepositoryIdentity', () => {
     temporaryDirectories.push(allowedDirectory);
 
     await expect(
-      resolveRepositoryIdentity(repositoryPath, {
-        baseDirectory: allowedDirectory,
-      }),
+      resolveRepositoryIdentity(
+        repositoryPath,
+        {
+          baseDirectory: allowedDirectory,
+        },
+        processRunner,
+      ),
     ).rejects.toMatchObject({ code: 'repository_invalid' });
   });
 });

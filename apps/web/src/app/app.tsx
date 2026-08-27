@@ -39,6 +39,7 @@ import {
   type ProjectImportSuggestion,
 } from '../projects/ProjectImportDialog';
 import { DeveloperInstructions } from '../projects/DeveloperInstructions';
+import { QaSettings } from '../projects/QaSettings';
 import { TaskBoard } from '../tasks/TaskBoard';
 
 type MeshStore = ReturnType<typeof createMeshStore>;
@@ -153,6 +154,8 @@ function ConnectedApp({
     pendingDeveloperInstructionsByProjectId,
     setPendingDeveloperInstructionsByProjectId,
   ] = useState<Record<string, boolean>>({});
+  const [pendingQaSettingsByProjectId, setPendingQaSettingsByProjectId] =
+    useState<Record<string, boolean>>({});
   const workspaceById = new Map(
     workspaces.map((workspace) => [workspace.id, workspace]),
   );
@@ -315,6 +318,45 @@ function ConnectedApp({
     } finally {
       setPendingDeveloperInstructionsByProjectId((current) => {
         const { [projectId]: _, ...remaining } = current;
+        return remaining;
+      });
+    }
+  };
+  const saveQaSettings = async ({
+    content,
+    reviewPolicy,
+    expectedRevision,
+  }: {
+    content: string;
+    reviewPolicy: Project['qaConfiguration']['reviewPolicy'];
+    expectedRevision: number;
+  }) => {
+    if (!activeProject) return;
+    const projectId = activeProject.id;
+    if (pendingQaSettingsByProjectId[projectId]) return;
+    const command: MutatingCommand = {
+      type: 'project.qa_configuration.update',
+      payload: {
+        projectId,
+        expectedRevision,
+        content,
+        reviewPolicy,
+        actor: operator,
+      },
+    };
+    onCommand?.({ type: command.type, payload: command.payload });
+    if (!api)
+      throw new Error('QA settings are unavailable while disconnected.');
+    setPendingQaSettingsByProjectId((current) => ({
+      ...current,
+      [projectId]: true,
+    }));
+    try {
+      await api.command(command);
+    } finally {
+      setPendingQaSettingsByProjectId((current) => {
+        const remaining = { ...current };
+        delete remaining[projectId];
         return remaining;
       });
     }
@@ -533,6 +575,17 @@ function ConnectedApp({
                 pendingDeveloperInstructionsByProjectId[activeProject.id],
               )}
               onSave={saveDeveloperInstructions}
+            />
+            <QaSettings
+              key={`${activeProject.id}:qa`}
+              project={activeProject}
+              disabled={
+                Boolean(activeProject.archivedAt) ||
+                projection.connectionHealth !== 'connected' ||
+                !api
+              }
+              saving={Boolean(pendingQaSettingsByProjectId[activeProject.id])}
+              onSave={saveQaSettings}
             />
             <TaskBoard
               project={activeProject}

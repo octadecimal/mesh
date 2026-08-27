@@ -6,6 +6,8 @@ import {
   developerExecutionCycleSchema,
   developerReviewFeedbackSchema,
   projectSchema,
+  qaExecutionCycleSchema,
+  qaReportSchema,
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
@@ -15,6 +17,8 @@ import {
   type DeveloperExecutionCycle,
   type DeveloperReviewFeedback,
   type MutatingCommand,
+  type QaExecutionCycle,
+  type QaReport,
   type Task,
 } from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
@@ -189,6 +193,61 @@ describe('DeveloperExecutionPanel', () => {
         actor,
       },
     });
+  });
+
+  it('shows only the human decision authorized by the latest matching QA state', () => {
+    const verifiedCycle = qaExecutionCycleSchema.parse({
+      ...qaCycle,
+      id: 'qa-cycle-verified',
+      terminalDisposition: 'verified',
+      reportId: 'qa-report-verified',
+    });
+    const activeCycle = qaExecutionCycleSchema.parse({
+      ...qaCycle,
+      id: 'qa-cycle-active',
+      endedAt: null,
+      terminalDisposition: null,
+      reportId: null,
+      terminalCommandId: null,
+      terminalEventId: null,
+    });
+    const rendered = renderPanel({
+      task: taskFor({ lifecycleState: 'review' }),
+      attempts: [developerAttempt],
+      cycles: [completionCycle],
+      completionReports: [completionReport],
+      qaCycles: [qaCycle],
+      qaReports: [qaReport],
+    });
+
+    expect(screen.queryByRole('button', { name: 'Accept as done' })).toBeNull();
+    expect(screen.getByLabelText('Rejection feedback')).toBeDefined();
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({ lifecycleState: 'review' }),
+        attempts: [developerAttempt],
+        cycles: [completionCycle],
+        completionReports: [completionReport],
+        qaCycles: [verifiedCycle],
+      }),
+    );
+    expect(
+      screen.getByRole('button', { name: 'Accept as done' }),
+    ).toBeDefined();
+    expect(screen.queryByLabelText('Rejection feedback')).toBeNull();
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({ lifecycleState: 'review' }),
+        attempts: [developerAttempt],
+        cycles: [completionCycle],
+        completionReports: [completionReport],
+        qaCycles: [activeCycle],
+      }),
+    );
+    expect(screen.queryByRole('button', { name: 'Accept as done' })).toBeNull();
+    expect(screen.queryByLabelText('Rejection feedback')).toBeNull();
   });
 
   it('does not expose Developer review or recovery commands without matching durable reports', () => {
@@ -854,6 +913,48 @@ const completionReport: DeveloperCompletionReport =
     reviewerNotes: 'Use semantic headings.',
     createdAt: later,
   });
+const qaCycle: QaExecutionCycle = qaExecutionCycleSchema.parse({
+  id: 'qa-cycle-1',
+  taskId: task.id,
+  attemptId: developerAttempt.attempt.id,
+  sessionId: 'qa-session-1',
+  ordinal: 1,
+  authorizedBy: actor,
+  authorizationCommandId: 'qa-launch-command',
+  policyVersion: 'qa-policy-v1',
+  qaInstructions: { content: 'Verify every criterion.', revision: 1 },
+  taskSnapshot: completionCycle.taskSnapshot,
+  developerCompletionReportId: completionReport.id,
+  workspaceId: 'workspace-1',
+  reviewPolicy: 'manual',
+  reviewPolicyRevision: 1,
+  automationGeneration: 0,
+  rejectionOrdinal: 1,
+  startedAt: '2026-08-25T00:02:00.000Z',
+  endedAt: '2026-08-25T00:03:00.000Z',
+  terminalDisposition: 'rejected',
+  reportId: 'qa-report-1',
+  terminalCommandId: 'qa-verdict-command',
+  terminalEventId: 'qa-verdict-event',
+});
+const qaReport: QaReport = qaReportSchema.parse({
+  id: 'qa-report-1',
+  cycleId: qaCycle.id,
+  disposition: 'rejected',
+  criterionResults: completionCycle.taskSnapshot.acceptanceCriteria.map(
+    (criterion, index) => ({
+      criterionId: criterion.id,
+      status: index === 0 ? 'failed' : 'passed',
+      evidence: index === 0 ? 'History order is wrong.' : 'Controls are safe.',
+    }),
+  ),
+  verificationCommands: [],
+  limitations: [],
+  residualRisks: [],
+  workspaceBefore: 'clean:abc',
+  workspaceAfter: 'clean:abc',
+  createdAt: '2026-08-25T00:03:00.000Z',
+});
 const blockerReport: DeveloperBlockerReport =
   developerBlockerReportSchema.parse({
     id: 'blocker-1',
@@ -882,6 +983,8 @@ type PanelOptions = {
   attempts?: (typeof developerAttempt)[];
   cycles?: DeveloperExecutionCycle[];
   completionReports?: DeveloperCompletionReport[];
+  qaCycles?: QaExecutionCycle[];
+  qaReports?: QaReport[];
   blockerReports?: DeveloperBlockerReport[];
   feedback?: DeveloperReviewFeedback[];
   repairs?: Array<{
@@ -903,6 +1006,8 @@ const panelElement = (options: PanelOptions = {}) => (
     attempts={options.attempts ?? []}
     cycles={options.cycles ?? []}
     completionReports={options.completionReports ?? []}
+    qaCycles={options.qaCycles ?? []}
+    qaReports={options.qaReports ?? []}
     blockerReports={options.blockerReports ?? []}
     feedback={options.feedback ?? []}
     repairs={options.repairs ?? []}
@@ -925,3 +1030,23 @@ const deferred = <Value,>() => {
   });
   return { promise, resolve, reject };
 };
+it('places QA cycles into the immutable Developer and QA chronology', () => {
+  renderPanel({
+    attempts: [developerAttempt],
+    cycles: [completionCycle],
+    completionReports: [completionReport],
+    qaCycles: [qaCycle],
+    qaReports: [qaReport],
+  });
+
+  const developer = screen.getByRole('article', {
+    name: 'Developer attempt 1 cycle 1',
+  });
+  const qa = screen.getByRole('article', {
+    name: 'QA attempt 1 cycle 1',
+  });
+  expect(
+    developer.compareDocumentPosition(qa) & Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
+  expect(within(qa).getByText('QA rejected')).toBeVisible();
+});

@@ -12,6 +12,7 @@ import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
 } from './developer-execution.js';
+import { qaReportInputSchema, reviewPolicySchema } from './qa-execution.js';
 import { protocolVersionSchema } from './protocol.js';
 
 export const discoveryCommandSchema = z.discriminatedUnion('type', [
@@ -127,6 +128,16 @@ export const projectCommandSchema = z.discriminatedUnion('type', [
       projectId: idSchema,
       expectedRevision: expectedRevisionSchema,
       content: z.string(),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.qa_configuration.update'),
+    payload: z.object({
+      projectId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      content: z.string(),
+      reviewPolicy: reviewPolicySchema,
       actor: humanActorSchema,
     }),
   }),
@@ -298,6 +309,48 @@ export const taskCommandSchema = z.discriminatedUnion('type', [
       title: z.string().trim().min(1),
       permissionMode: permissionModeSchema,
       workspace: sessionWorkspaceSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.qa.launch'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.qa.submit_verdict'),
+    payload: z.object({
+      capability: z.string().trim().min(1),
+      expectedRevision: expectedRevisionSchema,
+      report: qaReportInputSchema,
+      actor: developerAgentActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.qa.repair_interrupted'),
+    payload: z.object({
+      taskId: idSchema,
+      cycleId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.review_automation.enable'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('task.review_automation.pause'),
+    payload: z.object({
+      taskId: idSchema,
+      expectedRevision: expectedRevisionSchema,
       actor: humanActorSchema,
     }),
   }),

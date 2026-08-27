@@ -31,6 +31,7 @@ import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
+import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
 import type { TaskMutationResult, TaskService } from '../tasks/task-service.js';
@@ -39,9 +40,20 @@ import type {
   AttemptService,
 } from '../tasks/attempt-service.js';
 import type { DeveloperExecutionService } from '../tasks/developer-execution-service.js';
+import type {
+  QaExecutionService,
+  QaLaunchResult,
+  QaVerdictOutcome,
+} from '../tasks/qa-execution-service.js';
+import type { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
+import type {
+  ReviewAutomationCommandOutcome,
+  ReviewAutomationService,
+} from '../tasks/review-automation-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
+  type RepositoryIdentityResolver,
 } from '../projects/repository-identity.js';
 import { CommandError } from './errors.js';
 
@@ -71,12 +83,26 @@ export interface CommandDependencies {
   layouts: LayoutRepository;
   commands: CommandRepository;
   taskService: TaskService;
+  tasks: Pick<TaskRepository, 'get'>;
+  qaExecutions: Pick<
+    QaExecutionRepository,
+    'getActiveCycleBySession' | 'hasCycleForSession'
+  >;
   attemptService?: AttemptService;
   developerExecutionService?: DeveloperExecutionService;
+  qaExecutionService?: Pick<
+    QaExecutionService,
+    'launch' | 'submitVerdict' | 'repairInterrupted'
+  >;
+  reviewAutomationService?: Pick<
+    ReviewAutomationService,
+    'afterDeveloperSubmission' | 'afterQaVerdict' | 'enable' | 'pause'
+  >;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
   pathOptions?: ResolveWorkspacePathOptions;
+  resolveIdentity?: RepositoryIdentityResolver;
   billingConflicts?: readonly { variable: string }[];
   now?: () => string;
   createId?: () => string;
@@ -132,6 +158,72 @@ const requireDeveloperExecutionService = (
   return dependencies.developerExecutionService;
 };
 
+const requireQaExecutionService = (dependencies: CommandDependencies) => {
+  if (!dependencies.qaExecutionService) {
+    throw new CommandError(
+      'invalid_command',
+      'QA execution support is unavailable',
+    );
+  }
+  return dependencies.qaExecutionService;
+};
+
+const requireReviewAutomationService = (dependencies: CommandDependencies) => {
+  if (!dependencies.reviewAutomationService) {
+    throw new CommandError(
+      'invalid_command',
+      'Review automation support is unavailable',
+    );
+  }
+  return dependencies.reviewAutomationService;
+};
+
+const followUpErrorCodes = new Set([
+  'audit_unavailable',
+  'developer_resume_unavailable',
+  'review_automation_paused',
+  'unsafe_qa_workspace',
+]);
+
+const safeErrorCode = (error: unknown, fallback: string): string => {
+  const candidate =
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    typeof error.code === 'string'
+      ? error.code
+      : undefined;
+  return candidate && followUpErrorCodes.has(candidate) ? candidate : fallback;
+};
+
+const qaLaunchResponse = (result: QaLaunchResult) => ({
+  task: result.task,
+  attempt: result.attempt,
+  session: result.session,
+  cycle: result.cycle,
+  event: result.event,
+  projectEventCursor: result.event.sequence,
+});
+
+const qaVerdictResponse = (
+  result: QaVerdictOutcome,
+  projectEventCursor = result.events.at(-1)?.sequence ?? result.event.sequence,
+) => ({
+  task: result.task,
+  attempt: result.attempt,
+  cycle: result.cycle,
+  report: result.report,
+  event: result.event,
+  events: result.events,
+  projectEventCursor,
+});
+
+const reviewAutomationResponse = (result: ReviewAutomationCommandOutcome) => ({
+  task: result.task,
+  event: result.event,
+  projectEventCursor: result.event.sequence,
+});
+
 type DeveloperLaunchCommand = Extract<
   Extract<Command, { idempotencyKey: string }>['command'],
   { type: 'task.developer.launch' }
@@ -170,6 +262,152 @@ type DeveloperHumanCommand = Extract<
       | 'task.developer.unblock_new';
   }
 >;
+
+type DeveloperAgentCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'task.developer.submit_review' | 'task.developer.block' }
+>;
+
+const executeDeveloperAgentCommand = async (
+  command: DeveloperAgentCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  const service = requireDeveloperExecutionService(dependencies);
+  if (command.type === 'task.developer.block') {
+    const result = service.markBlocked({
+      ...command.payload,
+      commandId: idempotencyKey,
+    });
+    return response(command.type, {
+      ...result,
+      projectEventCursor: result.event.sequence,
+    });
+  }
+
+  const result = service.submitForReview({
+    ...command.payload,
+    commandId: idempotencyKey,
+  });
+  const warnings: Array<{ code: string; message: string }> = [];
+  let task = result.task;
+  let projectEventCursor = result.event.sequence;
+  try {
+    await requireReviewAutomationService(dependencies).afterDeveloperSubmission(
+      {
+        taskId: result.task.id,
+        cycleId: result.cycle.id,
+      },
+    );
+  } catch (error) {
+    task = dependencies.tasks.get(result.task.id) ?? result.task;
+    projectEventCursor = Math.max(
+      projectEventCursor,
+      dependencies.projectEvents.latestSequence(task.projectId),
+    );
+    warnings.push({
+      code: safeErrorCode(error, 'review_automation_paused'),
+      message: 'Developer submission was committed; review automation paused.',
+    });
+  }
+  return response(
+    command.type,
+    { ...result, task, projectEventCursor },
+    warnings,
+  );
+};
+
+type QaCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  {
+    type:
+      | 'task.qa.launch'
+      | 'task.qa.submit_verdict'
+      | 'task.qa.repair_interrupted';
+  }
+>;
+
+const executeQaCommand = async (
+  command: QaCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  const service = requireQaExecutionService(dependencies);
+  if (command.type === 'task.qa.launch') {
+    const result = await service.launch({
+      ...command.payload,
+      commandId: idempotencyKey,
+      trigger: 'manual',
+    });
+    return response(command.type, qaLaunchResponse(result));
+  }
+
+  if (command.type === 'task.qa.repair_interrupted') {
+    const result = service.repairInterrupted({
+      ...command.payload,
+      commandId: idempotencyKey,
+    });
+    return response(command.type, {
+      ...result,
+      projectEventCursor:
+        result.events.at(-1)?.sequence ?? result.event.sequence,
+    });
+  }
+
+  const committed = await service.submitVerdict({
+    ...command.payload,
+    commandId: idempotencyKey,
+  });
+  const warnings: Array<{ code: string; message: string }> = [];
+  let outcome = committed;
+  let projectEventCursor =
+    committed.events.at(-1)?.sequence ?? committed.event.sequence;
+  try {
+    await requireReviewAutomationService(dependencies).afterQaVerdict({
+      taskId: committed.task.id,
+      cycleId: committed.cycle.id,
+    });
+  } catch (error) {
+    outcome = {
+      ...committed,
+      task: dependencies.tasks.get(committed.task.id) ?? committed.task,
+    };
+    projectEventCursor = Math.max(
+      projectEventCursor,
+      dependencies.projectEvents.latestSequence(outcome.task.projectId),
+    );
+    warnings.push({
+      code: safeErrorCode(error, 'review_automation_paused'),
+      message:
+        'QA verdict was committed; Developer resume failed and automation paused.',
+    });
+  }
+  return response(
+    command.type,
+    qaVerdictResponse(outcome, projectEventCursor),
+    warnings,
+  );
+};
+
+type ReviewAutomationCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  {
+    type: 'task.review_automation.enable' | 'task.review_automation.pause';
+  }
+>;
+
+const executeReviewAutomationCommand = (
+  command: ReviewAutomationCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): CommandResponse => {
+  const service = requireReviewAutomationService(dependencies);
+  const result =
+    command.type === 'task.review_automation.enable'
+      ? service.enable({ ...command.payload, commandId: idempotencyKey })
+      : service.pause({ ...command.payload, commandId: idempotencyKey });
+  return response(command.type, reviewAutomationResponse(result));
+};
 
 const executeDeveloperHumanCommand = async (
   command: DeveloperHumanCommand,
@@ -467,6 +705,60 @@ const executeDeveloperInstructionUpdate = (
   return commandResponse;
 };
 
+type QaConfigurationUpdateCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'project.qa_configuration.update' }
+>;
+
+const executeQaConfigurationUpdate = (
+  command: QaConfigurationUpdateCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): CommandResponse => {
+  const existing =
+    dependencies.commands.getExisting<CommandResponse>(idempotencyKey);
+  if (existing.found) return existing.response;
+
+  let event: ProjectEvent | undefined;
+  const commandResponse =
+    dependencies.commands.executeOnceInImmediateTransaction(
+      idempotencyKey,
+      () => {
+        const project = requireActiveProject(
+          dependencies,
+          command.payload.projectId,
+        );
+        const updated = dependencies.projects.updateQaConfiguration(
+          project.id,
+          command.payload.expectedRevision,
+          {
+            instructions: { content: command.payload.content },
+            reviewPolicy: command.payload.reviewPolicy,
+          },
+          command.payload.actor,
+        );
+        if (!updated) {
+          throw new CommandError(
+            'project_revision_conflict',
+            `Project '${project.id}' has changed`,
+            { project: dependencies.projects.get(project.id) },
+          );
+        }
+        event = dependencies.projectEvents.appendInTransaction(project.id, {
+          protocolVersion: 1,
+          id: (dependencies.createId ?? randomUUID)(),
+          projectId: project.id,
+          occurredAt: updated.qaConfiguration.updatedAt,
+          type: 'project.qa_configuration_changed',
+          payload: { project: updated },
+        });
+        return response(command.type, updated);
+      },
+    );
+  if (event) dependencies.registry.publisher.publishProject(event);
+  return commandResponse;
+};
+
 const assertMilestoneTwoHumanActor = (
   command: Extract<Command, { idempotencyKey: string }>['command'],
 ) => {
@@ -490,8 +782,10 @@ const hasRunningTaskAttempt = (
     .listByProject(projectId, { includeArchived: true })
     .some(
       (session) =>
-        isLive(session) &&
-        dependencies.attempts.getCurrentBySession(session.id),
+        dependencies.qaExecutions.getActiveCycleBySession(session.id) !==
+          undefined ||
+        (isLive(session) &&
+          dependencies.attempts.getCurrentBySession(session.id)),
     );
 
 const reconcileLegacyProjectIdentities = async (
@@ -499,15 +793,14 @@ const reconcileLegacyProjectIdentities = async (
 ) => {
   const pathOptions = dependencies.pathOptions;
   if (!pathOptions) return;
+  const resolveIdentity =
+    dependencies.resolveIdentity ?? resolveRepositoryIdentity;
   const now = (dependencies.now ?? (() => new Date().toISOString()))();
   for (const project of dependencies.projects.list()) {
     if (project.repositoryIdentity !== project.repositoryPath) continue;
     let identity;
     try {
-      identity = await resolveRepositoryIdentity(
-        project.repositoryPath,
-        pathOptions,
-      );
+      identity = await resolveIdentity(project.repositoryPath, pathOptions);
     } catch (error) {
       if (
         error instanceof RepositoryIdentityError &&
@@ -646,7 +939,9 @@ const executeMutation = async (
           'Workspace path configuration is unavailable',
         );
       }
-      const identity = await resolveRepositoryIdentity(
+      const resolveIdentity =
+        dependencies.resolveIdentity ?? resolveRepositoryIdentity;
+      const identity = await resolveIdentity(
         command.payload.repositoryPath,
         dependencies.pathOptions,
       );
@@ -931,10 +1226,13 @@ const executeMutation = async (
     }
     case 'session.archive': {
       const session = requireSession(dependencies, command.payload.sessionId);
-      if (isLive(session)) {
+      if (
+        isLive(session) ||
+        dependencies.qaExecutions.getActiveCycleBySession(session.id)
+      ) {
         throw new CommandError(
           'invalid_session_state',
-          'A live session cannot be archived',
+          'A live session or active QA cycle cannot be archived',
         );
       }
       return response(
@@ -960,6 +1258,12 @@ const executeMutation = async (
         throw new CommandError(
           'invalid_session_state',
           'A session with task attempt history cannot be deleted',
+        );
+      }
+      if (dependencies.qaExecutions.hasCycleForSession(session.id)) {
+        throw new CommandError(
+          'invalid_session_state',
+          'A session with QA execution history cannot be deleted',
         );
       }
       const workspace = requireWorkspace(dependencies, session.workspaceId);
@@ -1025,6 +1329,13 @@ export const executeCommand = async (
 ): Promise<CommandResponse> => {
   const command = commandSchema.parse(input);
   if ('idempotencyKey' in command) {
+    if (command.command.type === 'project.qa_configuration.update') {
+      return executeQaConfigurationUpdate(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
     if (command.command.type === 'project.developer_instructions.update') {
       return executeDeveloperInstructionUpdate(
         command.command,
@@ -1034,6 +1345,37 @@ export const executeCommand = async (
     }
     if (command.command.type === 'task.developer.launch') {
       return executeDeveloperLaunch(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (
+      command.command.type === 'task.developer.submit_review' ||
+      command.command.type === 'task.developer.block'
+    ) {
+      return executeDeveloperAgentCommand(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (
+      command.command.type === 'task.qa.launch' ||
+      command.command.type === 'task.qa.submit_verdict' ||
+      command.command.type === 'task.qa.repair_interrupted'
+    ) {
+      return executeQaCommand(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (
+      command.command.type === 'task.review_automation.enable' ||
+      command.command.type === 'task.review_automation.pause'
+    ) {
+      return executeReviewAutomationCommand(
         command.command,
         command.idempotencyKey,
         dependencies,

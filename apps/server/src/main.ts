@@ -23,7 +23,12 @@ import {
 import { openDatabase } from './db/database.js';
 import { migrate } from './db/migrate.js';
 import { GitAdapter } from './platform/git.js';
-import { NodeProcessRunner } from './platform/process-runner.js';
+import {
+  NodeProcessRunner,
+  resolveGitExecutableAtStartup,
+} from './platform/process-runner.js';
+import { QaVerificationRunner } from './platform/qa-verification-runner.js';
+import { resolveRepositoryIdentity } from './projects/repository-identity.js';
 import { CommandRepository } from './repositories/command-repository.js';
 import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
 import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
@@ -31,6 +36,7 @@ import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
 import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
+import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
 import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
 import { TaskRepository } from './repositories/task-repository.js';
@@ -42,10 +48,13 @@ import { AttemptService } from './tasks/attempt-service.js';
 import { DeveloperCapabilityRegistry } from './tasks/developer-capability-registry.js';
 import { DeveloperExecutionService } from './tasks/developer-execution-service.js';
 import { DeveloperReworkService } from './tasks/developer-rework-service.js';
+import { QaCapabilityRegistry } from './tasks/qa-capability-registry.js';
+import { QaExecutionService } from './tasks/qa-execution-service.js';
 import {
   reconcileTaskAttemptLaunchReservations,
   reconcileTaskAttempts,
 } from './tasks/reconcile-attempts.js';
+import { ReviewAutomationService } from './tasks/review-automation-service.js';
 import { TaskService } from './tasks/task-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
@@ -163,6 +172,11 @@ export const startServer = async (
   const environment = options.environment ?? process.env;
   const config = loadServerConfig(environment);
   const billingConflicts = detectBillingOverrides(environment);
+  const trustedGitExecutable = await resolveGitExecutableAtStartup({
+    configuredPath: config.gitExecutable,
+    pathValue: environment.PATH,
+    workspaceRoot: config.baseDirectory,
+  });
   mkdirSync(dirname(config.databasePath), { recursive: true });
   const database = openDatabase(config.databasePath);
   migrate(database);
@@ -177,6 +191,7 @@ export const startServer = async (
   const sessions = new SessionRepository(database);
   const diagnostics = new DiagnosticRepository(database);
   const developerExecutions = new DeveloperExecutionRepository(database);
+  const qaExecutions = new QaExecutionRepository(database);
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
@@ -195,6 +210,14 @@ export const startServer = async (
     environment,
   );
   const capabilities = new DeveloperCapabilityRegistry();
+  const qaCapabilities = new QaCapabilityRegistry();
+  const roleServices: { reviewAutomation?: ReviewAutomationService } = {};
+  const requireReviewAutomation = (): ReviewAutomationService => {
+    if (!roleServices.reviewAutomation) {
+      throw new Error('Review automation service is not composed');
+    }
+    return roleServices.reviewAutomation;
+  };
   const runtimeRepairs: AttemptRepair[] = [];
   const reconcileStoppedRuntime = (activeRegistry: SessionRegistry) => {
     const result = reconcileTaskAttempts({
@@ -203,23 +226,14 @@ export const startServer = async (
       tasks,
       attempts,
       sessions,
+      workspaces,
       diagnostics,
       developerExecutions,
+      qaExecutions,
+      qaCapabilities,
       projectEvents,
     });
-    for (const repair of result.repairs) {
-      if (
-        !runtimeRepairs.some(
-          (current) =>
-            current.taskId === repair.taskId &&
-            current.attemptId === repair.attemptId &&
-            current.sessionId === repair.sessionId &&
-            current.reason === repair.reason,
-        )
-      ) {
-        runtimeRepairs.push(repair);
-      }
-    }
+    runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
     for (const event of result.events)
       activeRegistry.publisher.publishProject(event);
   };
@@ -230,8 +244,11 @@ export const startServer = async (
     events,
     diagnostics,
     driver,
-    invalidateDeveloperCapability: (sessionId) =>
-      capabilities.invalidateSession(sessionId),
+    invalidateDeveloperCapability: (sessionId) => {
+      capabilities.invalidateSession(sessionId);
+      qaCapabilities.invalidateSession(sessionId);
+      qaExecutionService.cancelRuntime(sessionId);
+    },
     onRuntimeStopped: () => reconcileStoppedRuntime(registry),
   });
   const developerExecutionService = new DeveloperExecutionService({
@@ -239,6 +256,7 @@ export const startServer = async (
     tasks,
     attempts,
     developerExecutions,
+    qaExecutions,
     transitions,
     projectEvents,
     commands,
@@ -254,15 +272,30 @@ export const startServer = async (
     sessions,
     diagnostics,
     developerExecutions,
+    qaExecutions,
+    transitions,
     projectEvents,
     commands,
     taskService,
     registry,
     capabilities,
     developerExecutionService,
+    afterDeveloperSubmission: async (input) => {
+      await requireReviewAutomation().afterDeveloperSubmission(input);
+    },
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
-  const git = new GitAdapter(new NodeProcessRunner(), pathOptions);
+  const processRunner = new NodeProcessRunner({ trustedGitExecutable });
+  const resolveIdentity = (
+    repositoryPath: string,
+    identityPathOptions: typeof pathOptions,
+  ) =>
+    resolveRepositoryIdentity(
+      repositoryPath,
+      identityPathOptions,
+      processRunner,
+    );
+  const git = new GitAdapter(processRunner, pathOptions);
   const attemptService = new AttemptService({
     database,
     projects,
@@ -280,7 +313,44 @@ export const startServer = async (
     developerReworkService,
     git,
     pathOptions,
+    resolveIdentity,
     billingConflicts,
+  });
+  const qaExecutionService = new QaExecutionService({
+    database,
+    projects,
+    tasks,
+    transitions,
+    attempts,
+    sessions,
+    workspaces,
+    diagnostics,
+    developerExecutions,
+    qaExecutions,
+    projectEvents,
+    commands,
+    attemptService,
+    capabilities: qaCapabilities,
+    registry,
+    verificationRunner: new QaVerificationRunner(processRunner),
+    billingConflicts,
+    afterRejectedVerdict: async (input) => {
+      await requireReviewAutomation().afterQaVerdict(input);
+    },
+    afterInterruptedRepair: () => reconcileStoppedRuntime(registry),
+  });
+  roleServices.reviewAutomation = new ReviewAutomationService({
+    database,
+    commands,
+    projects,
+    tasks,
+    attempts,
+    developerExecutions,
+    qaExecutions,
+    projectEvents,
+    qaExecutionService,
+    developerReworkService,
+    publisher: registry.publisher,
   });
   const reconciliation = reconcileTaskAttempts({
     database,
@@ -288,8 +358,11 @@ export const startServer = async (
     tasks,
     attempts,
     sessions,
+    workspaces,
     diagnostics,
     developerExecutions,
+    qaExecutions,
+    qaCapabilities,
     projectEvents,
   });
   runtimeRepairs.push(...reconciliation.repairs);
@@ -302,10 +375,13 @@ export const startServer = async (
     taskService,
     attemptService,
     developerExecutionService,
+    qaExecutionService,
+    reviewAutomationService: roleServices.reviewAutomation,
     attempts,
     transitions,
     projectEvents,
     developerExecutions,
+    qaExecutions,
     repairs: runtimeRepairs,
     workspaces,
     sessions,
@@ -317,6 +393,7 @@ export const startServer = async (
     driver,
     git,
     pathOptions,
+    resolveIdentity,
     billingConflicts,
     originPolicy,
     webRoot: options.test?.webRoot ?? config.webRoot,

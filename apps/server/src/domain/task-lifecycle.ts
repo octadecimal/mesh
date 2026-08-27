@@ -19,6 +19,11 @@ export type AuthorizeTaskTransitionInput = {
   operation?: 'developer_submit_review' | 'developer_mark_blocked';
 };
 
+export type AuthorizeQaVerdictInput = {
+  task: Task;
+  actor: TaskActor;
+};
+
 export class TaskReadinessError extends Error {
   readonly code = 'task_not_ready';
 
@@ -105,6 +110,19 @@ export const readinessProblems = (task: Task): TaskReadinessProblem[] => {
 export const allowedTaskTransitions = (
   task: Task,
 ): readonly TaskLifecycleState[] => transitionTable[task.lifecycleState];
+
+export const authorizeQaVerdict = ({
+  task,
+  actor,
+}: AuthorizeQaVerdictInput): void => {
+  if (task.lifecycleState !== 'review') {
+    throw new TaskTransitionInvalidError(task.lifecycleState, 'review');
+  }
+  if (task.blocked) throw new TaskBlockedError(task.id);
+  if (actor.type !== 'agent') {
+    throw new TaskTransitionUnauthorizedError('review', actor);
+  }
+};
 
 const requiresReason = ({
   task,

@@ -13,6 +13,7 @@ import {
   TaskTransitionReasonRequiredError,
   TaskTransitionUnauthorizedError,
   allowedTaskTransitions,
+  authorizeQaVerdict,
   authorizeTaskTransition,
   readinessProblems,
 } from './task-lifecycle.js';
@@ -248,5 +249,26 @@ describe('task lifecycle policy', () => {
         authorizeTaskTransition({ ...request, actor: agent }),
       ).toThrow(TaskTransitionUnauthorizedError);
     }
+  });
+
+  it('authorizes only a QA agent to submit a verdict for an unblocked review task', () => {
+    expect(
+      authorizeQaVerdict({ task: taskIn('review'), actor: agent }),
+    ).toBeUndefined();
+
+    expect(() =>
+      authorizeQaVerdict({ task: taskIn('review'), actor: human }),
+    ).toThrow(TaskTransitionUnauthorizedError);
+    expect(() =>
+      authorizeQaVerdict({ task: taskIn('in_progress'), actor: agent }),
+    ).toThrow(TaskTransitionInvalidError);
+    expect(() =>
+      authorizeQaVerdict({
+        task: taskIn('review', {
+          blocked: { reason: 'Blocked', actor: human, blockedAt: timestamp },
+        }),
+        actor: agent,
+      }),
+    ).toThrow(TaskBlockedError);
   });
 });
