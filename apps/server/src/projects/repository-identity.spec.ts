@@ -9,6 +9,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   NodeProcessRunner,
   resolveGitExecutableAtStartup,
+  type ProcessRunner,
 } from '../platform/process-runner.js';
 import { resolveRepositoryIdentity } from './repository-identity.js';
 
@@ -115,6 +116,140 @@ describe('resolveRepositoryIdentity', () => {
     expect(worktree.canonicalPath).toBe(await realpath(worktreePath));
     expect(worktree.commonDirectory).toBe(repository.commonDirectory);
     expect(worktree.repositoryIdentity).toBe(repository.repositoryIdentity);
+    expect(worktree.associatedWorktreePaths).toHaveLength(2);
+    expect(worktree.associatedWorktreePaths).toEqual(
+      expect.arrayContaining([
+        await realpath(repositoryPath),
+        await realpath(worktreePath),
+      ]),
+    );
+  });
+
+  it('reports the commit resolved by HEAD', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const { stdout } = await exec('git', ['rev-parse', '--verify', 'HEAD'], {
+      cwd: repositoryPath,
+      windowsHide: true,
+    });
+
+    const identity = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: directory },
+      processRunner,
+    );
+
+    expect(identity.headCommit).toBe(stdout.trim());
+  });
+
+  it('reports a null HEAD for an unborn repository', async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), 'mesh-repository-identity-unborn-'),
+    );
+    temporaryDirectories.push(directory);
+    const repositoryPath = join(directory, 'repository');
+    await runGit(directory, 'init', repositoryPath);
+
+    const identity = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: directory },
+      processRunner,
+    );
+
+    expect(identity.headCommit).toBeNull();
+  });
+
+  it('rejects malformed associated-worktree topology', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const malformedRunner: ProcessRunner = {
+      run: async (executable, args, options) =>
+        args.includes('worktree')
+          ? {
+              exitCode: 0,
+              stdout: 'HEAD 0000000000000000000000000000000000000000\0\0',
+              stderr: '',
+            }
+          : processRunner.run(executable, args, options),
+    };
+
+    await expect(
+      resolveRepositoryIdentity(
+        repositoryPath,
+        { baseDirectory: directory },
+        malformedRunner,
+      ),
+    ).rejects.toMatchObject({ code: 'repository_ambiguous' });
+  });
+
+  it('rejects incomplete associated-worktree records', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const canonicalPath = await realpath(repositoryPath);
+    const incompleteRunner: ProcessRunner = {
+      run: async (executable, args, options) =>
+        args.includes('worktree')
+          ? {
+              exitCode: 0,
+              stdout: `worktree ${canonicalPath}\0\0`,
+              stderr: '',
+            }
+          : processRunner.run(executable, args, options),
+    };
+
+    await expect(
+      resolveRepositoryIdentity(
+        repositoryPath,
+        { baseDirectory: directory },
+        incompleteRunner,
+      ),
+    ).rejects.toMatchObject({ code: 'repository_ambiguous' });
+  });
+
+  it('rejects a failed associated-worktree enumeration', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const canonicalPath = await realpath(repositoryPath);
+    const failedRunner: ProcessRunner = {
+      run: async (executable, args, options) =>
+        args.includes('worktree')
+          ? {
+              exitCode: 128,
+              stdout: `worktree ${canonicalPath}\0HEAD 0000000000000000000000000000000000000000\0detached\0\0`,
+              stderr: 'fatal: worktree list failed',
+            }
+          : processRunner.run(executable, args, options),
+    };
+
+    await expect(
+      resolveRepositoryIdentity(
+        repositoryPath,
+        { baseDirectory: directory },
+        failedRunner,
+      ),
+    ).rejects.toMatchObject({ code: 'repository_ambiguous' });
+  });
+
+  it('rejects an associated worktree path that cannot be canonicalized', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const canonicalPath = await realpath(repositoryPath);
+    const unreadableRunner: ProcessRunner = {
+      run: async (executable, args, options) =>
+        args.includes('worktree')
+          ? {
+              exitCode: 0,
+              stdout: [
+                `worktree ${canonicalPath}\0HEAD 0000000000000000000000000000000000000000\0detached\0\0`,
+                `worktree ${join(directory, 'missing-worktree')}\0HEAD 0000000000000000000000000000000000000000\0detached\0\0`,
+              ].join(''),
+              stderr: '',
+            }
+          : processRunner.run(executable, args, options),
+    };
+
+    await expect(
+      resolveRepositoryIdentity(
+        repositoryPath,
+        { baseDirectory: directory },
+        unreadableRunner,
+      ),
+    ).rejects.toMatchObject({ code: 'repository_ambiguous' });
   });
 
   it('rejects a directory that is not a Git repository', async () => {

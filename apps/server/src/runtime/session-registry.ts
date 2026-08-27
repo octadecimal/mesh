@@ -12,6 +12,7 @@ import type { DiagnosticRepository } from '../repositories/diagnostic-repository
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
+import { assertWorkspaceAvailable } from '../repositories/workspace-occupancy.js';
 import { EventPublisher } from './event-publisher.js';
 import { AuditUnavailableError, SessionRuntime } from './session-runtime.js';
 
@@ -69,12 +70,46 @@ export class SessionRegistry {
     configuration: { workspaceId: string; permissionMode: PermissionMode },
     runtimeConfiguration?: AgentRuntimeConfiguration,
   ): Promise<void> {
-    const configured = this.dependencies.sessions.configureResume(
-      sessionId,
-      configuration.workspaceId,
-      configuration.permissionMode,
-    );
-    if (!configured) throw { code: 'session_not_found', sessionId };
+    this.assertWritable();
+    this.assertAttachAvailable(sessionId, 'resume');
+    this.dependencies.database.exec('BEGIN IMMEDIATE');
+    try {
+      const current = this.dependencies.sessions.get(sessionId);
+      if (!current) throw { code: 'session_not_found', sessionId };
+      if (!current.claudeResumeId) {
+        throw {
+          code: 'invalid_session_state',
+          from: current.lifecycleState,
+          trigger: 'resume',
+        };
+      }
+      const workspace = this.dependencies.workspaces.get(
+        configuration.workspaceId,
+      );
+      if (!workspace) {
+        throw {
+          code: 'workspace_not_found',
+          workspaceId: configuration.workspaceId,
+        };
+      }
+      assertWorkspaceAvailable(this.dependencies.database, {
+        path: workspace.path,
+        excludingSessionId: sessionId,
+        policy: 'manual',
+      });
+      const configured = this.dependencies.sessions.configureResume(
+        sessionId,
+        configuration.workspaceId,
+        configuration.permissionMode,
+      );
+      if (!configured) throw { code: 'session_not_found', sessionId };
+      this.dependencies.database.exec('COMMIT');
+    } catch (error) {
+      if (this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
+      throw error;
+    }
     await this.attach(sessionId, 'resume', runtimeConfiguration);
   }
 
@@ -182,15 +217,7 @@ export class SessionRegistry {
     configuration?: AgentRuntimeConfiguration,
   ): Promise<void> {
     this.assertWritable();
-    if (
-      this.runtimes.has(sessionId) ||
-      this.pendingAttaches.has(sessionId) ||
-      this.repairReservations.has(sessionId)
-    ) {
-      const state =
-        this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
-      throw { code: 'invalid_session_state', from: state, trigger: mode };
-    }
+    this.assertAttachAvailable(sessionId, mode);
     const session = this.dependencies.sessions.get(sessionId);
     if (!session) throw { code: 'session_not_found', sessionId };
     const workspace = this.dependencies.workspaces.get(session.workspaceId);
@@ -318,6 +345,22 @@ export class SessionRegistry {
       from: 'interrupting',
       trigger: pending.cancellation ?? 'driver_required',
     };
+  }
+
+  private assertAttachAvailable(
+    sessionId: string,
+    mode: 'create' | 'resume',
+  ): void {
+    if (
+      !this.runtimes.has(sessionId) &&
+      !this.pendingAttaches.has(sessionId) &&
+      !this.repairReservations.has(sessionId)
+    ) {
+      return;
+    }
+    const state =
+      this.dependencies.sessions.get(sessionId)?.lifecycleState ?? 'running';
+    throw { code: 'invalid_session_state', from: state, trigger: mode };
   }
 
   private assertWritable(): void {

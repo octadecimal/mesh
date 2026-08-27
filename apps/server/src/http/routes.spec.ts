@@ -606,6 +606,144 @@ describe('HTTP command routes', () => {
     );
   });
 
+  it('rejects manual session creation in an occupied Mesh worktree', async () => {
+    const fixture = setup({
+      createId: () => 'manual-session',
+      billingConflicts: [],
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+    const protectedPath = join(fixture.workspacePath, 'project-run-worktree');
+    fixture.repositories.workspaces.create({
+      id: id('run-workspace'),
+      projectId: id('p1'),
+      type: 'worktree',
+      path: protectedPath,
+      gitBranch: 'mesh/run/item',
+      gitWorktreePath: protectedPath,
+      owner: 'mesh',
+      cleanupState: 'pending',
+    });
+    fixture.repositories.sessions.create({
+      id: id('run-session'),
+      projectId: id('p1'),
+      workspaceId: id('run-workspace'),
+      title: 'Reserved run item',
+      permissionMode: 'safe_auto',
+      lifecycleState: 'idle',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'manual-create-protected',
+        command: {
+          type: 'session.create',
+          payload: {
+            projectId: 'p1',
+            workspaceId: 'run-workspace',
+            title: 'Unsafe manual session',
+            permissionMode: 'interactive',
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: { code: 'project_run_conflict' },
+    });
+    expect(fixture.repositories.sessions.get('manual-session')).toBeUndefined();
+    expect(fixture.driver.createdRequests).toHaveLength(0);
+  });
+
+  it('rejects resume through an alias of an occupied Mesh worktree', async () => {
+    const fixture = setup({ billingConflicts: [] });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+    fixture.repositories.events.append(
+      's1',
+      {
+        id: 'resume-protected-ready',
+        occurredAt: now,
+        type: 'session.status',
+        payload: { from: 'idle', to: 'interrupted' },
+      },
+      {
+        id: id('resume-protected-raw'),
+        sessionId: id('s1'),
+        capturedAt: now,
+        payload: {},
+      },
+      { lifecycleState: 'interrupted', claudeResumeId: 'claude-1' },
+    );
+    const protectedPath = join(fixture.workspacePath, 'project-run-worktree');
+    fixture.repositories.workspaces.create({
+      id: id('run-workspace'),
+      projectId: id('p1'),
+      type: 'worktree',
+      path: protectedPath,
+      gitBranch: 'mesh/run/item',
+      gitWorktreePath: protectedPath,
+      owner: 'mesh',
+      cleanupState: 'active',
+    });
+    fixture.repositories.workspaces.create({
+      id: id('run-alias'),
+      projectId: id('p1'),
+      type: 'shared',
+      path: protectedPath,
+      cleanupState: 'active',
+    });
+    fixture.repositories.sessions.create({
+      id: id('run-session'),
+      projectId: id('p1'),
+      workspaceId: id('run-workspace'),
+      title: 'Active run item',
+      permissionMode: 'safe_auto',
+      lifecycleState: 'running',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'resume-protected',
+        command: {
+          type: 'session.resume',
+          payload: {
+            sessionId: 's1',
+            workspaceId: 'run-alias',
+            permissionMode: 'safe_auto',
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({
+      error: { code: 'project_run_conflict' },
+    });
+    expect(fixture.repositories.sessions.get('s1')).toMatchObject({
+      workspaceId: 'w1',
+      permissionMode: 'interactive',
+    });
+    expect(fixture.driver.resumedRequests).toHaveLength(0);
+  });
+
   it('resumes only from a stored Claude ID and refuses a second live-driver attachment', async () => {
     const fixture = setup({ billingConflicts: [] });
     cleanups.push(async () => {

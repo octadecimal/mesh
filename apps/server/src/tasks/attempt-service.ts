@@ -47,6 +47,7 @@ import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
+import { assertWorkspaceAvailable } from '../repositories/workspace-occupancy.js';
 import type { Database } from '../db/database.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
@@ -223,15 +224,6 @@ export class SessionRepositoryMismatchError extends Error {
 
   constructor(readonly sessionId: string) {
     super(`Session '${sessionId}' belongs to a different repository`);
-  }
-}
-
-export class WorkspaceOccupiedError extends Error {
-  readonly code = 'project_run_conflict';
-
-  constructor(readonly path: string) {
-    super(`Workspace '${path}' is already occupied by a live session`);
-    this.name = 'WorkspaceOccupiedError';
   }
 }
 
@@ -1056,7 +1048,13 @@ export class AttemptService {
           typeof source !== 'string',
         );
       }
-      this.assertWorkspaceAvailable(workspace.path, session.id, source);
+      if (typeof source !== 'string') {
+        assertWorkspaceAvailable(this.dependencies.database, {
+          path: workspace.path,
+          excludingSessionId: session.id,
+          policy: 'exclusive',
+        });
+      }
       this.dependencies.workspaces.create(workspace);
       this.dependencies.sessions.create(session);
       this.dependencies.database.exec('COMMIT');
@@ -1106,7 +1104,13 @@ export class AttemptService {
         }
         persistedSession = this.requireSession(session.id);
       } else {
-        this.assertWorkspaceAvailable(workspace.path, session.id, source);
+        if (typeof source !== 'string') {
+          assertWorkspaceAvailable(this.dependencies.database, {
+            path: workspace.path,
+            excludingSessionId: session.id,
+            policy: 'exclusive',
+          });
+        }
         this.dependencies.workspaces.create(workspace);
         persistedSession = this.dependencies.sessions.create(session);
       }
@@ -1277,27 +1281,5 @@ export class AttemptService {
         details: this.dependencies.billingConflicts,
       };
     }
-  }
-
-  private assertWorkspaceAvailable(
-    path: string,
-    sessionId: string,
-    source: TaskAttemptSource,
-  ): void {
-    if (typeof source === 'string') return;
-    const occupied = this.dependencies.database
-      .prepare(
-        `SELECT sessions.id
-        FROM sessions
-        JOIN workspaces ON workspaces.id = sessions.workspace_id
-        WHERE workspaces.path = ?
-          AND sessions.id <> ?
-          AND sessions.lifecycle_state IN (
-            'idle', 'starting', 'running', 'waiting_for_approval', 'interrupting'
-          )
-        LIMIT 1`,
-      )
-      .get(path, sessionId);
-    if (occupied) throw new WorkspaceOccupiedError(path);
   }
 }

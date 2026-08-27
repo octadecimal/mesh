@@ -24,10 +24,22 @@ const pathOptions = {
 };
 const workspaceRoot = '/repos/.mesh-project-runs';
 
-const identity = (repositoryIdentity: string) => ({
-  canonicalPath: project.repositoryPath as never,
+const identity = (
+  repositoryIdentity: string,
+  overrides: {
+    canonicalPath?: string;
+    associatedWorktreePaths?: readonly string[];
+    headCommit?: string | null;
+  } = {},
+) => ({
+  canonicalPath: (overrides.canonicalPath ?? project.repositoryPath) as never,
   commonDirectory: project.repositoryPath as never,
   repositoryIdentity,
+  associatedWorktreePaths: (overrides.associatedWorktreePaths ?? [
+    project.repositoryPath,
+  ]) as never,
+  headCommit:
+    overrides.headCommit === undefined ? 'a'.repeat(40) : overrides.headCommit,
 });
 
 describe('project run preflight', () => {
@@ -96,6 +108,47 @@ describe('project run preflight', () => {
       resolveIdentity: async () => identity('identity-1'),
       pathOptions,
       workspaceRoot: '/repos/project-one/.mesh-project-runs',
+      ensureWorkspaceRoot,
+    });
+
+    await expect(preflight(project)).rejects.toMatchObject({
+      code: 'repository_invalid',
+      reason: 'repository_unsafe',
+    });
+    expect(ensureWorkspaceRoot).not.toHaveBeenCalled();
+  });
+
+  it('rejects a root inside any worktree associated with the repository', async () => {
+    const ensureWorkspaceRoot = vi.fn();
+    const preflight = createProjectRunPreflight({
+      billingConflicts: [],
+      resolveIdentity: async () =>
+        identity('identity-1', {
+          canonicalPath: '/repos/project-one/.worktrees/feature',
+          associatedWorktreePaths: [
+            '/repos/project-one',
+            '/repos/project-one/.worktrees/feature',
+          ],
+        }),
+      pathOptions,
+      workspaceRoot: '/repos/project-one/.mesh-project-runs',
+      ensureWorkspaceRoot,
+    });
+
+    await expect(preflight(project)).rejects.toMatchObject({
+      code: 'repository_invalid',
+      reason: 'repository_unsafe',
+    });
+    expect(ensureWorkspaceRoot).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unborn repository before creating the workspace root', async () => {
+    const ensureWorkspaceRoot = vi.fn();
+    const preflight = createProjectRunPreflight({
+      billingConflicts: [],
+      resolveIdentity: async () => identity('identity-1', { headCommit: null }),
+      pathOptions,
+      workspaceRoot,
       ensureWorkspaceRoot,
     });
 

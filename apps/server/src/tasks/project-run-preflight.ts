@@ -65,6 +65,19 @@ export const createProjectRunPreflight =
       if (identity.repositoryIdentity !== project.repositoryIdentity) {
         throw new Error('Repository identity changed');
       }
+      if (identity.headCommit === null) {
+        throw new Error('Project run requires a resolvable HEAD commit');
+      }
+      if (
+        identity.associatedWorktreePaths.length === 0 ||
+        !identity.associatedWorktreePaths.some(
+          (worktreePath) =>
+            normalizeForComparison(worktreePath) ===
+            normalizeForComparison(identity.canonicalPath),
+        )
+      ) {
+        throw new Error('Repository worktree topology is incomplete');
+      }
       const workspaceRoot = await resolveWorkspacePath(
         dependencies.workspaceRoot,
         {
@@ -72,8 +85,14 @@ export const createProjectRunPreflight =
           allowMissingLeaf: true,
         },
       );
-      if (isWithin(workspaceRoot, identity.canonicalPath)) {
-        throw new Error('Project run workspace root is inside the repository');
+      if (
+        identity.associatedWorktreePaths.some((worktreePath) =>
+          isWithin(workspaceRoot, worktreePath),
+        )
+      ) {
+        throw new Error(
+          'Project run workspace root is inside an associated worktree',
+        );
       }
       dependencies.ensureWorkspaceRoot(workspaceRoot);
     } catch (error) {

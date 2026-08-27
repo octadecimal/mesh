@@ -34,6 +34,7 @@ import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
+import { assertWorkspaceAvailable } from '../repositories/workspace-occupancy.js';
 import type { SessionRegistry } from '../runtime/session-registry.js';
 import type { TaskMutationResult, TaskService } from '../tasks/task-service.js';
 import type {
@@ -1066,9 +1067,11 @@ const executeMutation = async (
       assertBillingSafe(dependencies);
       const project = requireProject(dependencies, command.payload.projectId);
       let workspace;
+      let createWorkspace = false;
       if ('workspaceId' in command.payload) {
         workspace = requireWorkspace(dependencies, command.payload.workspaceId);
       } else {
+        createWorkspace = true;
         const pathOptions = dependencies.pathOptions;
         if (!pathOptions) {
           throw new CommandError(
@@ -1083,15 +1086,13 @@ const executeMutation = async (
               command.payload.workspace.path,
               pathOptions,
             );
-            workspace = dependencies.workspaces.create(
-              workspaceSchema.parse({
-                id: workspaceId,
-                projectId: project.id,
-                type: 'shared',
-                path,
-                cleanupState: 'active',
-              }),
-            );
+            workspace = workspaceSchema.parse({
+              id: workspaceId,
+              projectId: project.id,
+              type: 'shared',
+              path,
+              cleanupState: 'active',
+            });
           } else {
             if (!dependencies.git) {
               throw new CommandError(
@@ -1131,18 +1132,16 @@ const executeMutation = async (
                 error instanceof Error ? { message: error.message } : undefined,
               );
             }
-            workspace = dependencies.workspaces.create(
-              workspaceSchema.parse({
-                id: workspaceId,
-                projectId: project.id,
-                type: 'worktree',
-                path: worktreePath,
-                gitBranch: command.payload.workspace.branch,
-                gitWorktreePath: worktreePath,
-                owner: 'mesh',
-                cleanupState: 'active',
-              }),
-            );
+            workspace = workspaceSchema.parse({
+              id: workspaceId,
+              projectId: project.id,
+              type: 'worktree',
+              path: worktreePath,
+              gitBranch: command.payload.workspace.branch,
+              gitWorktreePath: worktreePath,
+              owner: 'mesh',
+              cleanupState: 'active',
+            });
           }
         } catch (error) {
           if (error instanceof CommandError) throw error;
@@ -1160,28 +1159,44 @@ const executeMutation = async (
         );
       }
       const now = (dependencies.now ?? (() => new Date().toISOString()))();
-      const session = dependencies.sessions.create(
-        sessionSchema.parse({
-          id: (dependencies.createId ?? randomUUID)(),
-          projectId: command.payload.projectId,
-          workspaceId: workspace.id,
-          title: command.payload.title,
-          permissionMode: command.payload.permissionMode,
-          lifecycleState: 'idle',
-          createdAt: now,
-          updatedAt: now,
-        }),
-      );
-      const collision = dependencies.sessions
-        .listByProject(session.projectId)
-        .some(
-          (candidate) =>
-            candidate.id !== session.id &&
-            workspace.type === 'shared' &&
-            isLive(candidate) &&
-            dependencies.workspaces.get(candidate.workspaceId)?.path ===
-              workspace.path,
-        );
+      const candidateSession = sessionSchema.parse({
+        id: (dependencies.createId ?? randomUUID)(),
+        projectId: command.payload.projectId,
+        workspaceId: workspace.id,
+        title: command.payload.title,
+        permissionMode: command.payload.permissionMode,
+        lifecycleState: 'idle',
+        createdAt: now,
+        updatedAt: now,
+      });
+      dependencies.database.exec('BEGIN IMMEDIATE');
+      let session;
+      let collision;
+      try {
+        assertWorkspaceAvailable(dependencies.database, {
+          path: workspace.path,
+          excludingSessionId: candidateSession.id,
+          policy: 'manual',
+        });
+        if (createWorkspace) dependencies.workspaces.create(workspace);
+        session = dependencies.sessions.create(candidateSession);
+        collision = dependencies.sessions
+          .listByProject(session.projectId)
+          .some(
+            (candidate) =>
+              candidate.id !== session.id &&
+              workspace.type === 'shared' &&
+              isLive(candidate) &&
+              dependencies.workspaces.get(candidate.workspaceId)?.path ===
+                workspace.path,
+          );
+        dependencies.database.exec('COMMIT');
+      } catch (error) {
+        if (dependencies.database.inTransaction) {
+          dependencies.database.exec('ROLLBACK');
+        }
+        throw error;
+      }
       await dependencies.registry.create(session.id);
       return response(
         command.type,

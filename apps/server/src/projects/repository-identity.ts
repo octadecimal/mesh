@@ -14,6 +14,8 @@ export interface RepositoryIdentity {
   canonicalPath: AbsolutePath;
   commonDirectory: AbsolutePath;
   repositoryIdentity: string;
+  associatedWorktreePaths: readonly AbsolutePath[];
+  headCommit: string | null;
 }
 
 export type RepositoryIdentityResolver = (
@@ -56,6 +58,99 @@ const resolveGitPath = async (
     );
   }
   return resolveWorkspacePath(value, pathOptions);
+};
+
+const parseAssociatedWorktreePaths = async (
+  output: string,
+  pathOptions: ResolveWorkspacePathOptions,
+): Promise<readonly AbsolutePath[]> => {
+  if (output.length === 0 || !output.endsWith('\0\0')) {
+    throw new RepositoryIdentityError(
+      'repository_ambiguous',
+      'Git returned incomplete associated-worktree topology',
+    );
+  }
+  const records = output.slice(0, -2).split('\0\0');
+  if (records.length === 0 || records.some((record) => record.length === 0)) {
+    throw new RepositoryIdentityError(
+      'repository_ambiguous',
+      'Git returned malformed associated-worktree topology',
+    );
+  }
+
+  const worktreePaths: AbsolutePath[] = [];
+  const seen = new Set<string>();
+  for (const record of records) {
+    const fields = record.split('\0');
+    const worktreeField = fields[0];
+    const attributes = fields.slice(1);
+    const headFields = attributes.filter((field) => field.startsWith('HEAD '));
+    const branchFields = attributes.filter((field) =>
+      field.startsWith('branch '),
+    );
+    const detachedFields = attributes.filter((field) => field === 'detached');
+    const bareFields = attributes.filter((field) => field === 'bare');
+    const auxiliaryFields = attributes.filter(
+      (field) =>
+        field === 'locked' ||
+        field.startsWith('locked ') ||
+        field === 'prunable' ||
+        field.startsWith('prunable '),
+    );
+    const isBareRecord =
+      bareFields.length === 1 &&
+      headFields.length === 0 &&
+      branchFields.length === 0 &&
+      detachedFields.length === 0;
+    const isWorkingTreeRecord =
+      bareFields.length === 0 &&
+      headFields.length === 1 &&
+      /^[0-9a-f]+$/i.test(headFields[0].slice('HEAD '.length)) &&
+      branchFields.length + detachedFields.length === 1;
+    if (
+      !worktreeField?.startsWith('worktree ') ||
+      worktreeField.length === 'worktree '.length ||
+      attributes.some((field) => field.startsWith('worktree ')) ||
+      attributes.length !==
+        headFields.length +
+          branchFields.length +
+          detachedFields.length +
+          bareFields.length +
+          auxiliaryFields.length ||
+      (!isBareRecord && !isWorkingTreeRecord)
+    ) {
+      throw new RepositoryIdentityError(
+        'repository_ambiguous',
+        'Git returned malformed associated-worktree topology',
+      );
+    }
+    const worktreePath = await resolveGitPath(
+      worktreeField.slice('worktree '.length),
+      pathOptions,
+    );
+    const comparisonPath = normalizeForComparison(worktreePath);
+    if (seen.has(comparisonPath)) {
+      throw new RepositoryIdentityError(
+        'repository_ambiguous',
+        'Git returned duplicate associated-worktree topology',
+      );
+    }
+    seen.add(comparisonPath);
+    worktreePaths.push(worktreePath);
+  }
+  return worktreePaths;
+};
+
+const parseHeadCommit = (exitCode: number, output: string): string | null => {
+  if (exitCode !== 0) return null;
+  const values = output.split(/\r?\n/).filter((value) => value.length > 0);
+  if (values.length !== 1 || !/^[0-9a-f]+$/i.test(values[0])) {
+    throw new RepositoryIdentityError(
+      'repository_ambiguous',
+      'Git returned an ambiguous HEAD commit',
+    );
+  }
+  return values[0];
 };
 
 export const resolveRepositoryIdentity = async (
@@ -143,9 +238,72 @@ export const resolveRepositoryIdentity = async (
     );
   }
 
+  const [worktreeResult, headResult] = await Promise.all([
+    processRunner.run(
+      'git',
+      [
+        '-c',
+        'credential.interactive=false',
+        '-C',
+        canonicalPath,
+        'worktree',
+        'list',
+        '--porcelain',
+        '-z',
+      ],
+      { cwd: canonicalPath },
+    ),
+    processRunner.run(
+      'git',
+      [
+        '-c',
+        'credential.interactive=false',
+        '-C',
+        canonicalPath,
+        'rev-parse',
+        '--verify',
+        'HEAD^{commit}',
+      ],
+      { cwd: canonicalPath },
+    ),
+  ]);
+  if (worktreeResult.exitCode !== 0) {
+    throw new RepositoryIdentityError(
+      'repository_ambiguous',
+      'Git could not enumerate associated worktrees',
+    );
+  }
+  let associatedWorktreePaths: readonly AbsolutePath[];
+  try {
+    associatedWorktreePaths = await parseAssociatedWorktreePaths(
+      worktreeResult.stdout,
+      pathOptions,
+    );
+  } catch (error) {
+    if (error instanceof RepositoryIdentityError) throw error;
+    throw new RepositoryIdentityError(
+      'repository_ambiguous',
+      'Git returned an unreadable associated-worktree topology',
+    );
+  }
+  if (
+    !associatedWorktreePaths.some(
+      (worktreePath) =>
+        normalizeForComparison(worktreePath) ===
+        normalizeForComparison(canonicalPath),
+    )
+  ) {
+    throw new RepositoryIdentityError(
+      'repository_ambiguous',
+      'Git associated-worktree topology does not contain the imported working tree',
+    );
+  }
+
   return {
     canonicalPath,
     commonDirectory,
     repositoryIdentity: normalizeForComparison(commonDirectory),
+    associatedWorktreePaths,
+    headCommit: parseHeadCommit(headResult.exitCode, headResult.stdout),
   };
 };

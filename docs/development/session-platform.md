@@ -68,22 +68,37 @@ launches, Mesh compares that frozen authorization with current policy and
 automation truth. A mismatch terminalizes only that item as attention required
 without creating an attempt.
 
-Start and resume preflight the shared billing environment and resolve the
-project's authoritative repository identity before authorizing or claiming
-work. A billing conflict or unsafe/mismatched repository rejects Start. Resume
-keeps the existing run paused with `billing_conflict` or `repository_unsafe` so
-the operator can repair the condition without losing the frozen queue.
+Start, resume, and each new claim preflight the shared billing environment and
+resolve the project's authoritative repository identity before authorizing or
+claiming work. The approved Git executable enumerates the complete registered
+worktree set and resolves `HEAD` to a commit. A billing conflict, an
+unsafe/mismatched or incomplete repository topology, or an unborn `HEAD`
+rejects Start before the workspace root or run is created. Resume and restart
+drain keep the existing run paused with `billing_conflict` or
+`repository_unsafe` so the operator can repair the condition without losing the
+frozen queue.
 
 Each run item launches in a deterministic Mesh-owned Git worktree beneath the
 configured base directory's `.mesh-project-runs` folder. The run and item ids
 give every Developer/QA chain a distinct branch and path, so concurrent items
-do not edit the imported repository or one another's files. Mesh also reserves
-the resolved workspace path in the same transaction that creates the attempt;
-an occupied path fails closed rather than starting a second current session.
-The configured workspace root must therefore be a parent of imported
-repositories, not an imported repository itself. If `.mesh-project-runs` would
-be nested inside the project, preflight reports `repository_unsafe` before
-authorization or claiming; set `MESH_WORKSPACE_ROOT` to a safe parent directory.
+do not edit the imported repository or one another's files. Before Git worktree
+creation, an immediate reservation transaction checks the resolved path for
+live occupancy and commits a pending workspace plus idle session. Mesh then
+creates the filesystem worktree. A second immediate transaction activates the
+reservation and creates the attempt, execution cycle, and audit history. If Git
+or the second transaction fails, Mesh preserves the reservation or worktree for
+reconciliation instead of claiming atomicity across SQLite and the filesystem.
+
+Project-run reservation fails closed on any live session already using its
+planned path. In the reverse direction, manual create and resume fail closed
+before placing a second live session at a path backed by a pending or active
+Mesh-owned worktree, even when the selected workspace is a shared alias.
+Ordinary shared-folder overlap remains warning-only. The configured project-run
+root must be outside, and not equal to, every worktree registered to the
+project's Git common directory. If `.mesh-project-runs` would be nested inside
+any associated worktree, preflight reports `repository_unsafe` before root
+creation, authorization, resume, or claiming; set `MESH_WORKSPACE_ROOT` to a
+safe parent directory.
 
 `launch_pending` and `active` items both occupy capacity. Completed autonomous
 review releases a slot as completed. Manual review, disabled per-task
