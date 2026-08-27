@@ -111,6 +111,58 @@ const tableNames = (database: Database): string[] =>
 
 const assertPlanningStorageConstraints = (database: Database): void => {
   const at = '2026-08-27T00:00:00.000Z';
+  new ProjectRepository(database).create(
+    projectSchema.parse({
+      id: 'constraint-other-project',
+      displayName: 'Other constraint project',
+      repositoryPath: 'C:/code/constraint-other-project',
+      discoveredAt: at,
+      discoveryMetadata: {},
+    }),
+  );
+  for (const [id, projectId] of [
+    ['constraint-prerequisite-task', 'constraint-project'],
+    ['constraint-other-task', 'constraint-other-project'],
+  ]) {
+    new TaskRepository(database).create(
+      taskSchema.parse({
+        id,
+        projectId,
+        title: `Task ${id}`,
+        description: 'Persist ownership constraints',
+        acceptanceCriteria: ['Reject cross-project rows'],
+        priority: 'normal',
+        rank: id,
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: at,
+        updatedAt: at,
+      }),
+    );
+  }
+  new WorkspaceRepository(database).create(
+    workspaceSchema.parse({
+      id: 'constraint-other-workspace',
+      projectId: 'constraint-other-project',
+      type: 'shared',
+      path: 'C:/code/constraint-other-project',
+    }),
+  );
+  new SessionRepository(database).create(
+    sessionSchema.parse({
+      id: 'constraint-other-session',
+      projectId: 'constraint-other-project',
+      workspaceId: 'constraint-other-workspace',
+      title: 'Other constraint session',
+      permissionMode: 'safe_auto',
+      lifecycleState: 'running',
+      createdAt: at,
+      updatedAt: at,
+    }),
+  );
   const insertPlan = database.prepare(
     `INSERT INTO project_plans (
       id, project_id, goal, constraints_json, non_goals_json, policy_version,
@@ -197,17 +249,36 @@ const assertPlanningStorageConstraints = (database: Database): void => {
       at,
       null,
     );
+  expect(() =>
+    database
+      .prepare(
+        `INSERT INTO project_plan_sessions (
+          session_id, plan_id, project_id, capability_generation, started_at,
+          ended_at
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'constraint-other-session',
+        'planning-constraint-plan',
+        'constraint-project',
+        1,
+        at,
+        null,
+      ),
+  ).toThrow();
   database
     .prepare(
       `INSERT INTO project_plan_proposals (
-        id, plan_id, base_id, ordinal, plan_revision, capability_generation,
-        session_id, assumptions_json, risks_json, exclusions_json, submitted_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, plan_id, base_id, project_id, ordinal, plan_revision,
+        capability_generation, session_id, assumptions_json, risks_json,
+        exclusions_json, submitted_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       'planning-constraint-proposal',
       'planning-constraint-plan',
       'planning-constraint-base',
+      'constraint-project',
       1,
       1,
       1,
@@ -249,6 +320,18 @@ const assertPlanningStorageConstraints = (database: Database): void => {
       'Planning storage',
     ),
   ).toThrow();
+  insertProposalTask.run(
+    'planning-constraint-proposal',
+    'planning-constraint-proposal-prerequisite',
+    1,
+    'Constraint prerequisite',
+    'Persist planning dependency constraints',
+    '["Persist planning dependency constraints"]',
+    'normal',
+    '[]',
+    'Required for dependency coverage',
+    'Planning storage',
+  );
   expect(() =>
     database
       .prepare(
@@ -266,6 +349,64 @@ const assertPlanningStorageConstraints = (database: Database): void => {
         'planning-constraint-proposal',
         'planning-constraint-proposal-task',
       ),
+  ).toThrow();
+
+  const insertProposalDependency = database.prepare(
+    `INSERT INTO project_plan_proposal_dependencies (
+      proposal_id, project_id, ordinal, dependent_task_key, prerequisite_type,
+      prerequisite_task_key, prerequisite_task_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insertProposalDependency.run(
+    'planning-constraint-proposal',
+    'constraint-project',
+    0,
+    'planning-constraint-proposal-task',
+    'proposal_task',
+    'planning-constraint-proposal-prerequisite',
+    null,
+  );
+  expect(() =>
+    insertProposalDependency.run(
+      'planning-constraint-proposal',
+      'constraint-project',
+      1,
+      'planning-constraint-proposal-task',
+      'proposal_task',
+      'planning-constraint-proposal-prerequisite',
+      null,
+    ),
+  ).toThrow();
+  insertProposalDependency.run(
+    'planning-constraint-proposal',
+    'constraint-project',
+    2,
+    'planning-constraint-proposal-task',
+    'existing_task',
+    null,
+    'constraint-task',
+  );
+  expect(() =>
+    insertProposalDependency.run(
+      'planning-constraint-proposal',
+      'constraint-project',
+      3,
+      'planning-constraint-proposal-task',
+      'existing_task',
+      null,
+      'constraint-task',
+    ),
+  ).toThrow();
+  expect(() =>
+    insertProposalDependency.run(
+      'planning-constraint-proposal',
+      'constraint-project',
+      4,
+      'planning-constraint-proposal-task',
+      'existing_task',
+      null,
+      'constraint-other-task',
+    ),
   ).toThrow();
 
   const insertMapping = database.prepare(
@@ -289,6 +430,15 @@ const assertPlanningStorageConstraints = (database: Database): void => {
       at,
     ),
   ).toThrow();
+  expect(() =>
+    insertMapping.run(
+      'planning-constraint-proposal',
+      'planning-constraint-proposal-prerequisite',
+      'constraint-project',
+      'constraint-other-task',
+      at,
+    ),
+  ).toThrow();
 
   const insertDependency = database.prepare(
     `INSERT INTO task_dependencies (
@@ -300,6 +450,31 @@ const assertPlanningStorageConstraints = (database: Database): void => {
       'constraint-project',
       'constraint-task',
       'constraint-task',
+      '{"type":"human","id":"operator"}',
+      at,
+    ),
+  ).toThrow();
+  insertDependency.run(
+    'constraint-project',
+    'constraint-task',
+    'constraint-prerequisite-task',
+    '{"type":"human","id":"operator"}',
+    at,
+  );
+  expect(() =>
+    insertDependency.run(
+      'constraint-project',
+      'constraint-task',
+      'constraint-prerequisite-task',
+      '{"type":"human","id":"operator"}',
+      at,
+    ),
+  ).toThrow();
+  expect(() =>
+    insertDependency.run(
+      'constraint-project',
+      'constraint-task',
+      'constraint-other-task',
       '{"type":"human","id":"operator"}',
       at,
     ),
@@ -770,6 +945,52 @@ describe('migrate', () => {
       );
     database
       .prepare(
+        `INSERT INTO qa_execution_cycles (
+          id, task_id, attempt_id, session_id, ordinal, snapshot_json,
+          review_policy, automation_generation, rejection_ordinal, disposition,
+          started_at, terminal_at, report_id, terminal_command_id,
+          terminal_event_id, interrupted_at, interruption_command_id,
+          interruption_event_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'planning-upgrade-qa-execution',
+        'planning-upgrade-task',
+        'planning-upgrade-attempt',
+        'planning-upgrade-session',
+        1,
+        '{}',
+        'manual',
+        0,
+        0,
+        null,
+        at,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+      );
+    database
+      .prepare(
+        `INSERT INTO processed_commands (
+          id, idempotency_key, state, response_json, failure_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'planning-upgrade-command',
+        'planning-upgrade-command-key',
+        'completed',
+        '{"accepted":true}',
+        null,
+        at,
+        at,
+      );
+    database
+      .prepare(
         `INSERT INTO project_events (
           id, project_id, sequence, occurred_at, type, payload_json
         ) VALUES (?, ?, ?, ?, ?, ?)`,
@@ -788,9 +1009,14 @@ describe('migrate', () => {
       tasks: database.prepare('SELECT * FROM tasks').all(),
       attempts: database.prepare('SELECT * FROM task_attempts').all(),
       executions: database.prepare('SELECT * FROM developer_execution_cycles').all(),
+      qaExecutions: database.prepare('SELECT * FROM qa_execution_cycles').all(),
+      commands: database.prepare('SELECT * FROM processed_commands').all(),
       runs: database.prepare('SELECT * FROM project_runs').all(),
       events: database.prepare('SELECT * FROM project_events').all(),
     };
+    const pre017Ledger = database
+      .prepare('SELECT id, applied_at FROM schema_migrations ORDER BY id')
+      .all();
 
     migrate(database);
 
@@ -812,9 +1038,19 @@ describe('migrate', () => {
       tasks: database.prepare('SELECT * FROM tasks').all(),
       attempts: database.prepare('SELECT * FROM task_attempts').all(),
       executions: database.prepare('SELECT * FROM developer_execution_cycles').all(),
+      qaExecutions: database.prepare('SELECT * FROM qa_execution_cycles').all(),
+      commands: database.prepare('SELECT * FROM processed_commands').all(),
       runs: database.prepare('SELECT * FROM project_runs').all(),
       events: database.prepare('SELECT * FROM project_events').all(),
     }).toEqual(existingRows);
+    expect(
+      database
+        .prepare('SELECT id, applied_at FROM schema_migrations ORDER BY id')
+        .all(),
+    ).toEqual([
+      ...pre017Ledger,
+      { id: '017-pm-planning', applied_at: expect.any(String) },
+    ]);
   });
 
   it('upgrades Milestone 3 projects with the manual QA defaults', () => {

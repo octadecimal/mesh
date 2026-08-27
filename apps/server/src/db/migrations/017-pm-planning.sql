@@ -42,6 +42,15 @@ WHERE status IN (
   'attention_required'
 );
 
+CREATE UNIQUE INDEX project_plans_id_project_id
+ON project_plans(id, project_id);
+
+CREATE UNIQUE INDEX sessions_id_project_id
+ON sessions(id, project_id);
+
+CREATE UNIQUE INDEX tasks_id_project_id
+ON tasks(id, project_id);
+
 CREATE TABLE project_plan_bases (
   id TEXT PRIMARY KEY,
   plan_id TEXT NOT NULL REFERENCES project_plans(id) ON DELETE CASCADE,
@@ -56,19 +65,30 @@ CREATE TABLE project_plan_bases (
   UNIQUE(plan_id, ordinal)
 );
 
+CREATE UNIQUE INDEX project_plan_bases_id_plan_id
+ON project_plan_bases(id, plan_id);
+
 CREATE TABLE project_plan_sessions (
   session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE RESTRICT,
   plan_id TEXT NOT NULL REFERENCES project_plans(id) ON DELETE CASCADE,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   capability_generation INTEGER NOT NULL CHECK (capability_generation > 0),
   started_at TEXT NOT NULL,
-  ended_at TEXT
+  ended_at TEXT,
+  UNIQUE(session_id, plan_id),
+  FOREIGN KEY (session_id, project_id)
+    REFERENCES sessions(id, project_id)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (plan_id, project_id)
+    REFERENCES project_plans(id, project_id)
+    ON DELETE CASCADE
 );
 
 CREATE TABLE project_plan_proposals (
   id TEXT PRIMARY KEY,
   plan_id TEXT NOT NULL REFERENCES project_plans(id) ON DELETE CASCADE,
   base_id TEXT NOT NULL REFERENCES project_plan_bases(id) ON DELETE RESTRICT,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   ordinal INTEGER NOT NULL CHECK (ordinal > 0),
   plan_revision INTEGER NOT NULL CHECK (plan_revision > 0),
   capability_generation INTEGER NOT NULL CHECK (capability_generation > 0),
@@ -77,7 +97,18 @@ CREATE TABLE project_plan_proposals (
   risks_json TEXT NOT NULL CHECK (json_valid(risks_json)),
   exclusions_json TEXT NOT NULL CHECK (json_valid(exclusions_json)),
   submitted_at TEXT NOT NULL,
-  UNIQUE(plan_id, ordinal)
+  UNIQUE(plan_id, ordinal),
+  UNIQUE(id, project_id),
+  UNIQUE(id, plan_id),
+  FOREIGN KEY (plan_id, project_id)
+    REFERENCES project_plans(id, project_id)
+    ON DELETE CASCADE,
+  FOREIGN KEY (base_id, plan_id)
+    REFERENCES project_plan_bases(id, plan_id)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (session_id, plan_id)
+    REFERENCES project_plan_sessions(session_id, plan_id)
+    ON DELETE RESTRICT
 );
 
 CREATE TABLE project_plan_proposal_tasks (
@@ -97,6 +128,7 @@ CREATE TABLE project_plan_proposal_tasks (
 
 CREATE TABLE project_plan_proposal_dependencies (
   proposal_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
   ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
   dependent_task_key TEXT NOT NULL,
   prerequisite_type TEXT NOT NULL CHECK (prerequisite_type IN ('proposal_task', 'existing_task')),
@@ -108,6 +140,12 @@ CREATE TABLE project_plan_proposal_dependencies (
     ON DELETE CASCADE,
   FOREIGN KEY (proposal_id, prerequisite_task_key)
     REFERENCES project_plan_proposal_tasks(proposal_id, task_key)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (proposal_id, project_id)
+    REFERENCES project_plan_proposals(id, project_id)
+    ON DELETE CASCADE,
+  FOREIGN KEY (prerequisite_task_id, project_id)
+    REFERENCES tasks(id, project_id)
     ON DELETE RESTRICT,
   CHECK (
     (prerequisite_type = 'proposal_task'
@@ -143,7 +181,10 @@ CREATE TABLE project_plan_feedback (
   proposal_id TEXT REFERENCES project_plan_proposals(id) ON DELETE CASCADE,
   content TEXT NOT NULL,
   actor_json TEXT NOT NULL CHECK (json_valid(actor_json)),
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (proposal_id, plan_id)
+    REFERENCES project_plan_proposals(id, plan_id)
+    ON DELETE CASCADE
 );
 
 CREATE TABLE project_plan_task_mappings (
@@ -155,6 +196,12 @@ CREATE TABLE project_plan_task_mappings (
   PRIMARY KEY (proposal_id, proposal_task_key),
   FOREIGN KEY (proposal_id, proposal_task_key)
     REFERENCES project_plan_proposal_tasks(proposal_id, task_key)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (proposal_id, project_id)
+    REFERENCES project_plan_proposals(id, project_id)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (task_id, project_id)
+    REFERENCES tasks(id, project_id)
     ON DELETE RESTRICT
 );
 
@@ -165,6 +212,10 @@ CREATE TABLE task_dependencies (
   created_by_json TEXT NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (task_id, prerequisite_task_id),
+  FOREIGN KEY (task_id, project_id)
+    REFERENCES tasks(id, project_id),
+  FOREIGN KEY (prerequisite_task_id, project_id)
+    REFERENCES tasks(id, project_id),
   CHECK (task_id <> prerequisite_task_id)
 );
 
