@@ -296,7 +296,7 @@ export class ProjectRunService {
   ): void {
     if (!allowed.includes(run.state)) {
       throw new ProjectRunServiceError(
-        'project_run_transition_invalid',
+        'project_run_not_controllable',
         `Project run '${run.id}' cannot be controlled from '${run.state}'`,
         { run },
       );
@@ -305,7 +305,7 @@ export class ProjectRunService {
 
   private throwStale(runId: string, run?: ProjectRun): never {
     throw new ProjectRunServiceError(
-      'project_run_revision_conflict',
+      'project_run_stale',
       `Project run '${runId}' has changed`,
       { run: run ?? this.dependencies.projectRuns.get(runId) },
     );

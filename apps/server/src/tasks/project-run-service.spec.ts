@@ -310,7 +310,7 @@ describe('ProjectRunService controls', () => {
     expect(repositories.projectRuns.get(paused.run.id)?.state).toBe('paused');
   });
 
-  it('rejects stale revisions and non-controllable transitions with existing stable codes', () => {
+  it('reports a stale run revision with the canonical code', () => {
     const { repositories, project, service } = setup();
     repositories.tasks.create(createTask(project.id, 'task-1'));
     const started = startRun(service, project.id, 'start-stale', 1);
@@ -323,14 +323,20 @@ describe('ProjectRunService controls', () => {
           actor: human,
           idempotencyKey: 'pause-stale',
         }),
-      'project_run_revision_conflict',
+      'project_run_stale',
     );
+  });
+
+  it('reports an uncontrollable run state with the canonical code', () => {
+    const { repositories, project, service } = setup();
+    repositories.tasks.create(createTask(project.id, 'task-1'));
+    const started = startRun(service, project.id, 'start-not-controllable', 1);
 
     const paused = service.pauseRun({
       runId: started.run.id,
       expectedRevision: started.run.revision,
       actor: human,
-      idempotencyKey: 'pause-once',
+      idempotencyKey: 'pause-not-controllable',
     });
     expectCode(
       () =>
@@ -338,9 +344,9 @@ describe('ProjectRunService controls', () => {
           runId: paused.run.id,
           expectedRevision: paused.run.revision,
           actor: human,
-          idempotencyKey: 'pause-again',
+          idempotencyKey: 'pause-not-controllable-again',
         }),
-      'project_run_transition_invalid',
+      'project_run_not_controllable',
     );
   });
 

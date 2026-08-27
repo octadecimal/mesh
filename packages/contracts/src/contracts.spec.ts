@@ -25,6 +25,7 @@ import {
   sessionHistorySchema,
   sessionSnapshotSchema,
   sessionSchema,
+  stableTaskErrorCodeSchema,
   taskActorSchema,
   taskAttemptSchema,
   taskCommandSchema,
@@ -35,6 +36,13 @@ import {
 describe('session platform contracts', () => {
   const now = '2026-08-25T00:00:00.000Z';
   const actor = { type: 'human' as const, id: 'operator-1' };
+
+  it.each(['project_run_stale', 'project_run_not_controllable'] as const)(
+    'accepts the canonical %s operator-control error code',
+    (code) => {
+      expect(stableTaskErrorCodeSchema.parse(code)).toBe(code);
+    },
+  );
 
   it('accepts lightweight backlog tasks and rejects an empty blocked reason', () => {
     expect(
