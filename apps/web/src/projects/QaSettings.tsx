@@ -1,3 +1,4 @@
+import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import type { Project, ReviewPolicy } from '@mesh-session-platform/contracts';
@@ -50,6 +51,8 @@ export function QaSettings({
   const [conflictRevision, setConflictRevision] = useState<number>();
   const projectId = useRef(project.id);
   const dirty = useRef(false);
+  const keepManualButton = useRef<HTMLButtonElement>(null);
+  const saveButton = useRef<HTMLButtonElement>(null);
   const waitingForResync =
     conflictRevision !== undefined && project.revision < conflictRevision;
   const isSaving = saving || pending;
@@ -131,99 +134,117 @@ export function QaSettings({
   };
 
   return (
-    <section className="qa-settings" aria-label="QA settings">
-      <div className="task-section-heading">
-        <div>
-          <span className="eyebrow">QA execution</span>
-          <h3>QA settings</h3>
+    <Dialog.Root
+      open={confirmingAutonomous}
+      onOpenChange={setConfirmingAutonomous}
+    >
+      <section className="qa-settings" aria-label="QA settings">
+        <div className="task-section-heading">
+          <div>
+            <span className="eyebrow">QA execution</span>
+            <h3>QA settings</h3>
+          </div>
+          <span>QA configuration revision {canonical.revision}</span>
         </div>
-        <span>QA configuration revision {canonical.revision}</span>
-      </div>
-      <p>
-        These instructions and the review policy apply only to future QA
-        eligibility. Changing policy does not process existing review tasks
-        retroactively.
-      </p>
-      <p>
-        Disabling autonomous review does not interrupt a running QA session; use
-        the task’s Pause automation control to stop later automatic steps.
-      </p>
-      {error ? (
-        <p className="notice notice-warning" role="alert">
-          {error}
+        <p>
+          These instructions and the review policy apply only to future QA
+          eligibility. Changing policy does not process existing review tasks
+          retroactively.
         </p>
-      ) : null}
-      <form onSubmit={save}>
-        <label>
-          QA instructions
-          <textarea
-            aria-label="QA instructions"
-            disabled={disabled || isSaving || waitingForResync}
-            value={content}
-            onChange={(event) => {
-              dirty.current = true;
-              setContent(event.target.value);
-            }}
-          />
-        </label>
-        <label>
-          Review policy
-          <select
-            aria-label="Review policy"
-            disabled={disabled || isSaving || waitingForResync}
-            value={reviewPolicy}
-            onChange={(event) => {
-              dirty.current = true;
-              setReviewPolicy(event.target.value as ReviewPolicy);
-            }}
-          >
-            <option value="manual">Manual review</option>
-            <option value="autonomous_review">Autonomous review</option>
-          </select>
-        </label>
-        <div className="dialog-actions">
-          <button
-            className="button button-ghost"
-            type="button"
-            disabled={disabled || isSaving || waitingForResync || !changed}
-            onClick={reset}
-          >
-            Cancel
-          </button>
-          <button
-            className="button button-primary"
-            type="submit"
-            disabled={disabled || isSaving || waitingForResync || !changed}
-          >
-            {isSaving ? 'Saving QA settings…' : 'Save QA settings'}
-          </button>
-        </div>
-      </form>
-      {confirmingAutonomous ? (
-        <div
-          className="notice notice-warning qa-autonomy-confirmation"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Enable autonomous review"
-        >
-          <h4>Enable autonomous review</h4>
-          <p>
-            Autonomous review may start or resume Claude sessions and consume
-            Claude subscription quota. Mesh uses subscription-backed sessions,
-            never API billing.
+        <p>
+          Disabling autonomous review does not interrupt a running QA session;
+          use the task’s Pause automation control to stop later automatic steps.
+        </p>
+        {error ? (
+          <p className="notice notice-warning" role="alert">
+            {error}
           </p>
+        ) : null}
+        <form onSubmit={save}>
+          <label>
+            QA instructions
+            <textarea
+              aria-label="QA instructions"
+              disabled={disabled || isSaving || waitingForResync}
+              value={content}
+              onChange={(event) => {
+                dirty.current = true;
+                setContent(event.target.value);
+              }}
+            />
+          </label>
+          <label>
+            Review policy
+            <select
+              aria-label="Review policy"
+              disabled={disabled || isSaving || waitingForResync}
+              value={reviewPolicy}
+              onChange={(event) => {
+                dirty.current = true;
+                setReviewPolicy(event.target.value as ReviewPolicy);
+              }}
+            >
+              <option value="manual">Manual review</option>
+              <option value="autonomous_review">Autonomous review</option>
+            </select>
+          </label>
+          <div className="dialog-actions">
+            <button
+              className="button button-ghost"
+              type="button"
+              disabled={disabled || isSaving || waitingForResync || !changed}
+              onClick={reset}
+            >
+              Cancel
+            </button>
+            <button
+              ref={saveButton}
+              className="button button-primary"
+              type="submit"
+              disabled={disabled || isSaving || waitingForResync || !changed}
+            >
+              {isSaving ? 'Saving QA settings…' : 'Save QA settings'}
+            </button>
+          </div>
+        </form>
+      </section>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content qa-autonomy-confirmation"
+          aria-describedby="qa-autonomy-description"
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            keepManualButton.current?.focus();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            saveButton.current?.focus();
+          }}
+        >
+          <div className="dialog-heading">
+            <span className="eyebrow">Subscription confirmation</span>
+            <Dialog.Title>Enable autonomous review</Dialog.Title>
+            <Dialog.Description id="qa-autonomy-description">
+              Autonomous review may start or resume Claude sessions and consume
+              Claude subscription quota. Mesh uses subscription-backed sessions,
+              never API billing.
+            </Dialog.Description>
+          </div>
           <p>
             Only newly eligible task events are considered; existing review
             tasks are not processed retroactively.
           </p>
           <div className="dialog-actions">
-            <button
-              className="button button-ghost"
-              type="button"
-              onClick={() => setConfirmingAutonomous(false)}
-            >
-              Keep manual review
-            </button>
+            <Dialog.Close asChild>
+              <button
+                ref={keepManualButton}
+                className="button button-ghost"
+                type="button"
+              >
+                Keep manual review
+              </button>
+            </Dialog.Close>
             <button
               className="button button-primary"
               type="button"
@@ -232,8 +253,8 @@ export function QaSettings({
               Enable autonomous review
             </button>
           </div>
-        </div>
-      ) : null}
-    </section>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

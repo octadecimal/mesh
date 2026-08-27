@@ -119,10 +119,15 @@ export function QaExecutionPanel({
       ].includes(repair.reason),
   );
   const actions = automation?.actions ?? [];
+  const orderedActions = [...actions].sort(
+    (left, right) =>
+      left.createdAt.localeCompare(right.createdAt) ||
+      (left.completedAt ?? '').localeCompare(right.completedAt ?? '') ||
+      left.id.localeCompare(right.id),
+  );
   const pendingAction = [...actions]
     .reverse()
     .find((action) => action.status === 'pending');
-  const failedActions = actions.filter((action) => action.status === 'failed');
   const remaining = Math.max(
     0,
     rejectionLimit - (automation?.rejectionCount ?? 0),
@@ -202,20 +207,24 @@ export function QaExecutionPanel({
       },
     });
 
+  const taskAutomationStatus =
+    automation?.status ?? task.reviewAutomation.status;
+  const humanDecisionEligible =
+    policy === 'manual' || taskAutomationStatus !== 'enabled';
   const manualStartEligible =
-    policy === 'manual' &&
+    humanDecisionEligible &&
     task.lifecycleState === 'review' &&
     !task.blocked &&
     !activeCycle &&
     Boolean(latestDeveloperReport) &&
     !latestQaMatchesDeveloper;
   const verifiedAwaitingHuman =
-    policy === 'manual' &&
+    humanDecisionEligible &&
     task.lifecycleState === 'review' &&
     latestQaMatchesDeveloper &&
     latestReport?.disposition === 'verified';
   const rejectedAwaitingHuman =
-    policy === 'manual' &&
+    humanDecisionEligible &&
     task.lifecycleState === 'review' &&
     latestQaMatchesDeveloper &&
     latestReport?.disposition === 'rejected';
@@ -296,12 +305,50 @@ export function QaExecutionPanel({
               Enable automation
             </button>
           )}
-          {failedActions.map((action) => (
-            <p className="notice notice-error" key={action.id}>
-              {label(action.actionKind)} failed:{' '}
-              {action.errorCode ?? 'unknown error'}
-            </p>
-          ))}
+        </section>
+      ) : null}
+
+      {orderedActions.length ? (
+        <section className="qa-automation" aria-label="Automation audit">
+          <h4>Automation action history</h4>
+          <ol
+            className="qa-automation-history"
+            aria-label="Automation action history"
+          >
+            {orderedActions.map((action) => (
+              <li key={action.id}>
+                <article
+                  className={
+                    action.status === 'failed'
+                      ? 'notice notice-error'
+                      : 'qa-automation-action'
+                  }
+                >
+                  <header>
+                    <strong>{label(action.actionKind)}</strong>
+                    <span className="task-state">{label(action.status)}</span>
+                  </header>
+                  <p>
+                    Created at{' '}
+                    <time dateTime={action.createdAt}>{action.createdAt}</time>
+                  </p>
+                  <p>
+                    Source cycle {action.sourceCycleId} · Attempt{' '}
+                    {action.attemptId} · Generation {action.generation}
+                  </p>
+                  {action.completedAt ? (
+                    <p>
+                      Completed at{' '}
+                      <time dateTime={action.completedAt}>
+                        {action.completedAt}
+                      </time>
+                    </p>
+                  ) : null}
+                  {action.errorCode ? <p>Error {action.errorCode}</p> : null}
+                </article>
+              </li>
+            ))}
+          </ol>
         </section>
       ) : null}
 

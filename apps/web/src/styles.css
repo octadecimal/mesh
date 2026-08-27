@@ -1722,8 +1722,12 @@ textarea:focus-visible {
 }
 
 .qa-autonomy-confirmation {
-  position: relative;
-  z-index: 1;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.qa-autonomy-confirmation > p {
+  margin: 0;
 }
 
 .qa-status-grid,
@@ -1757,6 +1761,37 @@ textarea:focus-visible {
   display: flex;
   flex-wrap: wrap;
   gap: 0.65rem;
+}
+
+.qa-automation-history {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.qa-automation-action,
+.qa-automation-history .notice {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  padding: 0.65rem;
+}
+
+.qa-automation-action > header,
+.qa-automation-history .notice > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.qa-automation-action p,
+.qa-automation-history .notice p {
+  margin: 0;
 }
 
 .qa-cycle-list {

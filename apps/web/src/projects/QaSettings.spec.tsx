@@ -79,6 +79,42 @@ describe('QaSettings', () => {
     );
   });
 
+  it('traps consent focus, dismisses on Escape, and restores the save trigger', async () => {
+    const user = userEvent.setup();
+    render(
+      <QaSettings
+        project={project}
+        disabled={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText('Review policy'),
+      'autonomous_review',
+    );
+    const save = screen.getByRole('button', { name: 'Save QA settings' });
+    await user.click(save);
+
+    const keepManual = screen.getByRole('button', {
+      name: 'Keep manual review',
+    });
+    const enable = screen.getByRole('button', {
+      name: 'Enable autonomous review',
+    });
+    await waitFor(() => expect(keepManual).toHaveFocus());
+    await user.tab();
+    expect(enable).toHaveFocus();
+    await user.tab();
+    expect(keepManual).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+    expect(
+      screen.queryByRole('dialog', { name: 'Enable autonomous review' }),
+    ).not.toBeInTheDocument();
+    expect(save).toHaveFocus();
+  });
+
   it('preserves a stale draft until authoritative project refresh and explains non-retroactive disabling', async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockRejectedValue({

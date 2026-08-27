@@ -275,11 +275,75 @@ describe('QaExecutionPanel', () => {
     ).toBeVisible();
     expect(screen.getByText(/qa_start_failed/i)).toBeVisible();
     expect(screen.getByText(/automation repair needed/i)).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'Accept verified work' }),
+    ).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Pause automation' }));
     expect(onCommand).toHaveBeenCalledWith({
       type: 'task.review_automation.pause',
       payload: { taskId: task.id, expectedRevision: 7, actor },
     });
+  });
+
+  it('renders every durable automation action in chronological audit order', () => {
+    const automation: ReviewAutomationState & {
+      actions: ReviewAutomationAction[];
+    } = {
+      status: 'paused',
+      generation: 2,
+      rejectionCount: 1,
+      pauseReason: 'Automatic resume_developer failed.',
+      updatedAt: '2026-08-26T00:03:00.000Z',
+      actions: [
+        {
+          id: 'action-failed',
+          idempotencyKey: 'idem-failed',
+          projectId: project.id,
+          taskId: task.id,
+          attemptId: attempt.attempt.id,
+          sourceCycleId: 'qa-cycle-missing',
+          actionKind: 'resume_developer',
+          generation: 2,
+          status: 'failed',
+          errorCode: 'developer_resume_failed',
+          createdAt: '2026-08-26T00:02:00.000Z',
+          completedAt: '2026-08-26T00:03:00.000Z',
+        },
+        {
+          id: 'action-completed',
+          idempotencyKey: 'idem-completed',
+          projectId: project.id,
+          taskId: task.id,
+          attemptId: attempt.attempt.id,
+          sourceCycleId: cycle.id,
+          actionKind: 'launch_qa',
+          generation: 1,
+          status: 'completed',
+          errorCode: null,
+          createdAt: timestamp,
+          completedAt: later,
+        },
+      ],
+    };
+    renderPanel({ automation });
+
+    const history = screen.getByRole('list', {
+      name: 'Automation action history',
+    });
+    const entries = within(history).getAllByRole('listitem');
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toHaveTextContent('Launch qa');
+    expect(entries[0]).toHaveTextContent('Completed');
+    expect(entries[0]).toHaveTextContent(`Source cycle ${cycle.id}`);
+    expect(entries[0]).toHaveTextContent('Generation 1');
+    expect(entries[0]).toHaveTextContent(`Completed at ${later}`);
+    expect(entries[1]).toHaveTextContent('Resume developer');
+    expect(entries[1]).toHaveTextContent('Failed');
+    expect(entries[1]).toHaveTextContent('developer_resume_failed');
+    expect(entries[1]).toHaveTextContent('Source cycle qa-cycle-missing');
+    expect(entries[1]).toHaveTextContent(
+      'Completed at 2026-08-26T00:03:00.000Z',
+    );
   });
 
   it('opens the affected QA session from a repair warning', async () => {
@@ -370,6 +434,84 @@ describe('QaExecutionPanel', () => {
       reports: [rejectedReport],
       developerCompletionReports: [developerReport, newerDeveloperReport],
     });
+
+    expect(screen.getByRole('button', { name: 'Start QA' })).toBeEnabled();
+    expect(
+      screen.queryByRole('button', { name: 'Resume Developer rework' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('offers human recovery after a third autonomous rejection pauses the task', () => {
+    const pausedAutomation: ReviewAutomationState & {
+      actions: ReviewAutomationAction[];
+    } = {
+      status: 'paused',
+      generation: 2,
+      rejectionCount: 3,
+      pauseReason: 'Three autonomous QA rejections require a human decision.',
+      updatedAt: later,
+      actions: [],
+    };
+    const pausedTask = taskSchema.parse({
+      ...task,
+      reviewAutomation: pausedAutomation,
+    });
+    const autonomousProject = projectSchema.parse({
+      ...project,
+      qaConfiguration: {
+        ...project.qaConfiguration,
+        reviewPolicy: 'autonomous_review',
+      },
+    });
+    const thirdRejection = cycleFor({
+      reviewPolicy: 'autonomous_review',
+      automationGeneration: 2,
+      rejectionOrdinal: 2,
+      terminalDisposition: 'rejected',
+    });
+    const rejectedReport = reportFor({
+      disposition: 'rejected',
+      criterionResults: [
+        {
+          criterionId: 'criterion-1',
+          status: 'failed',
+          evidence: 'Third review still found missing history.',
+        },
+        {
+          criterionId: 'criterion-2',
+          status: 'passed',
+          evidence: 'Controls are safe.',
+        },
+      ],
+    });
+    const rendered = renderPanel({
+      project: autonomousProject,
+      task: pausedTask,
+      automation: pausedAutomation,
+      cycles: [thirdRejection],
+      reports: [rejectedReport],
+    });
+
+    expect(
+      screen.getByRole('button', { name: 'Resume Developer rework' }),
+    ).toBeEnabled();
+
+    const newerDeveloperReport = developerCompletionReportSchema.parse({
+      ...developerReport,
+      id: 'developer-report-after-pause',
+      cycleId: 'developer-cycle-after-pause',
+      createdAt: '2026-08-26T00:04:00.000Z',
+    });
+    rendered.rerender(
+      panel({
+        project: autonomousProject,
+        task: pausedTask,
+        automation: pausedAutomation,
+        cycles: [thirdRejection],
+        reports: [rejectedReport],
+        developerCompletionReports: [developerReport, newerDeveloperReport],
+      }),
+    );
 
     expect(screen.getByRole('button', { name: 'Start QA' })).toBeEnabled();
     expect(
