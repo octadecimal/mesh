@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   developerCompletionReportSchema,
   developerExecutionCycleSchema,
+  idSchema,
   projectSchema,
   qaExecutionCycleSchema,
   sessionSchema,
@@ -34,6 +35,7 @@ import { TaskAttemptRepository } from './repositories/task-attempt-repository.js
 import { TaskRepository } from './repositories/task-repository.js';
 import { WorkspaceRepository } from './repositories/workspace-repository.js';
 import { EventPublisher } from './runtime/event-publisher.js';
+import { ProjectRunService } from './tasks/project-run-service.js';
 import {
   createProcessLifecycle,
   originFromAddress,
@@ -1261,6 +1263,308 @@ describe('production composition', () => {
       ]);
     } finally {
       recovered.close();
+    }
+  });
+
+  it('coalesces outcome drains and defers stopped-runtime repair until the launch settles', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-main-run-coalescing-'));
+    directories.push(directory);
+    const repositoryPath = join(directory, 'repository');
+    const databasePath = join(directory, 'mesh.sqlite');
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: directory,
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    execFileSync(trustedGitExecutable.path, ['init', repositoryPath], {
+      cwd: directory,
+      windowsHide: true,
+    });
+    const identity = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: directory },
+      new NodeProcessRunner({ trustedGitExecutable }),
+    );
+    const database = openDatabase(databasePath);
+    migrate(database);
+    const projects = new ProjectRepository(database);
+    const tasks = new TaskRepository(database);
+    const project = projects.create(
+      projectSchema.parse({
+        id: 'project-run-coalescing',
+        displayName: 'Run drain coalescing',
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const runTasks = ['blocked', 'stopped', 'pending', 'later'].map(
+      (suffix, index) =>
+        tasks.create(
+          taskSchema.parse({
+            id: `task-run-coalescing-${suffix}`,
+            projectId: project.id,
+            title: `Coalescing ${suffix}`,
+            description:
+              'Exercise a stopped runtime during an in-flight launch.',
+            acceptanceCriteria: ['The run stays coherent across the race.'],
+            priority: 'normal',
+            rank: String.fromCharCode('a'.charCodeAt(0) + index),
+            lifecycleState: 'ready',
+            labels: [],
+            notes: '',
+            blocked: null,
+            revision: 1,
+            createdAt: now,
+            updatedAt: now,
+          }),
+        ),
+    );
+    database.close();
+
+    let releaseSecondLaunch!: () => void;
+    const secondLaunchGate = new Promise<void>((resolve) => {
+      releaseSecondLaunch = resolve;
+    });
+    let signalSecondLaunch!: () => void;
+    const secondLaunchStarted = new Promise<void>((resolve) => {
+      signalSecondLaunch = resolve;
+    });
+    let releaseThirdLaunch!: () => void;
+    const thirdLaunchGate = new Promise<void>((resolve) => {
+      releaseThirdLaunch = resolve;
+    });
+    let signalThirdLaunch!: () => void;
+    const thirdLaunchStarted = new Promise<void>((resolve) => {
+      signalThirdLaunch = resolve;
+    });
+    const driver = new FakeClaudeSessionDriver();
+    const create = driver.create.bind(driver);
+    let createCount = 0;
+    const createSpy = vi
+      .spyOn(driver, 'create')
+      .mockImplementation(async (request) => {
+        createCount += 1;
+        if (createCount === 2) {
+          signalSecondLaunch();
+          await secondLaunchGate;
+        }
+        if (createCount === 3) {
+          signalThirdLaunch();
+          await thirdLaunchGate;
+        }
+        return create(request);
+      });
+    const observedStoppedItemStatuses: Array<string | undefined> = [];
+    const drainAvailableSlots = ProjectRunService.prototype.drainAvailableSlots;
+    const drainSpy = vi
+      .spyOn(ProjectRunService.prototype, 'drainAvailableSlots')
+      .mockImplementation(function (runId) {
+        const observation = openDatabase(databasePath);
+        try {
+          const row = observation
+            .prepare(
+              'SELECT status FROM project_run_items WHERE run_id = ? AND task_id = ?',
+            )
+            .get(runId, 'task-run-coalescing-stopped') as
+            | { status: string }
+            | undefined;
+          observedStoppedItemStatuses.push(row?.status);
+        } finally {
+          observation.close();
+        }
+        return drainAvailableSlots.call(this, runId);
+      });
+    const running = await startServer({
+      environment: {
+        NODE_ENV: 'test',
+        MESH_PORT: '0',
+        MESH_DATA_DIR: directory,
+        MESH_DATABASE_PATH: 'mesh.sqlite',
+        MESH_WORKSPACE_ROOT: directory,
+        MESH_GIT_EXECUTABLE: trustedGitExecutable.path,
+        MESH_PROJECT_RUN_MAX_CONCURRENCY: '2',
+      },
+      test: { driver, webRoot: directory },
+    });
+    try {
+      const started = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: 'start-run-coalescing',
+          command: {
+            type: 'project.run.start',
+            payload: {
+              projectId: project.id,
+              concurrency: 2,
+              expectedTasks: runTasks.map((task) => ({
+                taskId: task.id,
+                revision: task.revision,
+              })),
+              actor: { type: 'human', id: 'operator-run-coalescing' },
+            },
+          },
+        },
+      });
+      expect(started.statusCode).toBe(200);
+      await secondLaunchStarted;
+      await vi.waitFor(() => expect(driver.createdSessions).toHaveLength(1));
+      expect(drainSpy).toHaveBeenCalledOnce();
+
+      await driver.markBlocked(0, {
+        idempotencyKey: idSchema.parse('block-run-coalescing'),
+        reason: 'A deterministic dependency is unavailable.',
+        evidence: 'The fake dependency probe returned no result.',
+        attemptedWork: 'Inspected the temporary repository and retried once.',
+        suggestedHumanAction: 'Provide the deterministic dependency.',
+        preserveWorkspace: true,
+      });
+
+      const deferred = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/snapshot`,
+      });
+      expect(deferred.statusCode).toBe(200);
+      expect(deferred.json().runs?.[0]).toMatchObject({
+        state: 'running',
+        pauseReason: null,
+        items: [
+          {
+            status: 'attention_required',
+            outcomeReason: 'developer_blocked',
+          },
+          { status: 'launch_pending', outcomeReason: null },
+          { status: 'queued', outcomeReason: null },
+          { status: 'queued', outcomeReason: null },
+        ],
+      });
+      expect(drainSpy).toHaveBeenCalledOnce();
+
+      releaseSecondLaunch();
+      await thirdLaunchStarted;
+      await vi.waitFor(() => expect(driver.createdSessions).toHaveLength(2));
+      const stoppedRuntime = driver.createdSessions[1];
+      if (!stoppedRuntime) throw new Error('Expected the second runtime');
+      stoppedRuntime.crash(new Error('deterministic runtime stop'));
+      await expect
+        .poll(async () => {
+          const projectSnapshot = await running.app.inject({
+            method: 'GET',
+            url: `/api/projects/${project.id}/snapshot`,
+          });
+          const stoppedItem = projectSnapshot
+            .json()
+            .runs?.[0]?.items?.find(
+              (item: { taskId?: string }) =>
+                item.taskId === 'task-run-coalescing-stopped',
+            );
+          const attempt = projectSnapshot
+            .json()
+            .attempts?.find(
+              (candidate: { id?: string }) =>
+                candidate.id === stoppedItem?.attemptId,
+            );
+          const sessionSnapshot = await running.app.inject({
+            method: 'GET',
+            url: '/api/snapshot',
+          });
+          return sessionSnapshot
+            .json()
+            .sessions?.find(
+              (session: { id?: string }) => session.id === attempt?.sessionId,
+            )?.lifecycleState;
+        })
+        .toBe('interrupted');
+
+      const stoppedDeferred = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/snapshot`,
+      });
+      expect(stoppedDeferred.json().runs?.[0]).toMatchObject({
+        state: 'running',
+        pauseReason: null,
+        items: [
+          {
+            status: 'attention_required',
+            outcomeReason: 'developer_blocked',
+          },
+          { status: 'active', outcomeReason: null },
+          { status: 'launch_pending', outcomeReason: null },
+          { status: 'queued', outcomeReason: null },
+        ],
+      });
+      expect(drainSpy).toHaveBeenCalledOnce();
+
+      releaseThirdLaunch();
+      await expect
+        .poll(async () => {
+          const response = await running.app.inject({
+            method: 'GET',
+            url: `/api/projects/${project.id}/snapshot`,
+          });
+          const run = response.json().runs?.[0];
+          return {
+            state: run?.state,
+            pauseReason: run?.pauseReason,
+            items: run?.items?.map(
+              (item: { status?: string; outcomeReason?: string | null }) => ({
+                status: item.status,
+                outcomeReason: item.outcomeReason,
+              }),
+            ),
+          };
+        })
+        .toEqual({
+          state: 'running',
+          pauseReason: null,
+          items: [
+            {
+              status: 'attention_required',
+              outcomeReason: 'developer_blocked',
+            },
+            {
+              status: 'attention_required',
+              outcomeReason: 'developer_cycle_without_live_session',
+            },
+            { status: 'active', outcomeReason: null },
+            { status: 'active', outcomeReason: null },
+          ],
+        });
+      expect(observedStoppedItemStatuses).toEqual([
+        'queued',
+        'active',
+        'attention_required',
+      ]);
+
+      const history = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${project.id}/history?after=0`,
+      });
+      const events = history.json().events as Array<{
+        payload?: {
+          run?: { items?: Array<{ outcomeReason?: string | null }> };
+        };
+      }>;
+      expect(
+        events.flatMap(
+          (event) =>
+            event.payload?.run?.items?.map((item) => item.outcomeReason) ?? [],
+        ),
+      ).not.toContain('launch_outcome_unknown');
+    } finally {
+      releaseSecondLaunch();
+      releaseThirdLaunch();
+      try {
+        await running.close();
+      } finally {
+        createSpy.mockRestore();
+        drainSpy.mockRestore();
+      }
     }
   });
 

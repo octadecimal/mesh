@@ -464,7 +464,9 @@ test('gives the project kanban the remaining board height', async ({
     viewportHeight: window.innerHeight,
   }));
   expect(layout.columnsHeight).toBeGreaterThan(layout.instructionsHeight);
-  expect(layout.viewportHeight - layout.columnsBottom).toBeLessThanOrEqual(20);
+  const bottomGap = layout.viewportHeight - layout.columnsBottom;
+  expect(bottomGap).toBeGreaterThanOrEqual(0);
+  expect(bottomGap).toBeLessThanOrEqual(20);
 });
 
 test('creates shared and worktree sessions with the production-built server', async ({
@@ -1643,12 +1645,19 @@ test('finite project run preserves bounded progress and durable history', async 
   );
 
   await runPanel.getByRole('button', { name: 'Pause run' }).click();
-  await waitForProjectSnapshot(
+  const paused = await waitForProjectSnapshot(
     harness,
     projectId,
-    (snapshot) => snapshot.runs.at(-1)?.state === 'paused',
+    (snapshot) => {
+      const run = snapshot.runs.at(-1);
+      return run?.state === 'paused' && run.pauseReason === 'operator_paused';
+    },
     'Pause did not become durable',
   );
+  expect(paused.runs.at(-1)).toMatchObject({
+    state: 'paused',
+    pauseReason: 'operator_paused',
+  });
   harness.releaseTaskOutcome('task-auto');
   await harness.waitForTaskOutcome('task-auto');
   const scriptedAutoOutcome = await readProjectSnapshot(harness, projectId);
@@ -1696,6 +1705,10 @@ test('finite project run preserves bounded progress and durable history', async 
   await expect(refreshedRunPanel).toContainText('Paused');
   await expect(refreshedRunPanel).toContainText('1 of 2 occupied');
   const afterRefresh = await readProjectSnapshot(harness, projectId);
+  expect(afterRefresh.runs.at(-1)).toMatchObject({
+    state: 'paused',
+    pauseReason: 'operator_paused',
+  });
   expect(itemStates(afterRefresh)).toEqual(itemStates(pausedWithOneActive));
   expect(afterRefresh.qaReports).toHaveLength(
     pausedWithOneActive.qaReports.length,
@@ -1744,6 +1757,10 @@ test('finite project run preserves bounded progress and durable history', async 
   ).toBeVisible();
   const afterRestart = await readProjectSnapshot(harness, projectId);
   expect(afterRestart.runs.at(-1)?.id).toBe(runId);
+  expect(afterRestart.runs.at(-1)).toMatchObject({
+    state: 'paused',
+    pauseReason: 'operator_paused',
+  });
   expect(itemStates(afterRestart)).toEqual(itemStates(beforeRestart));
   expect(afterRestart.developerCycles).toHaveLength(
     beforeRestart.developerCycles.length,
@@ -1767,6 +1784,49 @@ test('finite project run preserves bounded progress and durable history', async 
   const resumedRun = blockedAfterResume.runs.at(-1);
   if (!resumedRun) throw new Error('Expected resumed run');
   expect(resumedRun).toMatchObject({ state: 'running', pauseReason: null });
+  const blockedTask = blockedAfterResume.tasks.find(
+    ({ title }) => title === 'task-blocked',
+  );
+  if (!blockedTask) throw new Error('Expected the blocked task');
+  const blockedRunItem = resumedRun.items.find(
+    ({ taskId }) => taskId === blockedTask.id,
+  );
+  if (!blockedRunItem?.attemptId) {
+    throw new Error('Expected the blocked run item attempt');
+  }
+  const blockedCycle = blockedAfterResume.developerCycles.find(
+    ({ attemptId }) => attemptId === blockedRunItem.attemptId,
+  );
+  if (!blockedCycle) throw new Error('Expected the blocked Developer cycle');
+  const durableBlocker = blockedAfterResume.developerBlockerReports.find(
+    ({ id }) => id === blockedCycle.blockerReportId,
+  );
+  expect({
+    item: itemStates(blockedAfterResume).find(
+      ({ title }) => title === 'task-blocked',
+    ),
+    taskBlocker: blockedTask.blocked,
+    cycle: blockedCycle,
+    blocker: durableBlocker,
+  }).toMatchObject({
+    item: { status: 'attention_required', reason: 'developer_blocked' },
+    taskBlocker: {
+      reason: 'task-blocked encountered a deterministic blocker.',
+    },
+    cycle: {
+      terminalDisposition: 'blocked',
+      blockerReportId: durableBlocker?.id,
+      endedAt: expect.any(String),
+    },
+    blocker: {
+      cycleId: blockedCycle.id,
+      reason: 'task-blocked encountered a deterministic blocker.',
+      evidence: 'The fake dependency probe reported the scripted blocker.',
+      attemptedWork: 'Inspected the temporary repository and retried once.',
+      suggestedHumanAction: 'Resolve the scripted dependency before retrying.',
+      preserveWorkspace: true,
+    },
+  });
   await expect
     .poll(() => harness.startedTaskTitles())
     .toEqual([
