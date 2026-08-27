@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstat, open, readlink, realpath } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, win32 } from 'node:path';
 
 import type { ProcessResult, ProcessRunner } from './process-runner.js';
 
@@ -323,6 +323,24 @@ const looksLikePathOperand = (argument: string) => {
 const escapesWorkspace = (workspacePath: string, candidate: string) => {
   if (!candidate) return false;
   const normalizedCandidate = candidate.replace(/\\/g, '/');
+  const windowsCandidate =
+    win32.isAbsolute(candidate) &&
+    (/^[a-z]:[\\/]/i.test(candidate) || /^[\\/]{2}/.test(candidate));
+  if (windowsCandidate) {
+    const windowsWorkspace =
+      win32.isAbsolute(workspacePath) &&
+      (/^[a-z]:[\\/]/i.test(workspacePath) || /^[\\/]{2}/.test(workspacePath));
+    if (!windowsWorkspace) return true;
+    const withinWorkspace = win32.relative(
+      win32.resolve(workspacePath),
+      win32.resolve(workspacePath, candidate),
+    );
+    return (
+      win32.isAbsolute(withinWorkspace) ||
+      withinWorkspace === '..' ||
+      withinWorkspace.startsWith('..\\')
+    );
+  }
   const withinWorkspace = relative(
     workspacePath,
     resolve(workspacePath, normalizedCandidate),

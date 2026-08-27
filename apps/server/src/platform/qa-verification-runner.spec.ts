@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -76,7 +76,7 @@ describe('QaVerificationRunner', () => {
     expect(run).toHaveBeenCalledWith(
       'corepack',
       ['pnpm', 'test'],
-      expect.objectContaining({ cwd: 'C:\\repo' }),
+      expect.objectContaining({ cwd: resolve('C:\\repo') }),
     );
   });
 
@@ -255,7 +255,7 @@ describe('QaVerificationRunner', () => {
     expect(run).toHaveBeenCalledWith(
       'pnpm',
       ['test'],
-      expect.objectContaining({ cwd: 'C:\\repo' }),
+      expect.objectContaining({ cwd: resolve('C:\\repo\\nested\\..') }),
     );
   });
 
@@ -425,8 +425,13 @@ describe('QaVerificationRunner', () => {
     expect(run).toHaveBeenCalledOnce();
     expect(run).toHaveBeenCalledWith(
       'git',
-      ['-C', 'C:\\verified-workspace', 'rev-parse', '--is-inside-work-tree'],
-      expect.objectContaining({ cwd: 'C:\\verified-workspace' }),
+      [
+        '-C',
+        resolve('C:\\verified-workspace'),
+        'rev-parse',
+        '--is-inside-work-tree',
+      ],
+      expect.objectContaining({ cwd: resolve('C:\\verified-workspace') }),
     );
   });
 
@@ -614,10 +619,12 @@ describe('QaVerificationRunner', () => {
     expect(second).toBe(first);
     expect(run).toHaveBeenCalledWith(
       'git',
-      ['-C', 'C:\\repo', 'ls-files', '-z'],
-      expect.objectContaining({ cwd: 'C:\\repo' }),
+      ['-C', resolve('C:\\repo'), 'ls-files', '-z'],
+      expect.objectContaining({ cwd: resolve('C:\\repo') }),
     );
-    expect(readTrackedFile).toHaveBeenCalledWith('C:\\repo\\src\\app.ts');
+    expect(readTrackedFile).toHaveBeenCalledWith(
+      resolve('C:\\repo', 'src/app.ts'),
+    );
   });
 
   it('hashes a tracked directory link without reading its external target', async () => {
