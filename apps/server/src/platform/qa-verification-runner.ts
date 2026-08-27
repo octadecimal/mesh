@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 
 import type { ProcessResult, ProcessRunner } from './process-runner.js';
@@ -21,6 +21,26 @@ export class QaVerificationCommandRejectedError extends Error {
     this.name = 'QaVerificationCommandRejectedError';
   }
 }
+
+export class QaTrackedSourceUnstableError extends Error {
+  readonly code = 'qa_source_snapshot_unstable';
+
+  constructor() {
+    super('Tracked source did not remain stable during verification capture.');
+    this.name = 'QaTrackedSourceUnstableError';
+  }
+}
+
+type TrackedFileStat = {
+  dev: bigint | number;
+  ino: bigint | number;
+  mode: bigint | number;
+  size: bigint | number;
+  mtimeNs: bigint | number;
+  ctimeNs: bigint | number;
+};
+
+const stableSnapshotAttempts = 3;
 
 const allowedExecutables = new Set(['corepack', 'pnpm', 'npm', 'git']);
 const readOnlyGitCommands = new Set([
@@ -165,16 +185,10 @@ const optionName = (argument: string) =>
 
 const escapesWorkspace = (workspacePath: string, candidate: string) => {
   if (!candidate) return false;
-  const pathLike =
-    isAbsolute(candidate) ||
-    /^[a-z]:/i.test(candidate) ||
-    candidate === '..' ||
-    candidate.startsWith('../') ||
-    candidate.startsWith('..\\');
-  if (!pathLike) return false;
+  const normalizedCandidate = candidate.replace(/\\/g, '/');
   const withinWorkspace = relative(
     workspacePath,
-    resolve(workspacePath, candidate),
+    resolve(workspacePath, normalizedCandidate),
   );
   return (
     isAbsolute(withinWorkspace) ||
@@ -224,25 +238,53 @@ export class QaVerificationRunner {
     private readonly readTrackedFile: (
       path: string,
     ) => Promise<Uint8Array> = readFile,
+    private readonly statTrackedFile: (
+      path: string,
+    ) => Promise<TrackedFileStat> = async (path) =>
+      stat(path, { bigint: true }),
   ) {}
 
   async captureTrackedSource(workspacePath: string): Promise<string> {
     const assignedWorkspace = resolve(workspacePath);
+    for (let attempt = 0; attempt < stableSnapshotAttempts; attempt += 1) {
+      const forward = await this.captureObservation(
+        assignedWorkspace,
+        'forward',
+      );
+      const reverse = await this.captureObservation(
+        assignedWorkspace,
+        'reverse',
+      );
+      if (forward !== undefined && forward === reverse) return forward;
+    }
+    throw new QaTrackedSourceUnstableError();
+  }
+
+  private async listTrackedPaths(workspacePath: string): Promise<string[]> {
     const result = await this.processes.run(
       'git',
-      ['-C', assignedWorkspace, 'ls-files', '-z'],
-      { cwd: assignedWorkspace },
+      ['-C', workspacePath, 'ls-files', '-z'],
+      { cwd: workspacePath },
     );
     if (result.exitCode !== 0) {
       throw new Error(
         `Tracked source state could not be read: ${result.stderr}`,
       );
     }
-    const hash = createHash('sha256');
-    const trackedPaths = result.stdout.split('\0').filter(Boolean).sort();
-    for (const trackedPath of trackedPaths) {
-      const absolutePath = resolve(assignedWorkspace, trackedPath);
-      const withinWorkspace = relative(assignedWorkspace, absolutePath);
+    return result.stdout.split('\0').filter(Boolean).sort();
+  }
+
+  private async captureObservation(
+    workspacePath: string,
+    direction: 'forward' | 'reverse',
+  ): Promise<string | undefined> {
+    const trackedPaths = await this.listTrackedPaths(workspacePath);
+    const pathsToRead =
+      direction === 'forward' ? trackedPaths : [...trackedPaths].reverse();
+    const records = new Map<string, string>();
+    for (const trackedPath of pathsToRead) {
+      const absolutePath = resolve(workspacePath, trackedPath);
+      const withinWorkspace = relative(workspacePath, absolutePath);
       if (
         isAbsolute(withinWorkspace) ||
         withinWorkspace === '..' ||
@@ -251,12 +293,65 @@ export class QaVerificationRunner {
       ) {
         throw new Error('Tracked source path escaped the verified workspace.');
       }
+      const before = await this.readFileIdentity(absolutePath);
+      if (before === 'missing') {
+        if ((await this.readFileIdentity(absolutePath)) !== 'missing') {
+          return undefined;
+        }
+        records.set(trackedPath, 'missing');
+        continue;
+      }
+      let content: Uint8Array;
+      try {
+        content = await this.readTrackedFile(absolutePath);
+      } catch (error) {
+        if (this.isMissingFile(error)) return undefined;
+        throw error;
+      }
+      const after = await this.readFileIdentity(absolutePath);
+      if (before !== after) return undefined;
+      records.set(
+        trackedPath,
+        `${before}\0${createHash('sha256').update(content).digest('hex')}`,
+      );
+    }
+    const pathsAfterRead = await this.listTrackedPaths(workspacePath);
+    if (trackedPaths.join('\0') !== pathsAfterRead.join('\0')) return undefined;
+
+    const hash = createHash('sha256');
+    for (const trackedPath of trackedPaths) {
       hash.update(trackedPath);
       hash.update('\0');
-      hash.update(await this.readTrackedFile(absolutePath));
+      hash.update(records.get(trackedPath) ?? 'missing');
       hash.update('\0');
     }
     return `sha256:${hash.digest('hex')}`;
+  }
+
+  private async readFileIdentity(path: string): Promise<string> {
+    try {
+      const current = await this.statTrackedFile(path);
+      return [
+        current.dev,
+        current.ino,
+        current.mode,
+        current.size,
+        current.mtimeNs,
+        current.ctimeNs,
+      ].join(':');
+    } catch (error) {
+      if (this.isMissingFile(error)) return 'missing';
+      throw error;
+    }
+  }
+
+  private isMissingFile(error: unknown): boolean {
+    return (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    );
   }
 
   async run(

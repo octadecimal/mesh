@@ -589,12 +589,12 @@ export const applyProjectEvent = (
                   !(
                     repair.taskId === event.payload.task.id &&
                     repair.attemptId === event.payload.attempt.id &&
-                    repair.sessionId === event.payload.cycle.sessionId &&
-                    [
-                      'qa_cycle_without_trustworthy_outcome',
-                      'qa_session_workspace_mismatch',
-                      'review_automation_action_incomplete',
-                    ].includes(repair.reason)
+                    (repair.reason === 'review_automation_action_incomplete' ||
+                      (repair.sessionId === event.payload.cycle.sessionId &&
+                        [
+                          'qa_cycle_without_trustworthy_outcome',
+                          'qa_session_workspace_mismatch',
+                        ].includes(repair.reason)))
                   ),
               ),
             }
@@ -604,8 +604,9 @@ export const applyProjectEvent = (
 
   if (event.type === 'task.review_automation_changed') {
     const current = next.reviewAutomationByTaskId[event.payload.task.id];
-    const actions = event.payload.action
-      ? upsertById(current?.actions ?? [], event.payload.action)
+    const action = event.payload.action;
+    const actions = action
+      ? upsertById(current?.actions ?? [], action)
       : (current?.actions ?? []);
     next = {
       ...next,
@@ -620,6 +621,22 @@ export const applyProjectEvent = (
           actions,
         },
       },
+      repairsByProjectId:
+        action?.status === 'failed'
+          ? {
+              ...next.repairsByProjectId,
+              [event.projectId]: (
+                next.repairsByProjectId[event.projectId] ?? []
+              ).filter(
+                (repair) =>
+                  !(
+                    repair.reason === 'review_automation_action_incomplete' &&
+                    repair.taskId === action.taskId &&
+                    repair.attemptId === action.attemptId
+                  ),
+              ),
+            }
+          : next.repairsByProjectId,
     };
   }
 

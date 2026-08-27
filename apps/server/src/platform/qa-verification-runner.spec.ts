@@ -99,6 +99,23 @@ describe('QaVerificationRunner', () => {
       executable: 'pnpm',
       args: ['test', '--', '-uall'],
     },
+    {
+      executable: 'git',
+      args: [
+        'diff',
+        '--no-index',
+        'package.json',
+        'src/../../other/secret.txt',
+      ],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', '--', '--config=src/../../other/vitest.config.ts'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', 'src\\..\\..\\other\\secret.spec.ts'],
+    },
   ])(
     'rejects source-authoring command authority: $executable $args',
     async (input) => {
@@ -111,6 +128,36 @@ describe('QaVerificationRunner', () => {
         QaVerificationCommandRejectedError,
       );
       expect(run).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    {
+      executable: 'git',
+      args: [
+        'diff',
+        '--no-index',
+        'package.json',
+        'src/fixtures/expected.json',
+      ],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', '--', '--config=src/config/vitest.config.ts'],
+    },
+  ])(
+    'preserves workspace-local verification paths: $executable $args',
+    async (input) => {
+      const run = vi.fn(async () => ({
+        exitCode: 0,
+        stdout: 'passed',
+        stderr: '',
+      }));
+      const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+      await expect(runner.run('C:\\repo', input)).resolves.toMatchObject({
+        exitCode: 0,
+      });
     },
   );
 
@@ -144,6 +191,14 @@ describe('QaVerificationRunner', () => {
     const runner = new QaVerificationRunner(
       { run } as ProcessRunner,
       readTrackedFile,
+      async () => ({
+        dev: 1,
+        ino: 1,
+        mode: 0o100644,
+        size: 14,
+        mtimeNs: 0,
+        ctimeNs: 0,
+      }),
     );
 
     const first = await runner.captureTrackedSource('C:\\repo');
@@ -157,5 +212,78 @@ describe('QaVerificationRunner', () => {
       expect.objectContaining({ cwd: 'C:\\repo' }),
     );
     expect(readTrackedFile).toHaveBeenCalledWith('C:\\repo\\src\\app.ts');
+  });
+
+  it('detects a tracked mutation that occurs after the file was read', async () => {
+    let sourceA = 'source-a-before';
+    let sourceAVersion = 0;
+    let mutateDuringRead = false;
+    let mutated = false;
+    const run = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: 'src/a.ts\0src/b.ts\0',
+      stderr: '',
+    }));
+    const readTrackedFile = vi.fn(async (path: string) => {
+      if (path.endsWith('a.ts')) return Buffer.from(sourceA);
+      if (mutateDuringRead && !mutated) {
+        sourceA = 'source-a-after!';
+        sourceAVersion += 1;
+        mutated = true;
+      }
+      return Buffer.from('source-b');
+    });
+    const statTrackedFile = vi.fn(async (path: string) => ({
+      dev: 1,
+      ino: path.endsWith('a.ts') ? 1 : 2,
+      mode: 0o100644,
+      size: path.endsWith('a.ts') ? sourceA.length : 8,
+      mtimeNs: path.endsWith('a.ts') ? sourceAVersion : 0,
+      ctimeNs: path.endsWith('a.ts') ? sourceAVersion : 0,
+    }));
+    const runner = new QaVerificationRunner(
+      { run } as ProcessRunner,
+      readTrackedFile,
+      statTrackedFile,
+    );
+    const baseline = await runner.captureTrackedSource('C:\\repo');
+
+    mutateDuringRead = true;
+    const current = await runner.captureTrackedSource('C:\\repo');
+
+    expect(current).not.toBe(baseline);
+  });
+
+  it('fails closed when tracked source never stabilizes', async () => {
+    let sourceA = 'source-a-0';
+    let sourceAVersion = 0;
+    const run = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: 'src/a.ts\0src/b.ts\0',
+      stderr: '',
+    }));
+    const readTrackedFile = vi.fn(async (path: string) => {
+      if (path.endsWith('a.ts')) return Buffer.from(sourceA);
+      sourceA = sourceA === 'source-a-0' ? 'source-a-1' : 'source-a-0';
+      sourceAVersion += 1;
+      return Buffer.from('source-b');
+    });
+    const statTrackedFile = vi.fn(async (path: string) => ({
+      dev: 1,
+      ino: path.endsWith('a.ts') ? 1 : 2,
+      mode: 0o100644,
+      size: path.endsWith('a.ts') ? sourceA.length : 8,
+      mtimeNs: path.endsWith('a.ts') ? sourceAVersion : 0,
+      ctimeNs: path.endsWith('a.ts') ? sourceAVersion : 0,
+    }));
+    const runner = new QaVerificationRunner(
+      { run } as ProcessRunner,
+      readTrackedFile,
+      statTrackedFile,
+    );
+
+    await expect(runner.captureTrackedSource('C:\\repo')).rejects.toMatchObject(
+      { code: 'qa_source_snapshot_unstable' },
+    );
   });
 });

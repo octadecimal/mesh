@@ -85,11 +85,18 @@ Developer cycle has submitted a complete report and the task is unblocked in
 `review`. It revalidates and reuses that cycle's exact active workspace; a fresh
 worktree would not contain the submission being verified. The QA runtime can
 read source and invoke only server-approved verification executables; it never
-receives a general shell or source-authoring control. The server fingerprints
-the bytes of Git-tracked files before launch and after every verification
-command instead of accepting an agent-reported workspace state. Verification
-may create ordinary ignored build or test artifacts. A tracked-source mutation
-invalidates QA authority and pauses the review loop for inspection.
+receives a general shell or source-authoring control. The server captures
+Git-tracked source before launch, after every verification command, and
+immediately before verdict persistence instead of accepting an agent-reported
+workspace state. Each accepted capture requires matching forward and reverse
+observations of the tracked path set, per-file metadata, and content. A mutation
+or failure to stabilize within the bounded retry limit invalidates QA authority
+and pauses the review loop for inspection. This protocol defines the
+source-stability boundary; it is not a cross-file filesystem lock. A write after
+the accepted observation is a new concurrent mutation, so the verdict
+transaction begins immediately after capture without claiming
+filesystem-transaction atomicity. Verification may create ordinary ignored
+build or test artifacts.
 
 QA controls use a separate ephemeral capability bound to the QA session, task,
 current attempt, and open QA cycle. The only task-domain control exposed to the

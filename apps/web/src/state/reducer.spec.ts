@@ -980,6 +980,107 @@ describe('project projection', () => {
     );
     expect(reconnected.repairsByProjectId[project.id]).toEqual([]);
   });
+
+  it('clears an interrupted action repair across Developer and QA sessions', () => {
+    const actionRepair: AttemptRepair = {
+      taskId: task().id,
+      attemptId: attempt.id,
+      sessionId: attempt.sessionId,
+      reason: 'review_automation_action_incomplete',
+    };
+    const unrelatedTaskRepair: AttemptRepair = {
+      taskId: 'task-2',
+      attemptId: 'attempt-2',
+      sessionId: 'session-2',
+      reason: 'review_automation_action_incomplete',
+    };
+    const unrelatedAttemptRepair: AttemptRepair = {
+      taskId: task().id,
+      attemptId: 'attempt-3',
+      sessionId: 'session-3',
+      reason: 'review_automation_action_incomplete',
+    };
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({
+        repairs: [actionRepair, unrelatedTaskRepair, unrelatedAttemptRepair],
+      }),
+    );
+    const interruptedCycle: QaExecutionCycle = {
+      ...qaCycle,
+      endedAt: timestamp,
+      terminalDisposition: 'interrupted',
+      terminalCommandId: 'repair-qa-cycle-mismatched-session',
+      terminalEventId: 'project-event-4',
+    };
+
+    const repaired = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'task.qa_execution_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        attempt,
+        cycle: interruptedCycle,
+        report: null,
+      },
+    });
+
+    expect(repaired.kind).toBe('applied');
+    if (repaired.kind !== 'applied') return;
+    expect(repaired.state.repairsByProjectId[project.id]).toEqual([
+      unrelatedTaskRepair,
+      unrelatedAttemptRepair,
+    ]);
+  });
+
+  it('clears an action repair when its failed automation event arrives', () => {
+    const actionRepair: AttemptRepair = {
+      taskId: task().id,
+      attemptId: attempt.id,
+      sessionId: attempt.sessionId,
+      reason: 'review_automation_action_incomplete',
+    };
+    const unrelatedRepair: AttemptRepair = {
+      taskId: task().id,
+      attemptId: 'attempt-3',
+      sessionId: 'session-3',
+      reason: 'review_automation_action_incomplete',
+    };
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({ repairs: [actionRepair, unrelatedRepair] }),
+    );
+    const failedAction: ReviewAutomationAction = {
+      ...automationAction,
+      status: 'failed',
+      errorCode: 'qa_cycle_interrupted',
+      completedAt: timestamp,
+    };
+
+    const repaired = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'task.review_automation_changed',
+      payload: {
+        task: task({ lifecycleState: 'review' }),
+        automation: task().reviewAutomation,
+        action: failedAction,
+      },
+    });
+
+    expect(repaired.kind).toBe('applied');
+    if (repaired.kind !== 'applied') return;
+    expect(repaired.state.repairsByProjectId[project.id]).toEqual([
+      unrelatedRepair,
+    ]);
+  });
 });
 
 describe('createResyncCoordinator', () => {

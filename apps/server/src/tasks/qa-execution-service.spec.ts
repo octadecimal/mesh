@@ -478,12 +478,17 @@ describe('QaExecutionService', () => {
     });
 
     expect(response).toMatchObject({ isError: true });
-    expect(process).toHaveBeenCalledTimes(1);
-    expect(process).toHaveBeenCalledWith(
-      'git',
-      expect.any(Array),
-      expect.any(Object),
+    expect(process).toHaveBeenCalled();
+    expect(process.mock.calls).toEqual(
+      expect.arrayContaining([
+        ['git', expect.arrayContaining(['ls-files']), expect.any(Object)],
+      ]),
     );
+    expect(
+      process.mock.calls.every(
+        (call) => (call as unknown as [string])[0] === 'git',
+      ),
+    ).toBe(true);
   });
 
   it('pauses and interrupts QA when authoritative tracked source changes after verification', async () => {
@@ -1352,6 +1357,45 @@ describe('QaExecutionService', () => {
         context.attempt.id,
       ]),
     ).toEqual([]);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.launch.session.id);
+  });
+
+  it('pauses without committing a verdict when tracked source never stabilizes', async () => {
+    let captureCount = 0;
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => {
+          captureCount += 1;
+          if (captureCount === 1) return 'sha256:stable-baseline';
+          throw Object.assign(new Error('Tracked source kept changing'), {
+            code: 'qa_source_snapshot_unstable',
+          });
+        },
+        run: async () => ({
+          command: 'pnpm test',
+          exitCode: 0,
+          stdout: 'passed',
+          stderr: '',
+        }),
+      },
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_source_mutation_detected' });
+
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
     expect(context.interrupt).toHaveBeenCalledWith(launched.launch.session.id);
   });
 

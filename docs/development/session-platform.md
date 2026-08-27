@@ -112,9 +112,17 @@ creates a separate QA session and cycle in the Developer attempt's exact
 workspace. QA can read the submitted source and request named verification
 commands through Mesh's constrained runner, but receives no shell and cannot
 write source, create another worktree, commit, merge, or create a pull request.
-Mesh hashes the bytes of Git-tracked files at launch and after each command; a
-mutation pauses review and prevents a verdict. Its structured report covers every snapshotted acceptance criterion and
-records evidence, verification performed, residual risks, and workspace state.
+Mesh captures Git-tracked source at launch, after each verification command,
+and immediately before verdict persistence. A capture is accepted only when
+two consecutive full observations (forward, then reverse) agree on the tracked
+path set, per-file metadata, and content. Capture retries are bounded; ongoing
+churn pauses review and prevents a verdict. Ordinary filesystems do not provide
+a cross-file transaction here, so the accepted pair proves stability across
+those observations rather than locking the workspace. A write after the
+accepted observation is a new concurrent mutation; Mesh does not claim
+filesystem-transaction atomicity. Its structured report covers every
+snapshotted acceptance criterion and records evidence, verification performed,
+residual risks, and workspace state.
 After a verified verdict, a human may accept the task as done. After a rejection,
 a human chooses the appropriate Developer rework action. Manual mode never
 advances or resumes work merely because a verdict arrived.

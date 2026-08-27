@@ -409,23 +409,16 @@ export class QaExecutionService {
     verification.operation = 'submitting';
 
     try {
-      verification.latest =
-        await this.dependencies.verificationRunner.captureTrackedSource(
-          verification.workspacePath,
-        );
-      if (verification.latest !== verification.baseline) {
-        verification.mutationDetected = true;
-        await this.pauseForSourceMutation(
-          {
-            taskId: initialContext.task.id,
-            cycleId: initialContext.cycle.id,
-            sessionId: initialContext.cycle.sessionId,
-            workspaceBaseline: initialContext.cycle.workspaceBaseline,
-          },
-          input.capability,
-        );
-        throw new QaSourceMutationDetectedError();
-      }
+      await this.requireStableSourceState(
+        {
+          taskId: initialContext.task.id,
+          cycleId: initialContext.cycle.id,
+          sessionId: initialContext.cycle.sessionId,
+          workspaceBaseline: initialContext.cycle.workspaceBaseline,
+        },
+        input.capability,
+        verification,
+      );
 
       const result =
         this.dependencies.commands.executeOnceInImmediateTransaction(
@@ -1089,23 +1082,16 @@ export class QaExecutionService {
                       ? 'passed'
                       : `failed with exit code ${result.exitCode}`,
                 });
-                verification.latest =
-                  await this.dependencies.verificationRunner.captureTrackedSource(
-                    verification.workspacePath,
-                  );
-                if (verification.latest !== verification.baseline) {
-                  verification.mutationDetected = true;
-                  await this.pauseForSourceMutation(
-                    {
-                      taskId: prepared.task.id,
-                      cycleId: prepared.cycle.id,
-                      sessionId: prepared.session.id,
-                      workspaceBaseline: prepared.cycle.workspaceBaseline,
-                    },
-                    capability,
-                  );
-                  return qaControlFailure('qa_source_mutation_detected');
-                }
+                await this.requireStableSourceState(
+                  {
+                    taskId: prepared.task.id,
+                    cycleId: prepared.cycle.id,
+                    sessionId: prepared.session.id,
+                    workspaceBaseline: prepared.cycle.workspaceBaseline,
+                  },
+                  capability,
+                  verification,
+                );
                 return {
                   content: [
                     {
@@ -1183,6 +1169,36 @@ export class QaExecutionService {
         ],
       },
     };
+  }
+
+  private async requireStableSourceState(
+    context: SourceMutationContext,
+    capability: string,
+    verification: VerificationState,
+  ): Promise<void> {
+    try {
+      verification.latest =
+        await this.dependencies.verificationRunner.captureTrackedSource(
+          verification.workspacePath,
+        );
+    } catch (error) {
+      if (
+        typeof error !== 'object' ||
+        error === null ||
+        !('code' in error) ||
+        error.code !== 'qa_source_snapshot_unstable'
+      ) {
+        throw error;
+      }
+      verification.mutationDetected = true;
+      await this.pauseForSourceMutation(context, capability);
+      throw new QaSourceMutationDetectedError();
+    }
+    if (verification.latest === verification.baseline) return;
+
+    verification.mutationDetected = true;
+    await this.pauseForSourceMutation(context, capability);
+    throw new QaSourceMutationDetectedError();
   }
 
   private async pauseForSourceMutation(
