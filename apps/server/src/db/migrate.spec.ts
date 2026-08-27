@@ -135,6 +135,7 @@ describe('migrate', () => {
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
+      { id: '012-project-runs' },
     ]);
     expect(
       database
@@ -153,6 +154,33 @@ describe('migrate', () => {
         'developer_completion_reports',
         'developer_blocker_reports',
         'developer_review_feedback',
+        'project_runs',
+        'project_run_items',
+      ]),
+    );
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        'one_active_project_run',
+        'one_open_project_run_item_per_task',
+        'project_run_queue_order',
+      ]),
+    );
+    expect(
+      database
+        .prepare("SELECT * FROM pragma_foreign_key_list('project_run_items')")
+        .all(),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: 'project_runs', from: 'run_id' }),
+        expect.objectContaining({ table: 'projects', from: 'project_id' }),
+        expect.objectContaining({ table: 'tasks', from: 'task_id' }),
       ]),
     );
     expect(
@@ -231,6 +259,71 @@ describe('migrate', () => {
       updatedAt: appliedAt,
       updatedBy: null,
     });
+  });
+
+  it('upgrades an 011 database with project-run tables, constraints, and indexes', () => {
+    const directory = mkdtempSync(
+      join(tmpdir(), 'mesh-session-platform-project-run-upgrade-'),
+    );
+    directories.push(directory);
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+    const appliedAt = '2026-08-27T00:00:00.000Z';
+    const migrationFiles = [
+      '001-initial.sql',
+      '002-command-state.sql',
+      '003-task-board-storage.sql',
+      '004-project-event-streams.sql',
+      '005-task-attempt-safety.sql',
+      '006-task-attempt-launch-recovery.sql',
+      '007-developer-execution.sql',
+      '008-developer-cycle-task-title.sql',
+      '009-qa-execution.sql',
+      '010-review-automation-state.sql',
+      '011-qa-interruption-repair.sql',
+    ];
+    for (const file of migrationFiles) {
+      database.exec(readFileSync(join(__dirname, 'migrations', file), 'utf8'));
+      database
+        .prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)')
+        .run(file.slice(0, -4), appliedAt);
+    }
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(expect.arrayContaining(['project_runs', 'project_run_items']));
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' ORDER BY name",
+        )
+        .all()
+        .map((row) => (row as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        'one_active_project_run',
+        'one_open_project_run_item_per_task',
+        'project_run_queue_order',
+      ]),
+    );
+    expect(
+      database
+        .prepare("SELECT * FROM pragma_foreign_key_list('project_run_items')")
+        .all(),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ table: 'project_runs', from: 'run_id' }),
+        expect.objectContaining({ table: 'projects', from: 'project_id' }),
+        expect.objectContaining({ table: 'tasks', from: 'task_id' }),
+      ]),
+    );
   });
 
   it('preserves 009 automation actions while expanding source-cycle foreign keys', () => {
@@ -399,6 +492,7 @@ describe('migrate', () => {
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
+      { id: '012-project-runs' },
     ]);
   });
 
@@ -610,6 +704,10 @@ describe('migrate', () => {
       join(__dirname, 'migrations', '011-qa-interruption-repair.sql'),
       join(directory, 'migrations', '011-qa-interruption-repair.sql'),
     );
+    copyFileSync(
+      join(__dirname, 'migrations', '012-project-runs.sql'),
+      join(directory, 'migrations', '012-project-runs.sql'),
+    );
     buildSync({
       bundle: true,
       entryPoints: [join(__dirname, 'migrate.ts')],
@@ -666,6 +764,7 @@ describe('migrate', () => {
         { id: '009-qa-execution' },
         { id: '010-review-automation-state' },
         { id: '011-qa-interruption-repair' },
+        { id: '012-project-runs' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -743,6 +842,7 @@ describe('migrate', () => {
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
       { id: '011-qa-interruption-repair' },
+      { id: '012-project-runs' },
     ]);
   });
 
@@ -1188,6 +1288,7 @@ describe('migrate', () => {
         { id: '009-qa-execution' },
         { id: '010-review-automation-state' },
         { id: '011-qa-interruption-repair' },
+        { id: '012-project-runs' },
       ]);
       expect(
         database

@@ -1,0 +1,284 @@
+import {
+  projectSchema,
+  sessionSchema,
+  taskAttemptSchema,
+  taskSchema,
+  workspaceSchema,
+} from '@mesh-session-platform/contracts';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import { ProjectRunRepository } from './project-run-repository.js';
+import { createTestRepositories } from '../test/create-test-database.js';
+
+const at = '2026-08-27T00:00:00.000Z';
+
+const setup = (options?: { failProjectEventInsert?: boolean }) => {
+  const repositories = createTestRepositories(options);
+  repositories.projects.create(
+    projectSchema.parse({
+      id: 'project-1',
+      displayName: 'Project',
+      repositoryPath: 'C:/code/project',
+      discoveredAt: at,
+      discoveryMetadata: {},
+    }),
+  );
+  for (const [id, rank] of [
+    ['task-a', 'a'],
+    ['task-b', 'b'],
+    ['task-c', 'c'],
+  ] as const) {
+    repositories.tasks.create(
+      taskSchema.parse({
+        id,
+        projectId: 'project-1',
+        title: id,
+        description: 'Persist this task.',
+        acceptanceCriteria: ['Persist it'],
+        priority: 'normal',
+        rank,
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: at,
+        updatedAt: at,
+      }),
+    );
+  }
+  repositories.workspaces.create(
+    workspaceSchema.parse({
+      id: 'workspace-1',
+      projectId: 'project-1',
+      type: 'shared',
+      path: 'C:/code/project',
+    }),
+  );
+  repositories.sessions.create(
+    sessionSchema.parse({
+      id: 'session-1',
+      projectId: 'project-1',
+      workspaceId: 'workspace-1',
+      title: 'Task A',
+      permissionMode: 'safe_auto',
+      lifecycleState: 'running',
+      createdAt: at,
+      updatedAt: at,
+    }),
+  );
+  repositories.attempts.create(
+    taskAttemptSchema.parse({
+      id: 'attempt-1',
+      taskId: 'task-a',
+      sessionId: 'session-1',
+      ordinal: 1,
+      source: 'launched',
+      actor: { type: 'system', id: 'system-1' },
+      createdAt: at,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+      role: null,
+    }),
+  );
+  return {
+    ...repositories,
+    projectRuns: new ProjectRunRepository(repositories.database),
+  };
+};
+
+const createRun = (
+  repository: ProjectRunRepository,
+  taskIds = ['task-a', 'task-b'],
+) =>
+  repository.create({
+    id: 'run-1',
+    projectId: 'project-1',
+    concurrency: 2,
+    startedAt: at,
+    items: taskIds.map((taskId, queuePosition) => ({
+      id: `item-${taskId}`,
+      taskId,
+      taskRevision: 1,
+      policyRevision: 1,
+      taskAutomationGeneration: 0,
+      queuePosition,
+      launchIdempotencyKey: `launch-${taskId}`,
+    })),
+  });
+
+describe('ProjectRunRepository', () => {
+  const repositories: Array<ReturnType<typeof setup>> = [];
+
+  afterEach(() =>
+    repositories.splice(0).forEach((repository) => repository.dispose()),
+  );
+
+  it('creates a run and retains deterministic queue order', () => {
+    const repository = setup();
+    repositories.push(repository);
+
+    expect(createRun(repository.projectRuns)).toMatchObject({
+      id: 'run-1',
+      state: 'running',
+      revision: 1,
+      items: [
+        { taskId: 'task-a', queuePosition: 0, status: 'queued' },
+        { taskId: 'task-b', queuePosition: 1, status: 'queued' },
+      ],
+    });
+    expect(repository.projectRuns.listByProject('project-1')).toHaveLength(1);
+  });
+
+  it('claims only the configured concurrency in queue order', () => {
+    const repository = setup();
+    repositories.push(repository);
+    const run = createRun(repository.projectRuns, [
+      'task-a',
+      'task-b',
+      'task-c',
+    ]);
+
+    const first = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: 1,
+      occurredAt: at,
+    });
+    const second = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: first!.run.revision,
+      occurredAt: at,
+    });
+    const full = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: second!.run.revision,
+      occurredAt: at,
+    });
+
+    expect([first!.item.taskId, second!.item.taskId]).toEqual([
+      'task-a',
+      'task-b',
+    ]);
+    expect(full).toBeUndefined();
+  });
+
+  it('rejects another open run for the project and a duplicate queued task', () => {
+    const repository = setup();
+    repositories.push(repository);
+    createRun(repository.projectRuns);
+
+    expect(() =>
+      repository.projectRuns.create({
+        id: 'run-2',
+        projectId: 'project-1',
+        concurrency: 1,
+        startedAt: at,
+        items: [],
+      }),
+    ).toThrow();
+    expect(() =>
+      repository.projectRuns.create({
+        id: 'completed-run',
+        projectId: 'project-1',
+        concurrency: 1,
+        startedAt: at,
+        state: 'completed',
+        completedAt: at,
+        completionReason: 'previous',
+        items: [
+          {
+            id: 'duplicate-task',
+            taskId: 'task-a',
+            taskRevision: 1,
+            policyRevision: 1,
+            taskAutomationGeneration: 0,
+            queuePosition: 0,
+            launchIdempotencyKey: 'launch-duplicate',
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it('links a launch and persists a terminal outcome at the expected revision', () => {
+    const repository = setup();
+    repositories.push(repository);
+    const run = createRun(repository.projectRuns, ['task-a']);
+    const claim = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: at,
+    });
+    const launched = repository.projectRuns.linkLaunch({
+      runId: run.id,
+      itemId: claim!.item.id,
+      expectedRunRevision: claim!.run.revision,
+      attemptId: 'attempt-1',
+      sessionId: 'session-1',
+      occurredAt: at,
+    });
+
+    const finished = repository.projectRuns.finishItem({
+      runId: run.id,
+      itemId: claim!.item.id,
+      expectedRunRevision: launched.revision,
+      status: 'completed',
+      outcomeReason: 'task completed',
+      occurredAt: at,
+    });
+    expect(finished.items[0]).toMatchObject({
+      status: 'completed',
+      outcomeReason: 'task completed',
+      finishedAt: at,
+    });
+    expect(
+      repository.projectRuns.changeState({
+        runId: run.id,
+        expectedRunRevision: launched.revision,
+        state: 'paused',
+        occurredAt: at,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('returns aggregate counts and rolls back a run with a failing project event', () => {
+    const repository = setup({ failProjectEventInsert: true });
+    repositories.push(repository);
+    const run = createRun(repository.projectRuns, ['task-a']);
+    expect(repository.projectRuns.reconcileCounts(run.id)).toEqual({
+      queued: 1,
+      launchPending: 0,
+      active: 0,
+      completed: 0,
+      attentionRequired: 0,
+      notStarted: 0,
+    });
+
+    repository.database.exec('BEGIN IMMEDIATE');
+    try {
+      repository.projectRuns.create({
+        id: 'rolled-back-run',
+        projectId: 'project-1',
+        concurrency: 1,
+        startedAt: at,
+        state: 'completed',
+        completedAt: at,
+        completionReason: 'rolled back',
+        items: [],
+      });
+      expect(() =>
+        repository.projectEvents.appendInTransaction('project-1', {
+          protocolVersion: 1,
+          projectId: repository.projects.get('project-1')!.id,
+          occurredAt: at,
+          type: 'project.changed',
+          payload: { project: repository.projects.get('project-1')! },
+        }),
+      ).toThrow('project event insert failed');
+    } finally {
+      repository.database.exec('ROLLBACK');
+    }
+    expect(repository.projectRuns.get('rolled-back-run')).toBeUndefined();
+  });
+});

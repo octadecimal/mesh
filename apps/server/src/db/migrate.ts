@@ -77,6 +77,13 @@ const qaInterruptionRepairMigration = {
     'utf8',
   ),
 };
+const projectRunsMigration = {
+  id: '012-project-runs',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '012-project-runs.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -90,6 +97,7 @@ const migrations = [
   qaExecutionMigration,
   reviewAutomationStateMigration,
   qaInterruptionRepairMigration,
+  projectRunsMigration,
 ];
 
 export const migrate = (database: Database): void => {
