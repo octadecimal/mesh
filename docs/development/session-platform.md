@@ -30,10 +30,11 @@ to `in_progress` only after startup succeeds. A startup failure leaves the task
 attempt. For overlapping work, prefer an isolated worktree and inspect any
 preserved worktree before cleanup.
 
-Milestone 2 completion is human-only. An agent session can do the work, but only
-a human actor may move a task to `review` or `done`. Do not automate those
-transitions; the actor and policy contracts exist so a later milestone can add
-authority explicitly.
+Lifecycle authority is explicit. A Developer agent may move its current task to
+`review` only by submitting a complete criterion report through its scoped
+control. A human may accept reviewed work as `done`. The bounded autonomous-
+review policy may complete verified work only after a structured QA verdict; it
+does not gain general task-editing or scheduling authority.
 
 On restart, Mesh reconciles attempts against durable session truth. It reports
 `startup_outcome_unknown` when a retained launch has no trustworthy startup
@@ -95,14 +96,72 @@ state is trustworthy. Startup, task-transition, or cleanup uncertainty is
 handled the same way: retain the evidence and workspace until an operator can
 reconcile it.
 
+## QA review workflow
+
+Configure **QA instructions** and the project **Review policy** in project
+settings. Both values are revisioned, and each QA cycle records the exact task,
+acceptance criteria, Developer report, QA instructions, built-in policy version,
+and review policy it received. Later settings changes affect future cycles only.
+Repository-specific QA instructions can name verification commands and
+conventions, but cannot broaden workspace, source-authoring, billing, or task
+authority.
+
+Choose `manual` when a human should control every handoff. After the current
+Developer cycle submits for review, select **Start QA** in the task drawer. Mesh
+creates a separate QA session and cycle in the Developer attempt's exact
+workspace. QA can read the submitted source and run verification commands, but
+cannot write source, create another worktree, commit, merge, or create a pull
+request. Its structured report covers every snapshotted acceptance criterion and
+records evidence, verification performed, residual risks, and workspace state.
+After a verified verdict, a human may accept the task as done. After a rejection,
+a human chooses the appropriate Developer rework action. Manual mode never
+advances or resumes work merely because a verdict arrived.
+
+Choose `autonomous_review` only after confirming that automatic QA and Developer
+resumes may consume Claude subscription quota. The policy change governs future
+actions and does not silently process a task already waiting in review; enable
+automation explicitly for that task when desired. In a healthy enabled loop,
+Mesh starts QA after the current Developer submission commits, moves a verified
+task to `done`, and resumes the same Developer session after rejection. It does
+not choose another task, create a fresh attempt, or switch workspaces.
+
+The autonomous rejection budget is three QA rejections since the latest human-
+authorized initial Developer launch or human rework decision. The first and
+second rejection may resume the same Developer session. The third records the
+report and pauses automation with the task still in `review`; no fourth role
+cycle starts. A new human rework decision resets the budget. Switching the
+project policy to `manual` or selecting **Pause automation** prevents future
+automatic actions without silently interrupting a session already running;
+session interruption remains a separate visible command.
+
+Use the QA panel and **Execution history** to inspect the active role, exact
+workspace, policy snapshot, remaining rejection budget, chronological Developer
+and QA cycles, criterion-by-criterion evidence, linked session transcript,
+automatic actions, and pause or repair reason. These durable reports and events,
+not transcript prose or process exit, determine the task outcome. Refresh and
+reconnect replay the same project history in order.
+
+Recovery is deliberately conservative. QA startup failure keeps the QA session,
+cycle, and diagnostics while preserving the prior task truth. Developer resume
+failure keeps the rejection and feedback and leaves the task in `review`.
+Interrupted or outcome-unknown QA, audit failure, a missing or ambiguous
+workspace, workspace identity mismatch, and unexpected source changes all pause
+the loop with work and evidence preserved. Inspect the task, both linked
+sessions, reports, diagnostics, and workspace before using the offered state-
+specific repair action. Recovery never infers a verdict, deletes history,
+creates a fallback attempt, or bypasses workspace ownership checks.
+
 ## Subscription-only operation
 
 Mesh uses the installed Claude subscription through the Claude Agent SDK. It
 does not support an API-key or pay-per-token fallback. This applies equally to
-starting Developer and to the resume paths after rejection or unblock. If
-`ANTHROPIC_API_KEY` is present, new and resumed sessions are refused. Remove the
-variable outside Mesh, verify the intended Claude subscription is active, and
-restart Mesh.
+starting Developer, starting QA, and the resume paths after rejection or
+unblock. If `ANTHROPIC_API_KEY` is present, new and resumed sessions are refused.
+Remove the variable outside Mesh, verify the intended Claude subscription is
+active, and restart Mesh. Manual QA consumes subscription quota when a human
+starts it. Enabled autonomous review may consume quota for each automatic QA
+start and each Developer resume; the explicit consent, rejection ceiling, and
+pause control bound that behavior.
 
 Multiple live sessions that share a folder can modify the same files. Mesh warns about this collision; prefer an isolated worktree when sessions may overlap. Mesh-created worktrees are preserved on archive and on failed or ambiguous cleanup. Deletion removes one only after explicit confirmation and ownership/path checks; otherwise remove or preserve it manually with Git after inspecting its changes.
 
@@ -116,7 +175,15 @@ The normal local and CI gate is:
 corepack pnpm verify
 ```
 
-It runs formatting, lint, type checking, unit tests, builds, and deterministic Chromium acceptance tests. The acceptance fixture uses the production-built server and web assets, a temporary SQLite database and temporary Git repositories, and an in-process fake Claude driver available only under explicit test configuration. It covers explicit import, task launch and failure retention, human review/completion, and refresh recovery without contacting Claude. Failure traces and screenshots are retained under `tmp/playwright/session-platform`.
+It runs formatting, lint, type checking, unit tests, builds, and deterministic
+Chromium acceptance tests. The acceptance fixture uses the production-built
+server and web assets, a temporary SQLite database and temporary Git
+repositories, and an in-process fake Claude driver available only under
+explicit test configuration. It covers explicit import, task launch and failure
+retention, manual QA, bounded autonomous rejection/rework, verified completion,
+and refresh recovery without contacting Claude or consuming Claude subscription
+quota. Failure traces and screenshots are retained under
+`tmp/playwright/session-platform`.
 
 Windows Chromium is the required acceptance environment. The same test suite is the portable basis for future macOS/Linux matrix entries.
 
