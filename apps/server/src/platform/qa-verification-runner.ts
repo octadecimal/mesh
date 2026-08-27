@@ -324,8 +324,7 @@ const escapesWorkspace = (workspacePath: string, candidate: string) => {
   if (!candidate) return false;
   const normalizedCandidate = candidate.replace(/\\/g, '/');
   const windowsCandidate =
-    win32.isAbsolute(candidate) &&
-    (/^[a-z]:[\\/]/i.test(candidate) || /^[\\/]{2}/.test(candidate));
+    /^[a-z]:/i.test(candidate) || /^[\\/]{2}/.test(candidate);
   if (windowsCandidate) {
     const windowsWorkspace =
       win32.isAbsolute(workspacePath) &&
