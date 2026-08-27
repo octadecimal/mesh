@@ -444,7 +444,7 @@ describe('QaExecutionService', () => {
     );
   });
 
-  it('continues an eligible autonomous rejection only after the QA runtime closes', async () => {
+  it('continues an eligible autonomous rejection before stopping the QA runtime', async () => {
     const afterRejectedVerdict = vi.fn(async () => undefined);
     const context = setup({
       reviewPolicy: 'autonomous_review',
@@ -476,6 +476,42 @@ describe('QaExecutionService', () => {
       taskId: context.task.id,
       cycleId: launched.cycle.id,
     });
+    expect(afterRejectedVerdict.mock.invocationCallOrder[0]).toBeLessThan(
+      context.interrupt.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
+    );
+  });
+
+  it('still stops the QA runtime when autonomous rejection follow-up fails', async () => {
+    const afterRejectedVerdict = vi.fn(async () => {
+      throw new Error('resume failed');
+    });
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      afterRejectedVerdict,
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools[0];
+    if (!control) throw new Error('Expected QA verdict control');
+
+    const result = await control.execute(
+      reportFor(launched.cycle, {
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'Focused verification failed.',
+          },
+        ],
+      }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
   });
 
   it('does not continue a rejected manual review when automation state is stale', async () => {

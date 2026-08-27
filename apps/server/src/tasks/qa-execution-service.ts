@@ -771,16 +771,25 @@ export class QaExecutionService {
                   report: parsed.data,
                   actor,
                 });
-                await this.dependencies.registry.interrupt(prepared.session.id);
                 if (
                   outcome.report.disposition === 'rejected' &&
                   outcome.cycle.reviewPolicy === 'autonomous_review' &&
                   outcome.task.reviewAutomation.status === 'enabled'
                 ) {
-                  await this.dependencies.afterRejectedVerdict?.({
-                    taskId: outcome.task.id,
-                    cycleId: outcome.cycle.id,
-                  });
+                  try {
+                    await this.dependencies.afterRejectedVerdict?.({
+                      taskId: outcome.task.id,
+                      cycleId: outcome.cycle.id,
+                    });
+                  } finally {
+                    await this.dependencies.registry.interrupt(
+                      prepared.session.id,
+                    );
+                  }
+                } else {
+                  await this.dependencies.registry.interrupt(
+                    prepared.session.id,
+                  );
                 }
                 return {
                   content: [

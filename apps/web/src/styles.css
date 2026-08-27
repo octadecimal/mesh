@@ -128,12 +128,25 @@ textarea:focus-visible {
 }
 .project-board-boundary {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: auto auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   height: 100%;
   overflow: hidden;
   background: linear-gradient(145deg, #0b1017, #101824 55%, #0a0e14);
+}
+
+.project-board-header,
+.project-board-boundary > .task-board {
+  grid-column: 1 / -1;
+}
+
+.project-board-boundary > .developer-instructions,
+.project-board-boundary > .qa-settings {
+  align-self: start;
+  max-height: 18rem;
+  overflow: auto;
 }
 .project-view {
   min-width: 0;
@@ -1584,6 +1597,22 @@ textarea:focus-visible {
   }
 }
 @media (max-width: 760px) {
+  .project-board-boundary {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+  }
+
+  .project-board-header,
+  .project-board-boundary > .task-board {
+    grid-column: 1;
+  }
+
+  .project-board-boundary > .developer-instructions,
+  .project-board-boundary > .qa-settings {
+    max-height: none;
+    overflow: visible;
+  }
+
   .app-shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto minmax(0, 1fr);

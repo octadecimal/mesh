@@ -17,7 +17,10 @@ import {
 
 // The fake is test-only infrastructure; production selection still rejects it.
 // eslint-disable-next-line @nx/enforce-module-boundaries
-import { FakeClaudeSessionDriver } from '../../apps/server/src/claude/fake-driver.js';
+import {
+  FakeClaudeSessionDriver,
+  type FakeQaStep,
+} from '../../apps/server/src/claude/fake-driver.js';
 
 const require = createRequire(__filename);
 const builtMain = resolve('dist/apps/server/main.js');
@@ -32,12 +35,17 @@ type FakeDriverSessionControl = {
 };
 
 type FakeClaudeSessionDriverControl = {
-  createdRequests: unknown[];
+  createdRequests: Array<{
+    developer?: unknown;
+    role?: { role: 'qa' };
+  }>;
   createdSessions: FakeDriverSessionControl[];
   resumedRequests: Array<{
     claudeResumeId: string;
     workspacePath?: string;
     permissionMode?: string;
+    developer?: unknown;
+    role?: { role: 'qa' };
   }>;
   submitForReview(
     index: number,
@@ -47,6 +55,13 @@ type FakeClaudeSessionDriverControl = {
     index: number,
     report: DeveloperBlockerReportInput,
   ): Promise<void>;
+  queueQaStep(step: FakeQaStep): void;
+  submitLatestDeveloperForReview(
+    report: DeveloperCompletionReportInput,
+  ): Promise<void>;
+  drainQaSteps(): Promise<void>;
+  initialDeveloperResumeId(): string | undefined;
+  latestDeveloperResumeId(): string | undefined;
 };
 
 type RunningServer = {
@@ -125,6 +140,49 @@ const launchHarness = async (): Promise<{
       },
     ],
   });
+  const driverControl = driver as unknown as FakeClaudeSessionDriverControl;
+  driverControl.queueQaStep = (step) => {
+    const queue = (
+      driver as unknown as {
+        qaSteps: FakeQaStep[];
+      }
+    ).qaSteps;
+    queue.push(step);
+  };
+  driverControl.submitLatestDeveloperForReview = async (report) => {
+    const configurations = (
+      driver as unknown as {
+        developerConfigurations: Array<
+          | {
+              controls: {
+                submitForReview(
+                  value: DeveloperCompletionReportInput,
+                ): Promise<void>;
+              };
+            }
+          | undefined
+        >;
+      }
+    ).developerConfigurations;
+    let index = configurations.length - 1;
+    while (index >= 0 && !configurations[index]) index -= 1;
+    const configuration = configurations[index];
+    if (!configuration) {
+      throw new Error('No role-aware Developer runtime is available');
+    }
+    await configuration.controls.submitForReview(report);
+  };
+  driverControl.initialDeveloperResumeId = () => {
+    const index = driver.createdRequests.findIndex(
+      (request) => request.developer,
+    );
+    return index < 0
+      ? undefined
+      : driver.createdSessions[index]?.claudeResumeId;
+  };
+  driverControl.latestDeveloperResumeId = () =>
+    [...driver.resumedRequests].reverse().find((request) => request.developer)
+      ?.claudeResumeId;
   const startServer = (require(builtMain) as { startServer: StartServer })
     .startServer;
   let server: RunningServer;
@@ -142,7 +200,7 @@ const launchHarness = async (): Promise<{
     };
     server = await startServer({
       environment,
-      test: { driver, webRoot: resolve('dist/apps/web') },
+      test: { driver: driverControl, webRoot: resolve('dist/apps/web') },
     });
   };
 
@@ -187,7 +245,7 @@ const launchHarness = async (): Promise<{
     repositoryPath,
     sharedPath,
     worktreePath,
-    driver,
+    driver: driverControl,
     snapshot: async () =>
       sessionSnapshotSchema.parse((await request('/api/snapshot')).body),
     projectId,
