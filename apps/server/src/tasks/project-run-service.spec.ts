@@ -644,7 +644,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
     expect(launchAttempt).toHaveBeenCalledOnce();
   });
 
-  it('retries one reconciled launch_pending item idempotently after restart', async () => {
+  it('does not retry an arbitrary persisted launch_pending item', async () => {
     const context = setup();
     context.repositories.tasks.create(
       createTask(context.project.id, 'task-retry'),
@@ -662,19 +662,45 @@ describe('ProjectRunService drainAvailableSlots', () => {
     });
     if (!claimed) throw new Error('Expected durable launch claim');
 
-    await Promise.all([
-      context.service.drainAvailableSlots(started.run.id),
-      context.service.drainAvailableSlots(started.run.id),
-    ]);
+    await context.service.drainAvailableSlots(started.run.id);
 
-    expect(context.launchAttempt).toHaveBeenCalledOnce();
+    expect(context.launchAttempt).not.toHaveBeenCalled();
     expect(
       context.repositories.projectRuns.get(started.run.id)?.items[0],
     ).toMatchObject({
-      status: 'active',
-      attemptId: expect.any(String),
-      sessionId: expect.any(String),
+      status: 'launch_pending',
+      attemptId: null,
+      sessionId: null,
     });
+  });
+
+  it('does not launch when persisted occupancy exceeds run concurrency', async () => {
+    const context = setup();
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'over-capacity-a', { rank: 'a' }),
+    );
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'over-capacity-b', { rank: 'b' }),
+    );
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-over-capacity',
+      1,
+    );
+    context.repositories.database
+      .prepare(
+        "UPDATE project_run_items SET status = 'launch_pending', claimed_at = ? WHERE run_id = ?",
+      )
+      .run(now, started.run.id);
+
+    const observed = await context.service.drainAvailableSlots(started.run.id);
+
+    expect(context.launchAttempt).not.toHaveBeenCalled();
+    expect(observed.items.map(({ status }) => status)).toEqual([
+      'launch_pending',
+      'launch_pending',
+    ]);
   });
 
   it('terminalizes a known startup failure and continues independent queued work', async () => {
@@ -1093,6 +1119,46 @@ describe('ProjectRunService observeTaskOutcome', () => {
         expect.objectContaining({ taskId: nextTask.id, status: 'active' }),
       ]),
     );
+  });
+
+  it('pauses when the frozen QA policy revision no longer matches', async () => {
+    const context = setup();
+    const { firstTask, runId } = await prepareActiveRun(
+      context,
+      'policy-drift',
+    );
+    const project = context.repositories.projects.get(context.project.id);
+    if (!project) throw new Error('Expected project');
+    context.repositories.projects.updateQaConfiguration(
+      project.id,
+      project.qaConfiguration.revision,
+      {
+        instructions: {
+          content: `${project.qaConfiguration.instructions.content} Updated.`,
+        },
+        reviewPolicy: project.qaConfiguration.reviewPolicy,
+      },
+      human,
+    );
+    updateTask(context, firstTask.id, (task) => ({
+      ...task,
+      lifecycleState: 'review',
+      updatedAt: now,
+    }));
+
+    await context.service.observeTaskOutcome(firstTask.id);
+
+    expect(context.repositories.projectRuns.get(runId)).toMatchObject({
+      state: 'paused',
+      items: [
+        expect.objectContaining({
+          taskId: firstTask.id,
+          status: 'active',
+          outcomeReason: null,
+        }),
+        expect.objectContaining({ status: 'queued' }),
+      ],
+    });
   });
 
   it('uses a durable task-local repair and releases its slot', async () => {

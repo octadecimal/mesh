@@ -34,6 +34,7 @@ export type ProjectRunReconciliationDependencies =
       | 'get'
       | 'listByProject'
       | 'linkLaunch'
+      | 'resetLaunchClaim'
       | 'finishItem'
       | 'changeState'
       | 'reconcileCounts'
@@ -74,6 +75,7 @@ const projectRunAttempt = (
   attempt.source.runItemId === itemId;
 
 const taskOutcome = (
+  dependencies: ProjectRunReconciliationDependencies,
   project: Project,
   task: Task,
   item: ProjectRunItem,
@@ -83,7 +85,16 @@ const taskOutcome = (
   if (task.lifecycleState === 'done') {
     return { status: 'completed', reason: 'task_done' };
   }
-  if (task.blocked) {
+  const blockedCycle = dependencies.developerExecutions
+    .listByTask(task.id)
+    .find(
+      (cycle) =>
+        cycle.attemptId === item.attemptId &&
+        cycle.endedAt !== null &&
+        cycle.terminalDisposition === 'blocked' &&
+        cycle.blockerReportId !== null,
+    );
+  if (task.blocked && blockedCycle) {
     return { status: 'attention_required', reason: 'developer_blocked' };
   }
   if (task.lifecycleState !== 'review') return undefined;
@@ -159,6 +170,9 @@ const pauseRun = (
   occurredAt: string,
 ): ProjectRun =>
   mutateRun(dependencies, run.id, reason, occurredAt, (current) => {
+    if (current.state === 'draining') {
+      throw new ProjectRunReconciliationError(reason);
+    }
     const paused = dependencies.projectRuns.changeState({
       runId: current.id,
       expectedRunRevision: current.revision,
@@ -193,6 +207,21 @@ const finishItem = (
         outcomeReason: reason,
         occurredAt,
       }),
+  );
+
+const resetLaunchClaim = (
+  dependencies: ProjectRunReconciliationDependencies,
+  run: ProjectRun,
+  item: ProjectRunItem,
+  occurredAt: string,
+): ProjectRun =>
+  mutateRun(dependencies, run.id, `reset-${item.id}`, occurredAt, (current) =>
+    dependencies.projectRuns.resetLaunchClaim({
+      runId: current.id,
+      itemId: item.id,
+      expectedRunRevision: current.revision,
+      occurredAt,
+    }),
   );
 
 const completeRun = (
@@ -329,7 +358,14 @@ export const reconcileProjectRuns: ReconcileProjectRuns = (dependencies) => {
           break;
         }
 
-        const outcome = taskOutcome(project, task, item);
+        if (project.qaConfiguration.revision !== item.policyRevision) {
+          pauseRun(dependencies, run, 'capacity_ambiguous', occurredAt);
+          pausedRunIds.push(run.id);
+          paused = true;
+          break;
+        }
+
+        const outcome = taskOutcome(dependencies, project, task, item);
         if (outcome) {
           run = finishItem(
             dependencies,
@@ -394,6 +430,11 @@ export const reconcileProjectRuns: ReconcileProjectRuns = (dependencies) => {
             !task.blocked &&
             task.revision === item.taskRevision
           ) {
+            if (run.state === 'draining') {
+              throw new ProjectRunReconciliationError('launch_outcome_unknown');
+            }
+            run = resetLaunchClaim(dependencies, run, item, occurredAt);
+            repairedItemIds.push(item.id);
             retryablePending = true;
             continue;
           }

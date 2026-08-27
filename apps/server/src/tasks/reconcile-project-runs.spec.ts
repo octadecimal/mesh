@@ -222,13 +222,30 @@ describe('reconcileProjectRuns', () => {
     const item = claim(context);
 
     expect(reconcile(context)).toEqual({
-      repairedItemIds: [],
+      repairedItemIds: [item.id],
       pausedRunIds: [],
       launchableRunIds: [context.run.id],
     });
     expect(
       context.repositories.projectRuns.get(context.run.id)?.items[0],
-    ).toMatchObject({ id: item.id, status: 'launch_pending', attemptId: null });
+    ).toMatchObject({
+      id: item.id,
+      status: 'queued',
+      attemptId: null,
+      claimedAt: null,
+    });
+    expect(
+      context.repositories.projectEvents.after(context.project.id, 0),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'project.run_changed',
+        payload: {
+          run: expect.objectContaining({
+            items: [expect.objectContaining({ id: item.id, status: 'queued' })],
+          }),
+        },
+      }),
+    ]);
   });
 
   it('does not attach an older unlinked attempt repair to a new launch claim', () => {
@@ -296,13 +313,17 @@ describe('reconcileProjectRuns', () => {
     );
 
     expect(reconcile(context)).toEqual({
-      repairedItemIds: [],
+      repairedItemIds: [item.id],
       pausedRunIds: [],
       launchableRunIds: [context.run.id],
     });
     expect(
       context.repositories.projectRuns.get(context.run.id)?.items[0],
-    ).toMatchObject({ status: 'launch_pending', outcomeReason: null });
+    ).toMatchObject({
+      status: 'queued',
+      claimedAt: null,
+      outcomeReason: null,
+    });
   });
 
   it('closes a terminal task without consulting process or transcript state', () => {
@@ -377,6 +398,87 @@ describe('reconcileProjectRuns', () => {
     expect(context.repositories.projectRuns.get(context.run.id)).toMatchObject({
       state: 'paused',
       items: [expect.objectContaining({ status: 'launch_pending' })],
+    });
+  });
+
+  it('preserves a stopped launch_pending run with an unknown startup outcome', () => {
+    const context = setup();
+    const item = claim(context);
+    launchEffect(context, item, { sessionState: 'starting' });
+    recoverInterruptedSessions(context.repositories.database);
+    const current = context.repositories.projectRuns.get(context.run.id);
+    if (!current) throw new Error('Expected current run');
+    const draining = context.repositories.projectRuns.changeState({
+      runId: current.id,
+      expectedRunRevision: current.revision,
+      state: 'draining',
+      occurredAt: now,
+    });
+    if (!draining) throw new Error('Expected draining run');
+
+    try {
+      reconcile(context);
+      throw new Error('Expected unknown stopped launch outcome');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'launch_outcome_unknown' });
+    }
+    expect(context.repositories.projectRuns.get(context.run.id)).toMatchObject({
+      state: 'draining',
+      items: [expect.objectContaining({ status: 'launch_pending' })],
+    });
+  });
+
+  it('pauses when the frozen QA policy revision no longer matches', () => {
+    const context = setup();
+    claim(context);
+    const project = context.repositories.projects.get(context.project.id);
+    if (!project) throw new Error('Expected project');
+    context.repositories.projects.updateQaConfiguration(
+      project.id,
+      project.qaConfiguration.revision,
+      {
+        instructions: {
+          content: `${project.qaConfiguration.instructions.content} Updated.`,
+        },
+        reviewPolicy: project.qaConfiguration.reviewPolicy,
+      },
+      human,
+    );
+
+    expect(reconcile(context)).toEqual({
+      repairedItemIds: [],
+      pausedRunIds: [context.run.id],
+      launchableRunIds: [],
+    });
+    expect(context.repositories.projectRuns.get(context.run.id)).toMatchObject({
+      state: 'paused',
+      items: [expect.objectContaining({ status: 'launch_pending' })],
+    });
+  });
+
+  it('does not classify a human-blocked task as a Developer outcome', () => {
+    const context = setup();
+    const item = claim(context);
+    updateTask(context, item.taskId, (task) => ({
+      ...task,
+      blocked: {
+        reason: 'Waiting for an operator decision.',
+        actor: human,
+        blockedAt: now,
+      },
+      updatedAt: now,
+    }));
+
+    expect(reconcile(context)).toEqual({
+      repairedItemIds: [],
+      pausedRunIds: [context.run.id],
+      launchableRunIds: [],
+    });
+    expect(
+      context.repositories.projectRuns.get(context.run.id)?.items[0],
+    ).toMatchObject({
+      status: 'launch_pending',
+      outcomeReason: null,
     });
   });
 

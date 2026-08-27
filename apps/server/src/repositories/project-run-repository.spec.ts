@@ -1,6 +1,7 @@
 import {
   projectSchema,
   sessionSchema,
+  taskActorSchema,
   taskAttemptSourceSchema,
   taskAttemptSchema,
   taskSchema,
@@ -182,6 +183,108 @@ describe('ProjectRunRepository', () => {
       'task-b',
     ]);
     expect(full).toBeUndefined();
+  });
+
+  it('resets only the expected effect-free launch claim to queued', () => {
+    const repository = setup({
+      attemptSource: taskAttemptSourceSchema.parse('launched'),
+    });
+    repositories.push(repository);
+    repository.attempts.unlink(
+      'attempt-1',
+      taskActorSchema.parse({ type: 'human', id: 'operator-1' }),
+      'Historical attempt is no longer current.',
+      at,
+    );
+    const run = createRun(repository.projectRuns, ['task-a']);
+    const claim = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: at,
+    });
+    if (!claim) throw new Error('Expected a claimed item');
+
+    const reset = repository.projectRuns.resetLaunchClaim({
+      runId: run.id,
+      itemId: claim.item.id,
+      expectedRunRevision: claim.run.revision,
+      occurredAt: at,
+    });
+
+    expect(reset).toMatchObject({
+      revision: claim.run.revision + 1,
+      items: [
+        {
+          id: claim.item.id,
+          status: 'queued',
+          claimedAt: null,
+          attemptId: null,
+          sessionId: null,
+        },
+      ],
+    });
+    expect(() =>
+      repository.projectRuns.resetLaunchClaim({
+        runId: run.id,
+        itemId: claim.item.id,
+        expectedRunRevision: claim.run.revision,
+        occurredAt: at,
+      }),
+    ).toThrow('Project run revision does not match');
+  });
+
+  it('rejects resetting a launch claim with any current attempt', () => {
+    const repository = setup({
+      attemptSource: taskAttemptSourceSchema.parse('launched'),
+    });
+    repositories.push(repository);
+    const run = createRun(repository.projectRuns, ['task-a']);
+    const claim = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: at,
+    });
+    if (!claim) throw new Error('Expected a claimed item');
+
+    expect(() =>
+      repository.projectRuns.resetLaunchClaim({
+        runId: run.id,
+        itemId: claim.item.id,
+        expectedRunRevision: claim.run.revision,
+        occurredAt: at,
+      }),
+    ).toThrow('Project run launch claim cannot be reset');
+    expect(repository.projectRuns.get(run.id)).toEqual(claim.run);
+  });
+
+  it('rejects resetting a launch claim after it becomes active', () => {
+    const repository = setup();
+    repositories.push(repository);
+    const run = createRun(repository.projectRuns, ['task-a']);
+    const claim = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: at,
+    });
+    if (!claim) throw new Error('Expected a claimed item');
+    const active = repository.projectRuns.linkLaunch({
+      runId: run.id,
+      itemId: claim.item.id,
+      expectedRunRevision: claim.run.revision,
+      attemptId: 'attempt-1',
+      sessionId: 'session-1',
+      occurredAt: at,
+    });
+
+    expect(() =>
+      repository.projectRuns.resetLaunchClaim({
+        runId: run.id,
+        itemId: claim.item.id,
+        expectedRunRevision: active.revision,
+        occurredAt: at,
+      }),
+    ).toThrow('Project run launch claim cannot be reset');
+    expect(repository.projectRuns.get(run.id)).toEqual(active);
   });
 
   it('rejects another open run for the project and a duplicate queued task', () => {

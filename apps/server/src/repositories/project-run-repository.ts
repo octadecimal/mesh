@@ -76,6 +76,13 @@ export type LinkRunItemLaunchInput = {
   occurredAt: string;
 };
 
+export type ResetRunItemLaunchClaimInput = {
+  runId: string;
+  itemId: string;
+  expectedRunRevision: number;
+  occurredAt: string;
+};
+
 export type FinishRunItemInput = {
   runId: string;
   itemId: string;
@@ -303,6 +310,46 @@ export class ProjectRunRepository {
       const next = this.get(runId);
       const item = next?.items.find(({ id }) => id === itemRow.id);
       return next && item ? { run: next, item } : undefined;
+    });
+  }
+
+  resetLaunchClaim(input: ResetRunItemLaunchClaimInput): ProjectRun {
+    const runId = idSchema.parse(input.runId);
+    const itemId = idSchema.parse(input.itemId);
+    const occurredAt = isoTimestampSchema.parse(input.occurredAt);
+    assertPositiveInteger(input.expectedRunRevision, 'Expected run revision');
+    return this.transaction(() => {
+      const run = this.get(runId);
+      if (!run || run.revision !== input.expectedRunRevision) {
+        throw new Error('Project run revision does not match');
+      }
+      const result = this.database
+        .prepare(
+          `UPDATE project_run_items
+        SET status = 'queued', claimed_at = NULL
+        WHERE id = ? AND run_id = ? AND status = 'launch_pending'
+          AND attempt_id IS NULL AND session_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM project_runs
+            WHERE project_runs.id = project_run_items.run_id
+              AND project_runs.state = 'running'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM task_attempts
+            WHERE task_attempts.task_id = project_run_items.task_id
+              AND task_attempts.unlinked_at IS NULL
+          )`,
+        )
+        .run(itemId, runId);
+      if (
+        result.changes !== 1 ||
+        !this.bumpRevision(runId, input.expectedRunRevision, occurredAt)
+      ) {
+        throw new Error('Project run launch claim cannot be reset');
+      }
+      const next = this.get(runId);
+      if (!next) throw new Error('Reset project run was not found');
+      return next;
     });
   }
 

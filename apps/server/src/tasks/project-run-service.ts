@@ -232,19 +232,9 @@ export class ProjectRunService {
         );
       }
       if (run.state !== 'running') return run;
-      const retryable = run.items.find(
-        (item) =>
-          item.status === 'launch_pending' &&
-          item.attemptId === null &&
-          item.sessionId === null &&
-          !this.launchingItemIds.has(item.id),
-      );
-      if (retryable) {
-        await this.launch(run, retryable);
-        continue;
-      }
       const counts = this.dependencies.projectRuns.reconcileCounts(run.id);
-      if (counts.launchPending + counts.active >= run.concurrency) return run;
+      const occupied = counts.launchPending + counts.active;
+      if (occupied >= run.concurrency) return run;
       const next = run.items.find(({ status }) => status === 'queued');
       if (!next) {
         if (counts.launchPending + counts.active > 0) return run;
@@ -274,7 +264,13 @@ export class ProjectRunService {
       return;
     }
 
-    const outcome = this.classifyTaskOutcome(task, item);
+    const project = this.dependencies.projects.get(task.projectId);
+    if (!project || project.qaConfiguration.revision !== item.policyRevision) {
+      this.pauseForAmbiguousLaunch(run.id);
+      return;
+    }
+
+    const outcome = this.classifyTaskOutcome(project, task, item);
     if (!outcome) return;
     this.finishOutcome(run, item, outcome.status, outcome.reason);
     await this.continueAfterOutcome(run.id);
@@ -414,6 +410,7 @@ export class ProjectRunService {
   }
 
   private classifyTaskOutcome(
+    project: Project,
     task: Task,
     item: ProjectRunItem,
   ):
@@ -464,11 +461,7 @@ export class ProjectRunService {
       };
     }
 
-    const project = this.dependencies.projects.get(task.projectId);
-    if (
-      project?.qaConfiguration.revision === item.policyRevision &&
-      project.qaConfiguration.reviewPolicy === 'manual'
-    ) {
+    if (project.qaConfiguration.reviewPolicy === 'manual') {
       return { status: 'attention_required', reason: 'manual_review' };
     }
     if (task.reviewAutomation.status === 'paused') {
