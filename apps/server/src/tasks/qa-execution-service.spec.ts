@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1854,6 +1855,108 @@ describe('QaExecutionService', () => {
         }),
       }),
     );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+  });
+
+  it('pauses without a verdict when trusted Git becomes unavailable', async () => {
+    let captureCount = 0;
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => {
+          captureCount += 1;
+          if (captureCount === 1) return 'sha256:developer-source';
+          throw Object.assign(new Error('trusted Git unavailable'), {
+            code: 'qa_verification_executable_unavailable',
+          });
+        },
+        run: async () => ({
+          command: 'pnpm test',
+          exitCode: 0,
+          stdout: 'passed',
+          stderr: '',
+        }),
+      },
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({
+      code: 'qa_verification_executable_unavailable',
+    });
+
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.launch.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_executable_unavailable',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+  });
+
+  it('pauses without a verdict when final source revalidation is cancelled', async () => {
+    let canonicalWorkspace = '';
+    let armed = false;
+    let rootRevalidations = 0;
+    let cancelRuntime = () => undefined;
+    const run = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: 'source.ts\0',
+      stderr: '',
+    }));
+    const verificationRunner = new QaVerificationRunner(
+      { run } as ProcessRunner,
+      undefined,
+      undefined,
+      {
+        resolveRealPath: async (path) => {
+          const resolved = await realpath(path);
+          if (armed && resolved === canonicalWorkspace) {
+            rootRevalidations += 1;
+            if (rootRevalidations === 8) cancelRuntime();
+          }
+          return resolved;
+        },
+      },
+    );
+    const context = setup({ verificationRunner });
+    writeFileSync(join(context.workspace.path, 'source.ts'), 'trusted source');
+    canonicalWorkspace = await realpath(context.workspace.path);
+    const launched = await launchForVerdict(context);
+    cancelRuntime = () =>
+      context.service.cancelRuntime(launched.launch.session.id);
+    armed = true;
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_verification_cancelled' });
+
+    expect(rootRevalidations).toBe(8);
+    expect(context.repositories.database.inTransaction).toBe(false);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
     expect(
       context.repositories.qaExecutions.listReportsForAttempts([
         context.attempt.id,

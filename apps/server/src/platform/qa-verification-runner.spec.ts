@@ -6,7 +6,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { open, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -395,6 +395,22 @@ describe('QaVerificationRunner', () => {
     },
   );
 
+  it('maps a missing trusted executable to a stable QA failure', async () => {
+    const runner = new QaVerificationRunner({
+      run: async () => {
+        throw Object.assign(new Error('trusted Git unavailable'), {
+          code: 'process_trusted_executable_unavailable',
+        });
+      },
+    });
+
+    await expect(runner.captureTrackedSource('C:\\repo')).rejects.toMatchObject(
+      {
+        code: 'qa_verification_executable_unavailable',
+      },
+    );
+  });
+
   it.each([
     {
       name: 'runtime cancellation',
@@ -761,6 +777,44 @@ describe('QaVerificationRunner', () => {
     } finally {
       rmSync(root, { force: true, recursive: true });
       rmSync(outside, { force: true, recursive: true });
+    }
+  });
+
+  it('cancels when the reverse observation aborts during final root revalidation', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-source-cancel-'));
+    try {
+      mkdirSync(join(root, 'src'));
+      writeFileSync(join(root, 'src', 'app.ts'), 'trusted source');
+      const canonicalRoot = await realpath(root);
+      const controller = new AbortController();
+      let rootRevalidations = 0;
+      const run = vi.fn(async () => ({
+        exitCode: 0,
+        stdout: 'src/app.ts\0',
+        stderr: '',
+      }));
+      const runner = new QaVerificationRunner(
+        { run } as ProcessRunner,
+        undefined,
+        undefined,
+        {
+          resolveRealPath: async (path) => {
+            const resolved = await realpath(path);
+            if (resolved === canonicalRoot) {
+              rootRevalidations += 1;
+              if (rootRevalidations === 8) controller.abort();
+            }
+            return resolved;
+          },
+        },
+      );
+
+      await expect(
+        runner.captureTrackedSource(root, controller.signal),
+      ).rejects.toMatchObject({ code: 'qa_verification_cancelled' });
+      expect(rootRevalidations).toBe(8);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
     }
   });
 

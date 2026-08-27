@@ -93,7 +93,9 @@ reads and directory enumerations revalidate the canonical root, object, and
 parent identities before returning data so a link or file swap fails closed.
 Workspace search also caps visited directories, directory entries, queued
 paths, files, and matches, and checks the owning QA cycle's cancellation signal
-throughout traversal and file reads.
+throughout traversal and file reads. Directory traversal streams entries and
+closes the handle at the entry or queue budget instead of materializing an
+unbounded directory first.
 The constrained runner treats ambiguous joined option values as workspace
 paths unless they are explicitly safe non-path values, and validates missing
 paths through their deepest existing ancestor. It admits only non-interactive
@@ -101,8 +103,11 @@ verification commands, gives each child a five-minute wall-clock bound, caps
 each output stream at 64,000 bytes, and cancels owned process trees when the QA
 runtime is interrupted, closes, or exceeds a bound. On Windows, vetted package
 manager commands resolve to canonical bundled JavaScript entries and run via
-the installed Node executable with the shell disabled. Mesh proves that its
-canonical owned-tree terminator works before launching a child; a missing,
+the installed Node executable with the shell disabled. QA Git commands resolve
+to an absolute canonical executable from fixed system installation locations;
+Mesh never accepts PATH or a workspace-local Git executable, and fails closed
+before launch when no trusted Git installation is available. Mesh proves that
+its canonical owned-tree terminator works before launching a child; a missing,
 failing, or unresponsive terminator refuses launch or durably pauses the QA
 cycle after an exact-owned-PID fallback. The runner never exposes a general
 shell or source-authoring control.
@@ -125,9 +130,11 @@ workspace root, full path, and parent identity, so a restored parent swap cannot
 hide an external read. Every component of a requested path is inspected;
 broken links whose lexical target escapes the workspace fail closed even when
 the target does not exist. An indexed link's canonical parent must also remain
-inside the workspace. Timeout, cancellation, output overflow, or confinement
-failure pauses review and prevents a verdict. Verification may create ordinary
-ignored build or test artifacts.
+inside the workspace. Capture checks cancellation after final canonical
+revalidation and immediately before accepting either an observation or its
+stable hash. Timeout, cancellation, output overflow, or confinement failure
+pauses review and prevents a verdict. Verification may create ordinary ignored
+build or test artifacts.
 
 QA controls use a separate ephemeral capability bound to the QA session, task,
 current attempt, and open QA cycle. The only task-domain control exposed to the

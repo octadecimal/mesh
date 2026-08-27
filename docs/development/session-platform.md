@@ -115,10 +115,11 @@ bounded Mesh controls that reject absolute paths, traversal, and symlink or
 junction escapes. Mesh revalidates the opened object, its parent, and the
 workspace root before and after reads or directory enumeration so concurrent
 path swaps fail closed. Search traversal has independent directory, entry,
-queue, file, and match caps and stops with its owning QA cycle. It may request
-named verification commands through Mesh's constrained runner, but receives no
-shell and cannot write source, create another worktree, commit, merge, or create
-a pull request. Ambiguous
+queue, file, and match caps, streams rather than materializes large directories,
+and stops and closes its directory handle with its owning QA cycle. It may
+request named verification commands through Mesh's constrained runner, but
+receives no shell and cannot write source, create another worktree, commit,
+merge, or create a pull request. Ambiguous
 joined option values are treated as workspace paths, including missing paths
 whose deepest existing ancestor is a link. Interactive, watch, server, and
 authoring-style command forms are rejected. Every verification child has a
@@ -126,10 +127,14 @@ five-minute wall-clock bound and a 64,000-byte limit per output stream, and is
 cancelled with the owning QA runtime. Timeout, output overflow, or cancellation
 durably pauses review without recording a verdict. On Windows, vetted package
 manager commands use canonical bundled JavaScript launchers through the
-installed Node executable, with shell execution disabled. Before launch, Mesh
-proves that the canonical owned-process-tree terminator is functional. If that
-capability is missing or later fails, Mesh uses only the exact owned PID as a
-bounded fallback and durably pauses QA rather than assuming termination.
+installed Node executable, with shell execution disabled. Git is resolved only
+from fixed system installation locations to an absolute canonical executable
+outside the workspace; PATH and workspace-local Git copies are not trusted. If
+trusted Git is unavailable, Mesh refuses the child and durably pauses QA.
+Before launch, Mesh proves that the canonical owned-process-tree terminator is
+functional. If that capability is missing or later fails, Mesh uses only the
+exact owned PID as a bounded fallback and durably pauses QA rather than assuming
+termination.
 
 Mesh captures Git-tracked source at launch, after each verification command,
 and immediately before verdict persistence. A capture is accepted only when
@@ -147,9 +152,11 @@ path, and parent identity, which exposes a parent swapped to an external link
 even if the original parent is restored before path inspection. Broken link
 components whose lexical targets escape the workspace are rejected even when
 those targets do not exist, and every indexed link object's canonical parent
-must remain inside the assigned workspace. Its structured report covers every
-snapshotted acceptance criterion and records evidence, verification performed,
-residual risks, and workspace state.
+must remain inside the assigned workspace. Cancellation is rechecked after the
+last canonical revalidation and immediately before an observation or stable
+hash can be accepted. Its structured report covers every snapshotted acceptance
+criterion and records evidence, verification performed, residual risks, and
+workspace state.
 
 After a verified verdict, a human may accept the task as done. After a rejection,
 a human chooses the appropriate Developer rework action. Manual mode never

@@ -7,7 +7,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { open, readdir } from 'node:fs/promises';
+import { open, opendir, readdir } from 'node:fs/promises';
 
 import { describe, expect, it } from 'vitest';
 
@@ -20,6 +20,91 @@ const readerWithFileSystem = (fileSystem: Partial<QaWorkspaceFileSystem>) =>
   new QaWorkspaceReader(fileSystem);
 
 describe('QaWorkspaceReader', () => {
+  it('consumes only the pending budget from one huge directory stream', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-wide-'));
+    let yielded = 0;
+    let closed = false;
+    try {
+      for (let index = 0; index < 256; index += 1) {
+        mkdirSync(join(root, `empty-${index.toString().padStart(4, '0')}`));
+      }
+      const reader = readerWithFileSystem({
+        opendir: async (path) => {
+          if (path !== root) return opendir(path);
+          const entries = async function* () {
+            for (let index = 0; index < 10_000; index += 1) {
+              yielded += 1;
+              yield {
+                name: `empty-${index.toString().padStart(4, '0')}`,
+                isDirectory: () => true,
+                isFile: () => false,
+                isSymbolicLink: () => false,
+              };
+            }
+          };
+          return {
+            [Symbol.asyncIterator]: entries,
+            close: async () => {
+              closed = true;
+            },
+          };
+        },
+      });
+
+      await expect(reader.search(root, '.', 'not present')).resolves.toEqual({
+        path: '.',
+        matches: [],
+        truncated: true,
+      });
+      expect(yielded).toBeGreaterThan(0);
+      expect(yielded).toBeLessThanOrEqual(256);
+      expect(closed).toBe(true);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('stops and closes a huge directory stream as soon as search aborts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-stream-cancel-'));
+    const controller = new AbortController();
+    let yielded = 0;
+    let closed = false;
+    try {
+      const reader = readerWithFileSystem({
+        opendir: async () => {
+          const entries = async function* () {
+            for (let index = 0; index < 10_000; index += 1) {
+              yielded += 1;
+              if (yielded === 5) controller.abort();
+              yield {
+                name: `entry-${index}`,
+                isDirectory: () => false,
+                isFile: () => false,
+                isSymbolicLink: () => true,
+              };
+            }
+          };
+          return {
+            [Symbol.asyncIterator]: entries,
+            close: async () => {
+              closed = true;
+            },
+          };
+        },
+      });
+
+      await expect(
+        reader.search(root, '.', 'not present', {
+          signal: controller.signal,
+        }),
+      ).rejects.toMatchObject({ code: 'qa_workspace_search_cancelled' });
+      expect(yielded).toBe(5);
+      expect(closed).toBe(true);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   it('rejects reads, listings, and searches through an external directory link', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-root-'));
     const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-outside-'));
@@ -150,12 +235,19 @@ describe('QaWorkspaceReader', () => {
                   return open(path, flags);
                 },
               }
-            : {
-                readdir: async (path) => {
-                  swapAncestor();
-                  return readdir(path, { withFileTypes: true });
+            : operation === 'list'
+              ? {
+                  readdir: async (path) => {
+                    swapAncestor();
+                    return readdir(path, { withFileTypes: true });
+                  },
+                }
+              : {
+                  opendir: async (path) => {
+                    swapAncestor();
+                    return opendir(path);
+                  },
                 },
-              },
         );
 
         const pending =
@@ -200,8 +292,8 @@ describe('QaWorkspaceReader', () => {
       const controller = new AbortController();
       let enumerated = false;
       const reader = readerWithFileSystem({
-        readdir: async (path) => {
-          const entries = await readdir(path, { withFileTypes: true });
+        opendir: async (path) => {
+          const entries = await opendir(path);
           if (!enumerated) {
             enumerated = true;
             controller.abort();

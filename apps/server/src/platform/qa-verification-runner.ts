@@ -67,6 +67,15 @@ export class QaVerificationTerminationFailedError extends Error {
   }
 }
 
+export class QaVerificationExecutableUnavailableError extends Error {
+  readonly code = 'qa_verification_executable_unavailable';
+
+  constructor() {
+    super('A trusted QA verification executable is unavailable.');
+    this.name = 'QaVerificationExecutableUnavailableError';
+  }
+}
+
 type TrackedFileStat = {
   dev: bigint | number;
   ino: bigint | number;
@@ -511,23 +520,33 @@ export class QaVerificationRunner {
       options.verificationTimeoutMs ?? defaultVerificationTimeoutMs;
   }
 
+  private throwIfCaptureCancelled(signal?: AbortSignal): void {
+    if (signal?.aborted) throw new QaVerificationCancelledError();
+  }
+
   async captureTrackedSource(
     workspacePath: string,
     signal?: AbortSignal,
   ): Promise<string> {
     const assignedWorkspace = resolve(workspacePath);
+    this.throwIfCaptureCancelled(signal);
     for (let attempt = 0; attempt < stableSnapshotAttempts; attempt += 1) {
       const forward = await this.captureObservation(
         assignedWorkspace,
         'forward',
         signal,
       );
+      this.throwIfCaptureCancelled(signal);
       const reverse = await this.captureObservation(
         assignedWorkspace,
         'reverse',
         signal,
       );
-      if (forward !== undefined && forward === reverse) return forward;
+      this.throwIfCaptureCancelled(signal);
+      if (forward !== undefined && forward === reverse) {
+        this.throwIfCaptureCancelled(signal);
+        return forward;
+      }
     }
     throw new QaTrackedSourceUnstableError();
   }
@@ -555,12 +574,16 @@ export class QaVerificationRunner {
     direction: 'forward' | 'reverse',
     signal?: AbortSignal,
   ): Promise<string | undefined> {
+    this.throwIfCaptureCancelled(signal);
     const canonicalWorkspace = await this.tryRealPath(workspacePath);
+    this.throwIfCaptureCancelled(signal);
     const rootBefore = canonicalWorkspace
       ? await this.readCanonicalIdentity(canonicalWorkspace)
       : undefined;
+    this.throwIfCaptureCancelled(signal);
     if (rootBefore === 'missing') return undefined;
     const trackedPaths = await this.listTrackedPaths(workspacePath, signal);
+    this.throwIfCaptureCancelled(signal);
     const pathsToRead =
       direction === 'forward' ? trackedPaths : [...trackedPaths].reverse();
     const records = new Map<string, string>();
@@ -578,21 +601,24 @@ export class QaVerificationRunner {
       const parentBefore = canonicalWorkspace
         ? await this.readTrackedParentIdentity(canonicalWorkspace, absolutePath)
         : undefined;
+      this.throwIfCaptureCancelled(signal);
       if (parentBefore === 'missing') return undefined;
       const before = await this.readFileIdentity(absolutePath);
-      if (
-        parentBefore &&
-        canonicalWorkspace &&
-        !(await this.trackedParentMatches(
-          canonicalWorkspace,
-          absolutePath,
-          parentBefore,
-        ))
-      ) {
-        return undefined;
-      }
+      this.throwIfCaptureCancelled(signal);
+      const parentStillMatches =
+        parentBefore && canonicalWorkspace
+          ? await this.trackedParentMatches(
+              canonicalWorkspace,
+              absolutePath,
+              parentBefore,
+            )
+          : true;
+      this.throwIfCaptureCancelled(signal);
+      if (!parentStillMatches) return undefined;
       if (before === 'missing') {
-        if ((await this.readFileIdentity(absolutePath)) !== 'missing') {
+        const confirmedMissing = await this.readFileIdentity(absolutePath);
+        this.throwIfCaptureCancelled(signal);
+        if (confirmedMissing !== 'missing') {
           return undefined;
         }
         records.set(trackedPath, 'missing');
@@ -600,17 +626,23 @@ export class QaVerificationRunner {
       }
       if (before.symbolicLink) {
         const target = await this.tryReadTrackedLink(absolutePath);
+        this.throwIfCaptureCancelled(signal);
         if (target === undefined) return undefined;
         const after = await this.readFileIdentity(absolutePath);
+        this.throwIfCaptureCancelled(signal);
         const confirmedTarget = await this.tryReadTrackedLink(absolutePath);
+        this.throwIfCaptureCancelled(signal);
+        const linkParentStillMatches =
+          parentBefore && canonicalWorkspace
+            ? await this.trackedParentMatches(
+                canonicalWorkspace,
+                absolutePath,
+                parentBefore,
+              )
+            : true;
+        this.throwIfCaptureCancelled(signal);
         if (
-          (parentBefore &&
-            canonicalWorkspace &&
-            !(await this.trackedParentMatches(
-              canonicalWorkspace,
-              absolutePath,
-              parentBefore,
-            ))) ||
+          !linkParentStillMatches ||
           after === 'missing' ||
           !after.symbolicLink ||
           before.key !== after.key ||
@@ -625,6 +657,7 @@ export class QaVerificationRunner {
         continue;
       }
       const canonicalPath = await this.tryRealPath(absolutePath);
+      this.throwIfCaptureCancelled(signal);
       if (
         canonicalWorkspace &&
         (!canonicalPath || escapesWorkspace(canonicalWorkspace, canonicalPath))
@@ -636,33 +669,44 @@ export class QaVerificationRunner {
         before,
         signal,
       );
+      this.throwIfCaptureCancelled(signal);
       if (!contentHash) return undefined;
       const after = await this.readFileIdentity(absolutePath);
-      if (
-        after === 'missing' ||
-        after.symbolicLink ||
-        before.key !== after.key ||
-        (canonicalWorkspace &&
-          (!(await this.regularFileBoundaryMatches(
+      this.throwIfCaptureCancelled(signal);
+      const boundaryMatches = canonicalWorkspace
+        ? await this.regularFileBoundaryMatches(
             workspacePath,
             canonicalWorkspace,
             absolutePath,
             canonicalPath,
             parentBefore,
             rootBefore,
-          )) ||
-            escapesWorkspace(canonicalWorkspace, canonicalPath ?? '')))
+            signal,
+          )
+        : true;
+      this.throwIfCaptureCancelled(signal);
+      if (
+        after === 'missing' ||
+        after.symbolicLink ||
+        before.key !== after.key ||
+        !boundaryMatches ||
+        (canonicalWorkspace &&
+          escapesWorkspace(canonicalWorkspace, canonicalPath ?? ''))
       ) {
         return undefined;
       }
       records.set(trackedPath, `${before.key}\0${contentHash}`);
     }
     const pathsAfterRead = await this.listTrackedPaths(workspacePath, signal);
+    this.throwIfCaptureCancelled(signal);
+    const rootStillMatches =
+      canonicalWorkspace && rootBefore
+        ? await this.canonicalIdentityMatches(workspacePath, rootBefore)
+        : true;
+    this.throwIfCaptureCancelled(signal);
     if (
       trackedPaths.join('\0') !== pathsAfterRead.join('\0') ||
-      (canonicalWorkspace &&
-        rootBefore &&
-        !(await this.canonicalIdentityMatches(workspacePath, rootBefore)))
+      !rootStillMatches
     ) {
       return undefined;
     }
@@ -674,6 +718,7 @@ export class QaVerificationRunner {
       hash.update(records.get(trackedPath) ?? 'missing');
       hash.update('\0');
     }
+    this.throwIfCaptureCancelled(signal);
     return `sha256:${hash.digest('hex')}`;
   }
 
@@ -708,6 +753,7 @@ export class QaVerificationRunner {
         position += bytesRead;
       }
       const after = this.fileIdentity(await handle.stat({ bigint: true }));
+      this.throwIfCaptureCancelled(signal);
       return after.symbolicLink || after.key !== opened.key
         ? undefined
         : hash.digest('hex');
@@ -723,11 +769,13 @@ export class QaVerificationRunner {
     expectedPath: string | undefined,
     expectedParent: TrackedParentIdentity | undefined,
     expectedRoot: TrackedParentIdentity | undefined,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     if (!expectedPath || escapesWorkspace(canonicalWorkspace, expectedPath)) {
       return false;
     }
     const currentPath = await this.tryRealPath(absolutePath);
+    this.throwIfCaptureCancelled(signal);
     if (
       !currentPath ||
       relative(expectedPath, currentPath) !== '' ||
@@ -735,16 +783,24 @@ export class QaVerificationRunner {
     ) {
       return false;
     }
-    return (
-      (!expectedParent ||
-        (await this.trackedParentMatches(
-          canonicalWorkspace,
-          absolutePath,
-          expectedParent,
-        ))) &&
-      (!expectedRoot ||
-        (await this.canonicalIdentityMatches(workspacePath, expectedRoot)))
-    );
+    if (expectedParent) {
+      const parentMatches = await this.trackedParentMatches(
+        canonicalWorkspace,
+        absolutePath,
+        expectedParent,
+      );
+      this.throwIfCaptureCancelled(signal);
+      if (!parentMatches) return false;
+    }
+    if (expectedRoot) {
+      const rootMatches = await this.canonicalIdentityMatches(
+        workspacePath,
+        expectedRoot,
+      );
+      this.throwIfCaptureCancelled(signal);
+      if (!rootMatches) return false;
+    }
+    return true;
   }
 
   private fileIdentity(current: TrackedFileStat): TrackedFileIdentity {
@@ -990,6 +1046,14 @@ export class QaVerificationRunner {
           error.code === 'process_termination_failed')
       ) {
         throw new QaVerificationTerminationFailedError();
+      }
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        error.code === 'process_trusted_executable_unavailable'
+      ) {
+        throw new QaVerificationExecutableUnavailableError();
       }
       throw error;
     } finally {

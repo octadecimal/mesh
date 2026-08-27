@@ -1,7 +1,7 @@
-import type { Dirent } from 'node:fs';
 import {
   lstat as fsLstat,
   open as fsOpen,
+  opendir as fsOpendir,
   readdir as fsReaddir,
   realpath as fsRealpath,
 } from 'node:fs/promises';
@@ -38,10 +38,22 @@ type FileHandle = {
   stat(): Promise<FileSystemStat>;
 };
 
+type DirectoryEntry = {
+  name: string;
+  isDirectory(): boolean;
+  isFile(): boolean;
+  isSymbolicLink(): boolean;
+};
+
+type DirectoryHandle = AsyncIterable<DirectoryEntry> & {
+  close(): Promise<void>;
+};
+
 export type QaWorkspaceFileSystem = {
   lstat(path: string): Promise<FileSystemStat>;
   open(path: string, flags: 'r'): Promise<FileHandle>;
-  readdir(path: string): Promise<Dirent[]>;
+  opendir(path: string): Promise<DirectoryHandle>;
+  readdir(path: string): Promise<DirectoryEntry[]>;
   realpath(path: string): Promise<string>;
 };
 
@@ -62,6 +74,7 @@ type BoundSnapshot = RootSnapshot & {
 const defaultFileSystem: QaWorkspaceFileSystem = {
   lstat: async (path) => fsLstat(path),
   open: async (path, flags) => fsOpen(path, flags),
+  opendir: async (path) => fsOpendir(path),
   readdir: async (path) => fsReaddir(path, { withFileTypes: true }),
   realpath: fsRealpath,
 };
@@ -242,7 +255,7 @@ export class QaWorkspaceReader {
   private async readDirectory(
     snapshot: BoundSnapshot,
     signal?: AbortSignal,
-  ): Promise<Dirent[]> {
+  ): Promise<DirectoryEntry[]> {
     throwIfSearchAborted(signal);
     if (!snapshot.stat.isDirectory()) throw new QaWorkspacePathRejectedError();
     const entries = await this.fileSystem.readdir(snapshot.path);
@@ -250,6 +263,56 @@ export class QaWorkspaceReader {
     await this.revalidate(snapshot);
     throwIfSearchAborted(signal);
     return entries;
+  }
+
+  private async readDirectoryStream(
+    snapshot: BoundSnapshot,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<{ entries: DirectoryEntry[]; truncated: boolean }> {
+    throwIfSearchAborted(signal);
+    if (!snapshot.stat.isDirectory()) throw new QaWorkspacePathRejectedError();
+    const handle = await this.fileSystem.opendir(snapshot.path);
+    const entries: DirectoryEntry[] = [];
+    let exhausted = false;
+    let traversalError: unknown;
+    try {
+      const iterator = handle[Symbol.asyncIterator]();
+      while (entries.length < limit) {
+        throwIfSearchAborted(signal);
+        const next = await iterator.next();
+        throwIfSearchAborted(signal);
+        if (next.done) {
+          exhausted = true;
+          break;
+        }
+        entries.push(next.value);
+      }
+    } catch (error) {
+      traversalError = error;
+    }
+    let cleanupError: unknown;
+    try {
+      await handle.close();
+    } catch (error) {
+      if (
+        typeof error !== 'object' ||
+        error === null ||
+        !('code' in error) ||
+        error.code !== 'ERR_DIR_CLOSED'
+      ) {
+        cleanupError = error;
+      }
+    }
+    try {
+      await this.revalidate(snapshot);
+    } catch (error) {
+      cleanupError ??= error;
+    }
+    if (traversalError !== undefined) throw traversalError;
+    if (cleanupError !== undefined) throw cleanupError;
+    throwIfSearchAborted(signal);
+    return { entries, truncated: !exhausted && entries.length >= limit };
   }
 
   async read(workspacePath: string, inputPath: string) {
@@ -313,12 +376,22 @@ export class QaWorkspaceReader {
       }
       if (!snapshot.stat.isDirectory()) continue;
       directories += 1;
-      const entries = await this.readDirectory(snapshot, options.signal);
       const remainingEntries = maxSearchEntries - entriesVisited;
-      if (entries.length > remainingEntries) traversalTruncated = true;
-      for (const entry of entries.slice(0, remainingEntries).reverse()) {
+      const remainingPending = maxSearchPending - pending.length;
+      const entryBudget = Math.min(remainingEntries, remainingPending);
+      if (entryBudget <= 0) {
+        traversalTruncated = true;
+        break;
+      }
+      const streamed = await this.readDirectoryStream(
+        snapshot,
+        entryBudget,
+        options.signal,
+      );
+      entriesVisited += streamed.entries.length;
+      if (streamed.truncated) traversalTruncated = true;
+      for (const entry of streamed.entries.reverse()) {
         throwIfSearchAborted(options.signal);
-        entriesVisited += 1;
         if (entry.isSymbolicLink()) continue;
         if (pending.length >= maxSearchPending) {
           traversalTruncated = true;

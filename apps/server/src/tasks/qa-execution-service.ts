@@ -188,6 +188,7 @@ type SourceMutationContext = {
 type VerificationFailureCode =
   | 'qa_workspace_search_cancelled'
   | 'qa_verification_cancelled'
+  | 'qa_verification_executable_unavailable'
   | 'qa_verification_output_limit_exceeded'
   | 'qa_verification_termination_failed'
   | 'qa_verification_timed_out';
@@ -308,6 +309,7 @@ const safeQaControlErrorCodes = new Set([
   'qa_workspace_path_rejected',
   'qa_workspace_search_cancelled',
   'qa_verification_cancelled',
+  'qa_verification_executable_unavailable',
   'qa_verification_output_limit_exceeded',
   'qa_verification_termination_failed',
   'qa_verification_timed_out',
@@ -1378,6 +1380,7 @@ export class QaExecutionService {
     }
     return error.code === 'qa_workspace_search_cancelled' ||
       error.code === 'qa_verification_cancelled' ||
+      error.code === 'qa_verification_executable_unavailable' ||
       error.code === 'qa_verification_output_limit_exceeded' ||
       error.code === 'qa_verification_termination_failed' ||
       error.code === 'qa_verification_timed_out'
@@ -1407,13 +1410,15 @@ export class QaExecutionService {
             pauseReason:
               code === 'qa_workspace_search_cancelled'
                 ? 'QA workspace search was interrupted; human inspection is required.'
-                : code === 'qa_verification_timed_out'
-                  ? 'QA verification timed out; human inspection is required.'
-                  : code === 'qa_verification_output_limit_exceeded'
-                    ? 'QA verification exceeded its output limit; human inspection is required.'
-                    : code === 'qa_verification_termination_failed'
-                      ? 'QA verification process ownership failed; human inspection is required.'
-                      : 'QA verification was interrupted; human inspection is required.',
+                : code === 'qa_verification_executable_unavailable'
+                  ? 'A trusted QA verification executable is unavailable; human inspection is required.'
+                  : code === 'qa_verification_timed_out'
+                    ? 'QA verification timed out; human inspection is required.'
+                    : code === 'qa_verification_output_limit_exceeded'
+                      ? 'QA verification exceeded its output limit; human inspection is required.'
+                      : code === 'qa_verification_termination_failed'
+                        ? 'QA verification process ownership failed; human inspection is required.'
+                        : 'QA verification was interrupted; human inspection is required.',
             updatedAt: occurredAt,
           },
           updatedAt: occurredAt,

@@ -1,6 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -21,6 +30,153 @@ const isAlive = (pid: number) => {
 };
 
 describe('NodeProcessRunner', () => {
+  it('never runs a workspace-local Git executable found through PATH', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-process-git-shadow-'));
+    const localGit = join(
+      directory,
+      process.platform === 'win32' ? 'git.exe' : 'git',
+    );
+    const payload = join(directory, 'payload.cjs');
+    const marker = join(directory, 'workspace-git-ran');
+    const priorPath = process.env.PATH;
+    try {
+      copyFileSync(process.execPath, localGit);
+      if (process.platform !== 'win32') chmodSync(localGit, 0o755);
+      writeFileSync(
+        payload,
+        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`,
+      );
+      process.env.PATH = `${directory}${delimiter}${priorPath ?? ''}`;
+
+      const result = await new NodeProcessRunner().run(
+        'git',
+        [payload, marker],
+        { cwd: directory },
+      );
+
+      expect(result.exitCode).not.toBe(0);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (priorPath === undefined) delete process.env.PATH;
+      else process.env.PATH = priorPath;
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it('refuses Git before launch when no trusted installation is available', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-process-git-missing-'));
+    const localGit = join(
+      directory,
+      process.platform === 'win32' ? 'git.exe' : 'git',
+    );
+    const payload = join(directory, 'payload.cjs');
+    const marker = join(directory, 'started');
+    const priorPath = process.env.PATH;
+    try {
+      copyFileSync(process.execPath, localGit);
+      if (process.platform !== 'win32') chmodSync(localGit, 0o755);
+      writeFileSync(
+        payload,
+        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`,
+      );
+      process.env.PATH = `${directory}${delimiter}${priorPath ?? ''}`;
+      const runner = new NodeProcessRunner({
+        resolveTrustedGitExecutable: async () => undefined,
+      });
+
+      await expect(
+        runner.run('git', [payload], { cwd: directory }),
+      ).rejects.toMatchObject({
+        code: 'process_trusted_executable_unavailable',
+      });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (priorPath === undefined) delete process.env.PATH;
+      else process.env.PATH = priorPath;
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'does not trust forged Windows installation-root variables',
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'mesh-process-git-root-'));
+      const forgedRoot = mkdtempSync(
+        join(tmpdir(), 'mesh-process-git-forged-'),
+      );
+      const forgedGitDirectory = join(forgedRoot, 'Git', 'cmd');
+      const payload = join(directory, 'payload.cjs');
+      const marker = join(directory, 'forged-git-ran');
+      const prior = {
+        LOCALAPPDATA: process.env.LOCALAPPDATA,
+        ProgramFiles: process.env.ProgramFiles,
+        ProgramFilesX86: process.env['ProgramFiles(x86)'],
+        ProgramW6432: process.env.ProgramW6432,
+      };
+      try {
+        mkdirSync(forgedGitDirectory, { recursive: true });
+        copyFileSync(process.execPath, join(forgedGitDirectory, 'git.exe'));
+        writeFileSync(
+          payload,
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`,
+        );
+        process.env.LOCALAPPDATA = forgedRoot;
+        process.env.ProgramFiles = forgedRoot;
+        process.env['ProgramFiles(x86)'] = forgedRoot;
+        process.env.ProgramW6432 = forgedRoot;
+
+        const result = await new NodeProcessRunner().run('git', [payload], {
+          cwd: directory,
+        });
+
+        expect(result.exitCode).not.toBe(0);
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        for (const [name, value] of Object.entries({
+          LOCALAPPDATA: prior.LOCALAPPDATA,
+          ProgramFiles: prior.ProgramFiles,
+          'ProgramFiles(x86)': prior.ProgramFilesX86,
+          ProgramW6432: prior.ProgramW6432,
+        })) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
+        rmSync(directory, { force: true, recursive: true });
+        rmSync(forgedRoot, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'win32').each(['corepack', 'pnpm', 'npm'])(
+    'never runs a workspace-local %s executable found through PATH',
+    async (executable) => {
+      const directory = mkdtempSync(
+        join(tmpdir(), `mesh-process-${executable}-shadow-`),
+      );
+      const payload = join(directory, 'payload.cjs');
+      const marker = join(directory, `${executable}-ran`);
+      const priorPath = process.env.PATH;
+      try {
+        copyFileSync(process.execPath, join(directory, `${executable}.exe`));
+        writeFileSync(
+          payload,
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`,
+        );
+        process.env.PATH = `${directory}${delimiter}${priorPath ?? ''}`;
+
+        await new NodeProcessRunner().run(executable, [payload], {
+          cwd: directory,
+        });
+
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        if (priorPath === undefined) delete process.env.PATH;
+        else process.env.PATH = priorPath;
+        rmSync(directory, { force: true, recursive: true });
+      }
+    },
+  );
+
   it.each([
     {
       name: 'is unavailable',
