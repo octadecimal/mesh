@@ -485,7 +485,10 @@ export class ProjectRunService {
       };
     }
 
-    if (project.qaConfiguration.reviewPolicy === 'manual') {
+    if (
+      project.qaConfiguration.reviewPolicy === 'manual' ||
+      task.reviewAutomation.status === 'disabled'
+    ) {
       return { status: 'attention_required', reason: 'manual_review' };
     }
     if (task.reviewAutomation.status === 'paused') {
@@ -501,6 +504,10 @@ export class ProjectRunService {
     const current = this.dependencies.projectRuns.get(runId);
     if (!current) return;
     if (current.state === 'running') {
+      if (this.dependencies.scheduleDrain) {
+        this.scheduleDrain(current.id);
+        return;
+      }
       await this.drainAvailableSlots(current.id);
       return;
     }

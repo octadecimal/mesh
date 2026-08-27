@@ -221,6 +221,8 @@ export const startServer = async (
     projectRuns?: ProjectRunService;
   } = {};
   const runDrains = new Map<string, Promise<void>>();
+  const rerunRunDrains = new Set<string>();
+  let pendingStoppedRuntimeReconciliation: SessionRegistry | undefined;
   let runDrainFailure: unknown;
   const requireReviewAutomation = (): ReviewAutomationService => {
     if (!roleServices.reviewAutomation) {
@@ -262,16 +264,31 @@ export const startServer = async (
     originPolicy.stopAccepting();
     registry.reportAuditFailure(error);
   };
-  const scheduleRunDrains = (runIds: readonly string[]) => {
+  const scheduleRunDrains = (runIds: readonly string[]): void => {
     for (const runId of runIds) {
-      if (!originPolicy.accepting || runDrains.has(runId)) continue;
+      if (!originPolicy.accepting) continue;
+      if (runDrains.has(runId)) {
+        rerunRunDrains.add(runId);
+        continue;
+      }
       const drain = Promise.resolve()
         .then(async () => {
           await requireProjectRuns().drainAvailableSlots(runId);
         })
         .catch((error: unknown) => failProjectRunAudit(error))
         .finally(() => {
-          if (runDrains.get(runId) === drain) runDrains.delete(runId);
+          if (runDrains.get(runId) !== drain) return;
+          runDrains.delete(runId);
+          if (rerunRunDrains.delete(runId)) scheduleRunDrains([runId]);
+          if (runDrains.size === 0 && pendingStoppedRuntimeReconciliation) {
+            const activeRegistry = pendingStoppedRuntimeReconciliation;
+            pendingStoppedRuntimeReconciliation = undefined;
+            try {
+              reconcileStoppedRuntime(activeRegistry);
+            } catch {
+              // The reconciliation path already tripped the central audit barrier.
+            }
+          }
         });
       runDrains.set(runId, drain);
     }
@@ -282,7 +299,11 @@ export const startServer = async (
     }
     if (runDrainFailure) throw runDrainFailure;
   };
-  const reconcileStoppedRuntime = (activeRegistry: SessionRegistry) => {
+  function reconcileStoppedRuntime(activeRegistry: SessionRegistry): void {
+    if (runDrains.size > 0) {
+      pendingStoppedRuntimeReconciliation = activeRegistry;
+      return;
+    }
     const cursors = projectCursors();
     try {
       const result = reconcileTaskAttempts({
@@ -300,28 +321,19 @@ export const startServer = async (
       });
       runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
       reconcileTaskAttemptLaunchReservations(database);
-      const runReconciliation = reconcileProjectRuns({
-        database,
-        projects,
-        tasks,
-        attempts,
-        sessions,
-        workspaces,
-        diagnostics,
-        developerExecutions,
-        qaExecutions,
-        qaCapabilities,
-        projectEvents,
-        projectRuns,
-        billingConflicts,
-      });
       publishRecoveredEvents(cursors, activeRegistry);
-      scheduleRunDrains(runReconciliation.launchableRunIds);
+      for (const taskId of new Set(
+        result.repairs.map((repair) => repair.taskId),
+      )) {
+        void requireProjectRuns()
+          .observeTaskOutcome(taskId)
+          .catch((error: unknown) => failProjectRunAudit(error));
+      }
     } catch (error) {
       failProjectRunAudit(error);
       throw error;
     }
-  };
+  }
   const registry = new SessionRegistry({
     database,
     sessions,
@@ -367,6 +379,9 @@ export const startServer = async (
     developerExecutionService,
     afterDeveloperSubmission: async (input) => {
       await requireReviewAutomation().afterDeveloperSubmission(input);
+    },
+    afterDeveloperBlocked: async (input) => {
+      await requireProjectRuns().observeTaskOutcome(input.taskId);
     },
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
@@ -450,6 +465,9 @@ export const startServer = async (
     billingConflicts,
     afterRejectedVerdict: async (input) => {
       await requireReviewAutomation().afterQaVerdict(input);
+    },
+    afterVerifiedVerdict: async (input) => {
+      await projectRunBoundary.observeTaskOutcome(input.taskId);
     },
     afterInterruptedRepair: () => reconcileStoppedRuntime(registry),
   });

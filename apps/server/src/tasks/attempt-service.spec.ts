@@ -62,6 +62,10 @@ describe('AttemptService', () => {
       taskId: string;
       cycleId: string;
     }) => Promise<void>;
+    afterDeveloperBlocked?: (input: {
+      taskId: string;
+      cycleId: string;
+    }) => Promise<void>;
     resolveIdentity?: RepositoryIdentityResolver;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-attempt-service-'));
@@ -96,6 +100,7 @@ describe('AttemptService', () => {
       capabilities,
       developerExecutionService,
       afterDeveloperSubmission: options?.afterDeveloperSubmission,
+      afterDeveloperBlocked: options?.afterDeveloperBlocked,
       registry: {
         resume: (sessionId, configuration, developer) =>
           registry.resume(sessionId, configuration, developer),
@@ -1509,11 +1514,13 @@ describe('AttemptService', () => {
 
   it('keeps mark-blocked durable when runtime interruption fails', async () => {
     const emergencyClose = vi.fn(async () => undefined);
+    const afterDeveloperBlocked = vi.fn(async () => undefined);
     const { directory, driver, repositories, service } = setup({
       terminalInterrupt: async () => {
         throw new Error('interrupt failed');
       },
       emergencyClose,
+      afterDeveloperBlocked,
     });
     seedTask(repositories);
     const launched = await service.launchDeveloper(
@@ -1537,6 +1544,10 @@ describe('AttemptService', () => {
       blocked: { reason: 'A dependency is missing.' },
     });
     expect(emergencyClose).toHaveBeenCalledWith(session.id);
+    expect(afterDeveloperBlocked).toHaveBeenCalledWith({
+      taskId: 'task-1',
+      cycleId: cycle.id,
+    });
     expect(repositories.diagnostics.list(session.id)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

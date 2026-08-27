@@ -160,6 +160,10 @@ type QaExecutionServiceDependencies = {
     taskId: string;
     cycleId: string;
   }) => Promise<void>;
+  afterVerifiedVerdict?: (input: {
+    taskId: string;
+    cycleId: string;
+  }) => Promise<void>;
   afterInterruptedRepair?: () => void;
   now?: () => string;
   createId?: () => string;
@@ -1336,7 +1340,18 @@ export class QaExecutionService {
                   report: parsed.data,
                   actor,
                 });
-                if (
+                if (outcome.report.disposition === 'verified') {
+                  try {
+                    await this.dependencies.afterVerifiedVerdict?.({
+                      taskId: outcome.task.id,
+                      cycleId: outcome.cycle.id,
+                    });
+                  } finally {
+                    await this.dependencies.registry.interrupt(
+                      prepared.session.id,
+                    );
+                  }
+                } else if (
                   outcome.report.disposition === 'rejected' &&
                   outcome.cycle.reviewPolicy === 'autonomous_review' &&
                   outcome.task.reviewAutomation.status === 'enabled'

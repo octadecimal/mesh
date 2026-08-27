@@ -458,9 +458,13 @@ test('gives the project kanban the remaining board height', async ({
     columnsHeight: document
       .querySelector('.task-board-columns')!
       .getBoundingClientRect().height,
+    columnsBottom: document
+      .querySelector('.task-board-columns')!
+      .getBoundingClientRect().bottom,
+    viewportHeight: window.innerHeight,
   }));
   expect(layout.columnsHeight).toBeGreaterThan(layout.instructionsHeight);
-  expect(layout.columnsHeight).toBeGreaterThan(350);
+  expect(layout.viewportHeight - layout.columnsBottom).toBeLessThanOrEqual(20);
 });
 
 test('creates shared and worktree sessions with the production-built server', async ({
@@ -1523,6 +1527,317 @@ test('imports a project and retains a failed startup attempt', async ({
       .getByRole('region', { name: 'Ready tasks' })
       .getByRole('article', { name: `${title} task card` }),
   ).toBeVisible();
+});
+
+test('finite project run preserves bounded progress and durable history', async ({
+  page,
+  harness,
+}) => {
+  const taskTitles = [
+    'task-auto',
+    'task-manual',
+    'task-blocked',
+    'task-later-auto',
+    'task-later-manual',
+    'task-not-started',
+  ] as const;
+  const itemStates = (snapshot: ProjectSnapshot) => {
+    const run = snapshot.runs.at(-1);
+    if (!run) throw new Error('Expected a finite project run');
+    const titles = new Map(snapshot.tasks.map((task) => [task.id, task.title]));
+    return run.items.map((item) => ({
+      title: titles.get(item.taskId),
+      position: item.queuePosition,
+      status: item.status,
+      reason: item.outcomeReason,
+    }));
+  };
+
+  await importTemporaryRepository(page, harness, 'Finite project run');
+  const projectId = await saveQaSettings(page, harness, {
+    content: 'Verify the deterministic finite-run submission.',
+    reviewPolicy: 'autonomous_review',
+  });
+  for (const title of taskTitles) {
+    const dialog = await createReadyTask(page, {
+      title,
+      description: `Exercise the ${title} finite-run outcome.`,
+      acceptanceCriteria: [`${title} reaches its authorized outcome.`],
+    });
+    if (title === 'task-auto' || title === 'task-later-auto') {
+      await enableTaskAutomation(dialog, harness, projectId, title);
+    }
+    await dialog.getByRole('button', { name: 'Close' }).click();
+  }
+  const createdTasks = (await readProjectSnapshot(harness, projectId)).tasks;
+  for (const [index, title] of taskTitles.entries()) {
+    const task = createdTasks.find((candidate) => candidate.title === title);
+    if (!task) throw new Error(`Expected created task ${title}`);
+    const reordered = await harness.command({
+      type: 'task.reorder',
+      payload: {
+        taskId: task.id,
+        expectedRevision: task.revision,
+        rank: `finite-${index}`,
+        actor: {
+          type: 'human',
+          id: 'e2e-operator',
+          displayName: 'E2E operator',
+        },
+      },
+    } as unknown as MutatingCommand);
+    expect(reordered.status, JSON.stringify(reordered.body)).toBe(200);
+  }
+
+  harness.queueTaskOutcome('task-auto', {
+    developer: 'complete',
+    qa: 'verified',
+    hold: true,
+  });
+  harness.queueTaskOutcome('task-manual', {
+    developer: 'complete',
+    hold: true,
+  });
+  harness.queueTaskOutcome('task-blocked', { developer: 'blocked' });
+  harness.queueTaskOutcome('task-later-auto', {
+    developer: 'complete',
+    qa: 'verified',
+    hold: true,
+  });
+  harness.queueTaskOutcome('task-later-manual', {
+    developer: 'complete',
+    hold: true,
+  });
+
+  const runPanel = page.getByRole('region', {
+    name: 'Project run',
+    exact: true,
+  });
+  await runPanel.getByRole('button', { name: 'Start run' }).click();
+  const preview = runPanel.getByRole('list', { name: 'Eligible run order' });
+  await expect(preview.getByRole('listitem')).toHaveCount(taskTitles.length);
+  for (const title of taskTitles) await expect(preview).toContainText(title);
+  await runPanel.getByLabel('Concurrency').fill('2');
+  await runPanel
+    .getByLabel('I confirm this run may consume Claude subscription capacity.')
+    .check();
+  await runPanel.getByRole('button', { name: 'Authorize run' }).click();
+
+  await expect
+    .poll(() => harness.startedTaskTitles())
+    .toEqual(['task-auto', 'task-manual']);
+  const boundedStart = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => {
+      const states = itemStates(snapshot);
+      return (
+        states.filter(({ status }) => status === 'active').length === 2 &&
+        states.filter(({ status }) => status === 'queued').length === 4
+      );
+    },
+    'Concurrency two did not freeze the third task behind two active tasks',
+  );
+  expect(itemStates(boundedStart).map(({ title }) => title)).toEqual(
+    taskTitles,
+  );
+
+  await runPanel.getByRole('button', { name: 'Pause run' }).click();
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.runs.at(-1)?.state === 'paused',
+    'Pause did not become durable',
+  );
+  harness.releaseTaskOutcome('task-auto');
+  await harness.waitForTaskOutcome('task-auto');
+  const scriptedAutoOutcome = await readProjectSnapshot(harness, projectId);
+  const scriptedAutoTask = scriptedAutoOutcome.tasks.find(
+    ({ title }) => title === 'task-auto',
+  );
+  expect({
+    item: itemStates(scriptedAutoOutcome).find(
+      ({ title }) => title === 'task-auto',
+    ),
+    lifecycleState: scriptedAutoTask?.lifecycleState,
+    automation: scriptedAutoTask?.reviewAutomation,
+    qaDispositions: scriptedAutoOutcome.qaCycles.map(
+      ({ terminalDisposition }) => terminalDisposition,
+    ),
+    qaReportCount: scriptedAutoOutcome.qaReports.length,
+  }).toMatchObject({
+    item: { status: 'completed' },
+    lifecycleState: 'done',
+    qaDispositions: ['verified'],
+    qaReportCount: 1,
+  });
+  const pausedWithOneActive = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => {
+      const states = itemStates(snapshot);
+      return (
+        snapshot.runs.at(-1)?.state === 'paused' &&
+        states.find(({ title }) => title === 'task-auto')?.status ===
+          'completed' &&
+        states.filter(({ status }) => status === 'active').length === 1
+      );
+    },
+    'The autonomous task did not finish while the paused queue stayed bounded',
+  );
+  expect(harness.startedTaskTitles()).toEqual(['task-auto', 'task-manual']);
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  const refreshedRunPanel = page.getByRole('region', {
+    name: 'Project run',
+    exact: true,
+  });
+  await expect(refreshedRunPanel).toContainText('Paused');
+  await expect(refreshedRunPanel).toContainText('1 of 2 occupied');
+  const afterRefresh = await readProjectSnapshot(harness, projectId);
+  expect(itemStates(afterRefresh)).toEqual(itemStates(pausedWithOneActive));
+  expect(afterRefresh.qaReports).toHaveLength(
+    pausedWithOneActive.qaReports.length,
+  );
+
+  harness.releaseTaskOutcome('task-manual');
+  await harness.waitForTaskOutcome('task-manual');
+  const scriptedManualOutcome = await readProjectSnapshot(harness, projectId);
+  const scriptedManualTask = scriptedManualOutcome.tasks.find(
+    ({ title }) => title === 'task-manual',
+  );
+  expect({
+    item: itemStates(scriptedManualOutcome).find(
+      ({ title }) => title === 'task-manual',
+    ),
+    lifecycleState: scriptedManualTask?.lifecycleState,
+    automation: scriptedManualTask?.reviewAutomation.status,
+    projectReviewPolicy:
+      scriptedManualOutcome.project.qaConfiguration.reviewPolicy,
+  }).toMatchObject({
+    item: { status: 'attention_required', reason: 'manual_review' },
+    lifecycleState: 'review',
+    automation: 'disabled',
+    projectReviewPolicy: 'autonomous_review',
+  });
+  const beforeRestart = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => {
+      const states = itemStates(snapshot);
+      return (
+        snapshot.runs.at(-1)?.state === 'paused' &&
+        states.find(({ title }) => title === 'task-manual')?.status ===
+          'attention_required' &&
+        states.filter(({ status }) => status === 'active').length === 0
+      );
+    },
+    'Manual review did not release paused capacity as attention-required',
+  );
+  const runId = beforeRestart.runs.at(-1)?.id;
+  await harness.restart();
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'Board' }).click();
+  await expect(
+    page.getByRole('region', { name: 'Finite project run board' }),
+  ).toBeVisible();
+  const afterRestart = await readProjectSnapshot(harness, projectId);
+  expect(afterRestart.runs.at(-1)?.id).toBe(runId);
+  expect(itemStates(afterRestart)).toEqual(itemStates(beforeRestart));
+  expect(afterRestart.developerCycles).toHaveLength(
+    beforeRestart.developerCycles.length,
+  );
+  expect(afterRestart.qaReports).toHaveLength(beforeRestart.qaReports.length);
+  const restartedRunPanel = page.getByRole('region', {
+    name: 'Project run',
+    exact: true,
+  });
+  await expect(restartedRunPanel).toContainText('0 of 2 occupied');
+
+  await restartedRunPanel.getByRole('button', { name: 'Resume run' }).click();
+  const blockedAfterResume = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      itemStates(snapshot).find(({ title }) => title === 'task-blocked')
+        ?.status === 'attention_required',
+    'Developer blocker did not become attention-required after resume',
+  );
+  const resumedRun = blockedAfterResume.runs.at(-1);
+  if (!resumedRun) throw new Error('Expected resumed run');
+  expect(resumedRun).toMatchObject({ state: 'running', pauseReason: null });
+  await expect
+    .poll(() => harness.startedTaskTitles())
+    .toEqual([
+      'task-auto',
+      'task-manual',
+      'task-blocked',
+      'task-later-auto',
+      'task-later-manual',
+    ]);
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => {
+      const states = itemStates(snapshot);
+      return (
+        states.find(({ title }) => title === 'task-blocked')?.status ===
+          'attention_required' &&
+        states.find(({ title }) => title === 'task-later-auto')?.status ===
+          'active' &&
+        states.find(({ title }) => title === 'task-later-manual')?.status ===
+          'active' &&
+        states.find(({ title }) => title === 'task-not-started')?.status ===
+          'queued'
+      );
+    },
+    'Later queued work did not continue after the blocked outcome',
+  );
+
+  await restartedRunPanel.getByRole('button', { name: 'Stop run' }).click();
+  await restartedRunPanel
+    .getByRole('group', { name: 'Confirm stop' })
+    .getByRole('button', { name: 'Confirm stop run' })
+    .click();
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => {
+      const states = itemStates(snapshot);
+      return (
+        snapshot.runs.at(-1)?.state === 'draining' &&
+        states.find(({ title }) => title === 'task-not-started')?.status ===
+          'not_started' &&
+        states.filter(({ status }) => status === 'active').length === 2
+      );
+    },
+    'Stop did not preserve active work while marking queued work not started',
+  );
+  expect(harness.startedTaskTitles()).not.toContain('task-not-started');
+
+  harness.releaseTaskOutcome('task-later-auto');
+  harness.releaseTaskOutcome('task-later-manual');
+  await harness.drainTaskOutcomes();
+  const completed = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.runs.at(-1)?.state === 'completed',
+    'The stopped run did not drain to durable completion',
+  );
+  expect(completed.runs.at(-1)?.completionReason).toBe('stopped');
+  expect(itemStates(completed).map(({ status }) => status)).toEqual([
+    'completed',
+    'attention_required',
+    'attention_required',
+    'completed',
+    'attention_required',
+    'not_started',
+  ]);
+  await expect(
+    restartedRunPanel.getByRole('region', { name: 'Run history' }),
+  ).toContainText('2 completed, 3 attention, 1 not started');
+  expect(harness.apiBillingEnvironmentValues()).toEqual([undefined, undefined]);
 });
 
 test('refuses API-billing conflicts without invoking Claude', async ({

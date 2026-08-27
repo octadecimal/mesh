@@ -109,7 +109,8 @@ const taskOutcome = (
   }
   if (
     project.qaConfiguration.revision === item.policyRevision &&
-    project.qaConfiguration.reviewPolicy === 'manual'
+    (project.qaConfiguration.reviewPolicy === 'manual' ||
+      task.reviewAutomation.status === 'disabled')
   ) {
     return { status: 'attention_required', reason: 'manual_review' };
   }

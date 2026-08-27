@@ -247,6 +247,36 @@ an explicit paused repair condition. Reconciliation neither manufactures a
 verdict nor silently repeats QA or Developer work. State-specific recovery
 preserves the workspace, cycles, reports, diagnostics, and action history.
 
+Project-run orchestration is a finite authorization over current task truth,
+not an open-ended scheduler. The browser first previews the ordered eligible
+tasks, then sends their ids and revisions as `expectedTasks`. The start command
+rejects a stale preview and, on success, freezes membership, queue order, task
+revision, QA-policy revision, and task-automation generation. Only one
+`running`, `paused`, or `draining` run may exist for a project. Capacity counts
+both `launch_pending` and `active` items, and each launch claim plus its project
+event commits before the attempt starts. The resulting attempt records its run
+and run-item provenance.
+
+Task outcomes release capacity through the same durable run boundary. A done
+task completes its item; a Developer blocker, manual-review boundary, disabled
+task automation, rejection ceiling, or paused review automation requires
+attention. Later queued items may then launch without changing the frozen
+membership. `Pause` persists `operator_paused` and stops new claims while
+already occupied slots settle. `Resume` clears the durable pause reason and
+continues the same queue. `Stop` marks queued work `not_started`, lets occupied
+work drain without replacement, and completes the run with reason `stopped`.
+
+Full project-run reconciliation is a startup boundary. It proves persisted
+claims and attempt provenance, repairs known terminal outcomes, and pauses on
+repository, billing, capacity, or launch ambiguity rather than guessing. Live
+runtime-stop repair is deferred behind any tracked launch drain and observes
+only the affected durable attempt repairs, so a concurrent legitimate launch
+is not mistaken for restart ambiguity. Start, resume, and outcome-triggered
+drains share a tracked single-flight scheduler. Shutdown stops accepting new
+commands, settles that scheduler (including requested reruns), then shuts down
+the session registry and closes the database. Any drain or project-run audit
+failure trips the central audit barrier and prevents further mutation.
+
 ### Persistence
 
 `apps/server/src/db` owns SQLite setup and migrations.
@@ -266,6 +296,14 @@ project, session, workspace, and layout identities when an existing database is
 upgraded. Capability tokens and live MCP handler state are deliberately absent
 from persistence.
 
+Project-run storage was introduced by migrations 012 through 015. Migration
+012 adds runs, their frozen queue items, capacity states, and the one-active-run
+and one-open-item constraints. Migration 013 adds structured project-run source
+provenance to task attempts. Migration 014 permits pre-launch failures to end as
+`attention_required` without invented attempt or session ids. Migration 015
+adds the nullable durable `pause_reason`; a paused run therefore remains
+explainable after refresh and restart.
+
 Migrations are forward-moving, deterministic, and safe for existing databases.
 Do not edit an applied migration to change history; add the next migration and
 cover both fresh and upgraded databases.
@@ -280,6 +318,13 @@ attempt, and repair states.
 `apps/web/src/sessions` and `apps/web/src/workspace` render and compose session
 states. Components should express interaction and presentation rather than
 reimplementing server lifecycle rules.
+
+The project-run panel renders the server preview before authorization, requires
+an explicit subscription-capacity confirmation, and sends that preview as the
+stale-write guard. Running, paused, draining, and completed views are projections
+of durable run state, including occupied capacity, per-item outcomes, pause
+reason, and final history. Refresh and reconnect must preserve the same run id,
+frozen order, item statuses, and terminal counts.
 
 Treat disconnect, stale snapshot, invalid payload, empty data, loading,
 permission requests, and terminal states as first-class UI states. Reconnect

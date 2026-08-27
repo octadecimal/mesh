@@ -112,6 +112,10 @@ type Dependencies = {
     taskId: string;
     cycleId: string;
   }) => Promise<void>;
+  afterDeveloperBlocked?: (input: {
+    taskId: string;
+    cycleId: string;
+  }) => Promise<void>;
   now?: () => string;
   createId?: () => string;
 };
@@ -441,19 +445,24 @@ export class DeveloperReworkService {
             .update(JSON.stringify(evidence))
             .digest('hex');
           const commandId = `${cycle.id}-${idempotencyKey}-${fingerprint}`;
-          this.dependencies.developerExecutionService.markBlocked({
-            commandId,
-            capability,
-            expectedRevision,
-            report: developerBlockerReportSchema.parse({
-              id: commandId,
-              cycleId: cycle.id,
-              ...evidence,
-              createdAt: new Date().toISOString(),
-            }),
-            actor: agentActor,
-          });
+          const outcome =
+            this.dependencies.developerExecutionService.markBlocked({
+              commandId,
+              capability,
+              expectedRevision,
+              report: developerBlockerReportSchema.parse({
+                id: commandId,
+                cycleId: cycle.id,
+                ...evidence,
+                createdAt: new Date().toISOString(),
+              }),
+              actor: agentActor,
+            });
           await this.closeTerminalRuntime(attempt.sessionId, cycle.id);
+          await this.dependencies.afterDeveloperBlocked?.({
+            taskId: outcome.task.id,
+            cycleId: outcome.cycle.id,
+          });
         },
       },
     };

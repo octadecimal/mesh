@@ -458,6 +458,33 @@ describe('reconcileProjectRuns', () => {
     });
   });
 
+  it('restores disabled task automation as manual review under an autonomous project policy', () => {
+    const context = setup();
+    const item = claim(context);
+    launchEffect(context, item, { taskState: 'review', link: true });
+    updateTask(context, item.taskId, (task) => ({
+      ...task,
+      reviewAutomation: {
+        ...task.reviewAutomation,
+        status: 'disabled',
+        updatedAt: now,
+      },
+      updatedAt: now,
+    }));
+
+    expect(reconcile(context)).toEqual({
+      repairedItemIds: [item.id],
+      pausedRunIds: [],
+      launchableRunIds: [],
+    });
+    expect(
+      context.repositories.projectRuns.get(context.run.id)?.items[0],
+    ).toMatchObject({
+      status: 'attention_required',
+      outcomeReason: 'manual_review',
+    });
+  });
+
   it('does not classify a human-blocked task as a Developer outcome', () => {
     const context = setup();
     const item = claim(context);

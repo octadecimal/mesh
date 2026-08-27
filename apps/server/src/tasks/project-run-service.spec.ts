@@ -1244,6 +1244,35 @@ describe('ProjectRunService observeTaskOutcome', () => {
     );
   });
 
+  it('hands outcome continuation to the configured tracked drain scheduler', async () => {
+    const scheduleDrain = vi.fn();
+    const context = setup({ scheduleDrain });
+    const { firstTask, nextTask, runId } = await prepareActiveRun(
+      context,
+      'tracked-outcome',
+    );
+    scheduleDrain.mockClear();
+    updateTask(context, firstTask.id, (task) => ({
+      ...task,
+      lifecycleState: 'done',
+      updatedAt: now,
+    }));
+
+    await context.service.observeTaskOutcome(firstTask.id);
+
+    expect(scheduleDrain).toHaveBeenCalledOnce();
+    expect(scheduleDrain).toHaveBeenCalledWith(runId);
+    expect(context.repositories.projectRuns.get(runId)?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: firstTask.id,
+          status: 'completed',
+        }),
+        expect.objectContaining({ taskId: nextTask.id, status: 'queued' }),
+      ]),
+    );
+  });
+
   it('terminalizes a durable Developer blocker and releases its slot', async () => {
     const context = setup();
     const { firstTask, nextTask, runId } = await prepareActiveRun(
@@ -1332,6 +1361,37 @@ describe('ProjectRunService observeTaskOutcome', () => {
     updateTask(context, firstTask.id, (task) => ({
       ...task,
       lifecycleState: 'review',
+      updatedAt: now,
+    }));
+
+    await context.service.observeTaskOutcome(firstTask.id);
+
+    expect(context.repositories.projectRuns.get(runId)?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: firstTask.id,
+          status: 'attention_required',
+          outcomeReason: 'manual_review',
+        }),
+        expect.objectContaining({ taskId: nextTask.id, status: 'active' }),
+      ]),
+    );
+  });
+
+  it('releases disabled task automation as manual review under an autonomous project policy', async () => {
+    const context = setup();
+    const { firstTask, nextTask, runId } = await prepareActiveRun(
+      context,
+      'disabled-automation',
+    );
+    updateTask(context, firstTask.id, (task) => ({
+      ...task,
+      lifecycleState: 'review',
+      reviewAutomation: {
+        ...task.reviewAutomation,
+        status: 'disabled',
+        updatedAt: now,
+      },
       updatedAt: now,
     }));
 

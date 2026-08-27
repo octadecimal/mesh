@@ -54,6 +54,31 @@ do not delete history or guess the missing outcome. Inspect the task, attempt,
 session diagnostics, and preserved workspace before choosing a human recovery
 action.
 
+### Finite project runs
+
+Use **Start run** to authorize the current ordered set of eligible ready tasks.
+Inspect the preview first: authorization sends the previewed task ids and
+revisions as `expectedTasks`, so a task edit or reorder makes the command stale
+instead of silently changing the run. Choose bounded concurrency and confirm
+that the run may consume Claude subscription capacity. Membership and order are
+then frozen; tasks created or made ready later wait for a future run.
+
+`launch_pending` and `active` items both occupy capacity. Completed autonomous
+review releases a slot as completed. Manual review, disabled per-task
+automation, a Developer blocker, the rejection ceiling, and paused review
+automation release a slot as attention required, allowing later queued work to
+progress. These attention states require an operator decision outside the
+finite run; the run does not retry or invent a resolution.
+
+**Pause run** durably records `operator_paused` and prevents new launches while
+current launches and sessions settle. Refresh or backend restart preserves the
+run id, frozen queue, item results, and pause reason. **Resume run** continues
+that same queue after reviewing the reason. **Stop run** marks queued items not
+started, launches no replacements, drains already occupied items, and preserves
+the completed stopped run in project history. A restart ambiguity instead
+pauses with an explicit reason such as `launch_outcome_unknown`; inspect the
+attempt, diagnostics, and workspace before resuming.
+
 ## Developer execution workflow
 
 Configure **Developer instructions** on the project before starting work. The
@@ -239,6 +264,11 @@ starts it. Enabled autonomous review may consume quota for each automatic QA
 start and each Developer resume; the explicit consent, rejection ceiling, and
 pause control bound that behavior.
 
+A finite project run can start several Developer sessions up to its confirmed
+concurrency and can also trigger autonomous QA or Developer rework. The start
+dialog therefore requires a separate capacity confirmation. Pause and Stop
+bound future launches; they do not erase subscription work already started.
+
 Multiple live sessions that share a folder can modify the same files. Mesh warns about this collision; prefer an isolated worktree when sessions may overlap. Mesh-created worktrees are preserved on archive and on failed or ambiguous cleanup. Deletion removes one only after explicit confirmation and ownership/path checks; otherwise remove or preserve it manually with Git after inspecting its changes.
 
 On backend shutdown, live sessions are interrupted before the database closes. If a process stops without completing that sequence, the next start records a durable `backend_restart` transition from the previous live state to `interrupted`. Closing a panel or browser does not stop its backend session.
@@ -258,7 +288,11 @@ repositories, and an in-process fake Claude driver available only under
 explicit test configuration. It covers explicit import, task launch and failure
 retention, manual QA, bounded autonomous rejection/rework, verified completion,
 and refresh recovery without contacting Claude or consuming Claude subscription
-quota. Failure traces and screenshots are retained under
+quota. The finite-run acceptance path additionally proves concurrency two,
+autonomous completion, manual and blocker attention, later queue progress,
+Pause/Resume, browser refresh, backend restart, Stop/drain, durable history, and
+an absent API-billing environment. It uses only the fake driver, a temporary Git
+repository, and a temporary SQLite database. Failure traces and screenshots are retained under
 `tmp/playwright/session-platform`.
 
 Windows Chromium is the required acceptance environment. The same test suite is the portable basis for future macOS/Linux matrix entries.
