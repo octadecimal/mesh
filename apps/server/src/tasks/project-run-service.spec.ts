@@ -471,8 +471,15 @@ describe('ProjectRunService controls', () => {
     const attempt = repositories.attempts.createForTask(
       claimed.item.taskId,
       session.id,
-      'launched',
-      human,
+      {
+        type: 'project_run',
+        runId: claimed.run.id,
+        runItemId: claimed.item.id,
+      },
+      taskActorSchema.parse({
+        type: 'system',
+        id: `project-run:${claimed.run.id}:${claimed.item.id}`,
+      }),
       'developer',
     );
     const active = repositories.projectRuns.linkLaunch({
@@ -556,6 +563,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
   it('durably claims before launch and links the successful attempt and session', async () => {
     let context: ReturnType<typeof setup>;
     const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
+      expect(context.repositories.database.inTransaction).toBe(false);
       expect(
         context.repositories.projectRuns
           .get(input.source.runId)

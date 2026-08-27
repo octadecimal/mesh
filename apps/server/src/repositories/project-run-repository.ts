@@ -329,6 +329,10 @@ export class ProjectRunRepository {
             WHERE task_attempts.id = ?
               AND task_attempts.task_id = project_run_items.task_id
               AND task_attempts.session_id = ?
+              AND task_attempts.source_json IS NOT NULL
+              AND json_extract(task_attempts.source_json, '$.type') = 'project_run'
+              AND json_extract(task_attempts.source_json, '$.runId') = project_run_items.run_id
+              AND json_extract(task_attempts.source_json, '$.runItemId') = project_run_items.id
               AND sessions.project_id = project_run_items.project_id
           )`,
         )

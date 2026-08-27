@@ -1,9 +1,11 @@
 import {
   projectSchema,
   sessionSchema,
+  taskAttemptSourceSchema,
   taskAttemptSchema,
   taskSchema,
   workspaceSchema,
+  type TaskAttemptSource,
 } from '@mesh-session-platform/contracts';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -12,7 +14,10 @@ import { createTestRepositories } from '../test/create-test-database.js';
 
 const at = '2026-08-27T00:00:00.000Z';
 
-const setup = (options?: { failProjectEventInsert?: boolean }) => {
+const setup = (options?: {
+  failProjectEventInsert?: boolean;
+  attemptSource?: TaskAttemptSource;
+}) => {
   const repositories = createTestRepositories(options);
   repositories.projects.create(
     projectSchema.parse({
@@ -73,7 +78,11 @@ const setup = (options?: { failProjectEventInsert?: boolean }) => {
       taskId: 'task-a',
       sessionId: 'session-1',
       ordinal: 1,
-      source: 'launched',
+      source: options?.attemptSource ?? {
+        type: 'project_run',
+        runId: 'run-1',
+        runItemId: 'item-task-a',
+      },
       actor: { type: 'system', id: 'system-1' },
       createdAt: at,
       unlinkedAt: null,
@@ -283,6 +292,98 @@ describe('ProjectRunRepository', () => {
       outcomeReason: 'task_revision_conflict',
     });
   });
+
+  it.each([
+    ['legacy launch', 'launched'],
+    ['manual link', 'linked'],
+  ] as const)(
+    'rejects %s attempt provenance without changing the durable claim',
+    (_label, attemptSource) => {
+      const repository = setup({
+        attemptSource: taskAttemptSourceSchema.parse(attemptSource),
+      });
+      repositories.push(repository);
+      const run = createRun(repository.projectRuns, ['task-a']);
+      const claim = repository.projectRuns.claimNext({
+        runId: run.id,
+        expectedRunRevision: run.revision,
+        occurredAt: at,
+      });
+      if (!claim) throw new Error('Expected a claimed item');
+
+      expect(() =>
+        repository.projectRuns.linkLaunch({
+          runId: run.id,
+          itemId: claim.item.id,
+          expectedRunRevision: claim.run.revision,
+          attemptId: 'attempt-1',
+          sessionId: 'session-1',
+          occurredAt: at,
+        }),
+      ).toThrow('Project run item launch cannot be linked');
+      expect(repository.database.inTransaction).toBe(false);
+      expect(repository.projectRuns.get(run.id)).toMatchObject({
+        revision: claim.run.revision,
+        items: [
+          {
+            id: claim.item.id,
+            status: 'launch_pending',
+            attemptId: null,
+            sessionId: null,
+          },
+        ],
+      });
+    },
+  );
+
+  it.each([
+    [
+      'another run',
+      { type: 'project_run', runId: 'run-2', runItemId: 'item-task-a' },
+    ],
+    [
+      'another item',
+      { type: 'project_run', runId: 'run-1', runItemId: 'item-other' },
+    ],
+  ] as const)(
+    'rejects project-run attempt provenance bound to %s',
+    (_label, attemptSource) => {
+      const repository = setup({
+        attemptSource: taskAttemptSourceSchema.parse(attemptSource),
+      });
+      repositories.push(repository);
+      const run = createRun(repository.projectRuns, ['task-a']);
+      const claim = repository.projectRuns.claimNext({
+        runId: run.id,
+        expectedRunRevision: run.revision,
+        occurredAt: at,
+      });
+      if (!claim) throw new Error('Expected a claimed item');
+
+      expect(() =>
+        repository.projectRuns.linkLaunch({
+          runId: run.id,
+          itemId: claim.item.id,
+          expectedRunRevision: claim.run.revision,
+          attemptId: 'attempt-1',
+          sessionId: 'session-1',
+          occurredAt: at,
+        }),
+      ).toThrow('Project run item launch cannot be linked');
+      expect(repository.database.inTransaction).toBe(false);
+      expect(repository.projectRuns.get(run.id)).toMatchObject({
+        revision: claim.run.revision,
+        items: [
+          {
+            id: claim.item.id,
+            status: 'launch_pending',
+            attemptId: null,
+            sessionId: null,
+          },
+        ],
+      });
+    },
+  );
 
   it('rejects launch links whose attempt task or session does not match the item', () => {
     const repository = setup();
