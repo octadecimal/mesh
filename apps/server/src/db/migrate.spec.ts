@@ -134,6 +134,7 @@ describe('migrate', () => {
       { id: '008-developer-cycle-task-title' },
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
+      { id: '011-qa-interruption-repair' },
     ]);
     expect(
       database
@@ -397,6 +398,7 @@ describe('migrate', () => {
       { id: '008-developer-cycle-task-title' },
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
+      { id: '011-qa-interruption-repair' },
     ]);
   });
 
@@ -604,6 +606,10 @@ describe('migrate', () => {
       join(__dirname, 'migrations', '010-review-automation-state.sql'),
       join(directory, 'migrations', '010-review-automation-state.sql'),
     );
+    copyFileSync(
+      join(__dirname, 'migrations', '011-qa-interruption-repair.sql'),
+      join(directory, 'migrations', '011-qa-interruption-repair.sql'),
+    );
     buildSync({
       bundle: true,
       entryPoints: [join(__dirname, 'migrate.ts')],
@@ -659,6 +665,7 @@ describe('migrate', () => {
         { id: '008-developer-cycle-task-title' },
         { id: '009-qa-execution' },
         { id: '010-review-automation-state' },
+        { id: '011-qa-interruption-repair' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -735,6 +742,7 @@ describe('migrate', () => {
       { id: '008-developer-cycle-task-title' },
       { id: '009-qa-execution' },
       { id: '010-review-automation-state' },
+      { id: '011-qa-interruption-repair' },
     ]);
   });
 
@@ -1179,6 +1187,7 @@ describe('migrate', () => {
         { id: '008-developer-cycle-task-title' },
         { id: '009-qa-execution' },
         { id: '010-review-automation-state' },
+        { id: '011-qa-interruption-repair' },
       ]);
       expect(
         database

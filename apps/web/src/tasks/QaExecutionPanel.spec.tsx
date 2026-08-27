@@ -367,6 +367,44 @@ describe('QaExecutionPanel', () => {
     expect(onOpenSession).toHaveBeenCalledWith(qaSession.id);
   });
 
+  it('offers the audited non-verdict repair for a dead active QA cycle', async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    const activeCycle = cycleFor({
+      endedAt: null,
+      terminalDisposition: null,
+      reportId: null,
+      terminalCommandId: null,
+      terminalEventId: null,
+    });
+    renderPanel({
+      cycles: [activeCycle],
+      reports: [],
+      repairs: [
+        {
+          taskId: task.id,
+          attemptId: attempt.attempt.id,
+          sessionId: qaSession.id,
+          reason: 'qa_cycle_without_trustworthy_outcome',
+        },
+      ],
+      onCommand,
+    });
+
+    await user.click(
+      screen.getByRole('button', { name: 'Mark QA interrupted' }),
+    );
+    expect(onCommand).toHaveBeenCalledWith({
+      type: 'task.qa.repair_interrupted',
+      payload: {
+        taskId: task.id,
+        cycleId: activeCycle.id,
+        expectedRevision: task.revision,
+        actor,
+      },
+    });
+  });
+
   it('compares Developer and QA evidence and warns about rejection, workspace changes, and resume failure', () => {
     const rejectedCycle = cycleFor({
       terminalDisposition: 'rejected',

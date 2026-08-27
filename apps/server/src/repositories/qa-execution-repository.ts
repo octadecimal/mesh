@@ -26,6 +26,9 @@ type CycleRow = {
   report_id: string | null;
   terminal_command_id: string | null;
   terminal_event_id: string | null;
+  interrupted_at: string | null;
+  interruption_command_id: string | null;
+  interruption_event_id: string | null;
 };
 
 type ReportRow = {
@@ -60,6 +63,8 @@ type CycleSnapshot = Pick<
   | 'taskSnapshot'
   | 'developerCompletionReportId'
   | 'workspaceId'
+  | 'workspaceBaseline'
+  | 'taskFingerprint'
   | 'reviewPolicyRevision'
 >;
 
@@ -70,6 +75,11 @@ type CompleteCycle = Pick<
   | 'reportId'
   | 'terminalCommandId'
   | 'terminalEventId'
+>;
+
+type InterruptCycle = Pick<
+  QaExecutionCycle,
+  'endedAt' | 'terminalCommandId' | 'terminalEventId'
 >;
 
 const assertDurableActionState = (
@@ -112,11 +122,11 @@ const toCycle = (row: CycleRow): QaExecutionCycle => {
     automationGeneration: row.automation_generation,
     rejectionOrdinal: row.rejection_ordinal,
     startedAt: row.started_at,
-    endedAt: row.terminal_at,
-    terminalDisposition: row.disposition,
+    endedAt: row.interrupted_at ?? row.terminal_at,
+    terminalDisposition: row.interrupted_at ? 'interrupted' : row.disposition,
     reportId: row.report_id,
-    terminalCommandId: row.terminal_command_id,
-    terminalEventId: row.terminal_event_id,
+    terminalCommandId: row.interruption_command_id ?? row.terminal_command_id,
+    terminalEventId: row.interruption_event_id ?? row.terminal_event_id,
   });
 };
 
@@ -157,6 +167,7 @@ export class QaExecutionRepository {
   private readonly insertCycle;
   private readonly selectCycle;
   private readonly completeActiveCycle;
+  private readonly interruptActiveCycle;
   private readonly insertReportStatement;
   private readonly selectReport;
   private readonly selectTerminalReport;
@@ -190,7 +201,14 @@ export class QaExecutionRepository {
           report_id = @reportId,
           terminal_command_id = @terminalCommandId,
           terminal_event_id = @terminalEventId
-      WHERE id = @id AND terminal_at IS NULL
+      WHERE id = @id AND terminal_at IS NULL AND interrupted_at IS NULL
+    `);
+    this.interruptActiveCycle = database.prepare(`
+      UPDATE qa_execution_cycles
+      SET interrupted_at = @endedAt,
+          interruption_command_id = @terminalCommandId,
+          interruption_event_id = @terminalEventId
+      WHERE id = @id AND terminal_at IS NULL AND interrupted_at IS NULL
     `);
     this.insertReportStatement = database.prepare(`
       INSERT INTO qa_reports (id, cycle_id, report_json, created_at)
@@ -266,6 +284,27 @@ export class QaExecutionRepository {
     return row ? toCycle(row) : undefined;
   }
 
+  getActiveCycleBySession(sessionId: string): QaExecutionCycle | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM qa_execution_cycles
+         WHERE session_id = ? AND terminal_at IS NULL AND interrupted_at IS NULL
+         ORDER BY ordinal DESC, id DESC LIMIT 1`,
+      )
+      .get(idSchema.parse(sessionId)) as CycleRow | undefined;
+    return row ? toCycle(row) : undefined;
+  }
+
+  hasCycleForSession(sessionId: string): boolean {
+    return Boolean(
+      this.database
+        .prepare(
+          'SELECT 1 FROM qa_execution_cycles WHERE session_id = ? LIMIT 1',
+        )
+        .get(idSchema.parse(sessionId)),
+    );
+  }
+
   listCyclesForAttempts(attemptIds: readonly string[]): QaExecutionCycle[] {
     const ids = attemptIds.map((id) => idSchema.parse(id));
     if (ids.length === 0) return [];
@@ -305,6 +344,22 @@ export class QaExecutionRepository {
     }
     toReport(terminalReport);
     const result = this.completeActiveCycle.run(value);
+    return result.changes === 1 ? value : undefined;
+  }
+
+  interruptCycle(
+    id: string,
+    update: InterruptCycle,
+  ): QaExecutionCycle | undefined {
+    const current = this.getCycle(id);
+    if (!current || current.endedAt !== null) return undefined;
+    const value = qaExecutionCycleSchema.parse({
+      ...current,
+      ...update,
+      terminalDisposition: 'interrupted',
+      reportId: null,
+    });
+    const result = this.interruptActiveCycle.run({ id: value.id, ...update });
     return result.changes === 1 ? value : undefined;
   }
 
@@ -452,6 +507,8 @@ export class QaExecutionRepository {
       taskSnapshot: cycle.taskSnapshot,
       developerCompletionReportId: cycle.developerCompletionReportId,
       workspaceId: cycle.workspaceId,
+      workspaceBaseline: cycle.workspaceBaseline,
+      taskFingerprint: cycle.taskFingerprint,
       reviewPolicyRevision: cycle.reviewPolicyRevision,
     };
   }

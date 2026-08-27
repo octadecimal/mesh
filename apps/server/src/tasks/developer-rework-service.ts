@@ -331,6 +331,31 @@ export class DeveloperReworkService {
         `Developer attempt '${previousCycle.attemptId}' is not current`,
       );
     }
+    if (input.kind === 'rejection') {
+      const qaCycles = this.dependencies.qaExecutions.listCyclesForAttempts(
+        this.dependencies.attempts.listByTask(task.id).map(({ id }) => id),
+      );
+      if (qaCycles.some(({ endedAt }) => endedAt === null)) {
+        throw new DeveloperRecoveryInvalidError(
+          `Task '${task.id}' has an active QA cycle`,
+        );
+      }
+      const latestQaCycle = [...qaCycles]
+        .reverse()
+        .find(
+          ({ developerCompletionReportId }) =>
+            developerCompletionReportId === previousCycle.completionReportId,
+        );
+      if (
+        (qaCycles.length > 0 || automated) &&
+        (latestQaCycle?.terminalDisposition !== 'rejected' ||
+          latestQaCycle.reportId === null)
+      ) {
+        throw new DeveloperRecoveryInvalidError(
+          `Task '${task.id}' requires a matching rejected QA verdict`,
+        );
+      }
+    }
     if (automated) {
       this.assertAutomationRecovery(task, attempt, input.automation!);
     }

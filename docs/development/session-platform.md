@@ -109,9 +109,11 @@ authority.
 Choose `manual` when a human should control every handoff. After the current
 Developer cycle submits for review, select **Start QA** in the task drawer. Mesh
 creates a separate QA session and cycle in the Developer attempt's exact
-workspace. QA can read the submitted source and run verification commands, but
-cannot write source, create another worktree, commit, merge, or create a pull
-request. Its structured report covers every snapshotted acceptance criterion and
+workspace. QA can read the submitted source and request named verification
+commands through Mesh's constrained runner, but receives no shell and cannot
+write source, create another worktree, commit, merge, or create a pull request.
+Mesh hashes the bytes of Git-tracked files at launch and after each command; a
+mutation pauses review and prevents a verdict. Its structured report covers every snapshotted acceptance criterion and
 records evidence, verification performed, residual risks, and workspace state.
 After a verified verdict, a human may accept the task as done. After a rejection,
 a human chooses the appropriate Developer rework action. Manual mode never
@@ -133,6 +135,14 @@ cycle starts. A new human rework decision resets the budget. Switching the
 project policy to `manual` or selecting **Pause automation** prevents future
 automatic actions without silently interrupting a session already running;
 session interruption remains a separate visible command.
+
+When automation is paused or disabled for a task under the autonomous project
+policy, a human may start QA explicitly; that launch is audited and does not
+reenable automatic follow-up. If a QA runtime dies without a verdict,
+reconciliation shows a repair warning. After confirming the runtime is no
+longer live, **Mark QA interrupted** closes the cycle without fabricating a
+verdict, fails its pending automatic launch action, preserves its history, and
+allows a later human QA retry.
 
 Use the QA panel and **Execution history** to inspect the active role, exact
 workspace, policy snapshot, remaining rejection budget, chronological Developer
@@ -156,9 +166,11 @@ creates a fallback attempt, or bypasses workspace ownership checks.
 Mesh uses the installed Claude subscription through the Claude Agent SDK. It
 does not support an API-key or pay-per-token fallback. This applies equally to
 starting Developer, starting QA, and the resume paths after rejection or
-unblock. If `ANTHROPIC_API_KEY` is present, new and resumed sessions are refused.
-Remove the variable outside Mesh, verify the intended Claude subscription is
-active, and restart Mesh. Manual QA consumes subscription quota when a human
+unblock. Startup now requires the SDK to positively report a first-party
+subscription and no API-key source. Environment keys, API-key helpers, and
+keys managed by `/login` are all refused; ambiguous account metadata also fails
+closed. Remove the conflicting key outside Mesh, verify the intended Claude
+subscription login is active, and restart Mesh. Manual QA consumes subscription quota when a human
 starts it. Enabled autonomous review may consume quota for each automatic QA
 start and each Developer resume; the explicit consent, rejection ceiling, and
 pause control bound that behavior.

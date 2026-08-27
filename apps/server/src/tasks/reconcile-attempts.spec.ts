@@ -906,6 +906,32 @@ describe('reconcileTaskAttempts', () => {
     });
   });
 
+  it('treats an audited interrupted QA cycle as terminal without a verdict', () => {
+    const repositories = setup({
+      taskState: 'review',
+      sessionState: 'completed',
+      automationStatus: 'paused',
+    });
+    const active = addQaCycle(repositories, { sessionState: 'completed' });
+    const interrupted = repositories.qaExecutions.interruptCycle(active.id, {
+      endedAt: now,
+      terminalCommandId: 'repair-qa-1',
+      terminalEventId: 'repair-event-1',
+    });
+    if (!interrupted) throw new Error('Expected interrupted QA cycle');
+
+    expect(
+      reconcileTaskAttempts({
+        ...repositories,
+        qaExecutions: repositories.qaExecutions,
+        workspaces: repositories.workspaces,
+        qaCapabilities: new QaCapabilityRegistry(),
+      }),
+    ).toEqual({ repairs: [], events: [] });
+    expect(repositories.qaExecutions.getReport('qa-report-1')).toBeUndefined();
+    expect(repositories.qaExecutions.getCycle(active.id)).toEqual(interrupted);
+  });
+
   it.each(['review', 'done'] as const)(
     'reports a pending automatic action when its target task is %s and never replays it',
     (taskState) => {

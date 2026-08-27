@@ -578,6 +578,26 @@ export const applyProjectEvent = (
             [event.payload.report.cycleId]: event.payload.report,
           }
         : next.qaReportsByCycleId,
+      repairsByProjectId:
+        event.payload.cycle.terminalDisposition === 'interrupted'
+          ? {
+              ...next.repairsByProjectId,
+              [event.projectId]: (
+                next.repairsByProjectId[event.projectId] ?? []
+              ).filter(
+                (repair) =>
+                  !(
+                    repair.taskId === event.payload.task.id &&
+                    repair.attemptId === event.payload.attempt.id &&
+                    repair.sessionId === event.payload.cycle.sessionId &&
+                    [
+                      'qa_cycle_without_trustworthy_outcome',
+                      'qa_session_workspace_mismatch',
+                    ].includes(repair.reason)
+                  ),
+              ),
+            }
+          : next.repairsByProjectId,
     };
   }
 

@@ -84,10 +84,12 @@ or a system-policy launch in autonomous-review mode only after the current
 Developer cycle has submitted a complete report and the task is unblocked in
 `review`. It revalidates and reuses that cycle's exact active workspace; a fresh
 worktree would not contain the submission being verified. The QA runtime can
-read source and run verification commands, but its tool policy excludes source-
-authoring controls. Verification may create ordinary ignored build or test
-artifacts. A changed source snapshot cannot be accepted as verified and pauses
-the review loop for inspection.
+read source and invoke only server-approved verification executables; it never
+receives a general shell or source-authoring control. The server fingerprints
+the bytes of Git-tracked files before launch and after every verification
+command instead of accepting an agent-reported workspace state. Verification
+may create ordinary ignored build or test artifacts. A tracked-source mutation
+invalidates QA authority and pauses the review loop for inspection.
 
 QA controls use a separate ephemeral capability bound to the QA session, task,
 current attempt, and open QA cycle. The only task-domain control exposed to the
@@ -95,7 +97,10 @@ runtime is one structured verdict submission covering every snapshotted
 criterion. The capability becomes invalid when the verdict closes the cycle,
 startup or cleanup fails, the session stops, or the server restarts. A
 transcript, process exit, or stale capability is never interpreted as a QA
-outcome.
+outcome. If reconciliation finds a dead runtime with an open cycle, a human may
+terminalize it as `interrupted` through an audited repair command. That state
+has command, event, and end-time evidence but deliberately has no verdict
+report.
 
 `ReviewAutomationService` is the narrow policy boundary after committed
 Developer and QA outcomes. Manual policy records the verdict and performs no
@@ -157,6 +162,12 @@ updates the task, appends its transition, and appends the project event; only
 then does it publish the event and invalidate the capability. Human commands
 separately own accepting manual review as done, choosing rework, and resolving a
 blocker.
+
+Once a QA cycle exists for the current Developer submission, the older human
+commands are gated by that evidence: acceptance requires the latest matching
+verified verdict, rework requires the latest matching rejection, and neither is
+valid while QA is active. Tasks with no QA history retain the pre-QA manual
+decision path.
 
 `QaExecutionService` owns QA launch, authority checks, runtime composition, and
 verdict validation. A verdict transaction appends the complete QA report,

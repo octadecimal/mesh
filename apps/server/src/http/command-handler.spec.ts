@@ -27,6 +27,7 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
+import { QaVerificationRunner } from '../platform/qa-verification-runner.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
 import { AttemptService } from '../tasks/attempt-service.js';
@@ -129,6 +130,9 @@ describe('executeCommand', () => {
       attemptService,
       capabilities: qaCapabilities,
       registry,
+      verificationRunner: new QaVerificationRunner({
+        run: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
+      }),
       now: () => now,
       createId,
     });
@@ -219,6 +223,51 @@ describe('executeCommand', () => {
         projectEventCursor: 7,
       },
       warnings: [],
+    });
+  });
+
+  it('routes an audited human interrupted-cycle repair', async () => {
+    const { directory } = await createRepository();
+    const { dependencies } = commandDependencies(directory);
+    let repairInput: unknown;
+    (dependencies as { qaExecutionService: unknown }).qaExecutionService = {
+      launch: async () => undefined,
+      submitVerdict: () => undefined,
+      repairInterrupted: (input: unknown) => {
+        repairInput = input;
+        return {
+          task: { id: 'task-1' },
+          attempt: { id: 'attempt-1' },
+          cycle: { id: 'qa-cycle-1', terminalDisposition: 'interrupted' },
+          event: { sequence: 8 },
+          events: [{ sequence: 8 }],
+        };
+      },
+    };
+
+    const result = await executeCommand(
+      projectCommand('qa-repair-command', {
+        type: 'task.qa.repair_interrupted',
+        payload: {
+          taskId: 'task-1',
+          cycleId: 'qa-cycle-1',
+          expectedRevision: 4,
+          actor: { type: 'human', id: 'operator-1' },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(repairInput).toEqual({
+      commandId: 'qa-repair-command',
+      taskId: 'task-1',
+      cycleId: 'qa-cycle-1',
+      expectedRevision: 4,
+      actor: { type: 'human', id: 'operator-1' },
+    });
+    expect(result).toMatchObject({
+      commandType: 'task.qa.repair_interrupted',
+      result: { projectEventCursor: 8 },
     });
   });
 
@@ -421,11 +470,8 @@ describe('executeCommand', () => {
                 evidence: 'Focused test failed.',
               },
             ],
-            verificationCommands: [],
             limitations: [],
             residualRisks: ['Regression remains.'],
-            workspaceBefore: 'source-state-1',
-            workspaceAfter: 'source-state-1',
           },
           actor: { type: 'agent', id: 'qa-agent-1' },
         },
@@ -649,11 +695,8 @@ describe('executeCommand', () => {
         report: {
           disposition: 'rejected',
           criterionResults: report.criterionResults,
-          verificationCommands: [],
           limitations: [],
           residualRisks: report.residualRisks,
-          workspaceBefore: report.workspaceBefore,
-          workspaceAfter: report.workspaceAfter,
         },
         actor: { type: 'agent', id: 'qa-agent-replay' },
       },
@@ -1399,6 +1442,142 @@ describe('executeCommand', () => {
       ),
     ).rejects.toMatchObject({ code: 'project_has_running_attempt' });
     expect(repositories.projects.get('p1')?.archivedAt).toBeNull();
+  });
+
+  it('blocks archive and deletion through QA cycle session ownership', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    repositories.projects.create(
+      projectSchema.parse({
+        id: 'qa-owned-project',
+        displayName: 'QA owned',
+        repositoryPath: directory,
+        discoveredAt: now,
+      }),
+    );
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'qa-owned-workspace',
+        projectId: 'qa-owned-project',
+        type: 'shared',
+        path: directory,
+      }),
+    );
+    for (const [id, title] of [
+      ['qa-owned-developer', 'Developer'],
+      ['qa-owned-session', 'QA'],
+    ] as const) {
+      repositories.sessions.create(
+        sessionSchema.parse({
+          id,
+          projectId: 'qa-owned-project',
+          workspaceId: 'qa-owned-workspace',
+          title,
+          permissionMode: 'safe_auto',
+          lifecycleState: 'completed',
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+    }
+    const task = repositories.tasks.create(
+      taskSchema.parse({
+        id: 'qa-owned-task',
+        projectId: 'qa-owned-project',
+        title: 'QA owned task',
+        description: 'Preserve QA history.',
+        acceptanceCriteria: ['History is durable'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'review',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const attempt = repositories.attempts.create(
+      taskAttemptSchema.parse({
+        id: 'qa-owned-attempt',
+        taskId: task.id,
+        sessionId: 'qa-owned-developer',
+        ordinal: 1,
+        source: 'launched',
+        actor: { type: 'human', id: 'operator' },
+        createdAt: now,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: 'developer',
+      }),
+    );
+    repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: 'qa-owned-cycle',
+        taskId: task.id,
+        attemptId: attempt.id,
+        sessionId: 'qa-owned-session',
+        ordinal: 1,
+        authorizedBy: { type: 'human', id: 'operator' },
+        authorizationCommandId: 'qa-owned-launch',
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: 1,
+          title: task.title,
+          description: task.description,
+          acceptanceCriteria: [
+            { id: 'criterion-1', text: 'History is durable' },
+          ],
+        },
+        developerCompletionReportId: 'qa-owned-report',
+        workspaceId: 'qa-owned-workspace',
+        reviewPolicy: 'manual',
+        reviewPolicyRevision: 1,
+        automationGeneration: 0,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+
+    for (const command of [
+      {
+        type: 'session.archive',
+        payload: { sessionId: 'qa-owned-session' },
+      },
+      {
+        type: 'session.delete',
+        payload: { sessionId: 'qa-owned-session', confirmed: true },
+      },
+      {
+        type: 'project.archive',
+        payload: {
+          projectId: 'qa-owned-project',
+          expectedRevision: 1,
+          actor: { type: 'human', id: 'operator' },
+        },
+      },
+    ]) {
+      await expect(
+        executeCommand(
+          projectCommand(`qa-ownership-${command.type}`, command),
+          dependencies,
+        ),
+      ).rejects.toMatchObject({
+        code:
+          command.type === 'project.archive'
+            ? 'project_has_running_attempt'
+            : 'invalid_session_state',
+      });
+    }
+    expect(repositories.qaExecutions.getCycle('qa-owned-cycle')).toBeDefined();
   });
 
   it('restores an archived project with the next revision', async () => {

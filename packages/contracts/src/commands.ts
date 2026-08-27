@@ -330,6 +330,15 @@ export const taskCommandSchema = z.discriminatedUnion('type', [
     }),
   }),
   z.object({
+    type: z.literal('task.qa.repair_interrupted'),
+    payload: z.object({
+      taskId: idSchema,
+      cycleId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
     type: z.literal('task.review_automation.enable'),
     payload: z.object({
       taskId: idSchema,

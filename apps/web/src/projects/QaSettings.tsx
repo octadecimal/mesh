@@ -54,7 +54,7 @@ export function QaSettings({
   const keepManualButton = useRef<HTMLButtonElement>(null);
   const saveButton = useRef<HTMLButtonElement>(null);
   const waitingForResync =
-    conflictRevision !== undefined && project.revision < conflictRevision;
+    conflictRevision !== undefined && canonical.revision < conflictRevision;
   const isSaving = saving || pending;
   const changed =
     content !== canonical.instructions.content ||
@@ -94,15 +94,15 @@ export function QaSettings({
       await onSave({
         content,
         reviewPolicy,
-        expectedRevision: project.revision,
+        expectedRevision: canonical.revision,
       });
     } catch (caught) {
       const failure = failureDetails(caught);
-      const revision = failure?.details?.project?.revision;
+      const revision = failure?.details?.project?.qaConfiguration?.revision;
       if (failure?.code === 'project_revision_conflict' && revision) {
         setConflictRevision(revision);
         setError(
-          `The server is at revision ${revision}. Waiting for authoritative project refresh.`,
+          `The server is at QA configuration revision ${revision}. Waiting for authoritative project refresh.`,
         );
       } else {
         setError(failure?.message ?? 'QA settings could not be saved.');

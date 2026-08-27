@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { z } from 'zod';
 
 import {
   QaAlreadyActiveError,
@@ -41,6 +42,10 @@ import type { TaskAttemptRepository } from '../repositories/task-attempt-reposit
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
+import type {
+  QaVerificationCommand,
+  QaVerificationResult,
+} from '../platform/qa-verification-runner.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { AttemptService } from './attempt-service.js';
 import type { QaCapabilityRegistry } from './qa-capability-registry.js';
@@ -91,6 +96,22 @@ export type QaVerdictOutcome = {
   events: ProjectEvent[];
 };
 
+export type QaRepairInterruptedInput = {
+  commandId: string;
+  taskId: string;
+  cycleId: string;
+  expectedRevision: number;
+  actor: TaskActor;
+};
+
+export type QaRepairInterruptedOutcome = {
+  task: Task;
+  attempt: TaskAttempt;
+  cycle: QaExecutionCycle;
+  event: ProjectEvent;
+  events: ProjectEvent[];
+};
+
 type QaRegistry = {
   create(
     sessionId: string,
@@ -117,6 +138,13 @@ type QaExecutionServiceDependencies = {
   capabilities: QaCapabilityRegistry;
   registry: QaRegistry;
   billingConflicts?: readonly { variable: string }[];
+  verificationRunner: {
+    captureTrackedSource(path: string): Promise<string>;
+    run(
+      path: string,
+      input: QaVerificationCommand,
+    ): Promise<QaVerificationResult>;
+  };
   afterRejectedVerdict?: (input: {
     taskId: string;
     cycleId: string;
@@ -133,6 +161,36 @@ type LaunchContext = {
   developerReport: DeveloperCompletionReport;
 };
 
+type VerificationState = {
+  workspacePath: string;
+  baseline: string;
+  latest: string;
+  commands: Array<{ command: string; outcome: string }>;
+  mutationDetected: boolean;
+};
+
+const verificationCommandSchema = z.object({
+  executable: z.string().trim().min(1),
+  args: z.array(z.string()).min(1).max(64),
+});
+
+const taskFingerprint = (task: Task): string =>
+  `sha256:${createHash('sha256')
+    .update(
+      JSON.stringify({
+        title: task.title,
+        description: task.description,
+        acceptanceCriteria: task.acceptanceCriteria,
+        priority: task.priority,
+        rank: task.rank,
+        labels: task.labels,
+        notes: task.notes,
+        lifecycleState: task.lifecycleState,
+        blocked: task.blocked,
+      }),
+    )
+    .digest('hex')}`;
+
 class QaLaunchInvalidError extends Error {
   constructor(
     readonly code:
@@ -140,7 +198,9 @@ class QaLaunchInvalidError extends Error {
       | 'task_transition_invalid'
       | 'task_transition_unauthorized'
       | 'developer_cycle_invalid'
-      | 'developer_report_invalid',
+      | 'developer_report_invalid'
+      | 'qa_cycle_invalid'
+      | 'qa_cycle_active',
     message: string,
   ) {
     super(message);
@@ -188,6 +248,8 @@ const safeQaControlErrorCodes = new Set([
   'task_transition_invalid',
   'task_transition_unauthorized',
   'review_automation_paused',
+  'qa_verification_command_rejected',
+  'qa_source_mutation_detected',
 ]);
 
 const qaControlFailure = (error: unknown) => {
@@ -218,6 +280,7 @@ const qaControlFailure = (error: unknown) => {
 export class QaExecutionService {
   private readonly now: () => string;
   private readonly createId: () => string;
+  private readonly verificationStates = new Map<string, VerificationState>();
 
   constructor(private readonly dependencies: QaExecutionServiceDependencies) {
     this.now = dependencies.now ?? (() => new Date().toISOString());
@@ -243,12 +306,17 @@ export class QaExecutionService {
               attemptId: initial.attempt.id,
               workspaceId: initial.developerCycle.workspaceId,
             });
+          const workspaceBaseline =
+            await this.dependencies.verificationRunner.captureTrackedSource(
+              verified.workspace.path,
+            );
           const prepared = this.persistLaunch(
             input,
             actor,
             initial,
             verified.session,
             verified.workspace,
+            workspaceBaseline,
           );
           this.dependencies.registry.publisher.publishProject(prepared.event);
 
@@ -316,6 +384,9 @@ export class QaExecutionService {
         const report = this.dependencies.qaExecutions.insertReport(
           qaReportSchema.parse({
             ...reportInput,
+            verificationCommands: context.verification.commands,
+            workspaceBefore: context.verification.baseline,
+            workspaceAfter: context.verification.latest,
             id: idSchema.parse(this.createId()),
             cycleId: context.cycle.id,
             createdAt: occurredAt,
@@ -387,6 +458,140 @@ export class QaExecutionService {
     return result;
   }
 
+  repairInterrupted(
+    input: QaRepairInterruptedInput,
+  ): QaRepairInterruptedOutcome {
+    const commandId = idSchema.parse(input.commandId);
+    const existing =
+      this.dependencies.commands.getExisting<QaRepairInterruptedOutcome>(
+        commandId,
+      );
+    if (existing.found) return existing.response;
+
+    const result = this.dependencies.commands.executeOnceInImmediateTransaction(
+      commandId,
+      () => {
+        const actor = taskActorSchema.parse(input.actor);
+        if (actor.type !== 'human') {
+          throw new QaLaunchInvalidError(
+            'task_transition_unauthorized',
+            'Only a human may repair an interrupted QA cycle',
+          );
+        }
+        const task = this.dependencies.tasks.get(idSchema.parse(input.taskId));
+        if (!task) throw new TaskNotFoundError(input.taskId);
+        const project = this.dependencies.projects.get(task.projectId);
+        if (!project) throw new ProjectNotFoundError(task.projectId);
+        if (project.archivedAt) throw new ProjectArchivedError(project);
+        if (task.revision !== input.expectedRevision) {
+          throw new TaskRevisionConflictError(task);
+        }
+        const current = this.dependencies.qaExecutions.getCycle(
+          idSchema.parse(input.cycleId),
+        );
+        if (
+          !current ||
+          current.taskId !== task.id ||
+          current.endedAt !== null
+        ) {
+          throw new QaLaunchInvalidError(
+            'qa_cycle_invalid',
+            'The QA cycle is not an active cycle for this task',
+          );
+        }
+        const session = this.dependencies.sessions.get(current.sessionId);
+        if (
+          session &&
+          ['starting', 'running', 'waiting_for_input', 'interrupting'].includes(
+            session.lifecycleState,
+          )
+        ) {
+          throw new QaLaunchInvalidError(
+            'qa_cycle_active',
+            'A live QA runtime cannot be repaired as interrupted',
+          );
+        }
+        const attempt = this.dependencies.attempts
+          .listByTask(task.id)
+          .find(({ id }) => id === current.attemptId);
+        if (!attempt) {
+          throw new QaLaunchInvalidError(
+            'qa_cycle_invalid',
+            'The QA cycle no longer has its owning attempt',
+          );
+        }
+        const occurredAt = this.now();
+        const eventId = idSchema.parse(this.createId());
+        const cycle = this.dependencies.qaExecutions.interruptCycle(
+          current.id,
+          {
+            endedAt: occurredAt,
+            terminalCommandId: commandId,
+            terminalEventId: eventId,
+          },
+        );
+        if (!cycle) {
+          throw new QaLaunchInvalidError(
+            'qa_cycle_invalid',
+            'The QA cycle became terminal before repair completed',
+          );
+        }
+        const event = this.dependencies.projectEvents.appendInTransaction(
+          task.projectId,
+          {
+            protocolVersion: 1,
+            id: eventId,
+            projectId: task.projectId,
+            occurredAt,
+            type: 'task.qa_execution_changed',
+            payload: { task, attempt, cycle, report: null },
+          },
+        );
+        const events = [event];
+        for (const action of this.dependencies.qaExecutions
+          .listPendingAutomationActions()
+          .filter(
+            (candidate) =>
+              candidate.taskId === task.id &&
+              candidate.attemptId === attempt.id &&
+              (candidate.sourceCycleId === current.id ||
+                candidate.actionKind === 'launch_qa'),
+          )) {
+          const completed =
+            this.dependencies.qaExecutions.completeAutomationAction(action.id, {
+              status: 'failed',
+              errorCode: 'qa_cycle_interrupted',
+              completedAt: occurredAt,
+            });
+          if (!completed) continue;
+          events.push(
+            this.dependencies.projectEvents.appendInTransaction(
+              task.projectId,
+              {
+                protocolVersion: 1,
+                id: idSchema.parse(this.createId()),
+                projectId: task.projectId,
+                occurredAt,
+                type: 'task.review_automation_changed',
+                payload: {
+                  task,
+                  automation: task.reviewAutomation,
+                  action: completed,
+                },
+              },
+            ),
+          );
+        }
+        return { task, attempt, cycle, event, events };
+      },
+    );
+    this.dependencies.capabilities.invalidateSession(result.cycle.sessionId);
+    result.events.forEach((event) =>
+      this.dependencies.registry.publisher.publishProject(event),
+    );
+    return result;
+  }
+
   private parseReport(report: QaReportInput): QaReportInput {
     const parsed = qaReportInputSchema.safeParse(report);
     if (!parsed.success) {
@@ -401,6 +606,7 @@ export class QaExecutionService {
     task: Task;
     attempt: TaskAttempt;
     cycle: QaExecutionCycle;
+    verification: VerificationState;
   } {
     const binding = this.dependencies.capabilities.resolve(input.capability);
     const task = this.dependencies.tasks.get(binding.taskId);
@@ -408,15 +614,12 @@ export class QaExecutionService {
     const project = this.dependencies.projects.get(task.projectId);
     if (!project) throw new ProjectNotFoundError(task.projectId);
     if (project.archivedAt) throw new ProjectArchivedError(project);
-    if (task.revision !== input.expectedRevision) {
-      throw new TaskRevisionConflictError(task);
-    }
-
     const currentAttempt = this.dependencies.attempts
       .listByTask(task.id)
       .filter((attempt) => attempt.unlinkedAt === null)
       .at(-1);
     const cycle = this.dependencies.qaExecutions.getCycle(binding.cycleId);
+    const verification = this.verificationStates.get(binding.cycleId);
     const session = this.dependencies.sessions.get(binding.sessionId);
     const developerCycleActive = this.dependencies.developerExecutions
       .listByTask(task.id)
@@ -434,13 +637,22 @@ export class QaExecutionService {
       !session ||
       session.projectId !== task.projectId ||
       session.workspaceId !== cycle.workspaceId ||
-      developerCycleActive
+      developerCycleActive ||
+      !verification ||
+      verification.mutationDetected
     ) {
       throw new QaCapabilityInvalidError(
         'The QA capability does not match the active current task attempt.',
       );
     }
-    return { task, attempt: currentAttempt, cycle };
+    if (
+      task.revision !== input.expectedRevision &&
+      (cycle.taskFingerprint === 'legacy-unavailable' ||
+        cycle.taskFingerprint !== taskFingerprint(task))
+    ) {
+      throw new TaskRevisionConflictError(task);
+    }
+    return { task, attempt: currentAttempt, cycle, verification };
   }
 
   private requireValidReport(
@@ -473,14 +685,6 @@ export class QaExecutionService {
     ) {
       throw new QaReportIncompleteError(
         'Rejected QA reports require a failed or skipped criterion.',
-      );
-    }
-    if (
-      report.disposition === 'verified' &&
-      report.workspaceBefore !== report.workspaceAfter
-    ) {
-      throw new QaReportIncompleteError(
-        'Verified QA reports may not contain unexpected source changes.',
       );
     }
   }
@@ -525,7 +729,8 @@ export class QaExecutionService {
     }
     const launchPolicyMatches =
       (input.trigger === 'manual' &&
-        project.qaConfiguration.reviewPolicy === 'manual') ||
+        (project.qaConfiguration.reviewPolicy === 'manual' ||
+          task.reviewAutomation.status !== 'enabled')) ||
       (input.trigger === 'autonomous_policy' &&
         actor.type === 'system' &&
         project.qaConfiguration.reviewPolicy === 'autonomous_review');
@@ -604,6 +809,7 @@ export class QaExecutionService {
     initial: LaunchContext,
     developerSession: Session,
     workspace: Workspace,
+    workspaceBaseline: string,
   ): QaLaunchResult {
     this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
@@ -677,6 +883,8 @@ export class QaExecutionService {
           },
           developerCompletionReportId: current.developerReport.id,
           workspaceId: workspace.id,
+          workspaceBaseline,
+          taskFingerprint: taskFingerprint(current.task),
           reviewPolicy: current.project.qaConfiguration.reviewPolicy,
           reviewPolicyRevision: current.project.qaConfiguration.revision,
           automationGeneration: current.task.reviewAutomation.generation,
@@ -732,6 +940,14 @@ export class QaExecutionService {
       type: 'agent',
       id: `qa-${prepared.session.id}`,
     });
+    const verification: VerificationState = {
+      workspacePath: workspace.path,
+      baseline: prepared.cycle.workspaceBaseline,
+      latest: prepared.cycle.workspaceBaseline,
+      commands: [],
+      mutationDetected: false,
+    };
+    this.verificationStates.set(prepared.cycle.id, verification);
     return {
       role: 'qa',
       initialPrompt: composeQaPrompt({
@@ -747,7 +963,7 @@ export class QaExecutionService {
         'Read',
         'Glob',
         'Grep',
-        'Bash',
+        'mcp__mesh_qa__run_verification',
         'mcp__mesh_qa__submit_qa_verdict',
       ],
       disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
@@ -755,6 +971,57 @@ export class QaExecutionService {
         name: 'mesh_qa',
         version: '1',
         tools: [
+          {
+            name: 'run_verification',
+            description:
+              'Run one constrained verification command in the assigned workspace. Shells and source-authoring commands are unavailable.',
+            inputSchema: verificationCommandSchema.shape,
+            execute: async (input) => {
+              const parsed = verificationCommandSchema.safeParse(input);
+              if (!parsed.success) return qaControlFailure('invalid_input');
+              if (verification.mutationDetected) {
+                return qaControlFailure('qa_source_mutation_detected');
+              }
+              try {
+                const result = await this.dependencies.verificationRunner.run(
+                  verification.workspacePath,
+                  parsed.data,
+                );
+                verification.commands.push({
+                  command: result.command,
+                  outcome:
+                    result.exitCode === 0
+                      ? 'passed'
+                      : `failed with exit code ${result.exitCode}`,
+                });
+                verification.latest =
+                  await this.dependencies.verificationRunner.captureTrackedSource(
+                    verification.workspacePath,
+                  );
+                if (verification.latest !== verification.baseline) {
+                  verification.mutationDetected = true;
+                  await this.pauseForSourceMutation(prepared, capability);
+                  return qaControlFailure('qa_source_mutation_detected');
+                }
+                return {
+                  content: [
+                    {
+                      type: 'text' as const,
+                      text: JSON.stringify({
+                        status: 'verification_completed',
+                        command: result.command,
+                        exitCode: result.exitCode,
+                        stdout: result.stdout,
+                        stderr: result.stderr,
+                      }),
+                    },
+                  ],
+                };
+              } catch (error) {
+                return qaControlFailure(error);
+              }
+            },
+          },
           {
             name: 'submit_qa_verdict',
             description:
@@ -764,6 +1031,15 @@ export class QaExecutionService {
               const parsed = qaReportInputSchema.safeParse(input);
               if (!parsed.success) return qaControlFailure('invalid_input');
               try {
+                verification.latest =
+                  await this.dependencies.verificationRunner.captureTrackedSource(
+                    verification.workspacePath,
+                  );
+                if (verification.latest !== verification.baseline) {
+                  verification.mutationDetected = true;
+                  await this.pauseForSourceMutation(prepared, capability);
+                  return qaControlFailure('qa_source_mutation_detected');
+                }
                 const outcome = this.submitVerdict({
                   commandId,
                   capability,
@@ -809,6 +1085,72 @@ export class QaExecutionService {
         ],
       },
     };
+  }
+
+  private async pauseForSourceMutation(
+    prepared: QaLaunchResult,
+    capability: string,
+  ): Promise<void> {
+    let event: ProjectEvent | undefined;
+    this.dependencies.database.exec('BEGIN IMMEDIATE');
+    try {
+      const task = this.dependencies.tasks.get(prepared.task.id);
+      if (!task) throw new TaskNotFoundError(prepared.task.id);
+      const occurredAt = this.now();
+      const paused = this.dependencies.tasks.update(
+        {
+          ...task,
+          reviewAutomation: {
+            ...task.reviewAutomation,
+            status: 'paused',
+            pauseReason:
+              'QA verification changed tracked source; human repair is required.',
+            updatedAt: occurredAt,
+          },
+          updatedAt: occurredAt,
+        },
+        task.revision,
+      );
+      if (!paused) throw new TaskRevisionConflictError(task);
+      this.dependencies.diagnostics.insert(
+        rawDiagnosticSchema.parse({
+          id: this.createId(),
+          sessionId: prepared.session.id,
+          capturedAt: occurredAt,
+          payload: {
+            kind: 'qa_source_mutation',
+            cycleId: prepared.cycle.id,
+            workspaceBefore: prepared.cycle.workspaceBaseline,
+            workspaceAfter: this.verificationStates.get(prepared.cycle.id)
+              ?.latest,
+          },
+        }),
+      );
+      event = this.dependencies.projectEvents.appendInTransaction(
+        paused.projectId,
+        {
+          protocolVersion: 1,
+          id: this.createId(),
+          projectId: paused.projectId,
+          occurredAt,
+          type: 'task.review_automation_changed',
+          payload: {
+            task: paused,
+            automation: paused.reviewAutomation,
+            action: null,
+          },
+        },
+      );
+      this.dependencies.database.exec('COMMIT');
+    } catch (error) {
+      if (this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
+      throw error;
+    }
+    if (event) this.dependencies.registry.publisher.publishProject(event);
+    this.dependencies.capabilities.invalidate(capability);
+    await this.dependencies.registry.interrupt(prepared.session.id);
   }
 
   private recordStartupFailure(sessionId: string, error: unknown): boolean {

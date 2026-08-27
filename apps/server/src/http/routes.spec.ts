@@ -30,7 +30,10 @@ const setup = (options?: {
   withGit?: boolean;
   gitExitCode?: number;
   seedProject?: boolean;
-  qaExecutionService?: Pick<QaExecutionService, 'launch' | 'submitVerdict'>;
+  qaExecutionService?: Pick<
+    QaExecutionService,
+    'launch' | 'submitVerdict' | 'repairInterrupted'
+  >;
 }) => {
   const repositories = createTestRepositories();
   const workspacePath = options?.useDatabaseDirectoryAsWorkspace
@@ -142,6 +145,9 @@ describe('HTTP command routes', () => {
         submitVerdict: () => {
           throw new QaCapabilityInvalidError();
         },
+        repairInterrupted: () => {
+          throw new Error('unused');
+        },
       },
     });
     cleanups.push(async () => {
@@ -170,11 +176,8 @@ describe('HTTP command routes', () => {
                   evidence: 'Focused test failed.',
                 },
               ],
-              verificationCommands: [],
               limitations: [],
               residualRisks: ['The change remains unverified.'],
-              workspaceBefore: 'state-1',
-              workspaceAfter: 'state-1',
             },
             actor: { type: 'agent', id: 'qa-agent-1' },
           },

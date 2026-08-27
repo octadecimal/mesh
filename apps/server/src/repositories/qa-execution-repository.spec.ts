@@ -254,6 +254,68 @@ describe('QaExecutionRepository', () => {
     });
   });
 
+  it('terminalizes an interrupted cycle without fabricating a verdict report', () => {
+    const repo = setup();
+    repositories.push(repo);
+    repo.qaExecutions.createCycle(cycle(1));
+
+    expect(
+      repo.qaExecutions.interruptCycle('cycle-1', {
+        endedAt: at,
+        terminalCommandId: 'command-repair-1',
+        terminalEventId: 'event-repair-1',
+      }),
+    ).toMatchObject({
+      endedAt: at,
+      terminalDisposition: 'interrupted',
+      reportId: null,
+      terminalCommandId: 'command-repair-1',
+      terminalEventId: 'event-repair-1',
+    });
+    expect(repo.qaExecutions.getCycle('cycle-1')).toMatchObject({
+      terminalDisposition: 'interrupted',
+      reportId: null,
+    });
+    expect(
+      repo.qaExecutions.interruptCycle('cycle-1', {
+        endedAt: at,
+        terminalCommandId: 'command-repair-2',
+        terminalEventId: 'event-repair-2',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('exposes QA session ownership and prevents session deletion from cascading history', () => {
+    const repo = setup();
+    repositories.push(repo);
+    repo.sessions.create(
+      sessionSchema.parse({
+        id: 'qa-session-1',
+        projectId: 'project-1',
+        workspaceId: 'workspace-1',
+        title: 'QA',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'completed',
+        createdAt: at,
+        updatedAt: at,
+      }),
+    );
+    repo.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({ ...cycle(1), sessionId: 'qa-session-1' }),
+    );
+
+    expect(
+      repo.qaExecutions.getActiveCycleBySession('qa-session-1'),
+    ).toMatchObject({
+      id: 'cycle-1',
+    });
+    expect(repo.qaExecutions.hasCycleForSession('qa-session-1')).toBe(true);
+    expect(() => repo.sessions.remove('qa-session-1')).toThrow(
+      'session has QA execution history',
+    );
+    expect(repo.qaExecutions.getCycle('cycle-1')).toBeDefined();
+  });
+
   it('rejects terminal reports that are missing, belong to another cycle, or disagree with the disposition', () => {
     const repo = setup();
     repositories.push(repo);

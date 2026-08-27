@@ -8,6 +8,7 @@ import {
   developerExecutionCycleSchema,
   projectSchema,
   qaExecutionCycleSchema,
+  reviewAutomationActionSchema,
   sessionSchema,
   taskActorSchema,
   taskSchema,
@@ -17,6 +18,10 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import type { RepositoryIdentity } from '../projects/repository-identity.js';
+import {
+  QaVerificationRunner,
+  type QaVerificationResult,
+} from '../platform/qa-verification-runner.js';
 import { EventPublisher } from '../runtime/event-publisher.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { AttemptService } from './attempt-service.js';
@@ -57,6 +62,14 @@ describe('QaExecutionService', () => {
       taskId: string;
       cycleId: string;
     }) => Promise<void>;
+    trackedSourceStates?: string[];
+    verificationRunner?: {
+      captureTrackedSource(path: string): Promise<string>;
+      run(
+        path: string,
+        input: { executable: string; args: string[] },
+      ): Promise<QaVerificationResult>;
+    };
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-qa-launch-'));
     const repositories = createTestRepositories();
@@ -310,6 +323,23 @@ describe('QaExecutionService', () => {
     );
     const interrupt = vi.fn(async () => undefined);
     const qaCapabilities = new QaCapabilityRegistry();
+    const trackedSourceStates = [
+      ...(options?.trackedSourceStates ?? ['sha256:developer-source']),
+    ];
+    const captureTrackedSource = vi.fn(async () => {
+      const state = trackedSourceStates.shift();
+      return state ?? 'sha256:developer-source';
+    });
+    const runVerification = vi.fn(async (_path, input) => ({
+      command: [input.executable, ...input.args].join(' '),
+      exitCode: 0,
+      stdout: 'verification passed',
+      stderr: '',
+    }));
+    const verificationRunner = options?.verificationRunner ?? {
+      captureTrackedSource,
+      run: runVerification,
+    };
     const service = new QaExecutionService({
       ...repositories,
       attemptService,
@@ -319,6 +349,7 @@ describe('QaExecutionService', () => {
       billingConflicts: options?.billingConflict
         ? [{ variable: 'ANTHROPIC_API_KEY' }]
         : [],
+      verificationRunner,
       now: () => now,
       createId,
     });
@@ -338,6 +369,8 @@ describe('QaExecutionService', () => {
       service,
       starts,
       interrupt,
+      captureTrackedSource,
+      runVerification,
       task,
       workspace,
     };
@@ -367,6 +400,7 @@ describe('QaExecutionService', () => {
           workspaceId: context.workspace.id,
           reviewPolicy: 'manual',
           reviewPolicyRevision: 4,
+          workspaceBaseline: 'sha256:developer-source',
           automationGeneration: context.task.reviewAutomation.generation,
           rejectionOrdinal: context.task.reviewAutomation.rejectionCount,
         },
@@ -386,7 +420,7 @@ describe('QaExecutionService', () => {
           'Read',
           'Glob',
           'Grep',
-          'Bash',
+          'mcp__mesh_qa__run_verification',
           'mcp__mesh_qa__submit_qa_verdict',
         ],
         disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
@@ -411,16 +445,106 @@ describe('QaExecutionService', () => {
       });
       expect(
         start.configuration.controlServer.tools.map(({ name }) => name),
-      ).toEqual(['submit_qa_verdict']);
+      ).toEqual(['run_verification', 'submit_qa_verdict']);
     },
   );
+
+  it('rejects an adversarial source-writing verification request before process execution', async () => {
+    const process = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: '',
+      stderr: '',
+    }));
+    const context = setup({
+      verificationRunner: new QaVerificationRunner({ run: process }),
+    });
+    await context.service.launch(launchInput(context.task));
+    const configuration = context.starts[0]?.configuration;
+    const control = configuration?.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const response = await control.execute({
+      executable: 'node',
+      args: ['-e', "require('fs').writeFileSync('src/app.ts','owned')"],
+    });
+
+    expect(response).toMatchObject({ isError: true });
+    expect(process).toHaveBeenCalledTimes(1);
+    expect(process).toHaveBeenCalledWith(
+      'git',
+      expect.any(Array),
+      expect.any(Object),
+    );
+  });
+
+  it('pauses and interrupts QA when authoritative tracked source changes after verification', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      trackedSourceStates: ['sha256:before', 'sha256:after'],
+    });
+    await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const response = await control.execute({
+      executable: 'corepack',
+      args: ['pnpm', 'test'],
+    });
+
+    expect(response).toMatchObject({ isError: true });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      lifecycleState: 'review',
+      reviewAutomation: {
+        status: 'paused',
+        pauseReason: expect.stringContaining('tracked source'),
+      },
+    });
+    expect(context.interrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks authoritative tracked source at the verdict boundary', async () => {
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      trackedSourceStates: ['sha256:before', 'sha256:after'],
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+
+    const response = await control.execute(reportFor(launched.cycle));
+
+    expect(response).toMatchObject({ isError: true });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(context.interrupt).toHaveBeenCalledTimes(1);
+  });
 
   it('binds the only QA control to server-owned cycle context and closes the runtime after one verdict', async () => {
     const context = setup();
     const launched = await context.service.launch(launchInput(context.task));
     const configuration = context.starts[0]?.configuration;
     if (!configuration) throw new Error('Expected QA runtime configuration');
-    const control = configuration.controlServer.tools[0];
+    const control = configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
     if (!control) throw new Error('Expected QA verdict control');
     const report = reportFor(launched.cycle);
 
@@ -435,7 +559,12 @@ describe('QaExecutionService', () => {
         context.repositories.qaExecutions.getCycle(launched.cycle.id)
           ?.reportId ?? '',
       ),
-    ).toMatchObject(report);
+    ).toMatchObject({
+      ...report,
+      workspaceBefore: expect.stringMatching(/^sha256:/),
+      workspaceAfter: expect.stringMatching(/^sha256:/),
+      verificationCommands: [],
+    });
     expect(JSON.stringify(configuration.controlServer)).not.toContain(
       configuration.capability,
     );
@@ -455,7 +584,9 @@ describe('QaExecutionService', () => {
       actor: policyActor,
       trigger: 'autonomous_policy',
     });
-    const control = context.starts[0]?.configuration.controlServer.tools[0];
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
     if (!control) throw new Error('Expected QA verdict control');
 
     await control.execute(
@@ -494,7 +625,9 @@ describe('QaExecutionService', () => {
       actor: policyActor,
       trigger: 'autonomous_policy',
     });
-    const control = context.starts[0]?.configuration.controlServer.tools[0];
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
     if (!control) throw new Error('Expected QA verdict control');
 
     const result = await control.execute(
@@ -518,7 +651,9 @@ describe('QaExecutionService', () => {
     const afterRejectedVerdict = vi.fn(async () => undefined);
     const context = setup({ afterRejectedVerdict });
     const launched = await context.service.launch(launchInput(context.task));
-    const control = context.starts[0]?.configuration.controlServer.tools[0];
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
     if (!control) throw new Error('Expected QA verdict control');
 
     await control.execute(
@@ -536,6 +671,67 @@ describe('QaExecutionService', () => {
 
     expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
     expect(afterRejectedVerdict).not.toHaveBeenCalled();
+  });
+
+  it('persists a running QA verdict after a human pauses automation without following up', async () => {
+    const afterRejectedVerdict = vi.fn(async () => undefined);
+    const context = setup({
+      reviewPolicy: 'autonomous_review',
+      afterRejectedVerdict,
+    });
+    const launched = await context.service.launch({
+      ...launchInput(context.task),
+      actor: policyActor,
+      trigger: 'autonomous_policy',
+    });
+    const current = context.repositories.tasks.get(context.task.id);
+    if (!current) throw new Error('Expected current task');
+    const paused = context.repositories.tasks.update(
+      {
+        ...current,
+        reviewAutomation: {
+          ...current.reviewAutomation,
+          status: 'paused',
+          generation: current.reviewAutomation.generation + 1,
+          pauseReason: 'Operator paused while QA was running.',
+          updatedAt: now,
+        },
+      },
+      current.revision,
+    );
+    if (!paused) throw new Error('Expected paused task');
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'submit_qa_verdict',
+    );
+    if (!control) throw new Error('Expected QA verdict control');
+
+    const response = await control.execute(
+      reportFor(launched.cycle, {
+        disposition: 'rejected',
+        criterionResults: [
+          {
+            criterionId: 'criterion-1',
+            status: 'failed',
+            evidence: 'A focused check failed.',
+          },
+        ],
+      }),
+    );
+
+    expect(response).toMatchObject({
+      content: [{ type: 'text', text: '{"status":"submitted_qa_verdict"}' }],
+    });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toMatchObject({ terminalDisposition: 'rejected' });
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: {
+        status: 'paused',
+        pauseReason: 'Operator paused while QA was running.',
+      },
+    });
+    expect(afterRejectedVerdict).not.toHaveBeenCalled();
+    expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
   });
 
   it('launches only an enabled autonomous-review policy as a system actor', async () => {
@@ -603,6 +799,88 @@ describe('QaExecutionService', () => {
     },
   );
 
+  it('audits a human repair for a dead QA runtime without inventing a verdict', async () => {
+    const context = setup();
+    const launched = await context.service.launch(launchInput(context.task));
+    context.repositories.database
+      .prepare(
+        "UPDATE sessions SET lifecycle_state = 'failed', updated_at = ? WHERE id = ?",
+      )
+      .run(now, launched.session.id);
+    context.repositories.qaExecutions.insertAutomationAction(
+      reviewAutomationActionSchema.parse({
+        id: 'qa-launch-action',
+        idempotencyKey: 'qa-launch-action-key',
+        projectId: context.task.projectId,
+        taskId: context.task.id,
+        attemptId: context.attempt.id,
+        sourceCycleId: context.developerCycle.id,
+        actionKind: 'launch_qa',
+        generation: 0,
+        status: 'pending',
+        errorCode: null,
+        createdAt: now,
+        completedAt: null,
+      }),
+    );
+
+    const result = context.service.repairInterrupted({
+      commandId: 'repair-interrupted-qa',
+      taskId: context.task.id,
+      cycleId: launched.cycle.id,
+      expectedRevision: context.task.revision,
+      actor: humanActor,
+    });
+
+    expect(result.cycle).toMatchObject({
+      terminalDisposition: 'interrupted',
+      reportId: null,
+      terminalCommandId: 'repair-interrupted-qa',
+    });
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.cycle.id),
+    ).toEqual(result.cycle);
+    expect(
+      context.repositories.qaExecutions.getAutomationAction('qa-launch-action'),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'qa_cycle_interrupted',
+    });
+    expect(result.events.map(({ type }) => type)).toEqual([
+      'task.qa_execution_changed',
+      'task.review_automation_changed',
+    ]);
+    expect(
+      context.service.repairInterrupted({
+        commandId: 'repair-interrupted-qa',
+        taskId: context.task.id,
+        cycleId: launched.cycle.id,
+        expectedRevision: context.task.revision,
+        actor: humanActor,
+      }),
+    ).toEqual(result);
+  });
+
+  it('refuses to repair a QA cycle while its runtime is live', async () => {
+    const context = setup();
+    const launched = await context.service.launch(launchInput(context.task));
+    context.repositories.database
+      .prepare(
+        "UPDATE sessions SET lifecycle_state = 'running', updated_at = ? WHERE id = ?",
+      )
+      .run(now, launched.session.id);
+
+    expect(() =>
+      context.service.repairInterrupted({
+        commandId: 'repair-live-qa',
+        taskId: context.task.id,
+        cycleId: launched.cycle.id,
+        expectedRevision: context.task.revision,
+        actor: humanActor,
+      }),
+    ).toThrow(expect.objectContaining({ code: 'qa_cycle_active' }));
+  });
+
   it.each([
     ['manual', policyActor],
     ['autonomous_policy', humanActor],
@@ -641,6 +919,30 @@ describe('QaExecutionService', () => {
       context.service.launch(launchInput(context.task)),
     ).rejects.toMatchObject({ code: 'task_transition_unauthorized' });
   });
+
+  it.each(['paused', 'disabled'] as const)(
+    'allows an audited human QA launch when autonomous review is %s',
+    async (status) => {
+      const context = setup({
+        reviewPolicy: 'autonomous_review',
+        task: {
+          reviewAutomation: {
+            status,
+            generation: 2,
+            rejectionCount: 1,
+            pauseReason: status === 'paused' ? 'Operator paused.' : null,
+            updatedAt: now,
+          },
+        },
+      });
+
+      await expect(
+        context.service.launch(launchInput(context.task)),
+      ).resolves.toMatchObject({
+        cycle: { authorizedBy: humanActor, reviewPolicy: 'autonomous_review' },
+      });
+    },
+  );
 
   it.each([
     [
@@ -867,13 +1169,8 @@ describe('QaExecutionService', () => {
       status: 'passed' as const,
       evidence: `${id} passed focused verification.`,
     })),
-    verificationCommands: [
-      { command: 'corepack pnpm test', outcome: 'passed' },
-    ],
     limitations: [],
     residualRisks: [],
-    workspaceBefore: 'source-state-1',
-    workspaceAfter: 'source-state-1',
     ...overrides,
   });
 
@@ -1125,47 +1422,6 @@ describe('QaExecutionService', () => {
     ).toEqual([]);
   });
 
-  it('pauses an autonomous rejection when QA observes changed source state', async () => {
-    const context = setup({
-      reviewPolicy: 'autonomous_review',
-      task: {
-        reviewAutomation: {
-          status: 'enabled',
-          generation: 2,
-          rejectionCount: 0,
-          pauseReason: null,
-          updatedAt: now,
-        },
-      },
-    });
-    const launched = await launchAutonomousForVerdict(context);
-
-    const outcome = context.service.submitVerdict(
-      verdictInput(context, launched, {
-        report: reportFor(launched.launch.cycle, {
-          disposition: 'rejected',
-          criterionResults: [
-            {
-              criterionId: 'criterion-1',
-              status: 'failed',
-              evidence: 'Source changed during QA.',
-            },
-          ],
-          workspaceAfter: 'unexpected-source-state',
-        }),
-      }),
-    );
-
-    expect(outcome.task.reviewAutomation).toMatchObject({
-      status: 'paused',
-      rejectionCount: 1,
-      pauseReason: expect.stringContaining('source'),
-    });
-    expect(
-      context.repositories.qaExecutions.listPendingAutomationActions(),
-    ).toEqual([]);
-  });
-
   it('rolls back an autonomous verdict when action persistence fails', async () => {
     const context = setup({
       reviewPolicy: 'autonomous_review',
@@ -1379,19 +1635,20 @@ describe('QaExecutionService', () => {
     ).toThrow(expect.objectContaining({ code: 'task_transition_invalid' }));
   });
 
-  it('rejects verification when the reported workspace source state changed', async () => {
+  it('rejects a verdict after a material task edit despite the bound cycle', async () => {
     const context = setup();
     const launched = await launchForVerdict(context);
+    const current = context.repositories.tasks.get(context.task.id);
+    if (!current) throw new Error('Expected current task');
+    const changed = context.repositories.tasks.update(
+      { ...current, notes: 'Acceptance scope changed.', updatedAt: now },
+      current.revision,
+    );
+    if (!changed) throw new Error('Expected task update');
 
     expect(() =>
-      context.service.submitVerdict(
-        verdictInput(context, launched, {
-          report: reportFor(launched.launch.cycle, {
-            workspaceAfter: 'unexpected-source-change',
-          }),
-        }),
-      ),
-    ).toThrow(expect.objectContaining({ code: 'qa_report_incomplete' }));
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).toThrow(expect.objectContaining({ code: 'task_revision_conflict' }));
   });
 
   it('rolls back report, cycle, and publication when audit persistence fails', async () => {

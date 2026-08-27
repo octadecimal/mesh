@@ -27,7 +27,7 @@ const project = projectSchema.parse({
 });
 
 describe('QaSettings', () => {
-  it('saves controlled instructions and policy against the current project revision', async () => {
+  it('saves controlled instructions and policy against the QA configuration revision', async () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<QaSettings project={project} disabled={false} onSave={onSave} />);
@@ -44,7 +44,7 @@ describe('QaSettings', () => {
       expect(onSave).toHaveBeenCalledWith({
         content: 'Run focused verification.',
         reviewPolicy: 'manual',
-        expectedRevision: 4,
+        expectedRevision: 2,
       }),
     );
   });
@@ -74,7 +74,7 @@ describe('QaSettings', () => {
       expect(onSave).toHaveBeenCalledWith({
         content: 'Verify every acceptance criterion.',
         reviewPolicy: 'autonomous_review',
-        expectedRevision: 4,
+        expectedRevision: 2,
       }),
     );
   });
@@ -119,7 +119,13 @@ describe('QaSettings', () => {
     const user = userEvent.setup();
     const onSave = vi.fn().mockRejectedValue({
       code: 'project_revision_conflict',
-      details: { project: { ...project, revision: 5 } },
+      details: {
+        project: {
+          ...project,
+          revision: 5,
+          qaConfiguration: { ...project.qaConfiguration, revision: 3 },
+        },
+      },
     });
     const autonomous = {
       ...project,
@@ -147,7 +153,7 @@ describe('QaSettings', () => {
     await user.click(screen.getByRole('button', { name: 'Save QA settings' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'server is at revision 5',
+      'server is at QA configuration revision 3',
     );
     expect(screen.getByLabelText('QA instructions')).toHaveValue(
       'Keep this draft.',
@@ -158,7 +164,13 @@ describe('QaSettings', () => {
 
     rerender(
       <QaSettings
-        project={{ ...autonomous, revision: 5 } as Project}
+        project={
+          {
+            ...autonomous,
+            revision: 5,
+            qaConfiguration: { ...autonomous.qaConfiguration, revision: 3 },
+          } as Project
+        }
         disabled={false}
         onSave={onSave}
       />,

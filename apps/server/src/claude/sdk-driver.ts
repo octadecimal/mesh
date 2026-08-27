@@ -29,6 +29,23 @@ export type SdkStreamEvent =
   | { kind: 'malformed'; raw: unknown }
   | { kind: 'completed' };
 
+export type SdkAccountInfo = {
+  email?: string;
+  organization?: string;
+  subscriptionType?: string;
+  tokenSource?: string;
+  apiKeySource?: string;
+  apiProvider?:
+    | 'firstParty'
+    | 'bedrock'
+    | 'vertex'
+    | 'foundry'
+    | 'anthropicAws'
+    | 'anthropicGoogleCloud'
+    | 'mantle'
+    | 'gateway';
+};
+
 export interface SdkPermissionRequest {
   requestId: string;
   toolUseId?: string;
@@ -51,6 +68,7 @@ export interface SdkQuery {
   readonly sessionId?: string;
   events(): AsyncIterable<SdkStreamEvent>;
   sendPrompt(prompt: string): Promise<void>;
+  accountInfo(): Promise<SdkAccountInfo>;
   interrupt(): Promise<void>;
   close(): void;
 }
@@ -70,6 +88,17 @@ export class UnsupportedSdkCapabilityError extends Error {
       `Installed Claude Agent SDK does not support required capability: ${capability}`,
     );
     this.name = 'UnsupportedSdkCapabilityError';
+  }
+}
+
+export class UnsafeClaudeCredentialError extends Error {
+  readonly code = 'billing_configuration_conflict';
+
+  constructor(readonly apiKeySource: string | undefined) {
+    super(
+      'Claude startup did not positively establish subscription-backed credentials.',
+    );
+    this.name = 'UnsafeClaudeCredentialError';
   }
 }
 
@@ -94,20 +123,33 @@ class SdkDriverSession implements DriverSession {
   }
 
   async initialize(): Promise<void> {
+    let apiKeySource: string | undefined;
     if (this.query.sessionId) {
       this.claudeResumeId = this.query.sessionId;
-      return;
+    } else {
+      while (true) {
+        const next = await this.iterator.next();
+        if (next.done || next.value.kind === 'completed') {
+          throw new UnsupportedSdkCapabilityError('session_identity');
+        }
+        if (next.value.kind === 'started') {
+          this.claudeResumeId = next.value.sessionId;
+          apiKeySource = next.value.apiKeySource;
+          break;
+        }
+        this.bufferedSdkEvents.push(next.value);
+      }
     }
-    while (true) {
-      const next = await this.iterator.next();
-      if (next.done || next.value.kind === 'completed') {
-        throw new UnsupportedSdkCapabilityError('session_identity');
-      }
-      if (next.value.kind === 'started') {
-        this.claudeResumeId = next.value.sessionId;
-        return;
-      }
-      this.bufferedSdkEvents.push(next.value);
+
+    const account = await this.query.accountInfo();
+    const reportedSource = apiKeySource ?? account.apiKeySource;
+    if (
+      reportedSource !== 'none' ||
+      account.apiKeySource !== 'none' ||
+      account.apiProvider !== 'firstParty' ||
+      !account.subscriptionType?.trim()
+    ) {
+      throw new UnsafeClaudeCredentialError(reportedSource);
     }
   }
 
@@ -303,7 +345,12 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
     const query = this.sdk.startQuery(options);
     const session = new SdkDriverSession(query, mode);
     sessionRef.current = session;
-    await session.initialize();
+    try {
+      await session.initialize();
+    } catch (error) {
+      await session.close();
+      throw error;
+    }
     if (request.developer) {
       await session.sendPrompt(request.developer.initialPrompt);
     } else if (request.role) {

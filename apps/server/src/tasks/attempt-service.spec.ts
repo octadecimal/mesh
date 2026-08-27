@@ -355,6 +355,80 @@ describe('AttemptService', () => {
     return { task, attempt, cycle };
   };
 
+  const seedQaDecision = (
+    repositories: ReturnType<typeof createTestRepositories>,
+    prior: ReturnType<typeof seedRecovery>,
+    disposition: 'active' | 'verified' | 'rejected',
+  ) => {
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: `qa-session-${disposition}`,
+        projectId: prior.task.projectId,
+        workspaceId: 'workspace-recovery',
+        title: 'QA decision',
+        permissionMode: 'safe_auto',
+        lifecycleState: disposition === 'active' ? 'running' : 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const qaCycle = repositories.qaExecutions.createCycle(
+      qaExecutionCycleSchema.parse({
+        id: `qa-cycle-${disposition}`,
+        taskId: prior.task.id,
+        attemptId: prior.attempt.id,
+        sessionId: `qa-session-${disposition}`,
+        ordinal: 1,
+        authorizedBy: actor,
+        authorizationCommandId: `qa-launch-${disposition}`,
+        policyVersion: 'qa-policy-v1',
+        qaInstructions: { content: '', revision: 1 },
+        taskSnapshot: prior.cycle.taskSnapshot,
+        developerCompletionReportId: 'report-prior',
+        workspaceId: 'workspace-recovery',
+        reviewPolicy: 'manual',
+        reviewPolicyRevision: 1,
+        automationGeneration: 0,
+        rejectionOrdinal: 0,
+        startedAt: now,
+        endedAt: null,
+        terminalDisposition: null,
+        reportId: null,
+        terminalCommandId: null,
+        terminalEventId: null,
+      }),
+    );
+    if (disposition !== 'active') {
+      const report = repositories.qaExecutions.insertReport(
+        qaReportSchema.parse({
+          id: `qa-report-${disposition}`,
+          cycleId: qaCycle.id,
+          disposition,
+          criterionResults: [
+            {
+              criterionId: 'criterion-1',
+              status: disposition === 'verified' ? 'passed' : 'failed',
+              evidence: `${disposition} evidence`,
+            },
+          ],
+          verificationCommands: [],
+          limitations: [],
+          residualRisks: [],
+          workspaceBefore: 'sha256:source',
+          workspaceAfter: 'sha256:source',
+          createdAt: now,
+        }),
+      );
+      repositories.qaExecutions.completeCycle(qaCycle.id, {
+        endedAt: now,
+        terminalDisposition: disposition,
+        reportId: report.id,
+        terminalCommandId: `qa-verdict-${disposition}`,
+        terminalEventId: `qa-event-${disposition}`,
+      });
+    }
+  };
+
   it('persists the launched attempt, starts its runtime, then audits in_progress', async () => {
     const { directory, driver, repositories, service } = setup();
     seedTask(repositories);
@@ -434,6 +508,26 @@ describe('AttemptService', () => {
         ?.initialPrompt,
     ).toContain(input.feedback);
   });
+
+  it.each(['active', 'verified'] as const)(
+    'blocks human rejection rework for a %s QA outcome',
+    async (disposition) => {
+      const { directory, repositories, service } = setup();
+      const prior = seedRecovery(repositories, directory, 'rejection');
+      seedQaDecision(repositories, prior, disposition);
+
+      await expect(
+        service.resumeDeveloper({
+          commandId: `command-reject-${disposition}`,
+          taskId: prior.task.id,
+          expectedRevision: prior.task.revision,
+          kind: 'rejection',
+          feedback: 'Address the rejected QA evidence.',
+          actor,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_command' });
+    },
+  );
 
   it('resumes the same Claude session for an authorized autonomous rejection', async () => {
     const { directory, driver, repositories, service } = setup();

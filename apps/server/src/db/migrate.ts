@@ -70,6 +70,13 @@ const reviewAutomationStateMigration = {
     'utf8',
   ),
 };
+const qaInterruptionRepairMigration = {
+  id: '011-qa-interruption-repair',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '011-qa-interruption-repair.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -82,6 +89,7 @@ const migrations = [
   developerCycleTaskTitleMigration,
   qaExecutionMigration,
   reviewAutomationStateMigration,
+  qaInterruptionRepairMigration,
 ];
 
 export const migrate = (database: Database): void => {

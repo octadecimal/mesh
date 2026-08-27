@@ -375,16 +375,8 @@ const qaReport = (
       evidence: `${marker}: ${criterion.text}`,
     }),
   ),
-  verificationCommands: [
-    {
-      command: `fake-qa ${marker}`,
-      outcome: disposition === 'verified' ? 'passed' : 'failed as scripted',
-    },
-  ],
   limitations: [],
   residualRisks: disposition === 'rejected' ? [`${marker} needs rework`] : [],
-  workspaceBefore: 'fixture-workspace-clean',
-  workspaceAfter: 'fixture-workspace-clean',
 });
 
 const currentDeveloperCycle = (snapshot: ProjectSnapshot) => {

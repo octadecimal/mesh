@@ -13,6 +13,7 @@ import {
   projectSchema,
   projectSnapshotSchema,
   qaExecutionCycleSchema,
+  qaReportInputSchema,
   qaReportSchema,
   reviewPolicySchema,
   serverMessageSchema,
@@ -1111,6 +1112,20 @@ describe('session platform contracts', () => {
         expect(reviewPolicySchema.parse(reviewPolicy)).toBe(reviewPolicy);
       },
     );
+
+    it('rejects agent-supplied verification and workspace state', () => {
+      expect(() =>
+        qaReportInputSchema.parse({
+          disposition: 'verified',
+          criterionResults: report.criterionResults,
+          limitations: [],
+          residualRisks: [],
+          verificationCommands: report.verificationCommands,
+          workspaceBefore: 'agent-claimed-before',
+          workspaceAfter: 'agent-claimed-after',
+        }),
+      ).toThrow();
+    });
 
     it('requires exactly one QA result per snapshotted criterion at the event boundary', () => {
       const task = {

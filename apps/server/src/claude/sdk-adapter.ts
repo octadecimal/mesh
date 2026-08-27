@@ -323,6 +323,10 @@ class ClaudeSdkQuery implements SdkQuery {
     this.prompts.push(prompt);
   }
 
+  accountInfo() {
+    return this.sdkQuery.accountInfo();
+  }
+
   async interrupt(): Promise<void> {
     if (typeof this.sdkQuery.interrupt !== 'function') {
       throw new UnsupportedSdkCapabilityError('interrupt');

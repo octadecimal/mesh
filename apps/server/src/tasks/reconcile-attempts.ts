@@ -200,15 +200,26 @@ const developerRepairsFor = (
 const hasTrustworthyTerminalReport = (
   cycle: QaExecutionCycle,
   report: QaReport | undefined,
-): boolean =>
-  cycle.terminalDisposition !== null &&
-  cycle.endedAt !== null &&
-  cycle.reportId !== null &&
-  cycle.terminalCommandId !== null &&
-  cycle.terminalEventId !== null &&
-  report?.id === cycle.reportId &&
-  report.cycleId === cycle.id &&
-  report.disposition === cycle.terminalDisposition;
+): boolean => {
+  if (cycle.terminalDisposition === 'interrupted') {
+    return (
+      cycle.endedAt !== null &&
+      cycle.reportId === null &&
+      cycle.terminalCommandId !== null &&
+      cycle.terminalEventId !== null
+    );
+  }
+  return (
+    cycle.terminalDisposition !== null &&
+    cycle.endedAt !== null &&
+    cycle.reportId !== null &&
+    cycle.terminalCommandId !== null &&
+    cycle.terminalEventId !== null &&
+    report?.id === cycle.reportId &&
+    report.cycleId === cycle.id &&
+    report.disposition === cycle.terminalDisposition
+  );
+};
 
 const qaRepairsFor = (
   dependencies: ReconciliationDependencies,

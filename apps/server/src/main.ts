@@ -24,6 +24,7 @@ import { openDatabase } from './db/database.js';
 import { migrate } from './db/migrate.js';
 import { GitAdapter } from './platform/git.js';
 import { NodeProcessRunner } from './platform/process-runner.js';
+import { QaVerificationRunner } from './platform/qa-verification-runner.js';
 import { CommandRepository } from './repositories/command-repository.js';
 import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
 import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
@@ -257,6 +258,7 @@ export const startServer = async (
     tasks,
     attempts,
     developerExecutions,
+    qaExecutions,
     transitions,
     projectEvents,
     commands,
@@ -321,6 +323,7 @@ export const startServer = async (
     attemptService,
     capabilities: qaCapabilities,
     registry,
+    verificationRunner: new QaVerificationRunner(new NodeProcessRunner()),
     billingConflicts,
     afterRejectedVerdict: async (input) => {
       await requireReviewAutomation().afterQaVerdict(input);

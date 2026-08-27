@@ -226,6 +226,29 @@ export function DeveloperExecutionPanel({
   const hasDeveloperReview = Boolean(
     task.lifecycleState === 'review' && latestReviewCycle,
   );
+  const latestCompletionReport = latestReviewCycle
+    ? completionByCycleId.get(latestReviewCycle.id)
+    : undefined;
+  const hasActiveQa = qaCycles.some(({ endedAt }) => endedAt === null);
+  const latestMatchingQa = [...qaCycles]
+    .reverse()
+    .find(
+      ({ developerCompletionReportId }) =>
+        developerCompletionReportId === latestCompletionReport?.id,
+    );
+  const legacyHumanDecision = qaCycles.length === 0;
+  const canAcceptReview = Boolean(
+    hasDeveloperReview &&
+      !hasActiveQa &&
+      (legacyHumanDecision ||
+        latestMatchingQa?.terminalDisposition === 'verified'),
+  );
+  const canRequestRework = Boolean(
+    hasDeveloperReview &&
+      !hasActiveQa &&
+      (legacyHumanDecision ||
+        latestMatchingQa?.terminalDisposition === 'rejected'),
+  );
   const hasDeveloperBlocker = Boolean(task.blocked && latestBlockerCycle);
 
   useEffect(() => {
@@ -439,78 +462,85 @@ export function DeveloperExecutionPanel({
         </div>
       ) : null}
 
-      {task.lifecycleState === 'review' && hasDeveloperReview ? (
+      {task.lifecycleState === 'review' &&
+      (canAcceptReview || canRequestRework) ? (
         <div className="developer-action developer-review">
           <h4>Human review</h4>
-          <button
-            className="button button-primary"
-            type="button"
-            disabled={controlsDisabled}
-            onClick={() =>
-              execute('accept', {
-                type: 'task.developer.accept',
-                payload: {
-                  taskId: task.id,
-                  expectedRevision: task.revision,
-                  actor: operator,
-                },
-              })
-            }
-          >
-            Accept as done
-          </button>
-          <label>
-            Rejection feedback
-            <textarea
-              aria-label="Rejection feedback"
+          {canAcceptReview ? (
+            <button
+              className="button button-primary"
+              type="button"
               disabled={controlsDisabled}
-              value={rejectionFeedback}
-              onChange={(event) => setRejectionFeedback(event.target.value)}
-            />
-          </label>
-          <fieldset disabled={controlsDisabled}>
-            <legend>Rework path</legend>
-            <label>
-              <input
-                type="radio"
-                name="rejection-path"
-                checked={rejectionPath === 'resume'}
-                onChange={() => setRejectionPath('resume')}
-              />
-              Resume the same Developer attempt
-            </label>
-            <label>
-              <input
-                type="radio"
-                name="rejection-path"
-                checked={rejectionPath === 'new'}
-                onChange={() => setRejectionPath('new')}
-              />
-              Start a new Developer attempt
-            </label>
-          </fieldset>
-          {rejectionPath === 'new' ? (
-            <FreshExecutionFields
-              workspace={workspace}
-              onWorkspaceChange={setWorkspace}
-              permissionMode={permissionMode}
-              onPermissionModeChange={setPermissionMode}
-              disabled={controlsDisabled}
-            />
+              onClick={() =>
+                execute('accept', {
+                  type: 'task.developer.accept',
+                  payload: {
+                    taskId: task.id,
+                    expectedRevision: task.revision,
+                    actor: operator,
+                  },
+                })
+              }
+            >
+              Accept as done
+            </button>
           ) : null}
-          <button
-            className="button button-secondary"
-            type="button"
-            disabled={
-              controlsDisabled ||
-              !rejectionFeedback.trim() ||
-              !rejectionPath ||
-              (rejectionPath === 'new' && !freshReady)
-            }
-            onClick={reject}
-          >
-            Reject submission
-          </button>
+          {canRequestRework ? (
+            <>
+              <label>
+                Rejection feedback
+                <textarea
+                  aria-label="Rejection feedback"
+                  disabled={controlsDisabled}
+                  value={rejectionFeedback}
+                  onChange={(event) => setRejectionFeedback(event.target.value)}
+                />
+              </label>
+              <fieldset disabled={controlsDisabled}>
+                <legend>Rework path</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name="rejection-path"
+                    checked={rejectionPath === 'resume'}
+                    onChange={() => setRejectionPath('resume')}
+                  />
+                  Resume the same Developer attempt
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="rejection-path"
+                    checked={rejectionPath === 'new'}
+                    onChange={() => setRejectionPath('new')}
+                  />
+                  Start a new Developer attempt
+                </label>
+              </fieldset>
+              {rejectionPath === 'new' ? (
+                <FreshExecutionFields
+                  workspace={workspace}
+                  onWorkspaceChange={setWorkspace}
+                  permissionMode={permissionMode}
+                  onPermissionModeChange={setPermissionMode}
+                  disabled={controlsDisabled}
+                />
+              ) : null}
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={
+                  controlsDisabled ||
+                  !rejectionFeedback.trim() ||
+                  !rejectionPath ||
+                  (rejectionPath === 'new' && !freshReady)
+                }
+                onClick={reject}
+              >
+                Reject submission
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
 

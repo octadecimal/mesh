@@ -45,6 +45,7 @@ import type {
   QaLaunchResult,
   QaVerdictOutcome,
 } from '../tasks/qa-execution-service.js';
+import type { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import type {
   ReviewAutomationCommandOutcome,
   ReviewAutomationService,
@@ -82,9 +83,16 @@ export interface CommandDependencies {
   commands: CommandRepository;
   taskService: TaskService;
   tasks: Pick<TaskRepository, 'get'>;
+  qaExecutions: Pick<
+    QaExecutionRepository,
+    'getActiveCycleBySession' | 'hasCycleForSession'
+  >;
   attemptService?: AttemptService;
   developerExecutionService?: DeveloperExecutionService;
-  qaExecutionService?: Pick<QaExecutionService, 'launch' | 'submitVerdict'>;
+  qaExecutionService?: Pick<
+    QaExecutionService,
+    'launch' | 'submitVerdict' | 'repairInterrupted'
+  >;
   reviewAutomationService?: Pick<
     ReviewAutomationService,
     'afterDeveloperSubmission' | 'afterQaVerdict' | 'enable' | 'pause'
@@ -309,7 +317,12 @@ const executeDeveloperAgentCommand = async (
 
 type QaCommand = Extract<
   Extract<Command, { idempotencyKey: string }>['command'],
-  { type: 'task.qa.launch' | 'task.qa.submit_verdict' }
+  {
+    type:
+      | 'task.qa.launch'
+      | 'task.qa.submit_verdict'
+      | 'task.qa.repair_interrupted';
+  }
 >;
 
 const executeQaCommand = async (
@@ -325,6 +338,18 @@ const executeQaCommand = async (
       trigger: 'manual',
     });
     return response(command.type, qaLaunchResponse(result));
+  }
+
+  if (command.type === 'task.qa.repair_interrupted') {
+    const result = service.repairInterrupted({
+      ...command.payload,
+      commandId: idempotencyKey,
+    });
+    return response(command.type, {
+      ...result,
+      projectEventCursor:
+        result.events.at(-1)?.sequence ?? result.event.sequence,
+    });
   }
 
   const committed = service.submitVerdict({
@@ -755,8 +780,10 @@ const hasRunningTaskAttempt = (
     .listByProject(projectId, { includeArchived: true })
     .some(
       (session) =>
-        isLive(session) &&
-        dependencies.attempts.getCurrentBySession(session.id),
+        dependencies.qaExecutions.getActiveCycleBySession(session.id) !==
+          undefined ||
+        (isLive(session) &&
+          dependencies.attempts.getCurrentBySession(session.id)),
     );
 
 const reconcileLegacyProjectIdentities = async (
@@ -1196,10 +1223,13 @@ const executeMutation = async (
     }
     case 'session.archive': {
       const session = requireSession(dependencies, command.payload.sessionId);
-      if (isLive(session)) {
+      if (
+        isLive(session) ||
+        dependencies.qaExecutions.getActiveCycleBySession(session.id)
+      ) {
         throw new CommandError(
           'invalid_session_state',
-          'A live session cannot be archived',
+          'A live session or active QA cycle cannot be archived',
         );
       }
       return response(
@@ -1225,6 +1255,12 @@ const executeMutation = async (
         throw new CommandError(
           'invalid_session_state',
           'A session with task attempt history cannot be deleted',
+        );
+      }
+      if (dependencies.qaExecutions.hasCycleForSession(session.id)) {
+        throw new CommandError(
+          'invalid_session_state',
+          'A session with QA execution history cannot be deleted',
         );
       }
       const workspace = requireWorkspace(dependencies, session.workspaceId);
@@ -1323,7 +1359,8 @@ export const executeCommand = async (
     }
     if (
       command.command.type === 'task.qa.launch' ||
-      command.command.type === 'task.qa.submit_verdict'
+      command.command.type === 'task.qa.submit_verdict' ||
+      command.command.type === 'task.qa.repair_interrupted'
     ) {
       return executeQaCommand(
         command.command,

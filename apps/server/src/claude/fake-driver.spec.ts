@@ -149,13 +149,8 @@ describe('FakeClaudeSessionDriver', () => {
             evidence: `${disposition} evidence`,
           },
         ],
-        verificationCommands: [
-          { command: 'corepack pnpm test', outcome: 'passed' },
-        ],
         limitations: [],
         residualRisks: [],
-        workspaceBefore: 'source-state-1',
-        workspaceAfter: 'source-state-1',
       });
       const execute = vi.fn(async () => ({
         content: [{ type: 'text' as const, text: '{"status":"submitted"}' }],

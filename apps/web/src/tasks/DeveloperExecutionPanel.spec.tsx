@@ -195,6 +195,61 @@ describe('DeveloperExecutionPanel', () => {
     });
   });
 
+  it('shows only the human decision authorized by the latest matching QA state', () => {
+    const verifiedCycle = qaExecutionCycleSchema.parse({
+      ...qaCycle,
+      id: 'qa-cycle-verified',
+      terminalDisposition: 'verified',
+      reportId: 'qa-report-verified',
+    });
+    const activeCycle = qaExecutionCycleSchema.parse({
+      ...qaCycle,
+      id: 'qa-cycle-active',
+      endedAt: null,
+      terminalDisposition: null,
+      reportId: null,
+      terminalCommandId: null,
+      terminalEventId: null,
+    });
+    const rendered = renderPanel({
+      task: taskFor({ lifecycleState: 'review' }),
+      attempts: [developerAttempt],
+      cycles: [completionCycle],
+      completionReports: [completionReport],
+      qaCycles: [qaCycle],
+      qaReports: [qaReport],
+    });
+
+    expect(screen.queryByRole('button', { name: 'Accept as done' })).toBeNull();
+    expect(screen.getByLabelText('Rejection feedback')).toBeDefined();
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({ lifecycleState: 'review' }),
+        attempts: [developerAttempt],
+        cycles: [completionCycle],
+        completionReports: [completionReport],
+        qaCycles: [verifiedCycle],
+      }),
+    );
+    expect(
+      screen.getByRole('button', { name: 'Accept as done' }),
+    ).toBeDefined();
+    expect(screen.queryByLabelText('Rejection feedback')).toBeNull();
+
+    rendered.rerender(
+      panelElement({
+        task: taskFor({ lifecycleState: 'review' }),
+        attempts: [developerAttempt],
+        cycles: [completionCycle],
+        completionReports: [completionReport],
+        qaCycles: [activeCycle],
+      }),
+    );
+    expect(screen.queryByRole('button', { name: 'Accept as done' })).toBeNull();
+    expect(screen.queryByLabelText('Rejection feedback')).toBeNull();
+  });
+
   it('does not expose Developer review or recovery commands without matching durable reports', () => {
     const rendered = renderPanel({
       task: taskFor({ lifecycleState: 'review' }),

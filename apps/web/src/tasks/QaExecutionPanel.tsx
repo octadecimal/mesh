@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
+  idSchema,
   taskActorSchema,
   type AttemptRepair,
   type DeveloperCompletionReport,
@@ -172,6 +173,16 @@ export function QaExecutionPanel({
         actor: operator,
       },
     });
+  const repairInterrupted = (cycleId: QaExecutionCycle['id']) =>
+    execute('Repair interrupted QA', {
+      type: 'task.qa.repair_interrupted',
+      payload: {
+        taskId: task.id,
+        cycleId: idSchema.parse(cycleId),
+        expectedRevision: task.revision,
+        actor: operator,
+      },
+    });
   const accept = () =>
     execute('Accept verified work', {
       type: 'task.developer.accept',
@@ -217,7 +228,8 @@ export function QaExecutionPanel({
     !task.blocked &&
     !activeCycle &&
     Boolean(latestDeveloperReport) &&
-    !latestQaMatchesDeveloper;
+    (!latestQaMatchesDeveloper ||
+      latestCycle?.terminalDisposition === 'interrupted');
   const verifiedAwaitingHuman =
     humanDecisionEligible &&
     task.lifecycleState === 'review' &&
@@ -389,6 +401,10 @@ export function QaExecutionPanel({
         const repairSession = sessions.find(
           ({ id }) => id === repair.sessionId,
         );
+        const repairCycle = cycles.find(
+          (cycle) =>
+            cycle.sessionId === repair.sessionId && cycle.endedAt === null,
+        );
         return (
           <div
             className="notice notice-warning attempt-repair"
@@ -409,6 +425,16 @@ export function QaExecutionPanel({
                 onClick={() => onOpenSession(repairSession.id)}
               >
                 Open affected QA session
+              </button>
+            ) : null}
+            {repairCycle ? (
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={controlsDisabled}
+                onClick={() => repairInterrupted(repairCycle.id)}
+              >
+                Mark QA interrupted
               </button>
             ) : null}
           </div>
@@ -458,9 +484,11 @@ export function QaExecutionPanel({
                       ? report.disposition === 'verified'
                         ? 'QA verified'
                         : 'QA rejected'
-                      : cycle.endedAt
-                        ? 'Ended without report'
-                        : 'Active'}
+                      : cycle.terminalDisposition === 'interrupted'
+                        ? 'QA interrupted'
+                        : cycle.endedAt
+                          ? 'Ended without report'
+                          : 'Active'}
                   </span>
                 </header>
                 <p>Workspace {cycle.workspaceId}</p>

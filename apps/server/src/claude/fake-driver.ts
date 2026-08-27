@@ -224,10 +224,7 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
     const controls = configuration.controlServer.tools.filter(
       ({ name }) => name === 'submit_qa_verdict',
     );
-    if (
-      controls.length !== 1 ||
-      configuration.controlServer.tools.length !== 1
-    ) {
+    if (controls.length !== 1) {
       throw new Error('QA runtime must expose exactly one verdict control');
     }
     const control = controls[0];

@@ -77,7 +77,15 @@ export const qaReportSchema = qaReportBaseSchema.superRefine(
 );
 
 export const qaReportInputSchema = qaReportBaseSchema
-  .omit({ id: true, cycleId: true, createdAt: true })
+  .omit({
+    id: true,
+    cycleId: true,
+    createdAt: true,
+    verificationCommands: true,
+    workspaceBefore: true,
+    workspaceAfter: true,
+  })
+  .strict()
   .superRefine(requirePassedCriteriaForVerified);
 
 const qaTaskSnapshotSchema = z
@@ -120,13 +128,17 @@ export const qaExecutionCycleSchema = z
     taskSnapshot: qaTaskSnapshotSchema,
     developerCompletionReportId: id,
     workspaceId: id,
+    workspaceBaseline: z.string().trim().min(1).default('legacy-unavailable'),
+    taskFingerprint: z.string().trim().min(1).default('legacy-unavailable'),
     reviewPolicy: reviewPolicySchema,
     reviewPolicyRevision: z.number().int().positive(),
     automationGeneration: z.number().int().nonnegative(),
     rejectionOrdinal: z.number().int().nonnegative(),
     startedAt: timestamp,
     endedAt: timestamp.nullable(),
-    terminalDisposition: z.enum(['verified', 'rejected']).nullable(),
+    terminalDisposition: z
+      .enum(['verified', 'rejected', 'interrupted'])
+      .nullable(),
     reportId: id.nullable(),
     terminalCommandId: id.nullable(),
     terminalEventId: id.nullable(),
@@ -164,6 +176,28 @@ export const qaExecutionCycleSchema = z
           message: 'Terminal QA cycle dispositions require an end time.',
           path: ['terminalDisposition'],
         });
+      }
+      if (terminalDisposition === 'interrupted') {
+        if (reportId !== null) {
+          context.addIssue({
+            code: 'custom',
+            message: 'Interrupted QA cycles may not invent a QA report.',
+            path: ['reportId'],
+          });
+        }
+        for (const [field, value] of [
+          ['terminalCommandId', terminalCommandId],
+          ['terminalEventId', terminalEventId],
+        ] as const) {
+          if (value === null) {
+            context.addIssue({
+              code: 'custom',
+              message: 'Interrupted QA cycles require repair audit metadata.',
+              path: [field],
+            });
+          }
+        }
+        return;
       }
       for (const [index, value] of terminalMetadata.entries()) {
         if (value === null) {
