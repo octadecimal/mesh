@@ -93,12 +93,20 @@ Project-run reservation fails closed on any live session already using its
 planned path. In the reverse direction, manual create and resume fail closed
 before placing a second live session at a path backed by a pending or active
 Mesh-owned worktree, even when the selected workspace is a shared alias.
-Ordinary shared-folder overlap remains warning-only. The configured project-run
-root must be outside, and not equal to, every worktree registered to the
-project's Git common directory. If `.mesh-project-runs` would be nested inside
-any associated worktree, preflight reports `repository_unsafe` before root
-creation, authorization, resume, or claiming; set `MESH_WORKSPACE_ROOT` to a
-safe parent directory.
+Ordinary shared-folder overlap remains warning-only. Resume performs that
+occupancy check, applies the selected workspace and permission, and durably
+records the legal transition to live `starting` state in one immediate
+transaction. The transaction commits before Mesh calls the driver, so another
+create or resume observes the reservation while driver resume is pending. A
+known driver-resume rejection records ordered diagnostics and transitions the
+session to `failed`; the same session can then retry through the normal resume
+path. A cancelled pending resume keeps its live reservation until the driver
+settles and is closed, then durably transitions through `interrupting` to
+`interrupted`. The configured project-run root must be outside, and not equal
+to, every worktree registered to the project's Git common directory. If
+`.mesh-project-runs` would be nested inside any associated worktree, preflight
+reports `repository_unsafe` before root creation, authorization, resume, or
+claiming; set `MESH_WORKSPACE_ROOT` to a safe parent directory.
 
 `launch_pending` and `active` items both occupy capacity. Completed autonomous
 review releases a slot as completed. Manual review, disabled per-task

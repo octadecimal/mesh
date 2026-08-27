@@ -79,7 +79,8 @@ export class EventRepository {
       throw new Error('Raw diagnostic session must match the event session');
     }
 
-    this.database.exec('BEGIN IMMEDIATE');
+    const ownsTransaction = !this.database.inTransaction;
+    if (ownsTransaction) this.database.exec('BEGIN IMMEDIATE');
     try {
       const sequence = (
         this.nextSequence.get(sessionId) as { sequence: number }
@@ -109,10 +110,12 @@ export class EventRepository {
         claudeResumeId: sessionUpdate?.claudeResumeId ?? null,
         updatedAt: new Date().toISOString(),
       });
-      this.database.exec('COMMIT');
+      if (ownsTransaction) this.database.exec('COMMIT');
       return event;
     } catch (error) {
-      this.database.exec('ROLLBACK');
+      if (ownsTransaction && this.database.inTransaction) {
+        this.database.exec('ROLLBACK');
+      }
       throw error;
     }
   }

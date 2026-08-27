@@ -73,6 +73,35 @@ interface RuntimeDependencies {
   onStopped: () => void;
 }
 
+type AuditedSessionEventInput = {
+  sessionId: string;
+  draft: Omit<SessionEventDraft, 'id' | 'occurredAt'>;
+  raw: unknown;
+  sessionUpdate?: {
+    lifecycleState?: LifecycleState;
+    claudeResumeId?: string;
+  };
+  stableId?: string;
+};
+
+export const appendAuditedSessionEvent = (
+  events: EventRepository,
+  input: AuditedSessionEventInput,
+): SessionEvent => {
+  const id = input.stableId ?? randomUUID();
+  return events.append(
+    input.sessionId,
+    { id: `event-${id}`, occurredAt: now(), ...input.draft },
+    rawDiagnosticSchema.parse({
+      id: `diagnostic-${id}`,
+      sessionId: input.sessionId,
+      capturedAt: now(),
+      payload: JSON.parse(stablePayload(input.raw)) as unknown,
+    }),
+    input.sessionUpdate,
+  );
+};
+
 export class SessionRuntime {
   private state: LifecycleState;
   private readonly appliedDriverEvents = new Set<string>();
@@ -323,15 +352,15 @@ export class SessionRuntime {
     claudeResumeId?: string,
     stableId?: string,
   ): SessionEvent {
-    const id = stableId ?? randomUUID();
     let event: SessionEvent;
     try {
-      event = this.dependencies.events.append(
-        this.dependencies.session.id,
-        { id: `event-${id}`, occurredAt: now(), ...draft },
-        this.diagnostic(`diagnostic-${id}`, raw),
-        { lifecycleState: next, claudeResumeId },
-      );
+      event = appendAuditedSessionEvent(this.dependencies.events, {
+        sessionId: this.dependencies.session.id,
+        draft,
+        raw,
+        sessionUpdate: { lifecycleState: next, claudeResumeId },
+        stableId,
+      });
       if (next) this.state = next;
     } catch (error) {
       this.dependencies.onAuditFailure(error);

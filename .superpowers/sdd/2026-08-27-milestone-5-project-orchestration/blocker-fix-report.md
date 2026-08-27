@@ -178,3 +178,98 @@ No unresolved blocker remains. Git worktree creation is intentionally outside
 SQLite, so filesystem/audit failures continue to preserve reconciliation
 evidence rather than claim cross-system atomicity. The real Claude smoke remains
 separate, opt-in, subscription-consuming, and was not run.
+
+## Follow-up: durable resume occupancy
+
+### Root-cause confirmation
+
+`SessionRegistry.resume` previously committed the workspace and permission
+change while the durable lifecycle remained `interrupted`. The subsequent
+attachment awaited `driver.resume()` before `SessionRuntime` recorded the
+`resume` transition. Because the shared occupancy guard intentionally excludes
+stopped states, another create or resume could claim the same protected path
+during that await.
+
+The durable owner now checks occupancy, configures resume, and appends the
+audited transition to `starting` in the same `BEGIN IMMEDIATE` transaction.
+`starting` is already part of the shared guard's live-state set. Only after the
+transaction commits and publishes that event does Mesh call the driver. A
+known driver-resume rejection atomically records the error diagnostic and
+`starting -> failed` transition, preserving audit order and permitting a legal
+retry.
+
+### RED/GREEN evidence
+
+1. Deferred-driver occupancy race:
+   - RED: while the first resume was paused inside the driver, its durable state
+     was `interrupted`; the second resume reached the driver instead of
+     returning `project_run_conflict`.
+   - GREEN: the first session is durably `starting` while paused, the second
+     resume is rejected before its driver call, and the first completes to
+     `running`.
+2. Driver-resume failure cleanup and recovery:
+   - RED: a rejected driver resume left the session `interrupted` with no
+     reservation, error, or failure audit events.
+   - GREEN: the ordered audit is `interrupted -> starting`,
+     `driver_resume_failed`, then `starting -> failed`; a retry reaches
+     `running`.
+3. Reservation audit failure:
+   - RED: diagnostic insertion failure rolled back the reservation but left the
+     registry audit status `available`.
+   - GREEN: the audit barrier trips, configuration and lifecycle remain
+     unchanged, and the driver is never called.
+4. Same-session compatibility:
+   - GREEN proof: an interrupted session can resume its own protected workspace
+     and reaches `running` without self-conflict.
+5. Pending-resume cancellation:
+   - RED: after the deferred driver settled and was closed, the durable
+     reservation remained stuck in `starting`.
+   - GREEN: occupancy remains protected until driver settlement, then ordered
+     `starting -> interrupting -> interrupted` audit transitions release it.
+
+### Follow-up files changed
+
+- `apps/server/src/repositories/event-repository.ts`
+- `apps/server/src/runtime/session-runtime.ts`
+- `apps/server/src/runtime/session-registry.ts`
+- `apps/server/src/runtime/session-registry.spec.ts`
+- `docs/development/session-platform.md`
+
+No migration, shared contract, realtime protocol, or web projection change was
+required.
+
+### Follow-up verification
+
+Focused command:
+
+```text
+corepack pnpm vitest run \
+  apps/server/src/runtime/session-registry.spec.ts \
+  apps/server/src/runtime/session-runtime.spec.ts \
+  apps/server/src/http/routes.spec.ts \
+  apps/server/src/http/command-handler.spec.ts \
+  apps/server/src/repositories/repositories.spec.ts \
+  --config apps/server/vitest.config.ts
+```
+
+Result: 5 files passed, 134 tests passed.
+
+Complete gate:
+
+```text
+corepack pnpm verify
+```
+
+Result: exit 0. All format, lint, typecheck, test, and build targets
+completed; server tests reported 749 passed and 1 intentional skip; Chromium
+acceptance reported 18/18 passed. The gate emitted the existing non-failing
+lint, Vite/Nx deprecation, Windows line-ending, chunk-size, and nested-shell
+`pnpm` discovery warnings.
+
+### Follow-up residual concerns
+
+No unresolved blocker is known. A failed reservation audit deliberately leaves
+the process behind the global audit barrier; a failure while terminalizing an
+already committed `starting` reservation leaves that live reservation in place
+for fail-closed recovery rather than releasing occupancy without durable proof.
+The real Claude smoke remains opt-in and was not run.
