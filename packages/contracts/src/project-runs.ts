@@ -24,6 +24,8 @@ const projectRunItemBaseSchema = z.object({
   projectId: idSchema,
   taskId: idSchema,
   taskRevision: z.number().int().positive(),
+  policyRevision: z.number().int().positive().default(1),
+  taskAutomationGeneration: z.number().int().nonnegative().default(0),
   queuePosition: z.number().int().nonnegative(),
   attemptId: idSchema.nullable(),
   sessionId: idSchema.nullable(),

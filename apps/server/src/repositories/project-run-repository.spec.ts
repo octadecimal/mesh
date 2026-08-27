@@ -124,8 +124,20 @@ describe('ProjectRunRepository', () => {
       state: 'running',
       revision: 1,
       items: [
-        { taskId: 'task-a', queuePosition: 0, status: 'queued' },
-        { taskId: 'task-b', queuePosition: 1, status: 'queued' },
+        {
+          taskId: 'task-a',
+          queuePosition: 0,
+          status: 'queued',
+          policyRevision: 1,
+          taskAutomationGeneration: 0,
+        },
+        {
+          taskId: 'task-b',
+          queuePosition: 1,
+          status: 'queued',
+          policyRevision: 1,
+          taskAutomationGeneration: 0,
+        },
       ],
     });
     expect(repository.projectRuns.listByProject('project-1')).toHaveLength(1);
@@ -240,6 +252,118 @@ describe('ProjectRunRepository', () => {
         occurredAt: at,
       }),
     ).toBeUndefined();
+  });
+
+  it('rejects launch links whose attempt task or session does not match the item', () => {
+    const repository = setup();
+    repositories.push(repository);
+    repository.sessions.create(
+      sessionSchema.parse({
+        id: 'session-2',
+        projectId: 'project-1',
+        workspaceId: 'workspace-1',
+        title: 'Task B',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: at,
+        updatedAt: at,
+      }),
+    );
+    repository.attempts.create(
+      taskAttemptSchema.parse({
+        id: 'attempt-2',
+        taskId: 'task-b',
+        sessionId: 'session-2',
+        ordinal: 1,
+        source: 'launched',
+        actor: { type: 'system', id: 'system-1' },
+        createdAt: at,
+        unlinkedAt: null,
+        unlinkedBy: null,
+        unlinkReason: null,
+        role: null,
+      }),
+    );
+    const run = createRun(repository.projectRuns, ['task-a']);
+    const claim = repository.projectRuns.claimNext({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      occurredAt: at,
+    });
+    const input = {
+      runId: run.id,
+      itemId: claim!.item.id,
+      expectedRunRevision: claim!.run.revision,
+      occurredAt: at,
+    };
+
+    expect(() =>
+      repository.projectRuns.linkLaunch({
+        ...input,
+        attemptId: 'attempt-2',
+        sessionId: 'session-2',
+      }),
+    ).toThrow('Project run item launch cannot be linked');
+    expect(repository.projectRuns.get(run.id)).toMatchObject({
+      revision: claim!.run.revision,
+      items: [{ id: claim!.item.id, status: 'launch_pending' }],
+    });
+    expect(() =>
+      repository.projectRuns.linkLaunch({
+        ...input,
+        attemptId: 'attempt-1',
+        sessionId: 'session-2',
+      }),
+    ).toThrow('Project run item launch cannot be linked');
+    expect(repository.projectRuns.get(run.id)).toMatchObject({
+      revision: claim!.run.revision,
+      items: [{ id: claim!.item.id, status: 'launch_pending' }],
+    });
+  });
+
+  it('normalizes durable run identifiers and launch keys before storing and querying', () => {
+    const repository = setup();
+    repositories.push(repository);
+
+    const run = repository.projectRuns.create({
+      id: ' run-normalized ',
+      projectId: ' project-1 ',
+      concurrency: 1,
+      startedAt: at,
+      items: [
+        {
+          id: ' item-normalized ',
+          taskId: ' task-a ',
+          taskRevision: 1,
+          policyRevision: 7,
+          taskAutomationGeneration: 3,
+          queuePosition: 0,
+          launchIdempotencyKey: ' launch-normalized ',
+        },
+      ],
+    });
+
+    expect(run).toMatchObject({
+      id: 'run-normalized',
+      projectId: 'project-1',
+      items: [
+        {
+          id: 'item-normalized',
+          taskId: 'task-a',
+          policyRevision: 7,
+          taskAutomationGeneration: 3,
+          launchIdempotencyKey: 'launch-normalized',
+        },
+      ],
+    });
+    expect(repository.projectRuns.reconcileCounts(' run-normalized ')).toEqual({
+      queued: 1,
+      launchPending: 0,
+      active: 0,
+      completed: 0,
+      attentionRequired: 0,
+      notStarted: 0,
+    });
   });
 
   it('returns aggregate counts and rolls back a run with a failing project event', () => {

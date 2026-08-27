@@ -27,6 +27,8 @@ type ProjectRunItemRow = {
   project_id: string;
   task_id: string;
   task_revision: number;
+  policy_revision: number;
+  task_automation_generation: number;
   queue_position: number;
   status: string;
   attempt_id: string | null;
@@ -121,6 +123,8 @@ const toItem = (row: ProjectRunItemRow): ProjectRunItem =>
     projectId: row.project_id,
     taskId: row.task_id,
     taskRevision: row.task_revision,
+    policyRevision: row.policy_revision,
+    taskAutomationGeneration: row.task_automation_generation,
     queuePosition: row.queue_position,
     status: row.status,
     attemptId: row.attempt_id,
@@ -163,6 +167,7 @@ export class ProjectRunRepository {
   }
 
   create(input: CreateProjectRunInput): ProjectRun {
+    const runId = idSchema.parse(input.id);
     const projectId = idSchema.parse(input.projectId);
     const state = input.state ?? 'running';
     assertPositiveInteger(input.concurrency, 'Run concurrency');
@@ -175,13 +180,18 @@ export class ProjectRunRepository {
       state === 'completed'
         ? this.nonEmpty(input.completionReason, 'Run completion reason')
         : null;
+    const items = input.items.map((item) => ({
+      ...item,
+      id: idSchema.parse(item.id),
+      taskId: idSchema.parse(item.taskId),
+      launchIdempotencyKey: idSchema.parse(item.launchIdempotencyKey),
+    }));
     const itemIds = new Set<string>();
     const positions = new Set<number>();
     const taskIds = new Set<string>();
-    for (const item of input.items) {
-      const itemId = idSchema.parse(item.id);
-      const taskId = idSchema.parse(item.taskId);
-      idSchema.parse(item.launchIdempotencyKey);
+    for (const item of items) {
+      const itemId = item.id;
+      const taskId = item.taskId;
       assertPositiveInteger(item.taskRevision, 'Task revision');
       assertPositiveInteger(item.policyRevision, 'Policy revision');
       assertNonNegativeInteger(
@@ -211,7 +221,7 @@ export class ProjectRunRepository {
       ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)`,
         )
         .run(
-          idSchema.parse(input.id),
+          runId,
           projectId,
           state,
           input.concurrency,
@@ -228,8 +238,8 @@ export class ProjectRunRepository {
         task_automation_generation, queue_position, status, attempt_id, session_id,
         launch_idempotency_key, claimed_at, started_at, finished_at, outcome_reason
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, NULL, ?, NULL, NULL, NULL, NULL)`);
-      for (const item of input.items) {
-        const taskId = idSchema.parse(item.taskId);
+      for (const item of items) {
+        const taskId = item.taskId;
         const task = taskProject.get(taskId) as
           | { project_id: string }
           | undefined;
@@ -239,8 +249,8 @@ export class ProjectRunRepository {
           );
         }
         insertItem.run(
-          idSchema.parse(item.id),
-          input.id,
+          item.id,
+          runId,
           projectId,
           taskId,
           item.taskRevision,
@@ -250,7 +260,7 @@ export class ProjectRunRepository {
           item.launchIdempotencyKey,
         );
       }
-      const run = this.get(input.id);
+      const run = this.get(runId);
       if (!run) throw new Error('Created project run was not found');
       return run;
     });
@@ -311,9 +321,26 @@ export class ProjectRunRepository {
         .prepare(
           `UPDATE project_run_items
         SET status = 'active', attempt_id = ?, session_id = ?, started_at = ?
-        WHERE id = ? AND run_id = ? AND status = 'launch_pending'`,
+        WHERE id = ? AND run_id = ? AND status = 'launch_pending'
+          AND EXISTS (
+            SELECT 1
+            FROM task_attempts
+            JOIN sessions ON sessions.id = task_attempts.session_id
+            WHERE task_attempts.id = ?
+              AND task_attempts.task_id = project_run_items.task_id
+              AND task_attempts.session_id = ?
+              AND sessions.project_id = project_run_items.project_id
+          )`,
         )
-        .run(attemptId, sessionId, occurredAt, itemId, runId);
+        .run(
+          attemptId,
+          sessionId,
+          occurredAt,
+          itemId,
+          runId,
+          attemptId,
+          sessionId,
+        );
       if (
         result.changes !== 1 ||
         !this.bumpRevision(runId, input.expectedRunRevision, occurredAt)
@@ -387,7 +414,7 @@ export class ProjectRunRepository {
   }
 
   reconcileCounts(runId: string): ProjectRunCounts {
-    idSchema.parse(runId);
+    const parsedRunId = idSchema.parse(runId);
     const counts = this.database
       .prepare(
         `SELECT
@@ -399,7 +426,7 @@ export class ProjectRunRepository {
       SUM(status = 'not_started') AS not_started
       FROM project_run_items WHERE run_id = ?`,
       )
-      .get(runId) as Record<string, number | null>;
+      .get(parsedRunId) as Record<string, number | null>;
     return {
       queued: counts.queued ?? 0,
       launchPending: counts.launch_pending ?? 0,

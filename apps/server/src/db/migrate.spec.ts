@@ -14,11 +14,21 @@ import { Worker } from 'node:worker_threads';
 import { buildSync } from 'esbuild';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import {
+  projectSchema,
+  sessionSchema,
+  taskSchema,
+  workspaceSchema,
+} from '@mesh-session-platform/contracts';
+
 import { openDatabase, type Database } from './database.js';
 import { migrate } from './migrate.js';
 import { CommandRepository } from '../repositories/command-repository.js';
 import { ProjectRepository } from '../repositories/project-repository.js';
 import { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
+import { SessionRepository } from '../repositories/session-repository.js';
+import { TaskRepository } from '../repositories/task-repository.js';
+import { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import { waitForWorkerMessage } from '../test/wait-for-worker-message.js';
 
 const runProductionBuild = (
@@ -90,6 +100,188 @@ const runProductionBuild = (
       env: { ...options.env, npm_execpath: npmExecPath },
     });
   }
+};
+
+const assertProjectRunConstraints = (database: Database): void => {
+  const at = '2026-08-27T00:00:00.000Z';
+  new ProjectRepository(database).create(
+    projectSchema.parse({
+      id: 'constraint-project',
+      displayName: 'Constraint project',
+      repositoryPath: 'C:/code/constraint-project',
+      discoveredAt: at,
+      discoveryMetadata: {},
+    }),
+  );
+  new TaskRepository(database).create(
+    taskSchema.parse({
+      id: 'constraint-task',
+      projectId: 'constraint-project',
+      title: 'Constraint task',
+      description: '',
+      acceptanceCriteria: ['Persist constraints'],
+      priority: 'normal',
+      rank: 'a',
+      lifecycleState: 'ready',
+      labels: [],
+      notes: '',
+      blocked: null,
+      revision: 1,
+      createdAt: at,
+      updatedAt: at,
+    }),
+  );
+  new WorkspaceRepository(database).create(
+    workspaceSchema.parse({
+      id: 'constraint-workspace',
+      projectId: 'constraint-project',
+      type: 'shared',
+      path: 'C:/code/constraint-project',
+    }),
+  );
+  new SessionRepository(database).create(
+    sessionSchema.parse({
+      id: 'constraint-session',
+      projectId: 'constraint-project',
+      workspaceId: 'constraint-workspace',
+      title: 'Constraint session',
+      permissionMode: 'safe_auto',
+      lifecycleState: 'running',
+      createdAt: at,
+      updatedAt: at,
+    }),
+  );
+  database
+    .prepare(
+      `INSERT INTO project_runs (
+        id, project_id, state, revision, concurrency, started_at, updated_at,
+        completed_at, completion_reason
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      'constraint-run',
+      'constraint-project',
+      'running',
+      1,
+      1,
+      at,
+      at,
+      null,
+      null,
+    );
+  const insertRun = database.prepare(
+    `INSERT INTO project_runs (
+      id, project_id, state, revision, concurrency, started_at, updated_at,
+      completed_at, completion_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  expect(() =>
+    insertRun.run(
+      'invalid-concurrency',
+      'constraint-project',
+      'completed',
+      1,
+      0,
+      at,
+      at,
+      at,
+      'invalid concurrency',
+    ),
+  ).toThrow();
+  expect(() =>
+    insertRun.run(
+      'invalid-revision',
+      'constraint-project',
+      'completed',
+      0,
+      1,
+      at,
+      at,
+      at,
+      'invalid revision',
+    ),
+  ).toThrow();
+  expect(() =>
+    insertRun.run(
+      'invalid-completion-reason',
+      'constraint-project',
+      'completed',
+      1,
+      1,
+      at,
+      at,
+      at,
+      null,
+    ),
+  ).toThrow();
+
+  const insertItem = database.prepare(
+    `INSERT INTO project_run_items (
+      id, run_id, project_id, task_id, task_revision, policy_revision,
+      task_automation_generation, queue_position, status, attempt_id, session_id,
+      launch_idempotency_key, claimed_at, started_at, finished_at, outcome_reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  expect(() =>
+    insertItem.run(
+      'invalid-position',
+      'constraint-run',
+      'constraint-project',
+      'constraint-task',
+      1,
+      1,
+      0,
+      -1,
+      'queued',
+      null,
+      null,
+      'constraint-position',
+      null,
+      null,
+      null,
+      null,
+    ),
+  ).toThrow();
+  expect(() =>
+    insertItem.run(
+      'invalid-not-started-timestamp',
+      'constraint-run',
+      'constraint-project',
+      'constraint-task',
+      1,
+      1,
+      0,
+      0,
+      'not_started',
+      null,
+      null,
+      'constraint-not-started',
+      null,
+      at,
+      at,
+      'not started',
+    ),
+  ).toThrow();
+  expect(() =>
+    insertItem.run(
+      'invalid-linked-pair',
+      'constraint-run',
+      'constraint-project',
+      'constraint-task',
+      1,
+      1,
+      0,
+      0,
+      'active',
+      null,
+      'constraint-session',
+      'constraint-linked-pair',
+      at,
+      at,
+      null,
+      null,
+    ),
+  ).toThrow();
 };
 
 describe('migrate', () => {
@@ -181,8 +373,11 @@ describe('migrate', () => {
         expect.objectContaining({ table: 'project_runs', from: 'run_id' }),
         expect.objectContaining({ table: 'projects', from: 'project_id' }),
         expect.objectContaining({ table: 'tasks', from: 'task_id' }),
+        expect.objectContaining({ table: 'task_attempts', from: 'attempt_id' }),
+        expect.objectContaining({ table: 'sessions', from: 'session_id' }),
       ]),
     );
+    assertProjectRunConstraints(database);
     expect(
       database
         .prepare(
@@ -322,8 +517,11 @@ describe('migrate', () => {
         expect.objectContaining({ table: 'project_runs', from: 'run_id' }),
         expect.objectContaining({ table: 'projects', from: 'project_id' }),
         expect.objectContaining({ table: 'tasks', from: 'task_id' }),
+        expect.objectContaining({ table: 'task_attempts', from: 'attempt_id' }),
+        expect.objectContaining({ table: 'sessions', from: 'session_id' }),
       ]),
     );
+    assertProjectRunConstraints(database);
   });
 
   it('preserves 009 automation actions while expanding source-cycle foreign keys', () => {

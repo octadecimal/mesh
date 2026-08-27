@@ -1286,6 +1286,8 @@ describe('session platform contracts', () => {
           projectId: 'project-1',
           taskId: 'task-1',
           taskRevision: 3,
+          policyRevision: 2,
+          taskAutomationGeneration: 4,
           queuePosition: 0,
           status: 'queued' as const,
           outcomeReason: null,

@@ -48,7 +48,7 @@ CREATE TABLE project_run_items (
     OR
     (status IN ('completed', 'attention_required') AND claimed_at IS NOT NULL AND started_at IS NOT NULL AND attempt_id IS NOT NULL AND session_id IS NOT NULL)
     OR
-    (status = 'not_started' AND attempt_id IS NULL AND session_id IS NULL)
+    (status = 'not_started' AND started_at IS NULL AND attempt_id IS NULL AND session_id IS NULL)
   )
 );
 
