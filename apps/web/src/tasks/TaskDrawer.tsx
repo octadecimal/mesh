@@ -9,6 +9,10 @@ import {
   type MutatingCommand,
   type PermissionMode,
   type Project,
+  type QaExecutionCycle,
+  type QaReport,
+  type ReviewAutomationAction,
+  type ReviewAutomationState,
   type Session,
   type Task,
   type TaskAttempt,
@@ -24,6 +28,7 @@ import {
 } from '../sessions/WorkspaceFields';
 import { AttemptTimeline } from './AttemptTimeline';
 import { DeveloperExecutionPanel } from './DeveloperExecutionPanel';
+import { QaExecutionPanel } from './QaExecutionPanel';
 
 type TimelineAttempt = { attempt: TaskAttempt; session?: Session };
 
@@ -173,6 +178,9 @@ export function TaskDrawer({
   developerCompletionReports,
   developerBlockerReports,
   developerReviewFeedback,
+  qaCycles,
+  qaReports,
+  reviewAutomation,
   connected,
   onCommand,
   onOpenSession,
@@ -189,6 +197,11 @@ export function TaskDrawer({
   developerCompletionReports: readonly DeveloperCompletionReport[];
   developerBlockerReports: readonly DeveloperBlockerReport[];
   developerReviewFeedback: readonly DeveloperReviewFeedback[];
+  qaCycles: readonly QaExecutionCycle[];
+  qaReports: readonly QaReport[];
+  reviewAutomation?: ReviewAutomationState & {
+    actions: ReviewAutomationAction[];
+  };
   connected: boolean;
   onCommand: (command: MutatingCommand) => Promise<unknown> | void;
   onOpenSession?: (sessionId: string) => void;
@@ -859,8 +872,26 @@ export function TaskDrawer({
                   attempts={attempts}
                   cycles={developerCycles}
                   completionReports={developerCompletionReports}
+                  qaCycles={qaCycles}
+                  qaReports={qaReports}
                   blockerReports={developerBlockerReports}
                   feedback={developerReviewFeedback}
+                  repairs={taskRepairs}
+                  connected={connected}
+                  readOnly={readOnly}
+                  onCommand={onCommand}
+                  onOpenSession={onOpenSession}
+                />
+
+                <QaExecutionPanel
+                  project={project}
+                  task={task}
+                  attempts={attempts}
+                  sessions={sessions}
+                  cycles={qaCycles}
+                  reports={qaReports}
+                  developerCompletionReports={developerCompletionReports}
+                  automation={reviewAutomation}
                   repairs={taskRepairs}
                   connected={connected}
                   readOnly={readOnly}

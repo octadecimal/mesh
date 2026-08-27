@@ -157,6 +157,13 @@ export function TaskBoard({
   const drawerReviewFeedback = Object.values(
     projection.developerReviewFeedbackByCycleId,
   ).filter((entry) => drawerCycleIds.has(entry.cycleId));
+  const drawerQaCycles = drawerAttempts.flatMap(
+    ({ attempt }) => projection.qaCyclesByAttemptId[attempt.id] ?? [],
+  );
+  const drawerQaCycleIds = new Set(drawerQaCycles.map((cycle) => cycle.id));
+  const drawerQaReports = Object.values(projection.qaReportsByCycleId).filter(
+    (report) => drawerQaCycleIds.has(report.cycleId),
+  );
   const terminalTasks = useMemo(() => {
     const tasks = Object.values(projection.tasksById).filter(
       (task) => task.projectId === project.id,
@@ -516,6 +523,13 @@ export function TaskBoard({
           developerCompletionReports={drawerCompletionReports}
           developerBlockerReports={drawerBlockerReports}
           developerReviewFeedback={drawerReviewFeedback}
+          qaCycles={drawerQaCycles}
+          qaReports={drawerQaReports}
+          reviewAutomation={
+            drawerTask
+              ? projection.reviewAutomationByTaskId[drawerTask.id]
+              : undefined
+          }
           connected={connected}
           onCommand={onCommand}
           onOpenSession={onOpenSession}

@@ -1,11 +1,22 @@
 import {
   serverMessageSchema,
+  type MutatingCommand,
   type ServerMessage,
 } from '@mesh-session-platform/contracts';
 
 import { subscribeFrameSchema } from '@mesh-session-platform/contracts';
 
 type WebSocketFactory = (url: string) => WebSocket;
+
+const sessionCreatingCommands = new Set<MutatingCommand['type']>([
+  'session.create',
+  'task.attempt.launch',
+  'task.developer.launch',
+  'task.qa.launch',
+]);
+
+export const commandCreatesSession = (type: MutatingCommand['type']) =>
+  sessionCreatingCommands.has(type);
 
 export type MeshSocketOptions = {
   url: string;
