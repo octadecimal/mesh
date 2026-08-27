@@ -273,3 +273,76 @@ the process behind the global audit barrier; a failure while terminalizing an
 already committed `starting` reservation leaves that live reservation in place
 for fail-closed recovery rather than releasing occupancy without durable proof.
 The real Claude smoke remains opt-in and was not run.
+
+## Final follow-up: resume reservation commit failure
+
+### Root-cause confirmation
+
+The resume reservation originally treated only audited event append failure as
+an audit-barrier condition. `COMMIT` ran after that inner catch, so a commit
+exception reached the outer rollback path and was rethrown without tripping the
+central barrier. Mesh could no longer prove whether `starting` was durable, yet
+the process remained writable.
+
+The complete `BEGIN IMMEDIATE` through `COMMIT` sequence is now one audited
+operation. Any operational failure rolls back when the connection still owns a
+transaction, passes the original cause to the central barrier exactly once,
+and rethrows that cause. Expected resume domain outcomes use the same rollback
+path but do not trip the barrier. If rollback itself fails after an expected
+domain outcome, that rollback failure becomes the audit cause.
+
+### RED/GREEN evidence
+
+1. Reservation commit failure:
+   - RED: the injected `COMMIT` error rolled back and was rethrown, but
+     `tripAuditBarrier` was called zero times and the registry stayed writable.
+   - GREEN: rollback occurs once, the identical commit error reaches the
+     barrier once, the protected session remains truthfully `interrupted` with
+     no reservation audit rows, an existing runtime is interrupted, and later
+     writes return `audit_unavailable`.
+2. Expected domain conflict:
+   - GREEN compatibility proof: `project_run_conflict` leaves workspace and
+     permission unchanged, does not call the barrier, and preserves
+     `auditStatus === 'available'`.
+
+### Final follow-up files changed
+
+- `apps/server/src/runtime/session-registry.ts`
+- `apps/server/src/runtime/session-registry.spec.ts`
+
+No migration, shared contract, realtime protocol, web projection, or
+session-platform behavior documentation change was required.
+
+### Final follow-up verification
+
+Focused command:
+
+```text
+corepack pnpm vitest run \
+  apps/server/src/runtime/session-registry.spec.ts \
+  apps/server/src/runtime/session-runtime.spec.ts \
+  apps/server/src/main.spec.ts \
+  --config apps/server/vitest.config.ts
+```
+
+Result: 3 files passed, 54 tests passed.
+
+Complete gate:
+
+```text
+corepack pnpm verify
+```
+
+Result: exit 0. All format, lint, typecheck, test, and build targets
+completed; server tests reported 750 passed and 1 intentional skip; Chromium
+acceptance reported 18/18 passed. The gate emitted the existing non-failing
+lint, Vite/Nx deprecation, Windows line-ending, chunk-size, and nested-shell
+`pnpm` discovery warnings.
+
+### Final follow-up residual concerns
+
+No unresolved blocker is known. If SQLite reports a commit error after the
+transaction has already ended, Mesh cannot roll back; the central audit barrier
+still stops runtime and write activity, and any durable `starting` state remains
+live/fail-closed for recovery. The real Claude smoke remains opt-in and was not
+run.

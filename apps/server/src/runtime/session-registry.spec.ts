@@ -195,6 +195,12 @@ describe('SessionRegistry Developer attachment', () => {
       driver,
       closeDatabase: () => undefined,
     });
+    const tripAuditBarrier = vi.spyOn(
+      registry as unknown as {
+        tripAuditBarrier(error: unknown): void;
+      },
+      'tripAuditBarrier',
+    );
     seed(repositories, 'resume-protected', 'interrupted');
     const protectedPath = 'C:/code/project-1/.mesh-project-runs/item';
     repositories.workspaces.create(
@@ -247,6 +253,93 @@ describe('SessionRegistry Developer attachment', () => {
       permissionMode: 'interactive',
     });
     expect(driver.resumedRequests).toHaveLength(0);
+    expect(registry.auditStatus).toBe('available');
+    expect(tripAuditBarrier).not.toHaveBeenCalled();
+  });
+
+  it('trips the audit barrier once when resume reservation commit fails', async () => {
+    const repositories = createTestRepositories();
+    const commitFailure = new Error('resume reservation commit failed');
+    let failCommit = false;
+    let commitAttempts = 0;
+    let rollbackCalls = 0;
+    const database = new Proxy(repositories.database, {
+      get(target, property, receiver) {
+        if (property === 'exec') {
+          return (sql: string) => {
+            if (sql === 'COMMIT') {
+              commitAttempts += 1;
+              if (failCommit) {
+                failCommit = false;
+                throw commitFailure;
+              }
+            }
+            if (sql === 'ROLLBACK') rollbackCalls += 1;
+            return target.exec(sql);
+          };
+        }
+        if (property === 'prepare') return target.prepare.bind(target);
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const driver = new FakeClaudeSessionDriver();
+    const invalidated: string[] = [];
+    const registry = new SessionRegistry({
+      ...repositories,
+      database,
+      driver,
+      invalidateDeveloperCapability: (sessionId) => invalidated.push(sessionId),
+      closeDatabase: () => undefined,
+    });
+    const tripAuditBarrier = vi.spyOn(
+      registry as unknown as {
+        tripAuditBarrier(error: unknown): void;
+      },
+      'tripAuditBarrier',
+    );
+    seed(repositories, 'active-during-commit-failure');
+    seed(repositories, 'commit-failed-resume', 'interrupted');
+    const workspaceId = seedProtectedWorkspace(repositories);
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    await registry.create('active-during-commit-failure');
+    failCommit = true;
+
+    await expect(
+      registry.resume('commit-failed-resume', {
+        workspaceId,
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toBe(commitFailure);
+
+    expect(commitAttempts).toBe(1);
+    expect(rollbackCalls).toBe(1);
+    expect(tripAuditBarrier).toHaveBeenCalledOnce();
+    expect(tripAuditBarrier).toHaveBeenCalledWith(commitFailure);
+    expect(registry.auditStatus).toBe('audit_unavailable');
+    expect(repositories.sessions.get('commit-failed-resume')).toMatchObject({
+      workspaceId: 'workspace-1',
+      permissionMode: 'interactive',
+      lifecycleState: 'interrupted',
+    });
+    expect(repositories.events.after('commit-failed-resume', 0)).toEqual([]);
+    expect(repositories.diagnostics.list('commit-failed-resume')).toEqual([]);
+    expect(driver.resumedRequests).toHaveLength(0);
+    expect(invalidated).toContain('active-during-commit-failure');
+    await vi.waitFor(() =>
+      expect(driver.createdSessions[0]?.interrupted).toBe(true),
+    );
+    await expect(
+      registry.sendPrompt('active-during-commit-failure', 'blocked'),
+    ).rejects.toMatchObject({ code: 'audit_unavailable' });
+    await expect(
+      registry.resume('commit-failed-resume', {
+        workspaceId,
+        permissionMode: 'safe_auto',
+      }),
+    ).rejects.toMatchObject({ code: 'audit_unavailable' });
   });
 
   it('durably reserves protected occupancy while driver resume is pending', async () => {

@@ -81,8 +81,8 @@ export class SessionRegistry {
     this.assertWritable();
     this.assertAttachAvailable(sessionId, 'resume');
     let reservationEvent: SessionEvent;
-    this.dependencies.database.exec('BEGIN IMMEDIATE');
     try {
+      this.dependencies.database.exec('BEGIN IMMEDIATE');
       const current = this.dependencies.sessions.get(sessionId);
       if (!current) throw { code: 'session_not_found', sessionId };
       if (!current.claudeResumeId) {
@@ -115,28 +115,30 @@ export class SessionRegistry {
         configuration.permissionMode,
       );
       if (!configured) throw { code: 'session_not_found', sessionId };
-      try {
-        reservationEvent = appendAuditedSessionEvent(this.dependencies.events, {
-          sessionId,
-          draft: {
-            type: 'session.status',
-            payload: {
-              from: current.lifecycleState,
-              to: reservedState,
-            },
+      reservationEvent = appendAuditedSessionEvent(this.dependencies.events, {
+        sessionId,
+        draft: {
+          type: 'session.status',
+          payload: {
+            from: current.lifecycleState,
+            to: reservedState,
           },
-          raw: { kind: 'runtime_transition', trigger: 'resume' },
-          sessionUpdate: { lifecycleState: reservedState },
-        });
-      } catch (auditError) {
-        this.tripAuditBarrier(auditError);
-        throw auditError;
-      }
+        },
+        raw: { kind: 'runtime_transition', trigger: 'resume' },
+        sessionUpdate: { lifecycleState: reservedState },
+      });
       this.dependencies.database.exec('COMMIT');
     } catch (error) {
-      if (this.dependencies.database.inTransaction) {
-        this.dependencies.database.exec('ROLLBACK');
+      let rollbackError: unknown;
+      try {
+        if (this.dependencies.database.inTransaction) {
+          this.dependencies.database.exec('ROLLBACK');
+        }
+      } catch (failure) {
+        rollbackError = failure;
       }
+      const auditCause = isResumeDomainError(error) ? rollbackError : error;
+      if (auditCause) this.tripAuditBarrier(auditCause);
       throw error;
     }
     this.publisher.publish(reservationEvent);
@@ -592,3 +594,17 @@ const isDeveloperRuntimeConfiguration = (
   configuration: AgentRuntimeConfiguration | undefined,
 ): configuration is DeveloperRuntimeConfiguration =>
   configuration !== undefined && 'controls' in configuration;
+
+const resumeDomainErrorCodes = new Set([
+  'invalid_session_state',
+  'project_run_conflict',
+  'session_not_found',
+  'workspace_not_found',
+]);
+
+const isResumeDomainError = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  typeof error.code === 'string' &&
+  resumeDomainErrorCodes.has(error.code);
