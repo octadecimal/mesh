@@ -10,6 +10,9 @@ import {
   developerReviewFeedbackSchema,
   projectEventSchema,
   projectHistorySchema,
+  projectRunChangedEventSchema,
+  projectRunItemSchema,
+  projectRunSchema,
   projectSchema,
   projectSnapshotSchema,
   qaExecutionCycleSchema,
@@ -1262,6 +1265,166 @@ describe('session platform contracts', () => {
         updatedBy: null,
       });
       expect(taskAttemptSchema.parse(milestone3Attempt).qaCycles).toEqual([]);
+    });
+  });
+
+  describe('project run contracts', () => {
+    const run = {
+      id: 'run-1',
+      projectId: 'project-1',
+      state: 'running' as const,
+      revision: 1,
+      concurrency: 2,
+      completionReason: null,
+      startedAt: '2026-08-27T00:00:00.000Z',
+      updatedAt: '2026-08-27T00:00:00.000Z',
+      completedAt: null,
+      items: [
+        {
+          id: 'item-1',
+          runId: 'run-1',
+          projectId: 'project-1',
+          taskId: 'task-1',
+          taskRevision: 3,
+          queuePosition: 0,
+          status: 'queued' as const,
+          outcomeReason: null,
+          attemptId: null,
+          sessionId: null,
+          launchIdempotencyKey: 'run-1:item-1:launch',
+          claimedAt: null,
+          startedAt: null,
+          finishedAt: null,
+        },
+      ],
+    };
+
+    it.each([
+      ['queued', null],
+      ['launch_pending', null],
+      ['active', null],
+      ['completed', 'completed'],
+      ['attention_required', 'launch_failed'],
+      ['not_started', 'stopped'],
+    ] as const)(
+      'parses the %s project run item state',
+      (status, outcomeReason) => {
+        expect(
+          projectRunItemSchema.parse({
+            ...run.items[0],
+            status,
+            outcomeReason,
+          }).status,
+        ).toBe(status);
+      },
+    );
+
+    it.each([
+      ['running', null, null],
+      ['paused', null, null],
+      ['draining', null, null],
+      ['completed', 'finished', '2026-08-27T00:01:00.000Z'],
+    ] as const)(
+      'parses the %s project run state',
+      (state, completionReason, completedAt) => {
+        expect(
+          projectRunSchema.parse({
+            ...run,
+            state,
+            completionReason,
+            completedAt,
+          }).state,
+        ).toBe(state);
+      },
+    );
+
+    it('rejects invalid project run item and terminal run combinations', () => {
+      expect(() =>
+        projectRunItemSchema.parse({
+          ...run.items[0],
+          status: 'completed',
+          outcomeReason: null,
+        }),
+      ).toThrow();
+      expect(() =>
+        projectRunItemSchema.parse({
+          ...run.items[0],
+          status: 'queued',
+          outcomeReason: 'completed',
+        }),
+      ).toThrow();
+      expect(() =>
+        projectRunSchema.parse({
+          ...run,
+          state: 'completed',
+          completedAt: null,
+          completionReason: 'finished',
+        }),
+      ).toThrow();
+    });
+
+    it('parses runs, run commands, and authoritative run events', () => {
+      expect(projectRunSchema.parse(run)).toEqual(run);
+
+      for (const command of [
+        {
+          type: 'project.run.start',
+          payload: { projectId: 'project-1', concurrency: 2, actor },
+        },
+        {
+          type: 'project.run.pause',
+          payload: { runId: 'run-1', expectedRevision: 1, actor },
+        },
+        {
+          type: 'project.run.resume',
+          payload: { runId: 'run-1', expectedRevision: 2, actor },
+        },
+        {
+          type: 'project.run.stop',
+          payload: { runId: 'run-1', expectedRevision: 3, actor },
+        },
+      ]) {
+        expect(
+          commandEnvelopeSchema.parse({
+            protocolVersion: 1,
+            idempotencyKey: `project-run-${command.type}`,
+            command,
+          }).command.type,
+        ).toBe(command.type);
+      }
+
+      expect(
+        projectRunChangedEventSchema.parse({
+          protocolVersion: 1,
+          id: 'project-event-run-1',
+          projectId: 'project-1',
+          sequence: 1,
+          occurredAt: run.updatedAt,
+          type: 'project.run_changed',
+          payload: { run },
+        }).payload.run,
+      ).toEqual(run);
+    });
+
+    it('decodes project snapshots created before runs existed', () => {
+      const project = projectSchema.parse({
+        id: 'project-1',
+        displayName: 'Mesh',
+        repositoryPath: 'C:/code/mesh',
+        discoveredAt: now,
+      });
+
+      expect(
+        projectSnapshotSchema.parse({
+          protocolVersion: 1,
+          project,
+          tasks: [],
+          attempts: [],
+          transitions: [],
+          repairs: [],
+          cursor: 0,
+        }),
+      ).toMatchObject({ runs: [], projectRunLimits: { maxConcurrency: 1 } });
     });
   });
 });

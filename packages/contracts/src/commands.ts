@@ -141,6 +141,38 @@ export const projectCommandSchema = z.discriminatedUnion('type', [
       actor: humanActorSchema,
     }),
   }),
+  z.object({
+    type: z.literal('project.run.start'),
+    payload: z.object({
+      projectId: idSchema,
+      concurrency: z.number().int().positive(),
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.run.pause'),
+    payload: z.object({
+      runId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.run.resume'),
+    payload: z.object({
+      runId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
+  z.object({
+    type: z.literal('project.run.stop'),
+    payload: z.object({
+      runId: idSchema,
+      expectedRevision: expectedRevisionSchema,
+      actor: humanActorSchema,
+    }),
+  }),
 ]);
 
 export const taskCommandSchema = z.discriminatedUnion('type', [

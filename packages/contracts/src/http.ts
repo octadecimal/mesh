@@ -25,6 +25,7 @@ import {
 } from './qa-execution.js';
 import { sessionEventSchema } from './events.js';
 import { projectEventSchema } from './project-events.js';
+import { projectRunSchema } from './project-runs.js';
 import { protocolVersionSchema } from './protocol.js';
 
 export const sessionSnapshotSchema = z.object({
@@ -69,6 +70,12 @@ export const projectSnapshotSchema = z.object({
   qaCycles: z.array(qaExecutionCycleSchema).default([]),
   qaReports: z.array(qaReportSchema).default([]),
   reviewAutomationActions: z.array(reviewAutomationActionSchema).default([]),
+  runs: z.array(projectRunSchema).default([]),
+  projectRunLimits: z
+    .object({ maxConcurrency: z.number().int().positive() })
+    .default({
+      maxConcurrency: 1,
+    }),
   cursor: z.number().int().nonnegative(),
 });
 

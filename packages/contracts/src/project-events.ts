@@ -22,6 +22,7 @@ import {
   reviewAutomationActionSchema,
   reviewAutomationStateSchema,
 } from './qa-execution.js';
+import { projectRunSchema } from './project-runs.js';
 import { protocolVersionSchema } from './protocol.js';
 
 const projectEvent = <Type extends string, Payload extends z.ZodType>(
@@ -73,6 +74,10 @@ export const projectDeveloperInstructionsChangedEventSchema = projectEvent(
 export const projectQaConfigurationChangedEventSchema = projectEvent(
   'project.qa_configuration_changed',
   z.object({ project: projectSchema }),
+);
+export const projectRunChangedEventSchema = projectEvent(
+  'project.run_changed',
+  z.object({ run: projectRunSchema }),
 );
 const taskQaExecutionChangedPayloadSchema = z
   .object({
@@ -198,6 +203,7 @@ export const projectEventSchema = z.discriminatedUnion('type', [
   taskAttemptRepairDetectedEventSchema,
   projectDeveloperInstructionsChangedEventSchema,
   projectQaConfigurationChangedEventSchema,
+  projectRunChangedEventSchema,
   taskDeveloperExecutionChangedEventSchema,
   taskQaExecutionChangedEventSchema,
   taskReviewAutomationChangedEventSchema,
