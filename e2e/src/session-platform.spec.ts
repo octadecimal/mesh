@@ -1210,15 +1210,18 @@ test('QA review autonomously rejects, resumes the same Developer, verifies, and 
   const restoredHistory = page
     .getByRole('dialog', { name: title })
     .getByRole('region', { name: 'Developer execution history' });
-  await expect(restoredHistory.getByRole('article')).toHaveCount(4);
-  for (const name of [
+  expect(
+    await restoredHistory
+      .getByRole('article')
+      .evaluateAll((articles) =>
+        articles.map((article) => article.getAttribute('aria-label')),
+      ),
+  ).toEqual([
     'Developer attempt 1 cycle 1',
     'QA attempt 1 cycle 1',
     'Developer attempt 1 cycle 2',
     'QA attempt 1 cycle 2',
-  ]) {
-    await expect(restoredHistory.getByRole('article', { name })).toHaveCount(1);
-  }
+  ]);
 });
 
 test('QA review manual verification waits for human acceptance', async ({
