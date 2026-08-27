@@ -21,12 +21,16 @@ import {
 
 import type { ClaudeSessionDriver } from '../claude/driver.js';
 import type { GitAdapter } from '../platform/git.js';
+import { ProcessTrustedExecutableUnavailableError } from '../platform/process-runner.js';
 import {
   FakeClaudeSessionDriver,
   FakeDriverSession,
 } from '../claude/fake-driver.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
-import type { RepositoryIdentity } from '../projects/repository-identity.js';
+import type {
+  RepositoryIdentity,
+  RepositoryIdentityResolver,
+} from '../projects/repository-identity.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { AttemptService } from './attempt-service.js';
 import { DeveloperCapabilityRegistry } from './developer-capability-registry.js';
@@ -58,6 +62,7 @@ describe('AttemptService', () => {
       taskId: string;
       cycleId: string;
     }) => Promise<void>;
+    resolveIdentity?: RepositoryIdentityResolver;
   }) => {
     const directory = mkdtempSync(join(tmpdir(), 'mesh-attempt-service-'));
     const repositories = createTestRepositories(options?.repositories);
@@ -118,15 +123,17 @@ describe('AttemptService', () => {
       },
       git: options?.git,
       pathOptions: { baseDirectory: directory },
-      resolveIdentity: async (path) =>
-        ({
-          canonicalPath: path,
-          commonDirectory: path,
-          repositoryIdentity:
-            path === directory || path.endsWith('/project-1')
-              ? directory
-              : path,
-        }) as RepositoryIdentity,
+      resolveIdentity:
+        options?.resolveIdentity ??
+        (async (path) =>
+          ({
+            canonicalPath: path,
+            commonDirectory: path,
+            repositoryIdentity:
+              path === directory || path.endsWith('/project-1')
+                ? directory
+                : path,
+          }) as RepositoryIdentity),
       now: () => now,
       createId,
     });
@@ -1951,5 +1958,35 @@ describe('AttemptService', () => {
       workspace: repositories.workspaces.get(launched.session.workspaceId),
     });
     expect(repositories.workspaces.listByProject('project-1')).toHaveLength(1);
+  });
+
+  it('preserves trusted Git unavailability during QA workspace validation', async () => {
+    let gitAvailable = true;
+    const { directory, repositories, service } = setup({
+      resolveIdentity: async (path) => {
+        if (!gitAvailable) {
+          throw new ProcessTrustedExecutableUnavailableError('Git');
+        }
+        return {
+          canonicalPath: path,
+          commonDirectory: path,
+          repositoryIdentity: 'repository-identity',
+        } as RepositoryIdentity;
+      },
+    });
+    seedTask(repositories);
+    const launched = await service.launchDeveloper(
+      developerLaunchInput(directory),
+    );
+    if (!launched.session) throw new Error('Expected Developer session');
+    gitAvailable = false;
+
+    await expect(
+      service.requireQaWorkspace({
+        taskId: launched.task.id,
+        attemptId: launched.attempt.id,
+        workspaceId: launched.session.workspaceId,
+      }),
+    ).rejects.toBeInstanceOf(ProcessTrustedExecutableUnavailableError);
   });
 });

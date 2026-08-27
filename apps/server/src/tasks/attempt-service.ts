@@ -24,6 +24,7 @@ import type { DeveloperRuntimeConfiguration } from '../claude/driver.js';
 import { DEVELOPER_POLICY_VERSION } from '../domain/developer-policy.js';
 import { authorizeTaskTransition } from '../domain/task-lifecycle.js';
 import type { GitAdapter } from '../platform/git.js';
+import { ProcessTrustedExecutableUnavailableError } from '../platform/process-runner.js';
 import {
   resolveWorkspacePath,
   type ResolveWorkspacePathOptions,
@@ -323,7 +324,12 @@ export class AttemptService {
     try {
       await this.assertSameRepository(task, session);
     } catch (error) {
-      if (error instanceof ProjectNotFoundError) throw error;
+      if (
+        error instanceof ProjectNotFoundError ||
+        error instanceof ProcessTrustedExecutableUnavailableError
+      ) {
+        throw error;
+      }
       throw new UnsafeQaWorkspaceError(
         'The Developer workspace repository identity is unsafe or ambiguous.',
       );

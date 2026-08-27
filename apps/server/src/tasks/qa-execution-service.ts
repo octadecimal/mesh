@@ -42,13 +42,19 @@ import type { TaskAttemptRepository } from '../repositories/task-attempt-reposit
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
-import type {
-  QaVerificationCommand,
-  QaVerificationResult,
+import { ProcessTrustedExecutableUnavailableError } from '../platform/process-runner.js';
+import {
+  QaVerificationExecutableUnavailableError,
+  type QaVerificationCommand,
+  type QaVerificationResult,
 } from '../platform/qa-verification-runner.js';
 import { QaWorkspaceReader } from '../platform/qa-workspace-reader.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
-import type { AttemptService } from './attempt-service.js';
+import type {
+  AttemptService,
+  QaWorkspaceInput,
+  VerifiedQaWorkspace,
+} from './attempt-service.js';
 import type { QaCapabilityRegistry } from './qa-capability-registry.js';
 import { planQaVerdict } from './review-automation-service.js';
 import {
@@ -365,6 +371,19 @@ export class QaExecutionService {
     }
   }
 
+  private async requireLaunchWorkspace(
+    input: QaWorkspaceInput,
+  ): Promise<VerifiedQaWorkspace> {
+    try {
+      return await this.dependencies.attemptService.requireQaWorkspace(input);
+    } catch (error) {
+      if (error instanceof ProcessTrustedExecutableUnavailableError) {
+        throw new QaVerificationExecutableUnavailableError();
+      }
+      throw error;
+    }
+  }
+
   async launch(input: QaLaunchInput): Promise<QaLaunchResult> {
     const existing = this.dependencies.commands.getExisting<QaLaunchResult>(
       input.commandId,
@@ -373,12 +392,11 @@ export class QaExecutionService {
     this.assertBillingSafe();
     const preflightActor = this.requireActor(input);
     const preflightContext = this.requireLaunchContext(input, preflightActor);
-    const preflightWorkspace =
-      await this.dependencies.attemptService.requireQaWorkspace({
-        taskId: preflightContext.task.id,
-        attemptId: preflightContext.attempt.id,
-        workspaceId: preflightContext.developerCycle.workspaceId,
-      });
+    const preflightWorkspace = await this.requireLaunchWorkspace({
+      taskId: preflightContext.task.id,
+      attemptId: preflightContext.attempt.id,
+      workspaceId: preflightContext.developerCycle.workspaceId,
+    });
     await this.dependencies.verificationRunner.preflightTrackedSource(
       preflightWorkspace.workspace.path,
     );
@@ -390,12 +408,11 @@ export class QaExecutionService {
           this.assertBillingSafe();
           const actor = this.requireActor(input);
           const initial = this.requireLaunchContext(input, actor);
-          const verified =
-            await this.dependencies.attemptService.requireQaWorkspace({
-              taskId: initial.task.id,
-              attemptId: initial.attempt.id,
-              workspaceId: initial.developerCycle.workspaceId,
-            });
+          const verified = await this.requireLaunchWorkspace({
+            taskId: initial.task.id,
+            attemptId: initial.attempt.id,
+            workspaceId: initial.developerCycle.workspaceId,
+          });
           const workspaceBaseline =
             await this.dependencies.verificationRunner.captureTrackedSource(
               verified.workspace.path,
