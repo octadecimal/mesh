@@ -95,6 +95,18 @@ describe('server configuration', () => {
     );
   });
 
+  it('captures the operator-approved Git path without resolving it in project context', () => {
+    const configured =
+      process.platform === 'win32'
+        ? 'D:\\Portable\\Git\\bin\\git.exe'
+        : '/nix/store/operator-git/bin/git';
+
+    expect(
+      loadServerConfig({ MESH_GIT_EXECUTABLE: `  ${configured}  ` })
+        .gitExecutable,
+    ).toBe(configured);
+  });
+
   it.each(['0.0.0.0', '192.168.1.5', 'mesh.local', 'localhost', '127.999.0.1'])(
     'rejects non-loopback host %s',
     (host) => {

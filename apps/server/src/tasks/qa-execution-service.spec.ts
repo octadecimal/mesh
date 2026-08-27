@@ -22,6 +22,7 @@ import type { RepositoryIdentity } from '../projects/repository-identity.js';
 import type { ProcessRunner } from '../platform/process-runner.js';
 import type { QaWorkspaceReader } from '../platform/qa-workspace-reader.js';
 import {
+  QaVerificationExecutableUnavailableError,
   QaVerificationRunner,
   type QaVerificationResult,
 } from '../platform/qa-verification-runner.js';
@@ -486,6 +487,44 @@ describe('QaExecutionService', () => {
     },
   );
 
+  it('leaves no partial QA launch state when the initial Git baseline is unavailable', async () => {
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => {
+          throw new QaVerificationExecutableUnavailableError();
+        },
+        run: async () => {
+          throw new Error('verification must not start');
+        },
+      },
+    });
+    const projectEventsBefore =
+      context.repositories.projectEvents.latestSequence(context.project.id);
+    const sessionsBefore = context.repositories.sessions.listByProject(
+      context.project.id,
+    );
+
+    await expect(
+      context.service.launch(launchInput(context.task)),
+    ).rejects.toMatchObject({
+      code: 'qa_verification_executable_unavailable',
+    });
+
+    expect(
+      context.repositories.sessions.listByProject(context.project.id),
+    ).toEqual(sessionsBefore);
+    expect(
+      context.repositories.qaExecutions.listCyclesForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.projectEvents.latestSequence(context.project.id),
+    ).toBe(projectEventsBefore);
+    expect(context.publicationSnapshots).toEqual([]);
+    expect(context.starts).toEqual([]);
+  });
+
   it('keeps inherited QA authority inside bounded workspace controls', async () => {
     const context = setup({ permissionMode: 'inherit' });
     writeFileSync(
@@ -889,6 +928,76 @@ describe('QaExecutionService', () => {
       ],
     });
     expect(activeSearches).toBe(0);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_workspace_search_cancelled',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('cancels a workspace listing with its runtime and records the pause', async () => {
+    const started = deferred();
+    let activeListings = 0;
+    const context = setup({
+      workspaceReader: {
+        read: async () => ({ path: 'unused', content: '', truncated: false }),
+        list: async (_workspace, _path, options) => {
+          started.resolve();
+          if (!options?.signal) {
+            return { path: '.', entries: [], truncated: false };
+          }
+          activeListings += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeListings -= 1;
+                reject(
+                  Object.assign(new Error('listing cancelled'), {
+                    code: 'qa_workspace_search_cancelled',
+                  }),
+                );
+              },
+              { once: true },
+            );
+          });
+        },
+        search: async () => ({ path: '.', matches: [], truncated: false }),
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'list_workspace_files',
+    );
+    if (!control) throw new Error('Expected workspace listing control');
+
+    const pending = control.execute({ path: '.' });
+    await started.promise;
+    context.service.cancelRuntime(launched.session.id);
+
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('qa_workspace_search_cancelled'),
+        },
+      ],
+    });
+    expect(activeListings).toBe(0);
     expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
       reviewAutomation: { status: 'paused' },
     });

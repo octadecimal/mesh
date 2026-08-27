@@ -21,6 +21,8 @@ import {
   FakeClaudeSessionDriver,
   type FakeQaStep,
 } from '../../apps/server/src/claude/fake-driver.js';
+// eslint-disable-next-line @nx/enforce-module-boundaries
+import { resolveGitExecutableAtStartup } from '../../apps/server/src/platform/process-runner.js';
 
 const require = createRequire(__filename);
 const builtMain = resolve('dist/apps/server/main.js');
@@ -127,6 +129,13 @@ const launchHarness = async (): Promise<{
   const worktreePath = join(temporaryRoot, 'worktrees', 'acceptance');
   const dataDirectory = join(temporaryRoot, 'data');
   const databasePath = join(dataDirectory, 'mesh.sqlite');
+  const trustedGitExecutable = await resolveGitExecutableAtStartup({
+    pathValue: process.env.PATH ?? process.env.Path,
+    workspaceRoot: temporaryRoot,
+  });
+  if (!trustedGitExecutable) {
+    throw new Error('Expected an approved E2E Git executable');
+  }
   initializeRepository(repositoryPath);
   mkdirSync(sharedPath, { recursive: true });
   mkdirSync(join(temporaryRoot, 'worktrees'), { recursive: true });
@@ -196,6 +205,7 @@ const launchHarness = async (): Promise<{
       MESH_DATA_DIR: dataDirectory,
       MESH_DATABASE_PATH: 'mesh.sqlite',
       MESH_WORKSPACE_ROOT: temporaryRoot,
+      MESH_GIT_EXECUTABLE: trustedGitExecutable.path,
       ANTHROPIC_API_KEY: billingConflict ? 'forbidden-e2e-value' : undefined,
     };
     server = await startServer({

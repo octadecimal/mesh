@@ -24,6 +24,7 @@ export interface ServerConfig {
   baseDirectory: string;
   databasePath: string;
   developmentOrigin?: string;
+  gitExecutable?: string;
   webRoot?: string;
 }
 
@@ -100,6 +101,7 @@ export const loadServerConfig = (
                 ? 'http://127.0.0.1:4200'
                 : undefined),
           ),
+    gitExecutable: environment.MESH_GIT_EXECUTABLE?.trim() || undefined,
     webRoot:
       environment.NODE_ENV === 'production'
         ? resolve(currentDirectory, 'dist/apps/web')

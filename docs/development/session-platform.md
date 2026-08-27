@@ -13,6 +13,16 @@ corepack pnpm nx dev web
 
 The server listens only on a loopback address. Its default origin is `http://127.0.0.1:3737`; the development web origin is exactly `http://127.0.0.1:4200`. Runtime data defaults to `~/.mesh-session-platform/session-platform.sqlite`. Override the directory with `MESH_DATA_DIR` or the database filename with `MESH_DATABASE_PATH`.
 
+Mesh approves one Git executable at server startup and reuses it for repository
+and QA operations. Set `MESH_GIT_EXECUTABLE` to an absolute executable path for
+a custom, portable, LocalAppData, or Nix installation. If it is omitted, Mesh
+examines only absolute startup `PATH` entries; empty, relative, and
+workspace-contained entries are ignored. Approval canonicalizes the executable,
+records its identity outside the configured workspace root, and is revalidated
+before each use. Runtime execution does not rediscover Git through `PATH`,
+`SystemRoot`, or repository configuration. Restart Mesh after changing the
+setting or installation.
+
 ## Project and task operation
 
 Use **Import repository** to create a durable project from a local Git
@@ -117,7 +127,9 @@ workspace root before and after reads or directory enumeration so concurrent
 path swaps fail closed. Search traversal has independent directory, entry,
 queue, file, and match caps, streams rather than materializes large directories,
 and stops and closes its directory handle with its owning QA cycle. It may
-request named verification commands through Mesh's constrained runner, but
+request named verification commands through Mesh's constrained runner. File
+listing also streams entries, returns at most 500 plus a one-entry truncation
+lookahead, and closes its handle when the owning cycle is cancelled. QA
 receives no shell and cannot write source, create another worktree, commit,
 merge, or create a pull request. Ambiguous
 joined option values are treated as workspace paths, including missing paths
@@ -127,10 +139,13 @@ five-minute wall-clock bound and a 64,000-byte limit per output stream, and is
 cancelled with the owning QA runtime. Timeout, output overflow, or cancellation
 durably pauses review without recording a verdict. On Windows, vetted package
 manager commands use canonical bundled JavaScript launchers through the
-installed Node executable, with shell execution disabled. Git is resolved only
-from fixed system installation locations to an absolute canonical executable
-outside the workspace; PATH and workspace-local Git copies are not trusted. If
-trusted Git is unavailable, Mesh refuses the child and durably pauses QA.
+installed Node executable, with shell execution disabled. Git uses the single
+startup approval described above; every spawn revalidates the executable's
+canonical path and identity, and workspace-local copies cannot replace it. If
+the approval is unavailable when manual QA first captures its baseline, the
+command returns `503 qa_verification_executable_unavailable` with setup guidance
+and creates no QA session, cycle, or project event. If an already-active cycle
+loses its approval, Mesh refuses the child and durably pauses QA.
 Before launch, Mesh proves that the canonical owned-process-tree terminator is
 functional. If that capability is missing or later fails, Mesh uses only the
 exact owned PID as a bounded fallback and durably pauses QA rather than assuming

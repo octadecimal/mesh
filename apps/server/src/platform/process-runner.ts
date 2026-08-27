@@ -1,13 +1,13 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { lstat, realpath } from 'node:fs/promises';
 import {
-  basename,
   dirname,
   isAbsolute,
   join,
-  parse,
+  posix,
   relative,
   resolve,
+  win32,
 } from 'node:path';
 
 const defaultMaxOutputBytes = 16 * 1024 * 1024;
@@ -74,10 +74,7 @@ export class ProcessTrustedExecutableUnavailableError extends Error {
 
 export type NodeProcessRunnerOptions = {
   platform?: NodeJS.Platform;
-  resolveTrustedGitExecutable?: (
-    cwd: string,
-    platform: NodeJS.Platform,
-  ) => Promise<string | undefined>;
+  trustedGitExecutable?: TrustedGitExecutable;
   resolveWindowsTreeTerminator?: () => Promise<string | undefined>;
   runWindowsTreeTerminator?: (
     executable: string,
@@ -85,6 +82,19 @@ export type NodeProcessRunnerOptions = {
     deadlineMs: number,
   ) => Promise<number>;
   terminationDeadlineMs?: number;
+};
+
+export type TrustedGitExecutable = Readonly<{
+  identity: string;
+  path: string;
+  workspaceRoot: string;
+}>;
+
+export type ResolveGitExecutableOptions = {
+  configuredPath?: string;
+  pathValue?: string;
+  platform?: NodeJS.Platform;
+  workspaceRoot: string;
 };
 
 const inside = (root: string, candidate: string) => {
@@ -97,73 +107,90 @@ const inside = (root: string, candidate: string) => {
   );
 };
 
-const trustedGitCandidates = (platform: NodeJS.Platform): string[] => {
-  if (platform !== 'win32') {
-    return platform === 'darwin'
-      ? [
-          '/usr/bin/git',
-          '/opt/homebrew/bin/git',
-          '/usr/local/bin/git',
-          '/opt/local/bin/git',
-        ]
-      : ['/usr/bin/git', '/bin/git', '/usr/local/bin/git'];
-  }
-  const systemRoot = process.env.SystemRoot;
-  if (!systemRoot || !isAbsolute(systemRoot)) return [];
-  const driveRoot = parse(resolve(systemRoot)).root;
-  return ['Program Files', 'Program Files (x86)'].flatMap((directory) => [
-    join(driveRoot, directory, 'Git', 'cmd', 'git.exe'),
-    join(driveRoot, directory, 'Git', 'bin', 'git.exe'),
-  ]);
-};
+const executableIdentity = (stat: Awaited<ReturnType<typeof lstat>>) =>
+  [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs].join(
+    ':',
+  );
 
-export const resolveTrustedGitExecutable = async (
-  cwd: string,
-  platform: NodeJS.Platform = process.platform,
-): Promise<string | undefined> => {
-  let canonicalCwd: string;
+const platformPaths = (platform: NodeJS.Platform) =>
+  platform === 'win32' ? win32 : posix;
+
+const approveGitExecutable = async (
+  candidate: string,
+  workspaceRoot: string,
+  platform: NodeJS.Platform,
+): Promise<TrustedGitExecutable | undefined> => {
   try {
-    canonicalCwd = await realpath(resolve(cwd));
+    const [canonical, canonicalWorkspace] = await Promise.all([
+      realpath(candidate),
+      realpath(workspaceRoot),
+    ]);
+    const stat = await lstat(canonical);
+    const paths = platformPaths(platform);
+    return paths.isAbsolute(canonical) &&
+      stat.isFile() &&
+      !inside(canonicalWorkspace, canonical) &&
+      paths.basename(canonical).toLowerCase() ===
+        (platform === 'win32' ? 'git.exe' : 'git') &&
+      (platform === 'win32' || (stat.mode & 0o111) !== 0)
+      ? {
+          identity: executableIdentity(stat),
+          path: canonical,
+          workspaceRoot: canonicalWorkspace,
+        }
+      : undefined;
   } catch {
     return undefined;
   }
-  for (const candidate of trustedGitCandidates(platform)) {
-    try {
-      const canonical = await realpath(candidate);
-      const stat = await lstat(canonical);
-      if (
-        !isAbsolute(canonical) ||
-        !stat.isFile() ||
-        inside(canonicalCwd, canonical) ||
-        basename(canonical).toLowerCase() !==
-          (platform === 'win32' ? 'git.exe' : 'git') ||
-        (platform !== 'win32' && (stat.mode & 0o111) === 0)
-      ) {
-        continue;
-      }
-      return canonical;
-    } catch {
-      // Continue through the fixed trusted installation candidates.
-    }
+};
+
+export const resolveGitExecutableAtStartup = async ({
+  configuredPath,
+  pathValue,
+  platform = process.platform,
+  workspaceRoot,
+}: ResolveGitExecutableOptions): Promise<TrustedGitExecutable | undefined> => {
+  const paths = platformPaths(platform);
+  if (configuredPath !== undefined) {
+    const configured = configuredPath.trim();
+    if (!configured || !paths.isAbsolute(configured)) return undefined;
+    return approveGitExecutable(configured, workspaceRoot, platform);
+  }
+  const separator = platform === 'win32' ? ';' : ':';
+  for (const entry of pathValue?.split(separator) ?? []) {
+    const directory = entry.trim();
+    if (!directory || !paths.isAbsolute(directory)) continue;
+    const approved = await approveGitExecutable(
+      paths.join(directory, platform === 'win32' ? 'git.exe' : 'git'),
+      workspaceRoot,
+      platform,
+    );
+    if (approved) return approved;
   }
   return undefined;
 };
 
 const validateTrustedGitExecutable = async (
-  candidate: string,
+  approved: TrustedGitExecutable,
   cwd: string,
   platform: NodeJS.Platform,
 ): Promise<string | undefined> => {
   try {
-    const [canonical, canonicalCwd] = await Promise.all([
-      realpath(candidate),
+    const [canonical, canonicalCwd, canonicalWorkspace] = await Promise.all([
+      realpath(approved.path),
       realpath(resolve(cwd)),
+      realpath(approved.workspaceRoot),
     ]);
     const stat = await lstat(canonical);
-    return isAbsolute(canonical) &&
+    const paths = platformPaths(platform);
+    return paths.isAbsolute(canonical) &&
+      canonical === approved.path &&
+      canonicalWorkspace === approved.workspaceRoot &&
+      executableIdentity(stat) === approved.identity &&
       stat.isFile() &&
+      !inside(canonicalWorkspace, canonical) &&
       !inside(canonicalCwd, canonical) &&
-      basename(canonical).toLowerCase() ===
+      paths.basename(canonical).toLowerCase() ===
         (platform === 'win32' ? 'git.exe' : 'git') &&
       (platform === 'win32' || (stat.mode & 0o111) !== 0)
       ? canonical
@@ -178,16 +205,12 @@ const trustedLauncher = async (
   args: readonly string[],
   cwd: string,
   platform: NodeJS.Platform,
-  trustedGitResolver: (
-    cwd: string,
-    platform: NodeJS.Platform,
-  ) => Promise<string | undefined>,
+  trustedGitExecutable: TrustedGitExecutable | undefined,
 ): Promise<{ executable: string; args: readonly string[] }> => {
   const name = executable.replace(/\.(cmd|exe)$/i, '').toLowerCase();
   if (name === 'git') {
-    const trustedGit = await trustedGitResolver(cwd, platform);
-    const canonicalGit = trustedGit
-      ? await validateTrustedGitExecutable(trustedGit, cwd, platform)
+    const canonicalGit = trustedGitExecutable
+      ? await validateTrustedGitExecutable(trustedGitExecutable, cwd, platform)
       : undefined;
     if (!canonicalGit) {
       throw new ProcessTrustedExecutableUnavailableError('Git');
@@ -275,10 +298,7 @@ const abortError = (signal: AbortSignal) =>
 
 export class NodeProcessRunner implements ProcessRunner {
   private readonly platform: NodeJS.Platform;
-  private readonly resolveTrustedGitExecutable: (
-    cwd: string,
-    platform: NodeJS.Platform,
-  ) => Promise<string | undefined>;
+  private readonly trustedGitExecutable?: TrustedGitExecutable;
   private readonly resolveWindowsTreeTerminator: () => Promise<
     string | undefined
   >;
@@ -292,8 +312,7 @@ export class NodeProcessRunner implements ProcessRunner {
 
   constructor(options: NodeProcessRunnerOptions = {}) {
     this.platform = options.platform ?? process.platform;
-    this.resolveTrustedGitExecutable =
-      options.resolveTrustedGitExecutable ?? resolveTrustedGitExecutable;
+    this.trustedGitExecutable = options.trustedGitExecutable;
     this.resolveWindowsTreeTerminator =
       options.resolveWindowsTreeTerminator ?? windowsTaskkillPath;
     this.runWindowsTreeTerminator =
@@ -420,7 +439,7 @@ export class NodeProcessRunner implements ProcessRunner {
       args,
       options.cwd,
       this.platform,
-      this.resolveTrustedGitExecutable,
+      this.trustedGitExecutable,
     );
     if (options.signal?.aborted) throw abortError(options.signal);
     const windowsTerminator =

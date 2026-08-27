@@ -23,8 +23,12 @@ import {
 import { openDatabase } from './db/database.js';
 import { migrate } from './db/migrate.js';
 import { GitAdapter } from './platform/git.js';
-import { NodeProcessRunner } from './platform/process-runner.js';
+import {
+  NodeProcessRunner,
+  resolveGitExecutableAtStartup,
+} from './platform/process-runner.js';
 import { QaVerificationRunner } from './platform/qa-verification-runner.js';
+import { resolveRepositoryIdentity } from './projects/repository-identity.js';
 import { CommandRepository } from './repositories/command-repository.js';
 import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
 import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
@@ -168,6 +172,11 @@ export const startServer = async (
   const environment = options.environment ?? process.env;
   const config = loadServerConfig(environment);
   const billingConflicts = detectBillingOverrides(environment);
+  const trustedGitExecutable = await resolveGitExecutableAtStartup({
+    configuredPath: config.gitExecutable,
+    pathValue: environment.PATH,
+    workspaceRoot: config.baseDirectory,
+  });
   mkdirSync(dirname(config.databasePath), { recursive: true });
   const database = openDatabase(config.databasePath);
   migrate(database);
@@ -276,7 +285,17 @@ export const startServer = async (
     },
   });
   const pathOptions = { baseDirectory: config.baseDirectory };
-  const git = new GitAdapter(new NodeProcessRunner(), pathOptions);
+  const processRunner = new NodeProcessRunner({ trustedGitExecutable });
+  const resolveIdentity = (
+    repositoryPath: string,
+    identityPathOptions: typeof pathOptions,
+  ) =>
+    resolveRepositoryIdentity(
+      repositoryPath,
+      identityPathOptions,
+      processRunner,
+    );
+  const git = new GitAdapter(processRunner, pathOptions);
   const attemptService = new AttemptService({
     database,
     projects,
@@ -294,6 +313,7 @@ export const startServer = async (
     developerReworkService,
     git,
     pathOptions,
+    resolveIdentity,
     billingConflicts,
   });
   const qaExecutionService = new QaExecutionService({
@@ -312,7 +332,7 @@ export const startServer = async (
     attemptService,
     capabilities: qaCapabilities,
     registry,
-    verificationRunner: new QaVerificationRunner(new NodeProcessRunner()),
+    verificationRunner: new QaVerificationRunner(processRunner),
     billingConflicts,
     afterRejectedVerdict: async (input) => {
       await requireReviewAutomation().afterQaVerdict(input);
@@ -373,6 +393,7 @@ export const startServer = async (
     driver,
     git,
     pathOptions,
+    resolveIdentity,
     billingConflicts,
     originPolicy,
     webRoot: options.test?.webRoot ?? config.webRoot,

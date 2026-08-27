@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   DeveloperResumeUnavailableError,
   QaAlreadyActiveError,
@@ -27,7 +27,15 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
+import {
+  NodeProcessRunner,
+  resolveGitExecutableAtStartup,
+} from '../platform/process-runner.js';
 import { QaVerificationRunner } from '../platform/qa-verification-runner.js';
+import {
+  resolveRepositoryIdentity,
+  type RepositoryIdentityResolver,
+} from '../projects/repository-identity.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
 import { AttemptService } from '../tasks/attempt-service.js';
@@ -50,6 +58,20 @@ const runGit = async (cwd: string, ...args: string[]) => {
 
 describe('executeCommand', () => {
   const cleanups: Array<() => Promise<void> | void> = [];
+  let resolveIdentity: RepositoryIdentityResolver;
+
+  beforeAll(async () => {
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: tmpdir(),
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    const processRunner = new NodeProcessRunner({ trustedGitExecutable });
+    resolveIdentity = (repositoryPath, pathOptions) =>
+      resolveRepositoryIdentity(repositoryPath, pathOptions, processRunner);
+  });
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
@@ -122,6 +144,7 @@ describe('executeCommand', () => {
       developerReworkService,
       registry,
       pathOptions,
+      resolveIdentity,
       now: () => now,
       createId,
     });
@@ -160,6 +183,7 @@ describe('executeCommand', () => {
         registry,
         driver,
         pathOptions,
+        resolveIdentity,
         now: () => now,
         createId,
       },

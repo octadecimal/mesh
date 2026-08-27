@@ -2,7 +2,6 @@ import {
   lstat as fsLstat,
   open as fsOpen,
   opendir as fsOpendir,
-  readdir as fsReaddir,
   realpath as fsRealpath,
 } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
@@ -53,7 +52,6 @@ export type QaWorkspaceFileSystem = {
   lstat(path: string): Promise<FileSystemStat>;
   open(path: string, flags: 'r'): Promise<FileHandle>;
   opendir(path: string): Promise<DirectoryHandle>;
-  readdir(path: string): Promise<DirectoryEntry[]>;
   realpath(path: string): Promise<string>;
 };
 
@@ -75,7 +73,6 @@ const defaultFileSystem: QaWorkspaceFileSystem = {
   lstat: async (path) => fsLstat(path),
   open: async (path, flags) => fsOpen(path, flags),
   opendir: async (path) => fsOpendir(path),
-  readdir: async (path) => fsReaddir(path, { withFileTypes: true }),
   realpath: fsRealpath,
 };
 
@@ -252,19 +249,6 @@ export class QaWorkspaceReader {
     }
   }
 
-  private async readDirectory(
-    snapshot: BoundSnapshot,
-    signal?: AbortSignal,
-  ): Promise<DirectoryEntry[]> {
-    throwIfSearchAborted(signal);
-    if (!snapshot.stat.isDirectory()) throw new QaWorkspacePathRejectedError();
-    const entries = await this.fileSystem.readdir(snapshot.path);
-    throwIfSearchAborted(signal);
-    await this.revalidate(snapshot);
-    throwIfSearchAborted(signal);
-    return entries;
-  }
-
   private async readDirectoryStream(
     snapshot: BoundSnapshot,
     limit: number,
@@ -323,12 +307,23 @@ export class QaWorkspaceReader {
     };
   }
 
-  async list(workspacePath: string, inputPath: string) {
+  async list(
+    workspacePath: string,
+    inputPath: string,
+    options: { signal?: AbortSignal } = {},
+  ) {
+    throwIfSearchAborted(options.signal);
     const snapshot = await this.resolveBound(workspacePath, inputPath);
-    const entries = await this.readDirectory(snapshot);
+    throwIfSearchAborted(options.signal);
+    const streamed = await this.readDirectoryStream(
+      snapshot,
+      maxSearchFiles + 1,
+      options.signal,
+    );
+    const entries = streamed.entries.slice(0, maxSearchFiles);
     return {
       path: relative(snapshot.root, snapshot.path) || '.',
-      entries: entries.slice(0, maxSearchFiles).map((entry) => ({
+      entries: entries.map((entry) => ({
         path: relative(snapshot.root, resolve(snapshot.path, entry.name)),
         type: entry.isDirectory()
           ? 'directory'
@@ -338,7 +333,7 @@ export class QaWorkspaceReader {
               ? 'symbolic_link'
               : 'other',
       })),
-      truncated: entries.length > maxSearchFiles,
+      truncated: streamed.truncated || streamed.entries.length > maxSearchFiles,
     };
   }
 

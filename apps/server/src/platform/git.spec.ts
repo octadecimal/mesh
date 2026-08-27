@@ -14,7 +14,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { Session, Workspace } from '@mesh-session-platform/contracts';
 
 import { GitAdapter } from './git.js';
-import { NodeProcessRunner, type ProcessRunner } from './process-runner.js';
+import {
+  NodeProcessRunner,
+  resolveGitExecutableAtStartup,
+  type ProcessRunner,
+} from './process-runner.js';
 import type { AbsolutePath, WorkspacePathFileSystem } from './paths.js';
 
 const directoryFs: WorkspacePathFileSystem = {
@@ -243,9 +247,19 @@ describe('GitAdapter', () => {
     execFileSync('git', ['-C', repositoryPath, 'add', 'README.md']);
     execFileSync('git', ['-C', repositoryPath, 'commit', '-m', 'seed']);
 
-    const git = new GitAdapter(new NodeProcessRunner(), {
-      baseDirectory: directory,
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: directory,
     });
+    if (!trustedGitExecutable) {
+      throw new Error('The test environment has no approved Git executable');
+    }
+    const git = new GitAdapter(
+      new NodeProcessRunner({ trustedGitExecutable }),
+      {
+        baseDirectory: directory,
+      },
+    );
     await expect(
       git.createWorktree({
         branch: 'feature/real-test',

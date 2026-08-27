@@ -12,6 +12,7 @@ import {
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { GitAdapter } from '../platform/git.js';
+import { QaVerificationExecutableUnavailableError } from '../platform/qa-verification-runner.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
 import type { QaExecutionService } from '../tasks/qa-execution-service.js';
@@ -190,6 +191,52 @@ describe('HTTP command routes', () => {
       error: {
         code: 'qa_capability_invalid',
         message: 'The QA capability is invalid.',
+      },
+    });
+  });
+
+  it('maps a manual QA baseline without approved Git to service unavailable', async () => {
+    const fixture = setup({
+      qaExecutionService: {
+        launch: async () => {
+          throw new QaVerificationExecutableUnavailableError();
+        },
+        submitVerdict: () => {
+          throw new Error('unused');
+        },
+        repairInterrupted: () => {
+          throw new Error('unused');
+        },
+      },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/commands',
+      payload: {
+        protocolVersion: 1,
+        idempotencyKey: 'qa-launch-git-unavailable',
+        command: {
+          type: 'task.qa.launch',
+          payload: {
+            taskId: 'task-ready-for-qa',
+            expectedRevision: 4,
+            actor: { type: 'human', id: 'operator-1' },
+          },
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({
+      error: {
+        code: 'qa_verification_executable_unavailable',
+        message: expect.stringContaining('MESH_GIT_EXECUTABLE'),
       },
     });
   });

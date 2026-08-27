@@ -53,6 +53,7 @@ import type {
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
+  type RepositoryIdentityResolver,
 } from '../projects/repository-identity.js';
 import { CommandError } from './errors.js';
 
@@ -101,6 +102,7 @@ export interface CommandDependencies {
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
   pathOptions?: ResolveWorkspacePathOptions;
+  resolveIdentity?: RepositoryIdentityResolver;
   billingConflicts?: readonly { variable: string }[];
   now?: () => string;
   createId?: () => string;
@@ -791,15 +793,14 @@ const reconcileLegacyProjectIdentities = async (
 ) => {
   const pathOptions = dependencies.pathOptions;
   if (!pathOptions) return;
+  const resolveIdentity =
+    dependencies.resolveIdentity ?? resolveRepositoryIdentity;
   const now = (dependencies.now ?? (() => new Date().toISOString()))();
   for (const project of dependencies.projects.list()) {
     if (project.repositoryIdentity !== project.repositoryPath) continue;
     let identity;
     try {
-      identity = await resolveRepositoryIdentity(
-        project.repositoryPath,
-        pathOptions,
-      );
+      identity = await resolveIdentity(project.repositoryPath, pathOptions);
     } catch (error) {
       if (
         error instanceof RepositoryIdentityError &&
@@ -938,7 +939,9 @@ const executeMutation = async (
           'Workspace path configuration is unavailable',
         );
       }
-      const identity = await resolveRepositoryIdentity(
+      const resolveIdentity =
+        dependencies.resolveIdentity ?? resolveRepositoryIdentity;
+      const identity = await resolveIdentity(
         command.payload.repositoryPath,
         dependencies.pathOptions,
       );

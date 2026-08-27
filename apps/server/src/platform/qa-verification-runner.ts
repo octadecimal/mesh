@@ -71,7 +71,9 @@ export class QaVerificationExecutableUnavailableError extends Error {
   readonly code = 'qa_verification_executable_unavailable';
 
   constructor() {
-    super('A trusted QA verification executable is unavailable.');
+    super(
+      'A trusted Git executable is unavailable. Configure an absolute operator-approved MESH_GIT_EXECUTABLE and restart Mesh.',
+    );
     this.name = 'QaVerificationExecutableUnavailableError';
   }
 }

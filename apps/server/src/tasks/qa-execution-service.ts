@@ -1150,6 +1150,7 @@ export class QaExecutionService {
                 const result = await this.workspaceReader.list(
                   verification.workspacePath,
                   parsed.data.path,
+                  { signal: verification.abortController.signal },
                 );
                 return {
                   content: [
@@ -1157,6 +1158,20 @@ export class QaExecutionService {
                   ],
                 };
               } catch (error) {
+                const code = this.verificationInterruptionCode(error);
+                if (code) {
+                  await this.pauseForVerificationFailure(
+                    {
+                      taskId: prepared.task.id,
+                      cycleId: prepared.cycle.id,
+                      sessionId: prepared.session.id,
+                      workspaceBaseline: prepared.cycle.workspaceBaseline,
+                    },
+                    capability,
+                    code,
+                    verification,
+                  );
+                }
                 return qaControlFailure(error);
               }
             },

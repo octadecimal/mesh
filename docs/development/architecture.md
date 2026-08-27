@@ -95,7 +95,9 @@ Workspace search also caps visited directories, directory entries, queued
 paths, files, and matches, and checks the owning QA cycle's cancellation signal
 throughout traversal and file reads. Directory traversal streams entries and
 closes the handle at the entry or queue budget instead of materializing an
-unbounded directory first.
+unbounded directory first. Workspace listing uses the same streaming boundary,
+returns at most 500 entries, reads at most one additional entry to report
+truncation, and closes promptly when the owning cycle is cancelled.
 The constrained runner treats ambiguous joined option values as workspace
 paths unless they are explicitly safe non-path values, and validates missing
 paths through their deepest existing ancestor. It admits only non-interactive
@@ -103,14 +105,18 @@ verification commands, gives each child a five-minute wall-clock bound, caps
 each output stream at 64,000 bytes, and cancels owned process trees when the QA
 runtime is interrupted, closes, or exceeds a bound. On Windows, vetted package
 manager commands resolve to canonical bundled JavaScript entries and run via
-the installed Node executable with the shell disabled. QA Git commands resolve
-to an absolute canonical executable from fixed system installation locations;
-Mesh never accepts PATH or a workspace-local Git executable, and fails closed
-before launch when no trusted Git installation is available. Mesh proves that
-its canonical owned-tree terminator works before launching a child; a missing,
-failing, or unresponsive terminator refuses launch or durably pauses the QA
-cycle after an exact-owned-PID fallback. The runner never exposes a general
-shell or source-authoring control.
+the installed Node executable with the shell disabled. At server startup, Mesh
+approves one absolute canonical Git executable for both ordinary repository and
+QA commands. An explicit `MESH_GIT_EXECUTABLE` must be absolute; otherwise Mesh
+examines only absolute entries from the startup `PATH`, ignoring empty,
+relative, and workspace-contained entries. The approval records canonical file
+identity outside the configured workspace root and is revalidated before every
+Git spawn. Runtime code never searches `PATH`, trusts `SystemRoot`, or consults
+repository-controlled configuration. A missing or changed approval fails closed
+before launch. Mesh proves that its canonical owned-tree terminator works before
+launching a child; a missing, failing, or unresponsive terminator refuses launch
+or durably pauses the QA cycle after an exact-owned-PID fallback. The runner
+never exposes a general shell or source-authoring control.
 
 The server captures Git-tracked source before launch, after every verification
 command, and immediately before verdict persistence instead of accepting an

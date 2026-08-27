@@ -30,6 +30,7 @@ export type StableErrorCode =
   | 'qa_already_active'
   | 'review_automation_paused'
   | 'qa_rejection_ceiling_reached'
+  | 'qa_verification_executable_unavailable'
   | 'unsafe_qa_workspace'
   | 'developer_resume_unavailable'
   | 'session_already_linked'
@@ -95,6 +96,7 @@ const statusCodes: Record<StableErrorCode, number> = {
   qa_already_active: 409,
   review_automation_paused: 409,
   qa_rejection_ceiling_reached: 409,
+  qa_verification_executable_unavailable: 503,
   unsafe_qa_workspace: 409,
   developer_resume_unavailable: 409,
   command_reconciliation_required: 409,

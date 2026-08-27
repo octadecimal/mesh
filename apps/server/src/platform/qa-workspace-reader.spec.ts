@@ -7,7 +7,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { open, opendir, readdir } from 'node:fs/promises';
+import { open, opendir } from 'node:fs/promises';
 
 import { describe, expect, it } from 'vitest';
 
@@ -20,6 +20,117 @@ const readerWithFileSystem = (fileSystem: Partial<QaWorkspaceFileSystem>) =>
   new QaWorkspaceReader(fileSystem);
 
 describe('QaWorkspaceReader', () => {
+  it('lists only its fixed result cap plus one streamed lookahead entry', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-list-wide-'));
+    let yielded = 0;
+    let closed = false;
+    try {
+      const reader = readerWithFileSystem({
+        opendir: async () => {
+          const entries = async function* () {
+            for (let index = 0; index < 10_000; index += 1) {
+              yielded += 1;
+              yield {
+                name: `entry-${index.toString().padStart(5, '0')}.txt`,
+                isDirectory: () => false,
+                isFile: () => true,
+                isSymbolicLink: () => false,
+              };
+            }
+          };
+          return {
+            [Symbol.asyncIterator]: entries,
+            close: async () => {
+              closed = true;
+            },
+          };
+        },
+      });
+
+      const result = await reader.list(root, '.');
+
+      expect(result.entries).toHaveLength(500);
+      expect(result.truncated).toBe(true);
+      expect(yielded).toBe(501);
+      expect(closed).toBe(true);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('does not report truncation when a streamed listing exactly fits the result cap', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-list-exact-'));
+    let yielded = 0;
+    try {
+      const reader = readerWithFileSystem({
+        opendir: async () => {
+          const entries = async function* () {
+            for (let index = 0; index < 500; index += 1) {
+              yielded += 1;
+              yield {
+                name: `entry-${index}.txt`,
+                isDirectory: () => false,
+                isFile: () => true,
+                isSymbolicLink: () => false,
+              };
+            }
+          };
+          return {
+            [Symbol.asyncIterator]: entries,
+            close: async () => undefined,
+          };
+        },
+      });
+
+      const result = await reader.list(root, '.');
+
+      expect(result.entries).toHaveLength(500);
+      expect(result.truncated).toBe(false);
+      expect(yielded).toBe(500);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('stops and closes a streamed listing when its owning cycle aborts', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-list-cancel-'));
+    const controller = new AbortController();
+    let yielded = 0;
+    let closed = false;
+    try {
+      const reader = readerWithFileSystem({
+        opendir: async () => {
+          const entries = async function* () {
+            for (let index = 0; index < 10_000; index += 1) {
+              yielded += 1;
+              if (yielded === 4) controller.abort();
+              yield {
+                name: `entry-${index}.txt`,
+                isDirectory: () => false,
+                isFile: () => true,
+                isSymbolicLink: () => false,
+              };
+            }
+          };
+          return {
+            [Symbol.asyncIterator]: entries,
+            close: async () => {
+              closed = true;
+            },
+          };
+        },
+      });
+
+      await expect(
+        reader.list(root, '.', { signal: controller.signal }),
+      ).rejects.toMatchObject({ code: 'qa_workspace_search_cancelled' });
+      expect(yielded).toBe(4);
+      expect(closed).toBe(true);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   it('consumes only the pending budget from one huge directory stream', async () => {
     const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-wide-'));
     let yielded = 0;
@@ -237,9 +348,9 @@ describe('QaWorkspaceReader', () => {
               }
             : operation === 'list'
               ? {
-                  readdir: async (path) => {
+                  opendir: async (path) => {
                     swapAncestor();
-                    return readdir(path, { withFileTypes: true });
+                    return opendir(path);
                   },
                 }
               : {

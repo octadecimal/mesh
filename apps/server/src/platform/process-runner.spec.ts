@@ -13,7 +13,10 @@ import { delimiter, join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { NodeProcessRunner } from './process-runner.js';
+import {
+  NodeProcessRunner,
+  resolveGitExecutableAtStartup,
+} from './process-runner.js';
 
 const isAlive = (pid: number) => {
   try {
@@ -30,36 +33,85 @@ const isAlive = (pid: number) => {
 };
 
 describe('NodeProcessRunner', () => {
+  it('runs an explicitly approved custom Git installation outside the workspace', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-process-git-approved-'));
+    const workspace = join(root, 'workspace');
+    const install = join(root, 'portable');
+    const git = join(install, process.platform === 'win32' ? 'git.exe' : 'git');
+    const marker = join(root, 'approved-git-ran');
+    try {
+      mkdirSync(workspace);
+      mkdirSync(install);
+      copyFileSync(process.execPath, git);
+      if (process.platform !== 'win32') chmodSync(git, 0o755);
+      const approved = await resolveGitExecutableAtStartup({
+        configuredPath: git,
+        pathValue: '',
+        platform: process.platform,
+        workspaceRoot: workspace,
+      });
+
+      await new NodeProcessRunner({ trustedGitExecutable: approved }).run(
+        'git',
+        [
+          '-e',
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'approved')`,
+        ],
+        { cwd: workspace },
+      );
+
+      expect(readFileSync(marker, 'utf8')).toBe('approved');
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   it('never runs a workspace-local Git executable found through PATH', async () => {
-    const directory = mkdtempSync(join(tmpdir(), 'mesh-process-git-shadow-'));
+    const root = mkdtempSync(join(tmpdir(), 'mesh-process-git-shadow-'));
+    const directory = join(root, 'workspace');
+    const install = join(root, 'portable');
     const localGit = join(
       directory,
+      process.platform === 'win32' ? 'git.exe' : 'git',
+    );
+    const approvedGit = join(
+      install,
       process.platform === 'win32' ? 'git.exe' : 'git',
     );
     const payload = join(directory, 'payload.cjs');
     const marker = join(directory, 'workspace-git-ran');
     const priorPath = process.env.PATH;
     try {
+      mkdirSync(directory);
+      mkdirSync(install);
       copyFileSync(process.execPath, localGit);
+      copyFileSync(process.execPath, approvedGit);
       if (process.platform !== 'win32') chmodSync(localGit, 0o755);
+      if (process.platform !== 'win32') chmodSync(approvedGit, 0o755);
       writeFileSync(
         payload,
-        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`,
+        `require('node:fs').writeFileSync(${JSON.stringify(marker)}, process.execPath)`,
       );
       process.env.PATH = `${directory}${delimiter}${priorPath ?? ''}`;
+      const approved = await resolveGitExecutableAtStartup({
+        configuredPath: approvedGit,
+        pathValue: process.env.PATH,
+        platform: process.platform,
+        workspaceRoot: directory,
+      });
 
-      const result = await new NodeProcessRunner().run(
-        'git',
-        [payload, marker],
-        { cwd: directory },
+      const result = await new NodeProcessRunner({
+        trustedGitExecutable: approved,
+      }).run('git', [payload, marker], { cwd: directory });
+
+      expect(result.exitCode).toBe(0);
+      expect(readFileSync(marker, 'utf8').toLowerCase()).toBe(
+        approvedGit.toLowerCase(),
       );
-
-      expect(result.exitCode).not.toBe(0);
-      expect(existsSync(marker)).toBe(false);
     } finally {
       if (priorPath === undefined) delete process.env.PATH;
       else process.env.PATH = priorPath;
-      rmSync(directory, { force: true, recursive: true });
+      rmSync(root, { force: true, recursive: true });
     }
   });
 
@@ -80,9 +132,7 @@ describe('NodeProcessRunner', () => {
         `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started')`,
       );
       process.env.PATH = `${directory}${delimiter}${priorPath ?? ''}`;
-      const runner = new NodeProcessRunner({
-        resolveTrustedGitExecutable: async () => undefined,
-      });
+      const runner = new NodeProcessRunner();
 
       await expect(
         runner.run('git', [payload], { cwd: directory }),
@@ -97,55 +147,131 @@ describe('NodeProcessRunner', () => {
     }
   });
 
-  it.runIf(process.platform === 'win32')(
-    'does not trust forged Windows installation-root variables',
-    async () => {
+  it
+    .runIf(process.platform === 'win32')
+    .each(['D:\\ForgedWindows', '\\\\attacker.invalid\\share\\Windows'])(
+    'does not derive Git trust from forged SystemRoot %s',
+    async (systemRoot) => {
       const directory = mkdtempSync(join(tmpdir(), 'mesh-process-git-root-'));
-      const forgedRoot = mkdtempSync(
-        join(tmpdir(), 'mesh-process-git-forged-'),
-      );
-      const forgedGitDirectory = join(forgedRoot, 'Git', 'cmd');
       const payload = join(directory, 'payload.cjs');
       const marker = join(directory, 'forged-git-ran');
-      const prior = {
-        LOCALAPPDATA: process.env.LOCALAPPDATA,
-        ProgramFiles: process.env.ProgramFiles,
-        ProgramFilesX86: process.env['ProgramFiles(x86)'],
-        ProgramW6432: process.env.ProgramW6432,
-      };
+      const priorSystemRoot = process.env.SystemRoot;
       try {
-        mkdirSync(forgedGitDirectory, { recursive: true });
-        copyFileSync(process.execPath, join(forgedGitDirectory, 'git.exe'));
         writeFileSync(
           payload,
           `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`,
         );
-        process.env.LOCALAPPDATA = forgedRoot;
-        process.env.ProgramFiles = forgedRoot;
-        process.env['ProgramFiles(x86)'] = forgedRoot;
-        process.env.ProgramW6432 = forgedRoot;
+        process.env.SystemRoot = systemRoot;
 
-        const result = await new NodeProcessRunner().run('git', [payload], {
-          cwd: directory,
+        await expect(
+          new NodeProcessRunner().run('git', [payload], { cwd: directory }),
+        ).rejects.toMatchObject({
+          code: 'process_trusted_executable_unavailable',
         });
 
-        expect(result.exitCode).not.toBe(0);
         expect(existsSync(marker)).toBe(false);
       } finally {
-        for (const [name, value] of Object.entries({
-          LOCALAPPDATA: prior.LOCALAPPDATA,
-          ProgramFiles: prior.ProgramFiles,
-          'ProgramFiles(x86)': prior.ProgramFilesX86,
-          ProgramW6432: prior.ProgramW6432,
-        })) {
-          if (value === undefined) delete process.env[name];
-          else process.env[name] = value;
-        }
+        if (priorSystemRoot === undefined) delete process.env.SystemRoot;
+        else process.env.SystemRoot = priorSystemRoot;
         rmSync(directory, { force: true, recursive: true });
-        rmSync(forgedRoot, { force: true, recursive: true });
       }
     },
   );
+
+  it('enumerates only absolute startup PATH entries and skips workspace Git', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-process-git-path-'));
+    const workspace = join(root, 'workspace');
+    const install = join(root, 'portable');
+    const name = process.platform === 'win32' ? 'git.exe' : 'git';
+    try {
+      mkdirSync(workspace);
+      mkdirSync(install);
+      copyFileSync(process.execPath, join(workspace, name));
+      copyFileSync(process.execPath, join(install, name));
+      if (process.platform !== 'win32') {
+        chmodSync(join(workspace, name), 0o755);
+        chmodSync(join(install, name), 0o755);
+      }
+
+      const approved = await resolveGitExecutableAtStartup({
+        pathValue: ['', 'relative-bin', workspace, install].join(delimiter),
+        platform: process.platform,
+        workspaceRoot: workspace,
+      });
+
+      expect(approved?.path.toLowerCase()).toBe(
+        join(install, name).toLowerCase(),
+      );
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('fails closed for relative, missing, and workspace-contained configured Git paths', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-process-git-invalid-'));
+    const workspace = join(root, 'workspace');
+    const name = process.platform === 'win32' ? 'git.exe' : 'git';
+    try {
+      mkdirSync(workspace);
+      const insideGit = join(workspace, name);
+      copyFileSync(process.execPath, insideGit);
+      if (process.platform !== 'win32') chmodSync(insideGit, 0o755);
+
+      for (const configuredPath of [
+        join('relative', name),
+        join(root, 'missing', name),
+        insideGit,
+      ]) {
+        await expect(
+          resolveGitExecutableAtStartup({
+            configuredPath,
+            pathValue: process.env.PATH,
+            platform: process.platform,
+            workspaceRoot: workspace,
+          }),
+        ).resolves.toBeUndefined();
+      }
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
+  it('revalidates the approved Git file identity before every launch', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-process-git-replaced-'));
+    const workspace = join(root, 'workspace');
+    const install = join(root, 'portable');
+    const git = join(install, process.platform === 'win32' ? 'git.exe' : 'git');
+    const marker = join(root, 'replacement-ran');
+    try {
+      mkdirSync(workspace);
+      mkdirSync(install);
+      copyFileSync(process.execPath, git);
+      if (process.platform !== 'win32') chmodSync(git, 0o755);
+      const approved = await resolveGitExecutableAtStartup({
+        configuredPath: git,
+        workspaceRoot: workspace,
+      });
+      rmSync(git);
+      writeFileSync(git, 'replacement executable');
+      if (process.platform !== 'win32') chmodSync(git, 0o755);
+
+      await expect(
+        new NodeProcessRunner({ trustedGitExecutable: approved }).run(
+          'git',
+          [
+            '-e',
+            `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'unsafe')`,
+          ],
+          { cwd: workspace },
+        ),
+      ).rejects.toMatchObject({
+        code: 'process_trusted_executable_unavailable',
+      });
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
 
   it.runIf(process.platform === 'win32').each(['corepack', 'pnpm', 'npm'])(
     'never runs a workspace-local %s executable found through PATH',
