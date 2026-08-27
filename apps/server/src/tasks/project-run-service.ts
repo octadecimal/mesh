@@ -8,11 +8,13 @@ import {
   type ProjectRun,
   type ProjectRunItem,
   type StableTaskErrorCode,
+  type Task,
   type TaskActor,
 } from '@mesh-session-platform/contracts';
 
 import type { Database } from '../db/database.js';
 import type { CommandRepository } from '../repositories/command-repository.js';
+import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectRunRepository } from '../repositories/project-run-repository.js';
@@ -51,6 +53,7 @@ type ProjectRunServiceDependencies = {
   projects: ProjectRepository;
   tasks: TaskRepository;
   attempts: TaskAttemptRepository;
+  developerExecutions: Pick<DeveloperExecutionRepository, 'listByTask'>;
   projectRuns: ProjectRunRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
@@ -80,6 +83,7 @@ export class ProjectRunServiceError extends Error {
 
 export class ProjectRunService {
   private readonly maxConcurrency: number;
+  private readonly launchingItemIds = new Set<string>();
 
   constructor(private readonly dependencies: ProjectRunServiceDependencies) {
     this.maxConcurrency =
@@ -228,6 +232,17 @@ export class ProjectRunService {
         );
       }
       if (run.state !== 'running') return run;
+      const retryable = run.items.find(
+        (item) =>
+          item.status === 'launch_pending' &&
+          item.attemptId === null &&
+          item.sessionId === null &&
+          !this.launchingItemIds.has(item.id),
+      );
+      if (retryable) {
+        await this.launch(run, retryable);
+        continue;
+      }
       const counts = this.dependencies.projectRuns.reconcileCounts(run.id);
       if (counts.launchPending + counts.active >= run.concurrency) return run;
       const next = run.items.find(({ status }) => status === 'queued');
@@ -237,7 +252,41 @@ export class ProjectRunService {
       }
       const claim = this.claimNext(run);
       if (!claim) continue;
-      await this.launchClaim(claim.run, claim.item);
+      await this.launch(claim.run, claim.item);
+    }
+  }
+
+  async observeTaskOutcome(taskId: string): Promise<void> {
+    const task = this.dependencies.tasks.get(idSchema.parse(taskId));
+    if (!task) return;
+    const run = this.dependencies.projectRuns.getActiveByProject(
+      task.projectId,
+    );
+    const item = run?.items.find((candidate) => candidate.taskId === task.id);
+    if (!run || !item) return;
+
+    if (
+      item.status === 'completed' ||
+      item.status === 'attention_required' ||
+      item.status === 'not_started'
+    ) {
+      await this.continueAfterOutcome(run.id);
+      return;
+    }
+
+    const outcome = this.classifyTaskOutcome(task, item);
+    if (!outcome) return;
+    this.finishOutcome(run, item, outcome.status, outcome.reason);
+    await this.continueAfterOutcome(run.id);
+  }
+
+  private async launch(run: ProjectRun, item: ProjectRunItem): Promise<void> {
+    if (this.launchingItemIds.has(item.id)) return;
+    this.launchingItemIds.add(item.id);
+    try {
+      await this.launchClaim(run, item);
+    } finally {
+      this.launchingItemIds.delete(item.id);
     }
   }
 
@@ -343,16 +392,115 @@ export class ProjectRunService {
     item: ProjectRunItem,
     reason: string,
   ): ProjectRun {
+    return this.finishOutcome(run, item, 'attention_required', reason);
+  }
+
+  private finishOutcome(
+    run: ProjectRun,
+    item: ProjectRunItem,
+    status: 'completed' | 'attention_required',
+    reason: string,
+  ): ProjectRun {
     return this.mutateRun(run.id, (current) =>
       this.dependencies.projectRuns.finishItem({
         runId: current.id,
         itemId: item.id,
         expectedRunRevision: current.revision,
-        status: 'attention_required',
+        status,
         outcomeReason: reason,
         occurredAt: this.now(),
       }),
     );
+  }
+
+  private classifyTaskOutcome(
+    task: Task,
+    item: ProjectRunItem,
+  ):
+    | { status: 'completed' | 'attention_required'; reason: string }
+    | undefined {
+    if (task.lifecycleState === 'done') {
+      return { status: 'completed', reason: 'task_done' };
+    }
+
+    const repair = this.dependencies.projectEvents
+      .after(task.projectId, 0)
+      .filter(
+        (event) =>
+          event.type === 'task.attempt_repair_detected' &&
+          event.payload.repair.taskId === task.id &&
+          event.payload.repair.attemptId === item.attemptId &&
+          event.payload.repair.reason !== 'startup_outcome_unknown',
+      )
+      .at(-1);
+    if (repair?.type === 'task.attempt_repair_detected') {
+      return {
+        status: 'attention_required',
+        reason: repair.payload.repair.reason,
+      };
+    }
+
+    const blockedCycle = this.dependencies.developerExecutions
+      .listByTask(task.id)
+      .find(
+        (cycle) =>
+          cycle.attemptId === item.attemptId &&
+          cycle.endedAt !== null &&
+          cycle.terminalDisposition === 'blocked' &&
+          cycle.blockerReportId !== null,
+      );
+    if (task.blocked && blockedCycle) {
+      return { status: 'attention_required', reason: 'developer_blocked' };
+    }
+
+    if (task.lifecycleState !== 'review') return undefined;
+    if (
+      task.reviewAutomation.status === 'paused' &&
+      task.reviewAutomation.rejectionCount >= 3
+    ) {
+      return {
+        status: 'attention_required',
+        reason: 'qa_rejection_ceiling',
+      };
+    }
+
+    const project = this.dependencies.projects.get(task.projectId);
+    if (
+      project?.qaConfiguration.revision === item.policyRevision &&
+      project.qaConfiguration.reviewPolicy === 'manual'
+    ) {
+      return { status: 'attention_required', reason: 'manual_review' };
+    }
+    if (task.reviewAutomation.status === 'paused') {
+      return {
+        status: 'attention_required',
+        reason: 'review_automation_paused',
+      };
+    }
+    return undefined;
+  }
+
+  private async continueAfterOutcome(runId: string): Promise<void> {
+    const current = this.dependencies.projectRuns.get(runId);
+    if (!current) return;
+    if (current.state === 'running') {
+      await this.drainAvailableSlots(current.id);
+      return;
+    }
+    if (current.state !== 'draining') return;
+    const counts = this.dependencies.projectRuns.reconcileCounts(current.id);
+    if (counts.launchPending + counts.active > 0) return;
+    this.mutateRun(current.id, (run) => {
+      const completed = this.dependencies.projectRuns.changeState({
+        runId: run.id,
+        expectedRunRevision: run.revision,
+        state: 'completed',
+        completionReason: 'stopped',
+        occurredAt: this.now(),
+      });
+      if (!completed) this.throwStale(run.id);
+      return completed;
+    });
   }
 
   private pauseForAmbiguousLaunch(runId: string): ProjectRun {

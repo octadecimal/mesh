@@ -35,7 +35,7 @@ export type ReconciliationResult = {
   events: ProjectEvent[];
 };
 
-type ReconciliationDependencies = {
+export type ReconciliationDependencies = {
   database: Database;
   projects: Pick<ProjectRepository, 'list'>;
   tasks: Pick<TaskRepository, 'get' | 'listByProject' | 'update'>;
@@ -52,6 +52,10 @@ type ReconciliationDependencies = {
   projectEvents: Pick<ProjectEventRepository, 'after' | 'appendInTransaction'>;
   now?: () => string;
 };
+
+const hasLaunchEffects = (attempt: TaskAttempt): boolean =>
+  attempt.source === 'launched' ||
+  (typeof attempt.source === 'object' && attempt.source.type === 'project_run');
 
 export const reconcileTaskAttemptLaunchReservations = (
   database: Database,
@@ -152,7 +156,7 @@ const repairFor = (
     const latest = attempts
       .filter(
         ({ attempt, sessionState, diagnostics }) =>
-          attempt.source === 'launched' &&
+          hasLaunchEffects(attempt) &&
           sessionState === 'interrupted' &&
           diagnostics.some(isRecoveryFromLiveState),
       )

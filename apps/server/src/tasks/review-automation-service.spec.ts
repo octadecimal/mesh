@@ -32,6 +32,7 @@ describe('ReviewAutomationService', () => {
     automationStatus?: 'disabled' | 'enabled' | 'paused';
     rejectionCount?: number;
     resumeFailure?: Error;
+    observeTaskOutcome?: (taskId: string) => Promise<void>;
   }) => {
     const repositories = createTestRepositories();
     disposals.push(() => repositories.dispose());
@@ -183,6 +184,7 @@ describe('ReviewAutomationService', () => {
       qaExecutionService: { launch },
       developerReworkService: { resume },
       publisher,
+      observeTaskOutcome: options?.observeTaskOutcome,
       now: () => now,
       createId: () => `automation-${++nextId}`,
     });
@@ -357,6 +359,24 @@ describe('ReviewAutomationService', () => {
     ).toEqual([]);
   });
 
+  it('observes Developer outcomes only after review automation commits', async () => {
+    const observeTaskOutcome = vi.fn(async (taskId: string) => {
+      expect(context.repositories.database.inTransaction).toBe(false);
+      expect(taskId).toBe(context.task.id);
+      expect(
+        context.repositories.qaExecutions.listPendingAutomationActions(),
+      ).toEqual([]);
+    });
+    const context = setup({ observeTaskOutcome });
+
+    await context.service.afterDeveloperSubmission({
+      taskId: context.task.id,
+      cycleId: context.developerCycle.id,
+    });
+
+    expect(observeTaskOutcome).toHaveBeenCalledOnce();
+  });
+
   it.each(['disabled', 'paused'] as const)(
     'does not launch autonomous QA when task automation is %s',
     async (automationStatus) => {
@@ -423,6 +443,44 @@ describe('ReviewAutomationService', () => {
       }),
     ).resolves.toBeUndefined();
     expect(context.resumeStarts()).toBe(0);
+  });
+
+  it('observes a committed QA outcome even when no follow-up action exists', async () => {
+    const observeTaskOutcome = vi.fn(async () => undefined);
+    const context = setup({ observeTaskOutcome });
+    const cycle = context.rejectedCycle({ rejectionOrdinal: 2 });
+
+    await context.service.afterQaVerdict({
+      taskId: context.task.id,
+      cycleId: cycle.id,
+    });
+
+    expect(observeTaskOutcome).toHaveBeenCalledOnce();
+    expect(observeTaskOutcome).toHaveBeenCalledWith(context.task.id);
+  });
+
+  it('observes the durable pause after a review follow-up failure', async () => {
+    const observeTaskOutcome = vi.fn(async () => {
+      expect(context.repositories.database.inTransaction).toBe(false);
+      expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+        reviewAutomation: { status: 'paused' },
+      });
+    });
+    const context = setup({
+      observeTaskOutcome,
+      resumeFailure: new Error('resume unavailable'),
+    });
+    const cycle = context.rejectedCycle();
+    context.pendingResumeAction(cycle);
+
+    await expect(
+      context.service.afterQaVerdict({
+        taskId: context.task.id,
+        cycleId: cycle.id,
+      }),
+    ).rejects.toThrow('resume unavailable');
+
+    expect(observeTaskOutcome).toHaveBeenCalledOnce();
   });
 
   it('fails the durable action and pauses after resume failure', async () => {

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  attemptRepairSchema,
+  developerBlockerReportSchema,
+  developerExecutionCycleSchema,
   projectSchema,
   sessionSchema,
   taskActorSchema,
@@ -561,7 +564,6 @@ describe('ProjectRunService controls', () => {
 
 describe('ProjectRunService drainAvailableSlots', () => {
   it('durably claims before launch and links the successful attempt and session', async () => {
-    let context: ReturnType<typeof setup>;
     const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
       expect(context.repositories.database.inTransaction).toBe(false);
       expect(
@@ -571,7 +573,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
       ).toMatchObject({ status: 'launch_pending', attemptId: null });
       return setupLaunchResult(context.repositories, input, 1);
     });
-    context = setup({ launchAttempt });
+    const context = setup({ launchAttempt });
     context.repositories.tasks.create(createTask(context.project.id, 'task-a'));
     const started = startRun(
       context.service,
@@ -604,12 +606,11 @@ describe('ProjectRunService drainAvailableSlots', () => {
     const pending = new Promise<void>((resolve) => {
       release = resolve;
     });
-    let context: ReturnType<typeof setup>;
     const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
       await pending;
       return setupLaunchResult(context.repositories, input, 1);
     });
-    context = setup({ launchAttempt });
+    const context = setup({ launchAttempt });
     context.repositories.tasks.create(
       createTask(context.project.id, 'task-a', { rank: 'a' }),
     );
@@ -643,8 +644,40 @@ describe('ProjectRunService drainAvailableSlots', () => {
     expect(launchAttempt).toHaveBeenCalledOnce();
   });
 
+  it('retries one reconciled launch_pending item idempotently after restart', async () => {
+    const context = setup();
+    context.repositories.tasks.create(
+      createTask(context.project.id, 'task-retry'),
+    );
+    const started = startRun(
+      context.service,
+      context.project.id,
+      'start-retry',
+      1,
+    );
+    const claimed = context.repositories.projectRuns.claimNext({
+      runId: started.run.id,
+      expectedRunRevision: started.run.revision,
+      occurredAt: now,
+    });
+    if (!claimed) throw new Error('Expected durable launch claim');
+
+    await Promise.all([
+      context.service.drainAvailableSlots(started.run.id),
+      context.service.drainAvailableSlots(started.run.id),
+    ]);
+
+    expect(context.launchAttempt).toHaveBeenCalledOnce();
+    expect(
+      context.repositories.projectRuns.get(started.run.id)?.items[0],
+    ).toMatchObject({
+      status: 'active',
+      attemptId: expect.any(String),
+      sessionId: expect.any(String),
+    });
+  });
+
   it('terminalizes a known startup failure and continues independent queued work', async () => {
-    let context: ReturnType<typeof setup>;
     const launchAttempt = vi.fn(async (input: ProjectRunAttemptLaunchInput) => {
       if (input.taskId === 'task-a') {
         throw new AttemptStartFailedError(
@@ -654,7 +687,7 @@ describe('ProjectRunService drainAvailableSlots', () => {
       }
       return setupLaunchResult(context.repositories, input, 2);
     });
-    context = setup({ launchAttempt });
+    const context = setup({ launchAttempt });
     context.repositories.tasks.create(
       createTask(context.project.id, 'task-a', { rank: 'a' }),
     );
@@ -685,14 +718,13 @@ describe('ProjectRunService drainAvailableSlots', () => {
   it.each(['task_revision_conflict', 'task_transition_invalid'])(
     'treats the stable %s launch race as item-local',
     async (code) => {
-      let context: ReturnType<typeof setup>;
       const launchAttempt = vi.fn(
         async (input: ProjectRunAttemptLaunchInput) => {
           if (input.taskId === 'task-a') throw { code };
           return setupLaunchResult(context.repositories, input, 2);
         },
       );
-      context = setup({ launchAttempt });
+      const context = setup({ launchAttempt });
       context.repositories.tasks.create(
         createTask(context.project.id, 'task-a', { rank: 'a' }),
       );
@@ -778,14 +810,13 @@ describe('ProjectRunService drainAvailableSlots', () => {
       const pending = new Promise<void>((resolve) => {
         release = resolve;
       });
-      let context: ReturnType<typeof setup>;
       const launchAttempt = vi.fn(
         async (input: ProjectRunAttemptLaunchInput) => {
           await pending;
           return setupLaunchResult(context.repositories, input, 1);
         },
       );
-      context = setup({ launchAttempt });
+      const context = setup({ launchAttempt });
       context.repositories.tasks.create(
         createTask(context.project.id, 'task-a', { rank: 'a' }),
       );
@@ -861,6 +892,267 @@ describe('ProjectRunService drainAvailableSlots', () => {
         .get(started.run.id)
         ?.items.map(({ status }) => status),
     ).toEqual(['queued', 'queued']);
+  });
+});
+
+describe('ProjectRunService observeTaskOutcome', () => {
+  const prepareActiveRun = async (
+    context: ReturnType<typeof setup>,
+    prefix: string,
+  ) => {
+    const firstTask = context.repositories.tasks.create(
+      createTask(context.project.id, `${prefix}-first`, { rank: 'a' }),
+    );
+    const nextTask = context.repositories.tasks.create(
+      createTask(context.project.id, `${prefix}-next`, { rank: 'b' }),
+    );
+    const started = startRun(
+      context.service,
+      context.project.id,
+      `${prefix}-start`,
+      1,
+    );
+    await context.service.drainAvailableSlots(started.run.id);
+    return { firstTask, nextTask, runId: started.run.id };
+  };
+
+  const updateTask = (
+    context: ReturnType<typeof setup>,
+    taskId: string,
+    update: (task: Task) => Task,
+  ) => {
+    const current = context.repositories.tasks.get(taskId);
+    if (!current) throw new Error('Expected current task');
+    const updated = context.repositories.tasks.update(
+      update(current),
+      current.revision,
+    );
+    if (!updated) throw new Error('Expected task update');
+    return updated;
+  };
+
+  it('completes a done item and launches the next queued item', async () => {
+    const context = setup();
+    const { firstTask, nextTask, runId } = await prepareActiveRun(
+      context,
+      'done',
+    );
+    updateTask(context, firstTask.id, (task) => ({
+      ...task,
+      lifecycleState: 'done',
+      updatedAt: now,
+    }));
+
+    await context.service.observeTaskOutcome(firstTask.id);
+
+    expect(context.repositories.projectRuns.get(runId)?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: firstTask.id,
+          status: 'completed',
+          outcomeReason: 'task_done',
+        }),
+        expect.objectContaining({ taskId: nextTask.id, status: 'active' }),
+      ]),
+    );
+  });
+
+  it('terminalizes a durable Developer blocker and releases its slot', async () => {
+    const context = setup();
+    const { firstTask, nextTask, runId } = await prepareActiveRun(
+      context,
+      'blocked',
+    );
+    const attempt = context.repositories.attempts.listByTask(firstTask.id)[0];
+    if (!attempt) throw new Error('Expected run attempt');
+    const session = context.repositories.sessions.get(attempt.sessionId);
+    if (!session) throw new Error('Expected run session');
+    const blocker = developerBlockerReportSchema.parse({
+      id: 'blocked-report',
+      cycleId: 'blocked-cycle',
+      reason: 'Dependency unavailable.',
+      evidence: 'The dependency returned 503.',
+      attemptedWork: 'Retried once.',
+      suggestedHumanAction: 'Restore the dependency.',
+      preserveWorkspace: true,
+      createdAt: now,
+    });
+    context.repositories.developerExecutions.createCycle(
+      developerExecutionCycleSchema.parse({
+        id: blocker.cycleId,
+        attemptId: attempt.id,
+        ordinal: 1,
+        mode: 'new',
+        authorizedBy: agent,
+        authorizationCommandId: 'blocked-launch',
+        policyVersion: 'developer-policy-v1',
+        projectInstructions: { content: '', revision: 1 },
+        taskSnapshot: {
+          revision: firstTask.revision,
+          title: firstTask.title,
+          description: firstTask.description,
+          acceptanceCriteria: [],
+        },
+        workspaceId: session.workspaceId,
+        permissionMode: session.permissionMode,
+        startedAt: now,
+        endedAt: now,
+        terminalDisposition: 'blocked',
+        completionReportId: null,
+        blockerReportId: blocker.id,
+        terminalCommandId: 'blocked-command',
+        terminalEventId: 'blocked-event',
+      }),
+    );
+    context.repositories.developerExecutions.appendBlockerReport(blocker);
+    updateTask(context, firstTask.id, (task) => ({
+      ...task,
+      blocked: { reason: blocker.reason, actor: agent, blockedAt: now },
+      updatedAt: now,
+    }));
+
+    await context.service.observeTaskOutcome(firstTask.id);
+
+    expect(context.repositories.projectRuns.get(runId)?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: firstTask.id,
+          status: 'attention_required',
+          outcomeReason: 'developer_blocked',
+        }),
+        expect.objectContaining({ taskId: nextTask.id, status: 'active' }),
+      ]),
+    );
+  });
+
+  it('releases a manual-review boundary without trusting the trigger payload', async () => {
+    const context = setup();
+    context.repositories.projects.updateQaConfiguration(
+      context.project.id,
+      context.project.qaConfiguration.revision,
+      {
+        instructions: {
+          content: context.project.qaConfiguration.instructions.content,
+        },
+        reviewPolicy: 'manual',
+      },
+      human,
+    );
+    const { firstTask, nextTask, runId } = await prepareActiveRun(
+      context,
+      'manual',
+    );
+    updateTask(context, firstTask.id, (task) => ({
+      ...task,
+      lifecycleState: 'review',
+      updatedAt: now,
+    }));
+
+    await context.service.observeTaskOutcome(firstTask.id);
+
+    expect(context.repositories.projectRuns.get(runId)?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: firstTask.id,
+          status: 'attention_required',
+          outcomeReason: 'manual_review',
+        }),
+        expect.objectContaining({ taskId: nextTask.id, status: 'active' }),
+      ]),
+    );
+  });
+
+  it('releases the slot at the third autonomous QA rejection', async () => {
+    const context = setup();
+    const { firstTask, nextTask, runId } = await prepareActiveRun(
+      context,
+      'ceiling',
+    );
+    updateTask(context, firstTask.id, (task) => ({
+      ...task,
+      lifecycleState: 'review',
+      reviewAutomation: {
+        ...task.reviewAutomation,
+        status: 'paused',
+        rejectionCount: 3,
+        pauseReason: 'Autonomous QA rejection ceiling reached.',
+        updatedAt: now,
+      },
+      updatedAt: now,
+    }));
+
+    await context.service.observeTaskOutcome(firstTask.id);
+
+    expect(context.repositories.projectRuns.get(runId)?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: firstTask.id,
+          status: 'attention_required',
+          outcomeReason: 'qa_rejection_ceiling',
+        }),
+        expect.objectContaining({ taskId: nextTask.id, status: 'active' }),
+      ]),
+    );
+  });
+
+  it('uses a durable task-local repair and releases its slot', async () => {
+    const context = setup();
+    const { firstTask, nextTask, runId } = await prepareActiveRun(
+      context,
+      'repair',
+    );
+    const item = context.repositories.projectRuns
+      .get(runId)
+      ?.items.find(({ taskId }) => taskId === firstTask.id);
+    if (!item?.attemptId || !item.sessionId) {
+      throw new Error('Expected linked run item');
+    }
+    const repair = attemptRepairSchema.parse({
+      taskId: firstTask.id,
+      attemptId: item.attemptId,
+      sessionId: item.sessionId,
+      reason: 'developer_cycle_without_live_session',
+    });
+    context.repositories.projectEvents.append(firstTask.projectId, {
+      protocolVersion: 1,
+      id: 'repair-event',
+      projectId: firstTask.projectId,
+      occurredAt: now,
+      type: 'task.attempt_repair_detected',
+      payload: { repair },
+    });
+
+    await context.service.observeTaskOutcome(firstTask.id);
+
+    expect(context.repositories.projectRuns.get(runId)?.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          taskId: firstTask.id,
+          status: 'attention_required',
+          outcomeReason: repair.reason,
+        }),
+        expect.objectContaining({ taskId: nextTask.id, status: 'active' }),
+      ]),
+    );
+  });
+
+  it('ignores a task that is not part of the active run', async () => {
+    const context = setup();
+    const { nextTask, runId } = await prepareActiveRun(context, 'unrelated');
+    const unrelated = context.repositories.tasks.create(
+      createTask(context.project.id, 'unrelated-task'),
+    );
+    const before = context.repositories.projectRuns.get(runId);
+
+    await context.service.observeTaskOutcome(unrelated.id);
+
+    expect(context.repositories.projectRuns.get(runId)).toEqual(before);
+    expect(
+      context.repositories.projectRuns
+        .get(runId)
+        ?.items.find(({ taskId }) => taskId === nextTask.id)?.status,
+    ).toBe('queued');
+    expect(context.launchAttempt).toHaveBeenCalledOnce();
   });
 });
 

@@ -293,6 +293,7 @@ type Dependencies = {
   developerReworkService: {
     resume(input: DeveloperAttemptResumeInput): Promise<unknown>;
   };
+  observeTaskOutcome?: (taskId: string) => Promise<void>;
   publisher: Pick<EventPublisher, 'publishProject'>;
   now?: () => string;
   createId?: () => string;
@@ -321,6 +322,16 @@ export class ReviewAutomationService {
   }
 
   async afterDeveloperSubmission(
+    input: SourceInput,
+  ): Promise<ReviewAutomationAction | undefined> {
+    try {
+      return await this.handleDeveloperSubmission(input);
+    } finally {
+      await this.dependencies.observeTaskOutcome?.(input.taskId);
+    }
+  }
+
+  private async handleDeveloperSubmission(
     input: SourceInput,
   ): Promise<ReviewAutomationAction | undefined> {
     const knownCycle = this.dependencies.developerExecutions
@@ -473,6 +484,16 @@ export class ReviewAutomationService {
   }
 
   async afterQaVerdict(
+    input: SourceInput,
+  ): Promise<ReviewAutomationAction | undefined> {
+    try {
+      return await this.handleQaVerdict(input);
+    } finally {
+      await this.dependencies.observeTaskOutcome?.(input.taskId);
+    }
+  }
+
+  private async handleQaVerdict(
     input: SourceInput,
   ): Promise<ReviewAutomationAction | undefined> {
     const cycle = this.dependencies.qaExecutions.getCycle(input.cycleId);
