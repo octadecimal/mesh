@@ -1810,16 +1810,20 @@ describe('session platform contracts', () => {
       expect(
         projectPlanProposalSchema.parse({
           ...proposal,
+          tasks: [
+            proposedTask,
+            { ...proposedTask, key: 'runtime', title: 'Add PM runtime' },
+          ],
           dependencies: [
             {
               dependentTaskKey: 'contracts',
-              prerequisite: { type: 'proposal_task', taskKey: 'contracts' },
+              prerequisite: { type: 'proposal_task', taskKey: 'runtime' },
             },
           ],
         }).dependencies[0],
       ).toEqual({
         dependentTaskKey: 'contracts',
-        prerequisite: { type: 'proposal_task', taskKey: 'contracts' },
+        prerequisite: { type: 'proposal_task', taskKey: 'runtime' },
       });
       expect(projectPlanSchema.parse(plan)).toMatchObject({
         status: 'awaiting_review',
@@ -1869,6 +1873,30 @@ describe('session platform contracts', () => {
           ],
         }),
       ).toThrow();
+    });
+
+    it('rejects invalid proposal-local dependency references and graphs', () => {
+      const tasks = ['a', 'b', 'c'].map((key) => ({
+        ...proposedTask,
+        key,
+        title: `Task ${key}`,
+      }));
+      const edge = (dependentTaskKey: string, taskKey: string) => ({
+        dependentTaskKey,
+        prerequisite: { type: 'proposal_task' as const, taskKey },
+      });
+
+      for (const dependencies of [
+        [edge('missing', 'a')],
+        [edge('a', 'missing')],
+        [edge('a', 'b'), edge('a', 'b')],
+        [edge('a', 'a')],
+        [edge('a', 'b'), edge('b', 'c'), edge('c', 'a')],
+      ]) {
+        expect(() =>
+          projectPlanProposalSchema.parse({ ...proposal, tasks, dependencies }),
+        ).toThrow();
+      }
     });
 
     it('preserves bounded stale evidence and stable planning error codes', () => {

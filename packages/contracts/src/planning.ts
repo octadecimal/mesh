@@ -41,13 +41,109 @@ export const projectPlanProposalDependencySchema = z.object({
   prerequisite: proposalPrerequisiteSchema,
 });
 
-export const projectPlanProposalInputSchema = z.object({
-  tasks: z.array(projectPlanProposalTaskSchema).max(50),
-  dependencies: z.array(projectPlanProposalDependencySchema).max(200),
-  assumptions: z.array(z.string().trim().min(1)),
-  risks: z.array(z.string().trim().min(1)),
-  exclusions: z.array(z.string().trim().min(1)),
-});
+export const projectPlanProposalInputSchema = z
+  .object({
+    tasks: z.array(projectPlanProposalTaskSchema).max(50),
+    dependencies: z.array(projectPlanProposalDependencySchema).max(200),
+    assumptions: z.array(z.string().trim().min(1)),
+    risks: z.array(z.string().trim().min(1)),
+    exclusions: z.array(z.string().trim().min(1)),
+  })
+  .superRefine(({ tasks, dependencies }, context) => {
+    const taskKeys = new Set<string>();
+    for (const [index, task] of tasks.entries()) {
+      if (taskKeys.has(task.key)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Proposal task keys must be unique.',
+          path: ['tasks', index, 'key'],
+        });
+      }
+      taskKeys.add(task.key);
+    }
+
+    const localPrerequisites = new Map<string, string[]>();
+    const dependencyKeys = new Set<string>();
+    for (const [index, dependency] of dependencies.entries()) {
+      if (!taskKeys.has(dependency.dependentTaskKey)) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'Proposal dependencies must reference a proposed dependent task.',
+          path: ['dependencies', index, 'dependentTaskKey'],
+        });
+      }
+
+      const prerequisiteKey =
+        dependency.prerequisite.type === 'proposal_task'
+          ? dependency.prerequisite.taskKey
+          : dependency.prerequisite.taskId;
+      const dependencyKey = JSON.stringify([
+        dependency.dependentTaskKey,
+        dependency.prerequisite.type,
+        prerequisiteKey,
+      ]);
+      if (dependencyKeys.has(dependencyKey)) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Proposal dependencies must be unique.',
+          path: ['dependencies', index],
+        });
+      }
+      dependencyKeys.add(dependencyKey);
+
+      if (dependency.prerequisite.type !== 'proposal_task') continue;
+
+      if (!taskKeys.has(dependency.prerequisite.taskKey)) {
+        context.addIssue({
+          code: 'custom',
+          message:
+            'Proposal dependencies must reference a proposed prerequisite task.',
+          path: ['dependencies', index, 'prerequisite', 'taskKey'],
+        });
+        continue;
+      }
+      if (dependency.dependentTaskKey === dependency.prerequisite.taskKey) {
+        context.addIssue({
+          code: 'custom',
+          message: 'Proposal tasks cannot depend on themselves.',
+          path: ['dependencies', index, 'prerequisite', 'taskKey'],
+        });
+        continue;
+      }
+      const prerequisites = localPrerequisites.get(dependency.dependentTaskKey);
+      if (prerequisites) {
+        prerequisites.push(dependency.prerequisite.taskKey);
+      } else {
+        localPrerequisites.set(dependency.dependentTaskKey, [
+          dependency.prerequisite.taskKey,
+        ]);
+      }
+    }
+
+    const visited = new Set<string>();
+    const visiting = new Set<string>();
+    const hasCycle = (taskKey: string): boolean => {
+      if (visiting.has(taskKey)) return true;
+      if (visited.has(taskKey)) return false;
+
+      visiting.add(taskKey);
+      for (const prerequisite of localPrerequisites.get(taskKey) ?? []) {
+        if (hasCycle(prerequisite)) return true;
+      }
+      visiting.delete(taskKey);
+      visited.add(taskKey);
+      return false;
+    };
+
+    if ([...taskKeys].some(hasCycle)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'Proposal-local dependencies must be acyclic.',
+        path: ['dependencies'],
+      });
+    }
+  });
 
 export const projectPlanProposalSchema = projectPlanProposalInputSchema.extend({
   id: idSchema,
