@@ -373,6 +373,9 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
         permissionMode: 'default',
         ...(options.role
           ? {
+              tools: [...options.role.availableTools],
+              settingSources: [],
+              strictMcpConfig: true,
               allowedTools: [...options.role.allowedTools],
               disallowedTools: [...options.role.disallowedTools],
             }

@@ -238,6 +238,7 @@ export const startServer = async (
     invalidateDeveloperCapability: (sessionId) => {
       capabilities.invalidateSession(sessionId);
       qaCapabilities.invalidateSession(sessionId);
+      qaExecutionService.cancelRuntime(sessionId);
     },
     onRuntimeStopped: () => reconcileStoppedRuntime(registry),
   });

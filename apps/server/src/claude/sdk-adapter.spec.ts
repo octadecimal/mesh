@@ -17,10 +17,13 @@ type ToolDefinition = {
 
 type QueryInput = {
   options: {
+    tools?: string[];
     allowedTools?: string[];
     disallowedTools?: string[];
     includePartialMessages?: boolean;
     mcpServers?: Record<string, unknown>;
+    settingSources?: string[];
+    strictMcpConfig?: boolean;
   };
 };
 
@@ -111,6 +114,13 @@ describe('createClaudeSdkFacade', () => {
     expect(
       Object.keys(query.mock.calls[0]?.[0].options.mcpServers ?? {}),
     ).toEqual(['mesh_developer']);
+    expect(query.mock.calls[0]?.[0].options).not.toHaveProperty('tools');
+    expect(query.mock.calls[0]?.[0].options).not.toHaveProperty(
+      'settingSources',
+    );
+    expect(query.mock.calls[0]?.[0].options).not.toHaveProperty(
+      'strictMcpConfig',
+    );
   });
 
   it('installs one generic QA control server without Developer or source-authoring tools', async () => {
@@ -123,14 +133,17 @@ describe('createClaudeSdkFacade', () => {
       role: {
         role: 'qa',
         initialPrompt: 'Verify the submission.',
-        allowedTools: [
+        availableTools: [],
+        allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+        disallowedTools: [
+          'Bash',
           'Read',
           'Glob',
           'Grep',
-          'Bash',
-          'mcp__mesh_qa__submit_qa_verdict',
+          'Write',
+          'Edit',
+          'NotebookEdit',
         ],
-        disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
         controlServer: {
           name: 'mesh_qa',
           version: '1',
@@ -161,14 +174,19 @@ describe('createClaudeSdkFacade', () => {
       'submit_qa_verdict',
     ]);
     expect(query.mock.calls.at(-1)?.[0].options).toMatchObject({
-      allowedTools: [
+      tools: [],
+      settingSources: [],
+      strictMcpConfig: true,
+      allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+      disallowedTools: [
+        'Bash',
         'Read',
         'Glob',
         'Grep',
-        'Bash',
-        'mcp__mesh_qa__submit_qa_verdict',
+        'Write',
+        'Edit',
+        'NotebookEdit',
       ],
-      disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
     });
     expect(
       Object.keys(query.mock.calls.at(-1)?.[0].options.mcpServers ?? {}),

@@ -47,6 +47,7 @@ export interface RoleControlServer {
 export interface RoleRuntimeConfiguration {
   role: 'qa';
   initialPrompt: string;
+  availableTools: readonly string[];
   allowedTools: readonly string[];
   disallowedTools: readonly string[];
   controlServer: RoleControlServer;

@@ -62,8 +62,9 @@ describe('server configuration', () => {
         role: {
           role: 'qa',
           initialPrompt: 'Verify.',
-          allowedTools: ['Read', 'mcp__mesh_qa__submit_qa_verdict'],
-          disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+          availableTools: [],
+          allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+          disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'NotebookEdit'],
           controlServer: {
             name: 'mesh_qa',
             version: '1',

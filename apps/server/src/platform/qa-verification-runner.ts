@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { lstat, readFile, readlink, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 
 import type { ProcessResult, ProcessRunner } from './process-runner.js';
@@ -31,6 +31,24 @@ export class QaTrackedSourceUnstableError extends Error {
   }
 }
 
+export class QaVerificationCancelledError extends Error {
+  readonly code = 'qa_verification_cancelled';
+
+  constructor() {
+    super('QA verification was cancelled with its owning runtime.');
+    this.name = 'QaVerificationCancelledError';
+  }
+}
+
+export class QaVerificationTimedOutError extends Error {
+  readonly code = 'qa_verification_timed_out';
+
+  constructor() {
+    super('QA verification exceeded its bounded execution time.');
+    this.name = 'QaVerificationTimedOutError';
+  }
+}
+
 type TrackedFileStat = {
   dev: bigint | number;
   ino: bigint | number;
@@ -38,9 +56,16 @@ type TrackedFileStat = {
   size: bigint | number;
   mtimeNs: bigint | number;
   ctimeNs: bigint | number;
+  isSymbolicLink?(): boolean;
+};
+
+type TrackedFileIdentity = {
+  key: string;
+  symbolicLink: boolean;
 };
 
 const stableSnapshotAttempts = 3;
+const defaultVerificationTimeoutMs = 300_000;
 
 const allowedExecutables = new Set(['corepack', 'pnpm', 'npm', 'git']);
 const readOnlyGitCommands = new Set([
@@ -115,6 +140,35 @@ const sourceUpdatingArguments = new Set([
   '--updatesnapshot',
   '--write',
 ]);
+const pathValueArguments = new Set([
+  '--config',
+  '--config-file',
+  '--configfile',
+  '--globalsetup',
+  '--globalteardown',
+  '--import',
+  '--project',
+  '--require',
+  '--resolver',
+  '--setupfiles',
+  '--setupfilesafterenv',
+  '--snapshotresolver',
+  '--testenvironment',
+  '--testresultsprocessor',
+  '--testrunner',
+  '--tsconfig',
+]);
+const interactiveArguments = new Set([
+  '--browser',
+  '--interactive',
+  '--open',
+  '--serve',
+  '--ui',
+  '--watch',
+  '--watch-all',
+  '--watchall',
+]);
+const interactiveScript = /(^|:)(dev|interactive|serve|start|ui|watch)(:|$)/;
 
 const executableName = (value: string) =>
   value
@@ -135,9 +189,30 @@ const assertPackageManagerCommand = (args: readonly string[]) => {
       'The requested package-manager operation is not a verification command.',
     );
   }
+  if (
+    interactiveScript.test(command) ||
+    args.some((argument) => {
+      const name = optionName(argument);
+      return (
+        interactiveArguments.has(name) ||
+        (argument.startsWith('-') &&
+          !argument.startsWith('--') &&
+          argument[1]?.toLowerCase() === 'w')
+      );
+    })
+  ) {
+    throw new QaVerificationCommandRejectedError(
+      'Interactive, watch, and server modes are unavailable to QA.',
+    );
+  }
   if (command === 'run' && !verificationScripts.test(args[index + 1] ?? '')) {
     throw new QaVerificationCommandRejectedError(
       'Only named verification scripts may be run.',
+    );
+  }
+  if (command === 'run' && interactiveScript.test(args[index + 1] ?? '')) {
+    throw new QaVerificationCommandRejectedError(
+      'Interactive, watch, and server scripts are unavailable to QA.',
     );
   }
   if (command === 'run') return;
@@ -183,6 +258,17 @@ const quote = (value: string) =>
 const optionName = (argument: string) =>
   argument.split('=', 1)[0]?.toLowerCase() ?? '';
 
+const looksLikePathOperand = (argument: string) => {
+  if (!argument || argument === '--' || argument.startsWith('-')) return false;
+  const normalized = argument.replace(/\\/g, '/');
+  return (
+    isAbsolute(normalized) ||
+    /^[a-z]:/i.test(normalized) ||
+    normalized.includes('/') ||
+    /\.[a-z0-9][a-z0-9._-]*$/i.test(normalized)
+  );
+};
+
 const escapesWorkspace = (workspacePath: string, candidate: string) => {
   if (!candidate) return false;
   const normalizedCandidate = candidate.replace(/\\/g, '/');
@@ -198,10 +284,33 @@ const escapesWorkspace = (workspacePath: string, candidate: string) => {
   );
 };
 
-const assertWorkspaceBoundArguments = (
+const isMissingFile = (error: unknown): boolean =>
+  typeof error === 'object' &&
+  error !== null &&
+  'code' in error &&
+  error.code === 'ENOENT';
+
+const canonicalEscapesWorkspace = async (
+  workspacePath: string,
+  candidate: string,
+): Promise<boolean> => {
+  try {
+    const canonicalWorkspace = await realpath(workspacePath);
+    const canonicalCandidate = await realpath(
+      resolve(workspacePath, candidate.replace(/\\/g, '/')),
+    );
+    return escapesWorkspace(canonicalWorkspace, canonicalCandidate);
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
+  }
+};
+
+const assertWorkspaceBoundArguments = async (
   workspacePath: string,
   args: readonly string[],
-) => {
+): Promise<void> => {
+  let followingPathValue = false;
   for (const argument of args) {
     const name = optionName(argument);
     const shortOption =
@@ -221,10 +330,20 @@ const assertWorkspaceBoundArguments = (
         'Verification commands may not update source or select output destinations.',
       );
     }
-    const assignedValue = argument.includes('=')
+    const joinedPathValue =
+      pathValueArguments.has(name) && argument.includes('=');
+    const pathCandidate =
+      followingPathValue || joinedPathValue || looksLikePathOperand(argument);
+    followingPathValue =
+      pathValueArguments.has(name) && !argument.includes('=');
+    if (!pathCandidate) continue;
+    const assignedValue = joinedPathValue
       ? argument.slice(argument.indexOf('=') + 1)
       : argument;
-    if (escapesWorkspace(workspacePath, assignedValue)) {
+    if (
+      escapesWorkspace(workspacePath, assignedValue) ||
+      (await canonicalEscapesWorkspace(workspacePath, assignedValue))
+    ) {
       throw new QaVerificationCommandRejectedError(
         'Verification command paths must remain inside the assigned workspace.',
       );
@@ -233,6 +352,10 @@ const assertWorkspaceBoundArguments = (
 };
 
 export class QaVerificationRunner {
+  private readonly readTrackedLink: (path: string) => Promise<string>;
+  private readonly resolveRealPath: (path: string) => Promise<string>;
+  private readonly verificationTimeoutMs: number;
+
   constructor(
     private readonly processes: ProcessRunner,
     private readonly readTrackedFile: (
@@ -241,30 +364,49 @@ export class QaVerificationRunner {
     private readonly statTrackedFile: (
       path: string,
     ) => Promise<TrackedFileStat> = async (path) =>
-      stat(path, { bigint: true }),
-  ) {}
+      lstat(path, { bigint: true }),
+    options: {
+      readTrackedLink?: (path: string) => Promise<string>;
+      resolveRealPath?: (path: string) => Promise<string>;
+      verificationTimeoutMs?: number;
+    } = {},
+  ) {
+    this.readTrackedLink = options.readTrackedLink ?? readlink;
+    this.resolveRealPath = options.resolveRealPath ?? realpath;
+    this.verificationTimeoutMs =
+      options.verificationTimeoutMs ?? defaultVerificationTimeoutMs;
+  }
 
-  async captureTrackedSource(workspacePath: string): Promise<string> {
+  async captureTrackedSource(
+    workspacePath: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
     const assignedWorkspace = resolve(workspacePath);
     for (let attempt = 0; attempt < stableSnapshotAttempts; attempt += 1) {
       const forward = await this.captureObservation(
         assignedWorkspace,
         'forward',
+        signal,
       );
       const reverse = await this.captureObservation(
         assignedWorkspace,
         'reverse',
+        signal,
       );
       if (forward !== undefined && forward === reverse) return forward;
     }
     throw new QaTrackedSourceUnstableError();
   }
 
-  private async listTrackedPaths(workspacePath: string): Promise<string[]> {
-    const result = await this.processes.run(
+  private async listTrackedPaths(
+    workspacePath: string,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
+    const result = await this.runOwnedProcess(
       'git',
       ['-C', workspacePath, 'ls-files', '-z'],
-      { cwd: workspacePath },
+      workspacePath,
+      signal,
     );
     if (result.exitCode !== 0) {
       throw new Error(
@@ -277,8 +419,10 @@ export class QaVerificationRunner {
   private async captureObservation(
     workspacePath: string,
     direction: 'forward' | 'reverse',
+    signal?: AbortSignal,
   ): Promise<string | undefined> {
-    const trackedPaths = await this.listTrackedPaths(workspacePath);
+    const canonicalWorkspace = await this.tryRealPath(workspacePath);
+    const trackedPaths = await this.listTrackedPaths(workspacePath, signal);
     const pathsToRead =
       direction === 'forward' ? trackedPaths : [...trackedPaths].reverse();
     const records = new Map<string, string>();
@@ -301,21 +445,54 @@ export class QaVerificationRunner {
         records.set(trackedPath, 'missing');
         continue;
       }
+      if (before.symbolicLink) {
+        const target = await this.tryReadTrackedLink(absolutePath);
+        if (target === undefined) return undefined;
+        const after = await this.readFileIdentity(absolutePath);
+        const confirmedTarget = await this.tryReadTrackedLink(absolutePath);
+        if (
+          after === 'missing' ||
+          !after.symbolicLink ||
+          before.key !== after.key ||
+          target !== confirmedTarget
+        ) {
+          return undefined;
+        }
+        records.set(
+          trackedPath,
+          `${before.key}\0link\0${createHash('sha256').update(target).digest('hex')}`,
+        );
+        continue;
+      }
+      const canonicalPath = await this.tryRealPath(absolutePath);
+      if (
+        canonicalWorkspace &&
+        canonicalPath &&
+        escapesWorkspace(canonicalWorkspace, canonicalPath)
+      ) {
+        throw new Error('Tracked source path escaped the verified workspace.');
+      }
       let content: Uint8Array;
       try {
-        content = await this.readTrackedFile(absolutePath);
+        content = await this.readTrackedFile(canonicalPath ?? absolutePath);
       } catch (error) {
-        if (this.isMissingFile(error)) return undefined;
+        if (isMissingFile(error)) return undefined;
         throw error;
       }
       const after = await this.readFileIdentity(absolutePath);
-      if (before !== after) return undefined;
+      if (
+        after === 'missing' ||
+        after.symbolicLink ||
+        before.key !== after.key
+      ) {
+        return undefined;
+      }
       records.set(
         trackedPath,
-        `${before}\0${createHash('sha256').update(content).digest('hex')}`,
+        `${before.key}\0${createHash('sha256').update(content).digest('hex')}`,
       );
     }
-    const pathsAfterRead = await this.listTrackedPaths(workspacePath);
+    const pathsAfterRead = await this.listTrackedPaths(workspacePath, signal);
     if (trackedPaths.join('\0') !== pathsAfterRead.join('\0')) return undefined;
 
     const hash = createHash('sha256');
@@ -328,35 +505,50 @@ export class QaVerificationRunner {
     return `sha256:${hash.digest('hex')}`;
   }
 
-  private async readFileIdentity(path: string): Promise<string> {
+  private async readFileIdentity(
+    path: string,
+  ): Promise<TrackedFileIdentity | 'missing'> {
     try {
       const current = await this.statTrackedFile(path);
-      return [
-        current.dev,
-        current.ino,
-        current.mode,
-        current.size,
-        current.mtimeNs,
-        current.ctimeNs,
-      ].join(':');
+      return {
+        key: [
+          current.dev,
+          current.ino,
+          current.mode,
+          current.size,
+          current.mtimeNs,
+          current.ctimeNs,
+        ].join(':'),
+        symbolicLink: current.isSymbolicLink?.() === true,
+      };
     } catch (error) {
-      if (this.isMissingFile(error)) return 'missing';
+      if (isMissingFile(error)) return 'missing';
       throw error;
     }
   }
 
-  private isMissingFile(error: unknown): boolean {
-    return (
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'ENOENT'
-    );
+  private async tryRealPath(path: string): Promise<string | undefined> {
+    try {
+      return await this.resolveRealPath(path);
+    } catch (error) {
+      if (isMissingFile(error)) return undefined;
+      throw error;
+    }
+  }
+
+  private async tryReadTrackedLink(path: string): Promise<string | undefined> {
+    try {
+      return await this.readTrackedLink(path);
+    } catch (error) {
+      if (isMissingFile(error)) return undefined;
+      throw error;
+    }
   }
 
   async run(
     workspacePath: string,
     input: QaVerificationCommand,
+    options: { signal?: AbortSignal } = {},
   ): Promise<QaVerificationResult> {
     const assignedWorkspace = resolve(workspacePath);
     const executable = executableName(input.executable);
@@ -373,7 +565,7 @@ export class QaVerificationRunner {
         'Verification arguments are empty or malformed.',
       );
     }
-    assertWorkspaceBoundArguments(assignedWorkspace, input.args);
+    await assertWorkspaceBoundArguments(assignedWorkspace, input.args);
 
     if (executable === 'git') {
       const command = input.args.find((argument) => !argument.startsWith('-'));
@@ -405,14 +597,56 @@ export class QaVerificationRunner {
       assertPackageManagerCommand(args);
     }
 
-    const result = await this.processes.run(executable, input.args, {
-      cwd: assignedWorkspace,
-    });
+    const result = await this.runOwnedProcess(
+      executable,
+      input.args,
+      assignedWorkspace,
+      options.signal,
+    );
     return {
       ...result,
       command: [executable, ...input.args].map(quote).join(' '),
       stdout: result.stdout.slice(0, 32_000),
       stderr: result.stderr.slice(0, 32_000),
     };
+  }
+
+  private async runOwnedProcess(
+    executable: string,
+    args: readonly string[],
+    cwd: string,
+    parentSignal?: AbortSignal,
+  ): Promise<ProcessResult> {
+    if (parentSignal?.aborted) throw new QaVerificationCancelledError();
+    const controller = new AbortController();
+    let abortReason: QaVerificationCancelledError | QaVerificationTimedOutError;
+    const cancel = () => {
+      abortReason = new QaVerificationCancelledError();
+      controller.abort(abortReason);
+    };
+    parentSignal?.addEventListener('abort', cancel, { once: true });
+    const timeout = setTimeout(() => {
+      abortReason = new QaVerificationTimedOutError();
+      controller.abort(abortReason);
+    }, this.verificationTimeoutMs);
+    timeout.unref?.();
+    try {
+      const result = await this.processes.run(executable, args, {
+        cwd,
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) {
+        throw abortReason ?? new QaVerificationCancelledError();
+      }
+      return result;
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw abortReason ?? new QaVerificationCancelledError();
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      parentSignal?.removeEventListener('abort', cancel);
+    }
   }
 }

@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ProcessRunner } from './process-runner.js';
@@ -5,6 +9,14 @@ import {
   QaVerificationCommandRejectedError,
   QaVerificationRunner,
 } from './qa-verification-runner.js';
+
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+};
 
 describe('QaVerificationRunner', () => {
   it('runs a direct verification executable without a shell', async () => {
@@ -116,6 +128,12 @@ describe('QaVerificationRunner', () => {
       executable: 'pnpm',
       args: ['test', 'src\\..\\..\\other\\secret.spec.ts'],
     },
+    { executable: 'pnpm', args: ['test', '--watch'] },
+    { executable: 'pnpm', args: ['test', '--watchAll'] },
+    { executable: 'pnpm', args: ['test', '--ui'] },
+    { executable: 'pnpm', args: ['run', 'test:watch'] },
+    { executable: 'pnpm', args: ['nx', 'test', 'server', '--watch=true'] },
+    { executable: 'npm', args: ['start'] },
   ])(
     'rejects source-authoring command authority: $executable $args',
     async (input) => {
@@ -144,6 +162,10 @@ describe('QaVerificationRunner', () => {
     {
       executable: 'pnpm',
       args: ['test', '--', '--config=src/config/vitest.config.ts'],
+    },
+    {
+      executable: 'pnpm',
+      args: ['test', '--', '--testNamePattern=/workspace behavior/'],
     },
   ])(
     'preserves workspace-local verification paths: $executable $args',
@@ -181,6 +203,131 @@ describe('QaVerificationRunner', () => {
     );
   });
 
+  it('cancels an owned verification child when its QA runtime is interrupted', async () => {
+    const started = deferred();
+    let activeChildren = 0;
+    const run = vi.fn(
+      async (
+        _executable: string,
+        _args: readonly string[],
+        options: { signal?: AbortSignal },
+      ) => {
+        started.resolve();
+        if (!options.signal) {
+          return { exitCode: 0, stdout: 'not cancellable', stderr: '' };
+        }
+        activeChildren += 1;
+        return new Promise<never>((_resolve, reject) => {
+          options.signal?.addEventListener(
+            'abort',
+            () => {
+              activeChildren -= 1;
+              reject(options.signal?.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+    );
+    const runner = new QaVerificationRunner({ run } as ProcessRunner);
+    const controller = new AbortController();
+
+    const pending = runner.run(
+      'C:\\repo',
+      { executable: 'pnpm', args: ['test'] },
+      { signal: controller.signal },
+    );
+    await started.promise;
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'qa_verification_cancelled',
+    });
+    expect(activeChildren).toBe(0);
+  });
+
+  it('times out an owned verification child and leaves no active process', async () => {
+    vi.useFakeTimers();
+    try {
+      const started = deferred();
+      let activeChildren = 0;
+      const run = vi.fn(
+        async (
+          _executable: string,
+          _args: readonly string[],
+          options: { signal?: AbortSignal },
+        ) => {
+          started.resolve();
+          if (!options.signal) {
+            return { exitCode: 0, stdout: 'not bounded', stderr: '' };
+          }
+          activeChildren += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeChildren -= 1;
+                reject(options.signal?.reason);
+              },
+              { once: true },
+            );
+          });
+        },
+      );
+      const runner = new QaVerificationRunner(
+        { run } as ProcessRunner,
+        undefined,
+        undefined,
+        { verificationTimeoutMs: 100 },
+      );
+
+      const pending = runner.run('C:\\repo', {
+        executable: 'pnpm',
+        args: ['test'],
+      });
+      const timedOut = expect(pending).rejects.toMatchObject({
+        code: 'qa_verification_timed_out',
+      });
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(100);
+
+      await timedOut;
+      expect(activeChildren).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a test config reached through an external directory link', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-verifier-outside-'));
+    try {
+      writeFileSync(join(outside, 'vitest.config.ts'), 'export default {}');
+      symlinkSync(
+        outside,
+        join(root, 'external'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      const run = vi.fn(async () => ({
+        exitCode: 0,
+        stdout: 'passed',
+        stderr: '',
+      }));
+      const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+      await expect(
+        runner.run(root, {
+          executable: 'pnpm',
+          args: ['test', '--', '--config=external/vitest.config.ts'],
+        }),
+      ).rejects.toBeInstanceOf(QaVerificationCommandRejectedError);
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+      rmSync(outside, { force: true, recursive: true });
+    }
+  });
+
   it('derives an opaque tracked-source state from Git rather than agent input', async () => {
     const run = vi.fn(async () => ({
       exitCode: 0,
@@ -212,6 +359,67 @@ describe('QaVerificationRunner', () => {
       expect.objectContaining({ cwd: 'C:\\repo' }),
     );
     expect(readTrackedFile).toHaveBeenCalledWith('C:\\repo\\src\\app.ts');
+  });
+
+  it('hashes a tracked directory link without reading its external target', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-qa-source-root-'));
+    const outside = mkdtempSync(join(tmpdir(), 'mesh-qa-source-outside-'));
+    try {
+      const secret = join(outside, 'secret.txt');
+      writeFileSync(secret, 'first external value');
+      symlinkSync(
+        outside,
+        join(root, 'tracked-link'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      const run = vi.fn(async () => ({
+        exitCode: 0,
+        stdout: 'tracked-link\0',
+        stderr: '',
+      }));
+      const runner = new QaVerificationRunner({ run } as ProcessRunner);
+
+      const first = await runner.captureTrackedSource(root);
+      writeFileSync(secret, 'changed external value');
+      const second = await runner.captureTrackedSource(root);
+
+      expect(second).toBe(first);
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+      rmSync(outside, { force: true, recursive: true });
+    }
+  });
+
+  it('fails closed when a tracked link disappears during an observation', async () => {
+    const run = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: 'tracked-link\0',
+      stderr: '',
+    }));
+    let readCount = 0;
+    const readTrackedLink = vi.fn(async () => {
+      readCount += 1;
+      if (readCount % 2 === 1) return 'C:\\outside';
+      throw Object.assign(new Error('link disappeared'), { code: 'ENOENT' });
+    });
+    const runner = new QaVerificationRunner(
+      { run } as ProcessRunner,
+      async () => Buffer.from('must not be read'),
+      async () => ({
+        dev: 1,
+        ino: 1,
+        mode: 0o120777,
+        size: 10,
+        mtimeNs: 0,
+        ctimeNs: 0,
+        isSymbolicLink: () => true,
+      }),
+      { readTrackedLink },
+    );
+
+    await expect(runner.captureTrackedSource('C:\\repo')).rejects.toMatchObject(
+      { code: 'qa_source_snapshot_unstable' },
+    );
   });
 
   it('detects a tracked mutation that occurs after the file was read', async () => {

@@ -109,9 +109,17 @@ authority.
 Choose `manual` when a human should control every handoff. After the current
 Developer cycle submits for review, select **Start QA** in the task drawer. Mesh
 creates a separate QA session and cycle in the Developer attempt's exact
-workspace. QA can read the submitted source and request named verification
-commands through Mesh's constrained runner, but receives no shell and cannot
-write source, create another worktree, commit, merge, or create a pull request.
+workspace. QA receives no Claude SDK built-in tools or inherited filesystem MCP
+configuration. It can read, list, and search the submitted source only through
+bounded Mesh controls that reject absolute paths, traversal, and symlink or
+junction escapes. It may request named verification commands through Mesh's
+constrained runner, but receives no shell and cannot write source, create
+another worktree, commit, merge, or create a pull request. Interactive, watch,
+server, and authoring-style command forms are rejected. Every verification
+child has a five-minute wall-clock bound and is cancelled with the owning QA
+runtime; timeout or cancellation durably pauses review without recording a
+verdict.
+
 Mesh captures Git-tracked source at launch, after each verification command,
 and immediately before verdict persistence. A capture is accepted only when
 two consecutive full observations (forward, then reverse) agree on the tracked
@@ -120,9 +128,12 @@ churn pauses review and prevents a verdict. Ordinary filesystems do not provide
 a cross-file transaction here, so the accepted pair proves stability across
 those observations rather than locking the workspace. A write after the
 accepted observation is a new concurrent mutation; Mesh does not claim
-filesystem-transaction atomicity. Its structured report covers every
-snapshotted acceptance criterion and records evidence, verification performed,
-residual risks, and workspace state.
+filesystem-transaction atomicity. A tracked symbolic link contributes its own
+identity and target text to the snapshot without exposing the target; regular
+tracked files must resolve inside the assigned workspace. Its structured report
+covers every snapshotted acceptance criterion and records evidence, verification
+performed, residual risks, and workspace state.
+
 After a verified verdict, a human may accept the task as done. After a rejection,
 a human chooses the appropriate Developer rework action. Manual mode never
 advances or resumes work merely because a verdict arrived.

@@ -237,14 +237,17 @@ describe('SdkClaudeSessionDriver contract', () => {
     const qa = {
       role: 'qa' as const,
       initialPrompt: 'Verify the assigned Developer submission.',
-      allowedTools: [
+      availableTools: [] as string[],
+      allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+      disallowedTools: [
+        'Bash',
         'Read',
         'Glob',
         'Grep',
-        'Bash',
-        'mcp__mesh_qa__submit_qa_verdict',
+        'Write',
+        'Edit',
+        'NotebookEdit',
       ],
-      disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
       controlServer: {
         name: 'mesh_qa',
         version: '1',
@@ -267,6 +270,7 @@ describe('SdkClaudeSessionDriver contract', () => {
     await new SdkClaudeSessionDriver(sdk).create({
       title: 'QA',
       workspacePath: 'C:\\repo\\developer-workspace',
+      permissionMode: 'inherit',
       role: qa,
     });
 
@@ -275,6 +279,9 @@ describe('SdkClaudeSessionDriver contract', () => {
       role: qa,
     });
     expect(sdk.queryCalls[0]?.developer).toBeUndefined();
+    expect(sdk.queryCalls[0]).not.toHaveProperty('onPermission');
+    expect(qa.availableTools).toEqual([]);
+    expect(qa.disallowedTools).toContain('Bash');
     expect(sdk.query.prompts).toEqual([
       'Verify the assigned Developer submission.',
     ]);
@@ -309,8 +316,9 @@ describe('SdkClaudeSessionDriver contract', () => {
         role: {
           role: 'qa',
           initialPrompt: 'Verify.',
-          allowedTools: ['Read', 'mcp__mesh_qa__submit_qa_verdict'],
-          disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+          availableTools: [],
+          allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+          disallowedTools: ['Bash', 'Read', 'Write', 'Edit', 'NotebookEdit'],
           controlServer: { name: 'mesh_qa', version: '1', tools: [] },
         },
       }),

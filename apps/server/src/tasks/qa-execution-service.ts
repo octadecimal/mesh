@@ -46,6 +46,7 @@ import type {
   QaVerificationCommand,
   QaVerificationResult,
 } from '../platform/qa-verification-runner.js';
+import { QaWorkspaceReader } from '../platform/qa-workspace-reader.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
 import type { AttemptService } from './attempt-service.js';
 import type { QaCapabilityRegistry } from './qa-capability-registry.js';
@@ -140,12 +141,14 @@ type QaExecutionServiceDependencies = {
   registry: QaRegistry;
   billingConflicts?: readonly { variable: string }[];
   verificationRunner: {
-    captureTrackedSource(path: string): Promise<string>;
+    captureTrackedSource(path: string, signal?: AbortSignal): Promise<string>;
     run(
       path: string,
       input: QaVerificationCommand,
+      options?: { signal?: AbortSignal },
     ): Promise<QaVerificationResult>;
   };
+  workspaceReader?: Pick<QaWorkspaceReader, 'read' | 'list' | 'search'>;
   afterRejectedVerdict?: (input: {
     taskId: string;
     cycleId: string;
@@ -164,12 +167,15 @@ type LaunchContext = {
 };
 
 type VerificationState = {
+  sessionId: string;
   workspacePath: string;
   baseline: string;
   latest: string;
   commands: Array<{ command: string; outcome: string }>;
   mutationDetected: boolean;
   operation: 'idle' | 'verifying' | 'submitting';
+  abortController: AbortController;
+  failureRecorded: boolean;
 };
 
 type SourceMutationContext = {
@@ -182,6 +188,19 @@ type SourceMutationContext = {
 const verificationCommandSchema = z.object({
   executable: z.string().trim().min(1),
   args: z.array(z.string()).min(1).max(64),
+});
+
+const workspaceReadSchema = z.object({
+  path: z.string().trim().min(1).max(1_024),
+});
+
+const workspaceListSchema = z.object({
+  path: z.string().trim().min(1).max(1_024).default('.'),
+});
+
+const workspaceSearchSchema = z.object({
+  path: z.string().trim().min(1).max(1_024).default('.'),
+  query: z.string().min(1).max(512),
 });
 
 const taskFingerprint = (task: Task): string =>
@@ -279,6 +298,9 @@ const safeQaControlErrorCodes = new Set([
   'qa_verification_command_rejected',
   'qa_source_mutation_detected',
   'qa_control_busy',
+  'qa_workspace_path_rejected',
+  'qa_verification_cancelled',
+  'qa_verification_timed_out',
 ]);
 
 const qaControlFailure = (error: unknown) => {
@@ -310,10 +332,24 @@ export class QaExecutionService {
   private readonly now: () => string;
   private readonly createId: () => string;
   private readonly verificationStates = new Map<string, VerificationState>();
+  private readonly workspaceReader: Pick<
+    QaWorkspaceReader,
+    'read' | 'list' | 'search'
+  >;
 
   constructor(private readonly dependencies: QaExecutionServiceDependencies) {
     this.now = dependencies.now ?? (() => new Date().toISOString());
     this.createId = dependencies.createId ?? randomUUID;
+    this.workspaceReader =
+      dependencies.workspaceReader ?? new QaWorkspaceReader();
+  }
+
+  cancelRuntime(sessionId: string): void {
+    for (const verification of this.verificationStates.values()) {
+      if (verification.sessionId === sessionId) {
+        verification.abortController.abort();
+      }
+    }
   }
 
   async launch(input: QaLaunchInput): Promise<QaLaunchResult> {
@@ -1024,12 +1060,15 @@ export class QaExecutionService {
       id: `qa-${prepared.session.id}`,
     });
     const verification: VerificationState = {
+      sessionId: prepared.session.id,
       workspacePath: workspace.path,
       baseline: prepared.cycle.workspaceBaseline,
       latest: prepared.cycle.workspaceBaseline,
       commands: [],
       mutationDetected: false,
       operation: 'idle',
+      abortController: new AbortController(),
+      failureRecorded: false,
     };
     this.verificationStates.set(prepared.cycle.id, verification);
     return {
@@ -1043,18 +1082,97 @@ export class QaExecutionService {
         developerCompletionReport: developerReport,
       }),
       capability,
+      availableTools: [],
       allowedTools: [
-        'Read',
-        'Glob',
-        'Grep',
+        'mcp__mesh_qa__read_workspace_file',
+        'mcp__mesh_qa__list_workspace_files',
+        'mcp__mesh_qa__search_workspace_text',
         'mcp__mesh_qa__run_verification',
         'mcp__mesh_qa__submit_qa_verdict',
       ],
-      disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+      disallowedTools: [
+        'Bash',
+        'Read',
+        'Glob',
+        'Grep',
+        'Write',
+        'Edit',
+        'NotebookEdit',
+      ],
       controlServer: {
         name: 'mesh_qa',
         version: '1',
         tools: [
+          {
+            name: 'read_workspace_file',
+            description:
+              'Read one bounded text file inside the assigned QA workspace.',
+            inputSchema: workspaceReadSchema.shape,
+            execute: async (input) => {
+              const parsed = workspaceReadSchema.safeParse(input);
+              if (!parsed.success) return qaControlFailure('invalid_input');
+              try {
+                const result = await this.workspaceReader.read(
+                  verification.workspacePath,
+                  parsed.data.path,
+                );
+                return {
+                  content: [
+                    { type: 'text' as const, text: JSON.stringify(result) },
+                  ],
+                };
+              } catch (error) {
+                return qaControlFailure(error);
+              }
+            },
+          },
+          {
+            name: 'list_workspace_files',
+            description:
+              'List one directory inside the assigned QA workspace without shell access.',
+            inputSchema: workspaceListSchema.shape,
+            execute: async (input) => {
+              const parsed = workspaceListSchema.safeParse(input);
+              if (!parsed.success) return qaControlFailure('invalid_input');
+              try {
+                const result = await this.workspaceReader.list(
+                  verification.workspacePath,
+                  parsed.data.path,
+                );
+                return {
+                  content: [
+                    { type: 'text' as const, text: JSON.stringify(result) },
+                  ],
+                };
+              } catch (error) {
+                return qaControlFailure(error);
+              }
+            },
+          },
+          {
+            name: 'search_workspace_text',
+            description:
+              'Search bounded text content inside the assigned QA workspace without shell access.',
+            inputSchema: workspaceSearchSchema.shape,
+            execute: async (input) => {
+              const parsed = workspaceSearchSchema.safeParse(input);
+              if (!parsed.success) return qaControlFailure('invalid_input');
+              try {
+                const result = await this.workspaceReader.search(
+                  verification.workspacePath,
+                  parsed.data.path,
+                  parsed.data.query,
+                );
+                return {
+                  content: [
+                    { type: 'text' as const, text: JSON.stringify(result) },
+                  ],
+                };
+              } catch (error) {
+                return qaControlFailure(error);
+              }
+            },
+          },
           {
             name: 'run_verification',
             description:
@@ -1074,6 +1192,7 @@ export class QaExecutionService {
                 const result = await this.dependencies.verificationRunner.run(
                   verification.workspacePath,
                   parsed.data,
+                  { signal: verification.abortController.signal },
                 );
                 verification.commands.push({
                   command: result.command,
@@ -1107,6 +1226,20 @@ export class QaExecutionService {
                   ],
                 };
               } catch (error) {
+                const code = this.verificationInterruptionCode(error);
+                if (code) {
+                  await this.pauseForVerificationFailure(
+                    {
+                      taskId: prepared.task.id,
+                      cycleId: prepared.cycle.id,
+                      sessionId: prepared.session.id,
+                      workspaceBaseline: prepared.cycle.workspaceBaseline,
+                    },
+                    capability,
+                    code,
+                    verification,
+                  );
+                }
                 return qaControlFailure(error);
               } finally {
                 if (verification.operation === 'verifying') {
@@ -1180,8 +1313,19 @@ export class QaExecutionService {
       verification.latest =
         await this.dependencies.verificationRunner.captureTrackedSource(
           verification.workspacePath,
+          verification.abortController.signal,
         );
     } catch (error) {
+      const interruptionCode = this.verificationInterruptionCode(error);
+      if (interruptionCode) {
+        await this.pauseForVerificationFailure(
+          context,
+          capability,
+          interruptionCode,
+          verification,
+        );
+        throw error;
+      }
       if (
         typeof error !== 'object' ||
         error === null ||
@@ -1199,6 +1343,91 @@ export class QaExecutionService {
     verification.mutationDetected = true;
     await this.pauseForSourceMutation(context, capability);
     throw new QaSourceMutationDetectedError();
+  }
+
+  private verificationInterruptionCode(
+    error: unknown,
+  ): 'qa_verification_cancelled' | 'qa_verification_timed_out' | undefined {
+    if (typeof error !== 'object' || error === null || !('code' in error)) {
+      return undefined;
+    }
+    return error.code === 'qa_verification_cancelled' ||
+      error.code === 'qa_verification_timed_out'
+      ? error.code
+      : undefined;
+  }
+
+  private async pauseForVerificationFailure(
+    context: SourceMutationContext,
+    capability: string,
+    code: 'qa_verification_cancelled' | 'qa_verification_timed_out',
+    verification: VerificationState,
+  ): Promise<void> {
+    if (verification.failureRecorded) return;
+    let event: ProjectEvent | undefined;
+    this.dependencies.database.exec('BEGIN IMMEDIATE');
+    try {
+      const task = this.dependencies.tasks.get(context.taskId);
+      if (!task) throw new TaskNotFoundError(context.taskId);
+      const occurredAt = this.now();
+      const paused = this.dependencies.tasks.update(
+        {
+          ...task,
+          reviewAutomation: {
+            ...task.reviewAutomation,
+            status: 'paused',
+            pauseReason:
+              code === 'qa_verification_timed_out'
+                ? 'QA verification timed out; human inspection is required.'
+                : 'QA verification was interrupted; human inspection is required.',
+            updatedAt: occurredAt,
+          },
+          updatedAt: occurredAt,
+        },
+        task.revision,
+      );
+      if (!paused) throw new TaskRevisionConflictError(task);
+      this.dependencies.diagnostics.insert(
+        rawDiagnosticSchema.parse({
+          id: this.createId(),
+          sessionId: context.sessionId,
+          capturedAt: occurredAt,
+          payload: {
+            kind: 'qa_verification_failure',
+            cycleId: context.cycleId,
+            code,
+            automationPauseRequired: true,
+          },
+        }),
+      );
+      event = this.dependencies.projectEvents.appendInTransaction(
+        paused.projectId,
+        {
+          protocolVersion: 1,
+          id: this.createId(),
+          projectId: paused.projectId,
+          occurredAt,
+          type: 'task.review_automation_changed',
+          payload: {
+            task: paused,
+            automation: paused.reviewAutomation,
+            action: null,
+          },
+        },
+      );
+      this.dependencies.database.exec('COMMIT');
+    } catch (error) {
+      if (this.dependencies.database.inTransaction) {
+        this.dependencies.database.exec('ROLLBACK');
+      }
+      throw error;
+    }
+    verification.failureRecorded = true;
+    if (event) this.dependencies.registry.publisher.publishProject(event);
+    this.dependencies.capabilities.invalidate(capability);
+    if (code === 'qa_verification_timed_out') {
+      await this.dependencies.registry.interrupt(context.sessionId);
+    }
   }
 
   private async pauseForSourceMutation(

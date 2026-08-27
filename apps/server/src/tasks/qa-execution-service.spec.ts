@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,6 +18,7 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import type { RepositoryIdentity } from '../projects/repository-identity.js';
+import type { ProcessRunner } from '../platform/process-runner.js';
 import {
   QaVerificationRunner,
   type QaVerificationResult,
@@ -43,6 +44,14 @@ const policyActor = taskActorSchema.parse({
 });
 const qaActor = taskActorSchema.parse({ type: 'agent', id: 'qa-agent-1' });
 
+const deferred = () => {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+};
+
 describe('QaExecutionService', () => {
   const cleanups: Array<() => void> = [];
 
@@ -52,6 +61,7 @@ describe('QaExecutionService', () => {
 
   const setup = (options?: {
     workspaceType?: 'shared' | 'worktree';
+    permissionMode?: 'interactive' | 'safe_auto' | 'inherit';
     reviewPolicy?: 'manual' | 'autonomous_review';
     task?: Partial<Task>;
     billingConflict?: boolean;
@@ -68,6 +78,7 @@ describe('QaExecutionService', () => {
       run(
         path: string,
         input: { executable: string; args: string[] },
+        options?: { signal?: AbortSignal },
       ): Promise<QaVerificationResult>;
     };
     reserveRepair?: (sessionId: string) => (() => void) | undefined;
@@ -153,7 +164,7 @@ describe('QaExecutionService', () => {
         projectId: project.id,
         workspaceId: workspace.id,
         title: 'Developer',
-        permissionMode: 'safe_auto',
+        permissionMode: options?.permissionMode ?? 'safe_auto',
         lifecycleState: 'interrupted',
         createdAt: now,
         updatedAt: now,
@@ -423,14 +434,23 @@ describe('QaExecutionService', () => {
       expect(context.durableAtStart).toEqual([true]);
       expect(context.starts[0]?.configuration).toMatchObject({
         role: 'qa',
+        availableTools: [],
         allowedTools: [
-          'Read',
-          'Glob',
-          'Grep',
+          'mcp__mesh_qa__read_workspace_file',
+          'mcp__mesh_qa__list_workspace_files',
+          'mcp__mesh_qa__search_workspace_text',
           'mcp__mesh_qa__run_verification',
           'mcp__mesh_qa__submit_qa_verdict',
         ],
-        disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
+        disallowedTools: [
+          'Bash',
+          'Read',
+          'Glob',
+          'Grep',
+          'Write',
+          'Edit',
+          'NotebookEdit',
+        ],
         controlServer: {
           name: 'mesh_qa',
           version: '1',
@@ -452,9 +472,69 @@ describe('QaExecutionService', () => {
       });
       expect(
         start.configuration.controlServer.tools.map(({ name }) => name),
-      ).toEqual(['run_verification', 'submit_qa_verdict']);
+      ).toEqual([
+        'read_workspace_file',
+        'list_workspace_files',
+        'search_workspace_text',
+        'run_verification',
+        'submit_qa_verdict',
+      ]);
     },
   );
+
+  it('keeps inherited QA authority inside bounded workspace controls', async () => {
+    const context = setup({ permissionMode: 'inherit' });
+    writeFileSync(
+      join(context.directory, 'qa-evidence.txt'),
+      'inside evidence',
+    );
+    await context.service.launch(launchInput(context.task));
+    const configuration = context.starts[0]?.configuration;
+    if (!configuration) throw new Error('Expected QA runtime configuration');
+    const controls = Object.fromEntries(
+      configuration.controlServer.tools.map((control) => [
+        control.name,
+        control,
+      ]),
+    );
+
+    expect(configuration.availableTools).toEqual([]);
+    expect(configuration.disallowedTools).toEqual(
+      expect.arrayContaining(['Bash', 'Read', 'Glob', 'Grep']),
+    );
+    await expect(
+      controls.read_workspace_file?.execute({ path: 'qa-evidence.txt' }),
+    ).resolves.toMatchObject({
+      content: [
+        { type: 'text', text: expect.stringContaining('inside evidence') },
+      ],
+    });
+    await expect(
+      controls.list_workspace_files?.execute({ path: '.' }),
+    ).resolves.toMatchObject({
+      content: [
+        { type: 'text', text: expect.stringContaining('qa-evidence.txt') },
+      ],
+    });
+    await expect(
+      controls.search_workspace_text?.execute({
+        path: '.',
+        query: 'inside evidence',
+      }),
+    ).resolves.toMatchObject({
+      content: [
+        { type: 'text', text: expect.stringContaining('qa-evidence.txt') },
+      ],
+    });
+    await expect(
+      controls.read_workspace_file?.execute({ path: '../outside.txt' }),
+    ).resolves.toMatchObject({ isError: true });
+    await expect(
+      controls.read_workspace_file?.execute({
+        path: join(context.directory, '..', 'outside.txt'),
+      }),
+    ).resolves.toMatchObject({ isError: true });
+  });
 
   it('rejects an adversarial source-writing verification request before process execution', async () => {
     const process = vi.fn(async () => ({
@@ -489,6 +569,164 @@ describe('QaExecutionService', () => {
         (call) => (call as unknown as [string])[0] === 'git',
       ),
     ).toBe(true);
+  });
+
+  it('times out a hanging verification, pauses QA, and leaves no owned child', async () => {
+    vi.useFakeTimers();
+    try {
+      const started = deferred();
+      let activeChildren = 0;
+      const process = vi.fn(
+        async (
+          executable: string,
+          _args: readonly string[],
+          options: { signal?: AbortSignal },
+        ) => {
+          if (executable === 'git') {
+            return { exitCode: 0, stdout: '', stderr: '' };
+          }
+          started.resolve();
+          if (!options.signal) {
+            return { exitCode: 0, stdout: 'not bounded', stderr: '' };
+          }
+          activeChildren += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeChildren -= 1;
+                reject(options.signal?.reason);
+              },
+              { once: true },
+            );
+          });
+        },
+      );
+      const context = setup({
+        verificationRunner: new QaVerificationRunner(
+          { run: process } as ProcessRunner,
+          undefined,
+          undefined,
+          { verificationTimeoutMs: 100 },
+        ),
+      });
+      const launched = await context.service.launch(launchInput(context.task));
+      const control = context.starts[0]?.configuration.controlServer.tools.find(
+        ({ name }) => name === 'run_verification',
+      );
+      if (!control) throw new Error('Expected verification control');
+
+      const pending = control.execute({ executable: 'pnpm', args: ['test'] });
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(100);
+      const response = await pending;
+      expect(response).toMatchObject({
+        isError: true,
+        content: [
+          {
+            type: 'text',
+            text: expect.stringContaining('qa_verification_timed_out'),
+          },
+        ],
+      });
+
+      expect(activeChildren).toBe(0);
+      expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+        reviewAutomation: { status: 'paused' },
+      });
+      expect(
+        context.repositories.diagnostics.list(launched.session.id),
+      ).toContainEqual(
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            kind: 'qa_verification_failure',
+            code: 'qa_verification_timed_out',
+          }),
+        }),
+      );
+      expect(
+        context.repositories.qaExecutions.listReportsForAttempts([
+          context.attempt.id,
+        ]),
+      ).toEqual([]);
+      expect(context.interrupt).toHaveBeenCalledWith(launched.session.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a hanging verification with its runtime and records the pause', async () => {
+    const started = deferred();
+    let activeChildren = 0;
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => 'sha256:developer-source',
+        run: async (_path, _input, options) => {
+          started.resolve();
+          if (!options?.signal) {
+            return {
+              command: 'pnpm test',
+              exitCode: 0,
+              stdout: 'not cancellable',
+              stderr: '',
+            };
+          }
+          activeChildren += 1;
+          return new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                activeChildren -= 1;
+                reject(
+                  Object.assign(new Error('cancelled'), {
+                    code: 'qa_verification_cancelled',
+                  }),
+                );
+              },
+              { once: true },
+            );
+          });
+        },
+      },
+    });
+    const launched = await context.service.launch(launchInput(context.task));
+    const control = context.starts[0]?.configuration.controlServer.tools.find(
+      ({ name }) => name === 'run_verification',
+    );
+    if (!control) throw new Error('Expected verification control');
+
+    const pending = control.execute({ executable: 'pnpm', args: ['test'] });
+    await started.promise;
+    context.service.cancelRuntime(launched.session.id);
+    await expect(pending).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('qa_verification_cancelled'),
+        },
+      ],
+    });
+
+    expect(activeChildren).toBe(0);
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_cancelled',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
   });
 
   it('pauses and interrupts QA when authoritative tracked source changes after verification', async () => {
@@ -1397,6 +1635,54 @@ describe('QaExecutionService', () => {
       reviewAutomation: { status: 'paused' },
     });
     expect(context.interrupt).toHaveBeenCalledWith(launched.launch.session.id);
+  });
+
+  it('pauses without a verdict when commit-boundary source capture times out', async () => {
+    let captureCount = 0;
+    const context = setup({
+      verificationRunner: {
+        captureTrackedSource: async () => {
+          captureCount += 1;
+          if (captureCount === 1) return 'sha256:developer-source';
+          throw Object.assign(new Error('capture timed out'), {
+            code: 'qa_verification_timed_out',
+          });
+        },
+        run: async () => ({
+          command: 'pnpm test',
+          exitCode: 0,
+          stdout: 'passed',
+          stderr: '',
+        }),
+      },
+    });
+    const launched = await launchForVerdict(context);
+
+    await expect(
+      context.service.submitVerdict(verdictInput(context, launched)),
+    ).rejects.toMatchObject({ code: 'qa_verification_timed_out' });
+
+    expect(context.repositories.tasks.get(context.task.id)).toMatchObject({
+      reviewAutomation: { status: 'paused' },
+    });
+    expect(
+      context.repositories.diagnostics.list(launched.launch.session.id),
+    ).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          kind: 'qa_verification_failure',
+          code: 'qa_verification_timed_out',
+        }),
+      }),
+    );
+    expect(
+      context.repositories.qaExecutions.listReportsForAttempts([
+        context.attempt.id,
+      ]),
+    ).toEqual([]);
+    expect(
+      context.repositories.qaExecutions.getCycle(launched.launch.cycle.id),
+    ).toMatchObject({ endedAt: null, reportId: null });
   });
 
   it('records a rejected manual verdict without transitioning the task', async () => {

@@ -204,14 +204,17 @@ describe('FakeClaudeSessionDriver', () => {
 const qaRole = (execute: (input: unknown) => Promise<RoleControlResponse>) => ({
   role: 'qa' as const,
   initialPrompt: 'Verify the Developer submission.',
-  allowedTools: [
+  availableTools: [],
+  allowedTools: ['mcp__mesh_qa__submit_qa_verdict'],
+  disallowedTools: [
+    'Bash',
     'Read',
     'Glob',
     'Grep',
-    'Bash',
-    'mcp__mesh_qa__submit_qa_verdict',
+    'Write',
+    'Edit',
+    'NotebookEdit',
   ],
-  disallowedTools: ['Write', 'Edit', 'NotebookEdit'],
   controlServer: {
     name: 'mesh_qa',
     version: '1',

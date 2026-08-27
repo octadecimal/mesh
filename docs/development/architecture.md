@@ -83,20 +83,32 @@ attempt or workspace. `QaExecutionService` accepts a human launch in manual mode
 or a system-policy launch in autonomous-review mode only after the current
 Developer cycle has submitted a complete report and the task is unblocked in
 `review`. It revalidates and reuses that cycle's exact active workspace; a fresh
-worktree would not contain the submission being verified. The QA runtime can
-read source and invoke only server-approved verification executables; it never
-receives a general shell or source-authoring control. The server captures
-Git-tracked source before launch, after every verification command, and
-immediately before verdict persistence instead of accepting an agent-reported
-workspace state. Each accepted capture requires matching forward and reverse
-observations of the tracked path set, per-file metadata, and content. A mutation
-or failure to stabilize within the bounded retry limit invalidates QA authority
-and pauses the review loop for inspection. This protocol defines the
-source-stability boundary; it is not a cross-file filesystem lock. A write after
-the accepted observation is a new concurrent mutation, so the verdict
-transaction begins immediately after capture without claiming
-filesystem-transaction atomicity. Verification may create ordinary ignored
-build or test artifacts.
+worktree would not contain the submission being verified. The QA SDK query has
+no built-in tools and does not load filesystem settings or inherited MCP
+servers. It receives only Mesh's structured verdict, constrained verification,
+and bounded workspace read, list, and search controls. Those workspace controls
+resolve requested paths canonically inside the assigned workspace and reject
+absolute paths, traversal, and links whose targets escape it. The constrained
+runner admits only non-interactive verification commands, gives each child a
+five-minute wall-clock bound, and cancels owned process trees when the QA
+runtime is interrupted or closes. It never exposes a general shell or
+source-authoring control.
+
+The server captures Git-tracked source before launch, after every verification
+command, and immediately before verdict persistence instead of accepting an
+agent-reported workspace state. Each accepted capture requires matching forward
+and reverse observations of the tracked path set, per-file metadata, and
+content. A mutation or failure to stabilize within the bounded retry limit
+invalidates QA authority and pauses the review loop for inspection. This
+protocol defines the source-stability boundary; it is not a cross-file
+filesystem lock. A write after the accepted observation is a new concurrent
+mutation, so the verdict transaction begins immediately after capture without
+claiming
+filesystem-transaction atomicity. Tracked symbolic links are hashed as link
+identity and target text without following the target; regular tracked files
+must resolve inside the workspace. Timeout, cancellation, or confinement
+failure pauses review and prevents a verdict. Verification may create ordinary
+ignored build or test artifacts.
 
 QA controls use a separate ephemeral capability bound to the QA session, task,
 current attempt, and open QA cycle. The only task-domain control exposed to the
