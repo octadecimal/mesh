@@ -127,6 +127,7 @@ const projectRunChangedEvent: ProjectEvent = {
       revision: 1,
       concurrency: 2,
       state: 'running',
+      pauseReason: null,
       completionReason: null,
       startedAt: '2026-08-24T00:00:00.000Z',
       updatedAt: '2026-08-24T00:00:00.000Z',

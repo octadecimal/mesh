@@ -153,6 +153,34 @@ describe('ProjectRunRepository', () => {
     expect(repository.projectRuns.listByProject('project-1')).toHaveLength(1);
   });
 
+  it('persists the pause reason and clears it when the run resumes', () => {
+    const repository = setup();
+    repositories.push(repository);
+    const run = createRun(repository.projectRuns, ['task-a']);
+
+    const paused = repository.projectRuns.changeState({
+      runId: run.id,
+      expectedRunRevision: run.revision,
+      state: 'paused',
+      pauseReason: 'operator_paused',
+      occurredAt: at,
+    });
+    expect(paused).toMatchObject({
+      state: 'paused',
+      pauseReason: 'operator_paused',
+    });
+    if (!paused) throw new Error('Expected paused run');
+
+    expect(
+      repository.projectRuns.changeState({
+        runId: run.id,
+        expectedRunRevision: paused.revision,
+        state: 'running',
+        occurredAt: at,
+      }),
+    ).toMatchObject({ state: 'running', pauseReason: null });
+  });
+
   it('claims only the configured concurrency in queue order', () => {
     const repository = setup();
     repositories.push(repository);
@@ -361,6 +389,7 @@ describe('ProjectRunRepository', () => {
         runId: run.id,
         expectedRunRevision: launched.revision,
         state: 'paused',
+        pauseReason: 'operator_paused',
         occurredAt: at,
       }),
     ).toBeUndefined();

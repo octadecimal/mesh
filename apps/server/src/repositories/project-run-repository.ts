@@ -19,6 +19,7 @@ type ProjectRunRow = {
   updated_at: string;
   completed_at: string | null;
   completion_reason: string | null;
+  pause_reason: string | null;
 };
 
 type ProjectRunItemRow = {
@@ -96,6 +97,7 @@ export type ChangeProjectRunStateInput = {
   runId: string;
   expectedRunRevision: number;
   state: 'running' | 'paused' | 'draining' | 'completed';
+  pauseReason?: string;
   completionReason?: string;
   occurredAt: string;
 };
@@ -445,11 +447,15 @@ export class ProjectRunRepository {
       input.state === 'completed'
         ? this.nonEmpty(input.completionReason, 'Run completion reason')
         : null;
+    const pauseReason =
+      input.state === 'paused'
+        ? this.nonEmpty(input.pauseReason, 'Run pause reason')
+        : null;
     return this.transaction(() => {
       const result = this.database
         .prepare(
           `UPDATE project_runs
-        SET state = ?, revision = revision + 1, updated_at = ?, completed_at = ?, completion_reason = ?
+        SET state = ?, revision = revision + 1, updated_at = ?, completed_at = ?, completion_reason = ?, pause_reason = ?
         WHERE id = ? AND revision = ? AND state != 'completed'`,
         )
         .run(
@@ -457,6 +463,7 @@ export class ProjectRunRepository {
           occurredAt,
           completedAt,
           completionReason,
+          pauseReason,
           runId,
           input.expectedRunRevision,
         );
@@ -504,6 +511,7 @@ export class ProjectRunRepository {
       updatedAt: row.updated_at,
       completedAt: row.completed_at,
       completionReason: row.completion_reason,
+      pauseReason: row.pause_reason,
       items: items.map(toItem),
     });
   }

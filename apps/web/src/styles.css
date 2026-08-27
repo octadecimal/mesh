@@ -1812,6 +1812,11 @@ textarea:focus-visible {
     grid-template-rows: auto auto auto auto minmax(0, 1fr);
   }
 
+  .project-board-mobile-scroller {
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+  }
+
   .project-board-header,
   .project-board-boundary > .project-run-panel,
   .project-board-boundary > .task-board {
@@ -1821,6 +1826,20 @@ textarea:focus-visible {
   .project-board-boundary > .project-run-panel {
     max-height: none;
     overflow: visible;
+  }
+
+  .project-board-boundary > .task-board {
+    grid-template-rows: auto auto;
+    overflow: visible;
+  }
+
+  .project-board-boundary .task-board-columns {
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .project-board-boundary .task-column-cards {
+    overflow-y: visible;
   }
 
   .project-board-boundary > .developer-instructions,

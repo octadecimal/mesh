@@ -98,6 +98,13 @@ const projectRunPrelaunchAttentionMigration = {
     'utf8',
   ),
 };
+const projectRunPauseReasonMigration = {
+  id: '015-project-run-pause-reason',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '015-project-run-pause-reason.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -114,6 +121,7 @@ const migrations = [
   projectRunsMigration,
   taskAttemptProjectRunSourceMigration,
   projectRunPrelaunchAttentionMigration,
+  projectRunPauseReasonMigration,
 ];
 
 export const migrate = (database: Database): void => {

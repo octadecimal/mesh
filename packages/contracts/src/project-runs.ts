@@ -51,6 +51,7 @@ const projectRunBaseSchema = z.object({
   projectId: idSchema,
   revision: z.number().int().positive(),
   concurrency: z.number().int().positive(),
+  pauseReason: z.string().trim().min(1).nullable().default(null),
   startedAt: isoTimestampSchema,
   updatedAt: isoTimestampSchema,
   items: z.array(projectRunItemSchema),
@@ -58,7 +59,12 @@ const projectRunBaseSchema = z.object({
 
 export const projectRunSchema = z.discriminatedUnion('state', [
   projectRunBaseSchema.extend({
-    state: z.enum(['running', 'paused', 'draining']),
+    state: z.enum(['running', 'draining']),
+    completionReason: z.null(),
+    completedAt: z.null(),
+  }),
+  projectRunBaseSchema.extend({
+    state: z.literal('paused'),
     completionReason: z.null(),
     completedAt: z.null(),
   }),

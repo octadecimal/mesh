@@ -167,7 +167,9 @@ describe('App', () => {
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
 
-    expect(screen.getByRole('region', { name: 'Mesh board' })).toBeDefined();
+    expect(screen.getByRole('region', { name: 'Mesh board' })).toHaveClass(
+      'project-board-mobile-scroller',
+    );
     await user.click(screen.getByRole('button', { name: 'Sessions' }));
     expect(
       screen.getByRole('main', { name: 'Session workspace' }),
@@ -254,6 +256,7 @@ describe('App', () => {
       payload: {
         projectId: project.id,
         concurrency: 1,
+        expectedTasks: [{ taskId: 'board-task', revision: 1 }],
         actor: taskActorSchema.parse({
           type: 'human',
           id: 'operator',

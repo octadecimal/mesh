@@ -393,6 +393,7 @@ export function TaskBoard({
   return (
     <>
       <ProjectRunPanel
+        key={project.id}
         project={project}
         projection={projection}
         connected={connected}

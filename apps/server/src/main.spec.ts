@@ -967,6 +967,7 @@ describe('production composition', () => {
       runId: pausedRun.id,
       expectedRunRevision: pausedRun.revision,
       state: 'paused',
+      pauseReason: 'operator_paused',
       occurredAt: '2026-08-25T12:01:00.000Z',
     });
     projects.create(
@@ -1382,6 +1383,7 @@ describe('production composition', () => {
             payload: {
               projectId: project.id,
               concurrency: 1,
+              expectedTasks: [{ taskId: 'task-drain-audit', revision: 1 }],
               actor: { type: 'human', id: 'operator-drain-audit' },
             },
           },
@@ -1508,6 +1510,7 @@ describe('production composition', () => {
             payload: {
               projectId: project.id,
               concurrency: 1,
+              expectedTasks: [{ taskId: 'task-runtime-stopped', revision: 1 }],
               actor: { type: 'human', id: 'operator-runtime-stopped' },
             },
           },
@@ -1664,6 +1667,7 @@ describe('production composition', () => {
         payload: {
           projectId: project.id,
           concurrency: 1,
+          expectedTasks: [{ taskId: 'task-run-audit', revision: 1 }],
           actor: { type: 'human', id: 'operator-run-audit' },
         },
       },

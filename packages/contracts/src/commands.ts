@@ -146,6 +146,9 @@ export const projectCommandSchema = z.discriminatedUnion('type', [
     payload: z.object({
       projectId: idSchema,
       concurrency: z.number().int().positive(),
+      expectedTasks: z.array(
+        z.object({ taskId: idSchema, revision: expectedRevisionSchema }),
+      ),
       actor: humanActorSchema,
     }),
   }),

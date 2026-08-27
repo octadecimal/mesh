@@ -258,6 +258,7 @@ describe('HTTP command routes', () => {
             payload: {
               projectId: 'p1',
               concurrency: 1,
+              expectedTasks: [],
               actor: { type: 'human', id: 'operator-run' },
             },
           },

@@ -224,6 +224,7 @@ describe('executeCommand', () => {
         revision,
         concurrency: 2,
         state,
+        pauseReason: state === 'paused' ? 'operator_paused' : null,
         startedAt: now,
         updatedAt: now,
         completedAt: null,
@@ -258,7 +259,12 @@ describe('executeCommand', () => {
 
     const started = await execute('start-run-command', {
       type: 'project.run.start',
-      payload: { projectId: 'project-run', concurrency: 2, actor },
+      payload: {
+        projectId: 'project-run',
+        concurrency: 2,
+        expectedTasks: [{ taskId: 'task-1', revision: 3 }],
+        actor,
+      },
     });
     const paused = await execute('pause-run-command', {
       type: 'project.run.pause',
@@ -281,6 +287,7 @@ describe('executeCommand', () => {
       {
         projectId: 'project-run',
         concurrency: 2,
+        expectedTasks: [{ taskId: 'task-1', revision: 3 }],
         actor,
         idempotencyKey: 'start-run-command',
       },
@@ -354,7 +361,12 @@ describe('executeCommand', () => {
     });
     const command = projectCommand('start-run-idempotent', {
       type: 'project.run.start',
-      payload: { projectId: project.id, concurrency: 1, actor },
+      payload: {
+        projectId: project.id,
+        concurrency: 1,
+        expectedTasks: [{ taskId: 'task-run-idempotent', revision: 1 }],
+        actor,
+      },
     });
 
     const first = await executeCommand(command, {
@@ -384,6 +396,7 @@ describe('executeCommand', () => {
         payload: {
           projectId: 'project-run',
           concurrency: 1,
+          expectedTasks: [],
           actor: { type: 'system', id: 'scheduler' },
         },
       }),

@@ -507,7 +507,7 @@ function ConnectedApp({
         </div>
         {projectLoadError ? (
           <section
-            className="project-board-boundary"
+            className="project-board-boundary project-board-mobile-scroller"
             aria-label="Project board unavailable"
           >
             <div>
@@ -534,7 +534,7 @@ function ConnectedApp({
           </section>
         ) : view === 'board' && activeProject && !projectLoadTargetId ? (
           <section
-            className={`project-board-boundary${
+            className={`project-board-boundary project-board-mobile-scroller${
               activeProject.archivedAt ? ' project-board-read-only' : ''
             }`}
             aria-label={`${activeProject.displayName} board`}

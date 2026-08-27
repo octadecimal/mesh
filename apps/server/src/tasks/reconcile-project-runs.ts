@@ -177,6 +177,7 @@ const pauseRun = (
       runId: current.id,
       expectedRunRevision: current.revision,
       state: 'paused',
+      pauseReason: reason,
       occurredAt,
     });
     if (!paused) {

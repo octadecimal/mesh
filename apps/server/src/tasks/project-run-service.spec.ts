@@ -22,12 +22,17 @@ import {
   type ProjectRunAttemptLaunchInput,
 } from './attempt-service.js';
 import { ProjectRunService } from './project-run-service.js';
+import { selectEligibleRunTasks } from './project-run-policy.js';
 
 const now = '2026-08-27T00:00:00.000Z';
 const human = taskActorSchema.parse({ type: 'human', id: 'operator-1' });
 const agent = taskActorSchema.parse({ type: 'agent', id: 'agent-1' });
 
 const disposals: Array<() => void> = [];
+const serviceRepositories = new WeakMap<
+  ProjectRunService,
+  ReturnType<typeof createTestRepositories>
+>();
 
 afterEach(() => {
   while (disposals.length > 0) disposals.pop()?.();
@@ -158,6 +163,7 @@ const setup = (options?: {
     now: () => now,
     createId: () => `generated-${++id}`,
   });
+  serviceRepositories.set(service, repositories);
   return { launchAttempt, repositories, project, publisher, service };
 };
 
@@ -176,9 +182,57 @@ const startRun = (
   idempotencyKey = 'start-run-1',
   concurrency = 2,
   actor: TaskActor = human,
-) => service.startRun({ projectId, concurrency, actor, idempotencyKey });
+) => {
+  const repositories = serviceRepositories.get(service);
+  const project = repositories?.projects.get(projectId);
+  if (!repositories || !project) throw new Error('Missing test repositories');
+  const tasks = repositories.tasks.listByProject(projectId);
+  const currentAttemptTaskIds = new Set(
+    tasks
+      .filter((task) =>
+        repositories.attempts
+          .listByTask(task.id)
+          .some(({ unlinkedAt }) => unlinkedAt === null),
+      )
+      .map(({ id }) => id),
+  );
+  const expectedTasks = selectEligibleRunTasks({
+    project,
+    tasks,
+    currentAttemptTaskIds,
+  }).map(({ task }) => ({ taskId: task.id, revision: task.revision }));
+  return service.startRun({
+    projectId,
+    concurrency,
+    expectedTasks,
+    actor,
+    idempotencyKey,
+  });
+};
 
 describe('ProjectRunService startRun', () => {
+  it('rejects a changed eligible selection before creating a run', () => {
+    const { repositories, project, service } = setup();
+    repositories.tasks.create(createTask(project.id, 'task-a'));
+    repositories.tasks.create(createTask(project.id, 'task-b'));
+
+    expectCode(
+      () =>
+        service.startRun({
+          projectId: project.id,
+          concurrency: 1,
+          expectedTasks: [
+            { taskId: 'task-b', revision: 1 },
+            { taskId: 'task-a', revision: 1 },
+          ],
+          actor: human,
+          idempotencyKey: 'stale-preview',
+        }),
+      'project_run_stale',
+    );
+    expect(repositories.projectRuns.listByProject(project.id)).toEqual([]);
+  });
+
   it('freezes eligible tasks in stable rank order with policy snapshots', () => {
     const { repositories, project, publisher, service } = setup();
     repositories.tasks.create(
@@ -436,8 +490,16 @@ describe('ProjectRunService controls', () => {
       idempotencyKey: 'resume-run-1',
     });
 
-    expect(paused.run).toMatchObject({ state: 'paused', revision: 2 });
-    expect(resumed.run).toMatchObject({ state: 'running', revision: 3 });
+    expect(paused.run).toMatchObject({
+      state: 'paused',
+      pauseReason: 'operator_paused',
+      revision: 2,
+    });
+    expect(resumed.run).toMatchObject({
+      state: 'running',
+      pauseReason: null,
+      revision: 3,
+    });
     expect(resumed.run.items).toEqual(started.run.items);
     expect(publisher.publishProject).toHaveBeenCalledTimes(3);
   });

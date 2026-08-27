@@ -331,6 +331,7 @@ describe('migrate', () => {
       { id: '012-project-runs' },
       { id: '013-task-attempt-project-run-source' },
       { id: '014-project-run-prelaunch-attention' },
+      { id: '015-project-run-pause-reason' },
     ]);
     expect(
       database
@@ -859,6 +860,7 @@ describe('migrate', () => {
       { id: '012-project-runs' },
       { id: '013-task-attempt-project-run-source' },
       { id: '014-project-run-prelaunch-attention' },
+      { id: '015-project-run-pause-reason' },
     ]);
   });
 
@@ -1082,6 +1084,10 @@ describe('migrate', () => {
       join(__dirname, 'migrations', '014-project-run-prelaunch-attention.sql'),
       join(directory, 'migrations', '014-project-run-prelaunch-attention.sql'),
     );
+    copyFileSync(
+      join(__dirname, 'migrations', '015-project-run-pause-reason.sql'),
+      join(directory, 'migrations', '015-project-run-pause-reason.sql'),
+    );
     buildSync({
       bundle: true,
       entryPoints: [join(__dirname, 'migrate.ts')],
@@ -1141,6 +1147,7 @@ describe('migrate', () => {
         { id: '012-project-runs' },
         { id: '013-task-attempt-project-run-source' },
         { id: '014-project-run-prelaunch-attention' },
+        { id: '015-project-run-pause-reason' },
       ]);
     } finally {
       Atomics.store(new Int32Array(barrier), 0, 1);
@@ -1221,6 +1228,7 @@ describe('migrate', () => {
       { id: '012-project-runs' },
       { id: '013-task-attempt-project-run-source' },
       { id: '014-project-run-prelaunch-attention' },
+      { id: '015-project-run-pause-reason' },
     ]);
   });
 
@@ -1635,6 +1643,22 @@ describe('migrate', () => {
     ).toEqual({ project_id: 'p1', high_water: 2 });
   });
 
+  it('adds a nullable durable pause reason to existing project runs', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'mesh-run-pause-reason-'));
+    const database = openDatabase(join(directory, 'upgrade.sqlite'));
+    databases.push(database);
+
+    migrate(database);
+
+    expect(
+      database
+        .prepare(
+          "SELECT name, `notnull` AS nullable_flag FROM pragma_table_info('project_runs') WHERE name = 'pause_reason'",
+        )
+        .get(),
+    ).toEqual({ name: 'pause_reason', nullable_flag: 0 });
+  });
+
   it('loads the built migration registry and applies every migration from a fresh production output', () => {
     const workspaceRoot = join(__dirname, '..', '..', '..', '..');
     const directory = mkdtempSync(
@@ -1669,6 +1693,7 @@ describe('migrate', () => {
         { id: '012-project-runs' },
         { id: '013-task-attempt-project-run-source' },
         { id: '014-project-run-prelaunch-attention' },
+        { id: '015-project-run-pause-reason' },
       ]);
       expect(
         database

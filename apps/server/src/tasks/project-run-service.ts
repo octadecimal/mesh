@@ -37,6 +37,7 @@ export type ProjectRunCommandOutcome = {
 export type StartProjectRunInput = {
   projectId: string;
   concurrency: number;
+  expectedTasks: Array<{ taskId: string; revision: number }>;
   actor: TaskActor;
   idempotencyKey: string;
 };
@@ -127,6 +128,24 @@ export class ProjectRunService {
         tasks,
         currentAttemptTaskIds,
       });
+      const currentTasks = eligible.map(({ task }) => ({
+        taskId: task.id,
+        revision: task.revision,
+      }));
+      if (
+        input.expectedTasks.length !== currentTasks.length ||
+        input.expectedTasks.some(
+          (expected, index) =>
+            expected.taskId !== currentTasks[index]?.taskId ||
+            expected.revision !== currentTasks[index]?.revision,
+        )
+      ) {
+        throw new ProjectRunServiceError(
+          'project_run_stale',
+          `Project '${project.id}' eligible tasks have changed`,
+          { expectedTasks: input.expectedTasks, currentTasks },
+        );
+      }
       if (eligible.length === 0) {
         throw new ProjectRunServiceError(
           'project_run_empty',
@@ -169,6 +188,7 @@ export class ProjectRunService {
         runId: run.id,
         expectedRunRevision: run.revision,
         state: 'paused',
+        pauseReason: 'operator_paused',
         occurredAt: this.now(),
       });
       if (!changed) this.throwStale(run.id);
@@ -516,6 +536,7 @@ export class ProjectRunService {
         runId,
         expectedRunRevision: run.revision,
         state: 'paused',
+        pauseReason: 'launch_outcome_unknown',
         occurredAt: this.now(),
       });
       if (!changed) this.throwStale(runId);

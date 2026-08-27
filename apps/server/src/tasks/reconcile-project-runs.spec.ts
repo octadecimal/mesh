@@ -397,6 +397,7 @@ describe('reconcileProjectRuns', () => {
     });
     expect(context.repositories.projectRuns.get(context.run.id)).toMatchObject({
       state: 'paused',
+      pauseReason: 'launch_outcome_unknown',
       items: [expect.objectContaining({ status: 'launch_pending' })],
     });
   });
@@ -452,6 +453,7 @@ describe('reconcileProjectRuns', () => {
     });
     expect(context.repositories.projectRuns.get(context.run.id)).toMatchObject({
       state: 'paused',
+      pauseReason: 'capacity_ambiguous',
       items: [expect.objectContaining({ status: 'launch_pending' })],
     });
   });
@@ -506,6 +508,7 @@ describe('reconcileProjectRuns', () => {
       runId: context.run.id,
       expectedRunRevision: context.run.revision,
       state: 'paused',
+      pauseReason: 'operator_paused',
       occurredAt: now,
     });
     if (!paused) throw new Error('Expected paused run');
@@ -607,12 +610,18 @@ describe('reconcileProjectRuns', () => {
     expect(reconcile(repositoryUnsafe).pausedRunIds).toEqual([
       repositoryUnsafe.run.id,
     ]);
+    expect(
+      repositoryUnsafe.repositories.projectRuns.get(repositoryUnsafe.run.id),
+    ).toMatchObject({ state: 'paused', pauseReason: 'repository_unsafe' });
 
     const billingUnsafe = setup();
     expect(
       reconcile(billingUnsafe, [{ variable: 'ANTHROPIC_API_KEY' }])
         .pausedRunIds,
     ).toEqual([billingUnsafe.run.id]);
+    expect(
+      billingUnsafe.repositories.projectRuns.get(billingUnsafe.run.id),
+    ).toMatchObject({ state: 'paused', pauseReason: 'billing_conflict' });
   });
 
   it('fails closed with audit_failed when a repair event cannot persist', () => {

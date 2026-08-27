@@ -7,7 +7,7 @@ import {
   type Task,
   type TaskActor,
 } from '@mesh-session-platform/contracts';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import type { MeshProjection } from '../state/reducer';
 import {
@@ -95,6 +95,15 @@ const itemCounts = (run: ProjectRun) => ({
     .length,
   notStarted: run.items.filter(({ status }) => status === 'not_started').length,
 });
+
+const runProjectionFingerprint = (run: ProjectRun | undefined) =>
+  run ? `${run.id}:${run.revision}:${run.state}` : 'no-active-run';
+
+type PendingAction = {
+  label: string;
+  baseline: string;
+  settled: boolean;
+};
 
 function ItemEvidence({
   item,
@@ -201,14 +210,20 @@ export function ProjectRunPanel({
     ({ state }) => state === 'completed',
   );
   const eligibleTasks = selectEligibleRunPreview(projection, project.id);
+  const previewFingerprint = eligibleTasks
+    .map(({ id, revision }) => `${id}:${revision}`)
+    .join('|');
   const repairs = selectProjectRepairConditions(projection, project.id);
   const boundedMaximum = Math.max(1, maxConcurrency);
   const [authorizing, setAuthorizing] = useState(false);
   const [concurrency, setConcurrency] = useState(1);
   const [subscriptionConfirmed, setSubscriptionConfirmed] = useState(false);
-  const [pendingAction, setPendingAction] = useState<string>();
+  const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [error, setError] = useState<string>();
   const [confirmingStop, setConfirmingStop] = useState(false);
+  const currentProjectId = useRef(project.id);
+  currentProjectId.current = project.id;
+  const projectionFingerprint = runProjectionFingerprint(activeRun);
   const controlsDisabled =
     !connected || Boolean(project.archivedAt) || Boolean(pendingAction);
 
@@ -226,6 +241,19 @@ export function ProjectRunPanel({
   }, [boundedMaximum]);
 
   useEffect(() => {
+    setSubscriptionConfirmed(false);
+  }, [previewFingerprint]);
+
+  useEffect(() => {
+    if (
+      pendingAction?.settled &&
+      pendingAction.baseline !== projectionFingerprint
+    ) {
+      setPendingAction(undefined);
+    }
+  }, [pendingAction, projectionFingerprint]);
+
+  useEffect(() => {
     setError(undefined);
     setConfirmingStop(false);
   }, [activeRun?.id, activeRun?.revision]);
@@ -236,13 +264,22 @@ export function ProjectRunPanel({
     fallback: string,
   ) => {
     if (controlsDisabled) return;
-    setPendingAction(label);
+    const commandProjectId = project.id;
+    setPendingAction({
+      label,
+      baseline: projectionFingerprint,
+      settled: false,
+    });
     setError(undefined);
     try {
       await Promise.resolve(onCommand(command));
+      if (currentProjectId.current !== commandProjectId) return;
+      setPendingAction((current) =>
+        current?.label === label ? { ...current, settled: true } : current,
+      );
     } catch (caught) {
+      if (currentProjectId.current !== commandProjectId) return;
       setError(failureMessage(caught, fallback));
-    } finally {
       setPendingAction(undefined);
     }
   };
@@ -253,7 +290,15 @@ export function ProjectRunPanel({
       'start',
       {
         type: 'project.run.start',
-        payload: { projectId: project.id, concurrency, actor: operator },
+        payload: {
+          projectId: project.id,
+          concurrency,
+          expectedTasks: eligibleTasks.map(({ id, revision }) => ({
+            taskId: id,
+            revision,
+          })),
+          actor: operator,
+        },
       },
       'The project run could not be authorized.',
     );
@@ -318,6 +363,22 @@ export function ProjectRunPanel({
         </p>
       ) : null}
 
+      {repairs.length > 0 ? (
+        <div className="notice notice-error project-run-repairs" role="alert">
+          <strong>Task/project repairs required</strong>
+          <ul>
+            {repairs.map((repair) => (
+              <li key={`${repair.taskId}:${repair.attemptId}:${repair.reason}`}>
+                Task repair —{' '}
+                {projection.tasksById[repair.taskId]?.title ?? repair.taskId}{' '}
+                {repairLabels[repair.reason] ??
+                  repair.reason.replace(/_/g, ' ')}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {activeRun ? (
         <div className="project-run-active">
           <div className="project-run-summary">
@@ -339,8 +400,12 @@ export function ProjectRunPanel({
 
           {activeRun.state === 'paused' ? (
             <p className="notice notice-warning">
-              New launches are paused. Active work continues and may release
-              capacity.
+              New launches are paused:{' '}
+              {(activeRun.pauseReason ?? 'reason unavailable').replace(
+                /_/g,
+                ' ',
+              )}
+              . Active work continues and may release capacity.
             </p>
           ) : null}
           {activeRun.state === 'draining' ? (
@@ -348,27 +413,6 @@ export function ProjectRunPanel({
               Stop is committed. Active work is draining; no queued task will
               start.
             </p>
-          ) : null}
-
-          {repairs.length > 0 ? (
-            <div
-              className="notice notice-error project-run-repairs"
-              role="alert"
-            >
-              <strong>Run repair required</strong>
-              <ul>
-                {repairs.map((repair) => (
-                  <li
-                    key={`${repair.taskId}:${repair.attemptId}:${repair.reason}`}
-                  >
-                    {projection.tasksById[repair.taskId]?.title ??
-                      repair.taskId}{' '}
-                    {repairLabels[repair.reason] ??
-                      repair.reason.replace(/_/g, ' ')}
-                  </li>
-                ))}
-              </ul>
-            </div>
           ) : null}
 
           <RunItems
@@ -386,7 +430,9 @@ export function ProjectRunPanel({
                 disabled={controlsDisabled}
                 onClick={() => control('pause')}
               >
-                {pendingAction === 'pause' ? 'Pausing run…' : 'Pause run'}
+                {pendingAction?.label === 'pause'
+                  ? 'Pausing run…'
+                  : 'Pause run'}
               </button>
             ) : null}
             {activeRun.state === 'paused' ? (
@@ -396,7 +442,9 @@ export function ProjectRunPanel({
                 disabled={controlsDisabled}
                 onClick={() => control('resume')}
               >
-                {pendingAction === 'resume' ? 'Resuming run…' : 'Resume run'}
+                {pendingAction?.label === 'resume'
+                  ? 'Resuming run…'
+                  : 'Resume run'}
               </button>
             ) : null}
             {activeRun.state === 'running' || activeRun.state === 'paused' ? (
@@ -437,7 +485,7 @@ export function ProjectRunPanel({
                   disabled={controlsDisabled}
                   onClick={() => control('stop')}
                 >
-                  {pendingAction === 'stop'
+                  {pendingAction?.label === 'stop'
                     ? 'Stopping run…'
                     : 'Confirm stop run'}
                 </button>
@@ -546,7 +594,7 @@ export function ProjectRunPanel({
                 }
                 onClick={authorize}
               >
-                {pendingAction === 'start'
+                {pendingAction?.label === 'start'
                   ? 'Authorizing run…'
                   : 'Authorize run'}
               </button>
@@ -575,7 +623,7 @@ export function ProjectRunPanel({
                         pastRun.completionReason}
                     </strong>
                     <span>
-                      Authorized {new Date(pastRun.startedAt).toLocaleString()}
+                      Started {new Date(pastRun.startedAt).toLocaleString()}
                     </span>
                   </div>
                   <span>

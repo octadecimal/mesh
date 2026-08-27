@@ -67,6 +67,70 @@ describe('ProjectRunPanel', () => {
     ).toBeDisabled();
   });
 
+  it('requires confirmation again when the ordered preview fingerprint changes', async () => {
+    const user = userEvent.setup();
+    const rendered = renderPanel({ tasks: [task()] });
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    const confirmation = screen.getByRole('checkbox', {
+      name: /subscription capacity/i,
+    });
+    await user.click(confirmation);
+    expect(confirmation).toBeChecked();
+
+    rendered.rerender(
+      <ProjectRunPanel
+        project={project}
+        projection={projection({ tasks: [task({ revision: 2 })] })}
+        connected
+        maxConcurrency={3}
+        onCommand={vi.fn()}
+        onSelectTask={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole('checkbox', { name: /subscription capacity/i }),
+    ).not.toBeChecked();
+  });
+
+  it('ignores a previous project command settlement after the project changes', async () => {
+    const user = userEvent.setup();
+    const pending = deferred<unknown>();
+    const secondProject = projectSchema.parse({
+      ...project,
+      id: 'project-2',
+      displayName: 'Second project',
+    });
+    const first = renderPanel({
+      tasks: [task()],
+      onCommand: vi.fn().mockReturnValue(pending.promise),
+    });
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    await user.click(
+      screen.getByRole('checkbox', { name: /subscription capacity/i }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Authorize run' }));
+
+    first.rerender(
+      <ProjectRunPanel
+        project={secondProject}
+        projection={projection({
+          tasks: [task({ id: 'task-2', projectId: secondProject.id })],
+        })}
+        connected
+        maxConcurrency={3}
+        onCommand={vi.fn()}
+        onSelectTask={vi.fn()}
+      />,
+    );
+    pending.reject(new Error('First project failed'));
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Start run' })).toBeEnabled(),
+    );
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('requires explicit subscription confirmation and sends the bounded command without optimistic state', async () => {
     const user = userEvent.setup();
     const pending = deferred<unknown>();
@@ -81,7 +145,12 @@ describe('ProjectRunPanel', () => {
 
     expect(onCommand).toHaveBeenCalledWith({
       type: 'project.run.start',
-      payload: { projectId: project.id, concurrency: 1, actor: operator },
+      payload: {
+        projectId: project.id,
+        concurrency: 1,
+        expectedTasks: [{ taskId: 'task-a', revision: 1 }],
+        actor: operator,
+      },
     });
     expect(
       screen.getByRole('button', { name: 'Authorizing run…' }),
@@ -92,8 +161,8 @@ describe('ProjectRunPanel', () => {
     pending.resolve(undefined);
     await waitFor(() =>
       expect(
-        screen.getByRole('button', { name: 'Authorize run' }),
-      ).toBeEnabled(),
+        screen.getByRole('button', { name: 'Authorizing run…' }),
+      ).toBeDisabled(),
     );
   });
 
@@ -137,10 +206,9 @@ describe('ProjectRunPanel', () => {
 
   it('reports start failures and preserves the authorization form', async () => {
     const user = userEvent.setup();
-    const onCommand = vi.fn().mockRejectedValue({
-      code: 'project_run_stale',
-      message: 'The eligible queue changed. Refresh and review it again.',
-    });
+    const onCommand = vi
+      .fn()
+      .mockRejectedValue(new Error('The command connection closed.'));
     renderPanel({ tasks: [task()], onCommand });
 
     await user.click(screen.getByRole('button', { name: 'Start run' }));
@@ -150,7 +218,7 @@ describe('ProjectRunPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Authorize run' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'The eligible queue changed. Refresh and review it again.',
+      'The command connection closed.',
     );
     expect(screen.getByLabelText('Concurrency')).toHaveValue(1);
   });
@@ -252,6 +320,8 @@ describe('ProjectRunPanel', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(
       /Active task.*startup outcome is unknown/i,
     );
+    expect(screen.getByRole('alert')).toHaveTextContent(/Task repair/i);
+    expect(screen.queryByText(/Run repair/i)).toBeNull();
   });
 
   it('sends revision-safe pause, resume, and stop commands and explains draining', async () => {
@@ -265,6 +335,21 @@ describe('ProjectRunPanel', () => {
       payload: { runId: 'run-1', expectedRevision: 4, actor: operator },
     });
 
+    expect(screen.getByRole('button', { name: 'Stop run' })).toBeDisabled();
+
+    rendered.rerender(
+      <ProjectRunPanel
+        project={project}
+        projection={projection({
+          runs: [run({ state: 'paused', revision: 5 })],
+        })}
+        connected
+        maxConcurrency={3}
+        onCommand={onCommand}
+        onSelectTask={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/operator paused/i)).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Stop run' }));
     expect(
       screen.getByText(/Active work drains and is not interrupted/i),
@@ -272,13 +357,15 @@ describe('ProjectRunPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Confirm stop run' }));
     expect(onCommand).toHaveBeenLastCalledWith({
       type: 'project.run.stop',
-      payload: { runId: 'run-1', expectedRevision: 4, actor: operator },
+      payload: { runId: 'run-1', expectedRevision: 5, actor: operator },
     });
 
     rendered.rerender(
       <ProjectRunPanel
         project={project}
-        projection={projection({ runs: [run({ state: 'paused' })] })}
+        projection={projection({
+          runs: [run({ state: 'paused', revision: 6 })],
+        })}
         connected
         maxConcurrency={3}
         onCommand={onCommand}
@@ -288,7 +375,7 @@ describe('ProjectRunPanel', () => {
     await user.click(screen.getByRole('button', { name: 'Resume run' }));
     expect(onCommand).toHaveBeenLastCalledWith({
       type: 'project.run.resume',
-      payload: { runId: 'run-1', expectedRevision: 4, actor: operator },
+      payload: { runId: 'run-1', expectedRevision: 6, actor: operator },
     });
   });
 
@@ -348,6 +435,8 @@ describe('ProjectRunPanel', () => {
     });
 
     const history = screen.getByRole('region', { name: 'Run history' });
+    expect(within(history).getByText(/Started /)).toBeVisible();
+    expect(within(history).queryByText(/Authorized /)).toBeNull();
     expect(within(history).getByText(/Stopped/)).toBeVisible();
     expect(
       within(history).getByText(/0 completed, 1 attention, 1 not started/i),
@@ -444,12 +533,17 @@ const run = (overrides: Partial<ProjectRun> = {}) =>
     revision: 4,
     concurrency: 2,
     state: 'running',
+    pauseReason: null,
     startedAt: timestamp,
     updatedAt: timestamp,
     completionReason: null,
     completedAt: null,
     items: [],
     ...overrides,
+    pauseReason:
+      overrides.state === 'paused'
+        ? (overrides.pauseReason ?? 'operator_paused')
+        : null,
   });
 
 const developerCycle: MeshProjection['developerCyclesByAttemptId'][string][number] =

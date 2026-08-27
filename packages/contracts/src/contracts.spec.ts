@@ -1295,6 +1295,7 @@ describe('session platform contracts', () => {
       state: 'running' as const,
       revision: 1,
       concurrency: 2,
+      pauseReason: null,
       completionReason: null,
       startedAt: '2026-08-27T00:00:00.000Z',
       updatedAt: '2026-08-27T00:00:00.000Z',
@@ -1342,17 +1343,18 @@ describe('session platform contracts', () => {
     );
 
     it.each([
-      ['running', null, null],
-      ['paused', null, null],
-      ['draining', null, null],
-      ['completed', 'finished', '2026-08-27T00:01:00.000Z'],
+      ['running', null, null, null],
+      ['paused', 'operator_paused', null, null],
+      ['draining', null, null, null],
+      ['completed', null, 'finished', '2026-08-27T00:01:00.000Z'],
     ] as const)(
       'parses the %s project run state',
-      (state, completionReason, completedAt) => {
+      (state, pauseReason, completionReason, completedAt) => {
         expect(
           projectRunSchema.parse({
             ...run,
             state,
+            pauseReason,
             completionReason,
             completedAt,
           }).state,
@@ -1391,7 +1393,15 @@ describe('session platform contracts', () => {
       for (const command of [
         {
           type: 'project.run.start',
-          payload: { projectId: 'project-1', concurrency: 2, actor },
+          payload: {
+            projectId: 'project-1',
+            concurrency: 2,
+            expectedTasks: [
+              { taskId: 'task-2', revision: 5 },
+              { taskId: 'task-1', revision: 3 },
+            ],
+            actor,
+          },
         },
         {
           type: 'project.run.pause',
@@ -1414,6 +1424,17 @@ describe('session platform contracts', () => {
           }).command.type,
         ).toBe(command.type);
       }
+
+      expect(() =>
+        commandEnvelopeSchema.parse({
+          protocolVersion: 1,
+          idempotencyKey: 'project-run-unbound-start',
+          command: {
+            type: 'project.run.start',
+            payload: { projectId: 'project-1', concurrency: 2, actor },
+          },
+        }),
+      ).toThrow();
 
       expect(
         projectRunChangedEventSchema.parse({
