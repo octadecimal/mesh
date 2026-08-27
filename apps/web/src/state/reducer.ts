@@ -7,6 +7,7 @@ import type {
   PermissionRequest,
   Project,
   ProjectEvent,
+  ProjectRun,
   ProjectSnapshot,
   QaExecutionCycle,
   QaReport,
@@ -49,6 +50,9 @@ export type MeshProjection = {
   qaCyclesByAttemptId: Record<string, QaExecutionCycle[]>;
   qaReportsByCycleId: Record<string, QaReport>;
   reviewAutomationByTaskId: Record<string, ReviewAutomationProjection>;
+  projectRunsById: Record<string, ProjectRun>;
+  projectRunIdsByProjectId: Record<string, string[]>;
+  projectRunMaxConcurrencyByProjectId: Record<string, number>;
   projectCursors: Record<string, number>;
   workspaces: SessionSnapshot['workspaces'];
   sessions: Session[];
@@ -121,6 +125,9 @@ export const createProjection = (
   qaCyclesByAttemptId: {},
   qaReportsByCycleId: {},
   reviewAutomationByTaskId: {},
+  projectRunsById: {},
+  projectRunIdsByProjectId: {},
+  projectRunMaxConcurrencyByProjectId: {},
   projectCursors: Object.fromEntries(
     snapshot.projects.map((project) => [project.id, 0]),
   ),
@@ -185,33 +192,51 @@ export const applyEvent = (
 export const replaceSnapshot = (
   state: MeshProjection,
   snapshot: SessionSnapshot,
-): MeshProjection => ({
-  ...createProjection(snapshot),
-  tasksById: state.tasksById,
-  attemptsById: state.attemptsById,
-  transitionsByTaskId: state.transitionsByTaskId,
-  repairsByProjectId: state.repairsByProjectId,
-  developerCyclesByAttemptId: state.developerCyclesByAttemptId,
-  developerCompletionReportsByCycleId:
-    state.developerCompletionReportsByCycleId,
-  developerBlockerReportsByCycleId: state.developerBlockerReportsByCycleId,
-  developerReviewFeedbackByCycleId: state.developerReviewFeedbackByCycleId,
-  qaCyclesByAttemptId: state.qaCyclesByAttemptId,
-  qaReportsByCycleId: state.qaReportsByCycleId,
-  reviewAutomationByTaskId: state.reviewAutomationByTaskId,
-  projectCursors: Object.fromEntries(
-    snapshot.projects.map((project) => [
-      project.id,
-      state.projectCursors[project.id] ?? 0,
-    ]),
-  ),
-  selectedSessionId: state.selectedSessionId,
-  filters: state.filters,
-  promptDrafts: state.promptDrafts,
-  unreadSessionIds: state.unreadSessionIds,
-  connectionHealth: state.connectionHealth,
-  notifications: state.notifications,
-});
+): MeshProjection => {
+  const projectIds = new Set<string>(snapshot.projects.map(({ id }) => id));
+  return {
+    ...createProjection(snapshot),
+    tasksById: state.tasksById,
+    attemptsById: state.attemptsById,
+    transitionsByTaskId: state.transitionsByTaskId,
+    repairsByProjectId: state.repairsByProjectId,
+    developerCyclesByAttemptId: state.developerCyclesByAttemptId,
+    developerCompletionReportsByCycleId:
+      state.developerCompletionReportsByCycleId,
+    developerBlockerReportsByCycleId: state.developerBlockerReportsByCycleId,
+    developerReviewFeedbackByCycleId: state.developerReviewFeedbackByCycleId,
+    qaCyclesByAttemptId: state.qaCyclesByAttemptId,
+    qaReportsByCycleId: state.qaReportsByCycleId,
+    reviewAutomationByTaskId: state.reviewAutomationByTaskId,
+    projectRunsById: Object.fromEntries(
+      Object.entries(state.projectRunsById).filter(([, run]) =>
+        projectIds.has(run.projectId),
+      ),
+    ) as Record<string, ProjectRun>,
+    projectRunIdsByProjectId: Object.fromEntries(
+      Object.entries(state.projectRunIdsByProjectId).filter(([projectId]) =>
+        projectIds.has(projectId),
+      ),
+    ) as Record<string, string[]>,
+    projectRunMaxConcurrencyByProjectId: Object.fromEntries(
+      Object.entries(state.projectRunMaxConcurrencyByProjectId).filter(
+        ([projectId]) => projectIds.has(projectId),
+      ),
+    ) as Record<string, number>,
+    projectCursors: Object.fromEntries(
+      snapshot.projects.map((project) => [
+        project.id,
+        state.projectCursors[project.id] ?? 0,
+      ]),
+    ),
+    selectedSessionId: state.selectedSessionId,
+    filters: state.filters,
+    promptDrafts: state.promptDrafts,
+    unreadSessionIds: state.unreadSessionIds,
+    connectionHealth: state.connectionHealth,
+    notifications: state.notifications,
+  };
+};
 
 const projectsAfter = (projects: readonly Project[], project: Project) => {
   const index = projects.findIndex(({ id }) => id === project.id);
@@ -290,6 +315,9 @@ export const replaceProjectSnapshot = (
   const qaCycles = snapshot.qaCycles ?? [];
   const qaReports = snapshot.qaReports ?? [];
   const reviewAutomationActions = snapshot.reviewAutomationActions ?? [];
+  const runs = snapshot.runs ?? [];
+  const projectRunMaxConcurrency =
+    snapshot.projectRunLimits?.maxConcurrency ?? 1;
   const replacedTaskIds = new Set<string>([
     ...Object.values(state.tasksById)
       .filter((task) => task.projectId === snapshot.project.id)
@@ -359,6 +387,16 @@ export const replaceProjectSnapshot = (
       ([taskId]) => !replacedTaskIds.has(taskId),
     ),
   ) as Record<string, ReviewAutomationProjection>;
+  const replacedRunIds = new Set<string>(
+    Object.values(state.projectRunsById)
+      .filter((run) => run.projectId === snapshot.project.id)
+      .map((run) => run.id),
+  );
+  const projectRunsById = Object.fromEntries(
+    Object.entries(state.projectRunsById).filter(
+      ([runId]) => !replacedRunIds.has(runId),
+    ),
+  ) as Record<string, ProjectRun>;
   const transitionsByTaskId = Object.fromEntries(
     Object.entries(state.transitionsByTaskId).filter(
       ([taskId]) => !replacedTaskIds.has(taskId),
@@ -409,6 +447,15 @@ export const replaceProjectSnapshot = (
     reviewAutomationByTaskId: {
       ...reviewAutomationByTaskId,
       ...automationByTask(snapshot.tasks, reviewAutomationActions),
+    },
+    projectRunsById: { ...projectRunsById, ...byId(runs) },
+    projectRunIdsByProjectId: {
+      ...state.projectRunIdsByProjectId,
+      [snapshot.project.id]: runs.map((run) => run.id),
+    },
+    projectRunMaxConcurrencyByProjectId: {
+      ...state.projectRunMaxConcurrencyByProjectId,
+      [snapshot.project.id]: projectRunMaxConcurrency,
     },
     projectCursors: {
       ...state.projectCursors,
@@ -487,6 +534,23 @@ export const applyProjectEvent = (
       attemptsById: {
         ...next.attemptsById,
         [event.payload.attempt.id]: event.payload.attempt,
+      },
+    };
+  }
+
+  if (event.type === 'project.run_changed') {
+    const runs = next.projectRunIdsByProjectId[event.projectId] ?? [];
+    next = {
+      ...next,
+      projectRunsById: {
+        ...next.projectRunsById,
+        [event.payload.run.id]: event.payload.run,
+      },
+      projectRunIdsByProjectId: {
+        ...next.projectRunIdsByProjectId,
+        [event.projectId]: runs.includes(event.payload.run.id)
+          ? runs
+          : [...runs, event.payload.run.id],
       },
     };
   }

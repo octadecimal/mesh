@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   projectSchema,
+  projectRunSchema,
   projectSnapshotSchema,
   qaExecutionCycleSchema,
   taskAttemptSchema,
@@ -98,6 +99,18 @@ const projectSnapshot = (projectId: string, cursor: number) => {
     terminalCommandId: null,
     terminalEventId: null,
   });
+  const run = projectRunSchema.parse({
+    id: `run-${projectId}`,
+    projectId,
+    revision: 1,
+    concurrency: 1,
+    state: 'running',
+    completionReason: null,
+    startedAt: timestamp,
+    updatedAt: timestamp,
+    completedAt: null,
+    items: [],
+  });
   return projectSnapshotSchema.parse({
     protocolVersion: 1,
     project: project(projectId),
@@ -105,13 +118,15 @@ const projectSnapshot = (projectId: string, cursor: number) => {
     attempts: [attempt],
     transitions: [],
     repairs: [],
+    runs: [run],
+    projectRunLimits: { maxConcurrency: 4 },
     qaCycles: [cycle],
     cursor,
   });
 };
 
 describe('project resync', () => {
-  it('refreshes QA state for only the project that owns the sequence gap', async () => {
+  it('refreshes project-local QA and run state for only the project that owns the sequence gap', async () => {
     const store = createMeshStore(sessionSnapshot);
     store.replaceProjectSnapshot(projectSnapshot('project-2', 4));
     const requested: string[] = [];
@@ -144,5 +159,14 @@ describe('project resync', () => {
     expect(
       store.state.qaCyclesByAttemptId['attempt-project-2'][0].id.get(),
     ).toBe('qa-cycle-project-2');
+    expect(store.state.projectRunsById['run-project-1'].id.get()).toBe(
+      'run-project-1',
+    );
+    expect(store.state.projectRunsById['run-project-2'].id.get()).toBe(
+      'run-project-2',
+    );
+    expect(
+      store.state.projectRunMaxConcurrencyByProjectId['project-1'].get(),
+    ).toBe(4);
   });
 });
