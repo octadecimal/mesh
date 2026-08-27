@@ -148,6 +148,35 @@ describe('project run policy', () => {
     ).toEqual(['available']);
   });
 
+  it('excludes eligible-looking tasks from another project', () => {
+    expect(
+      selectEligibleRunTasks({
+        project,
+        tasks: [
+          task('foreign-task', { projectId: 'other-project' }),
+          task('project-task'),
+        ],
+        currentAttemptTaskIds: new Set(),
+      }).map(({ task: eligibleTask }) => eligibleTask.id),
+    ).toEqual(['project-task']);
+  });
+
+  it('orders ranks and task IDs with binary, not locale-dependent, comparison', () => {
+    expect(
+      selectEligibleRunTasks({
+        project,
+        tasks: [
+          task('ä', { rank: 'm' }),
+          task('a', { rank: 'm' }),
+          task('Z', { rank: 'm' }),
+          task('lowercase-rank', { rank: 'a' }),
+          task('uppercase-rank', { rank: 'A' }),
+        ],
+        currentAttemptTaskIds: new Set(),
+      }).map(({ task: eligibleTask }) => eligibleTask.id),
+    ).toEqual(['uppercase-rank', 'lowercase-rank', 'Z', 'a', 'ä']);
+  });
+
   it('counts launch-pending and active items as occupied capacity', () => {
     expect(
       occupiedSlots(

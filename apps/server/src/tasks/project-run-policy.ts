@@ -17,6 +17,9 @@ export interface SelectEligibleRunTasksInput {
   currentAttemptTaskIds: ReadonlySet<string>;
 }
 
+const compareBinaryStrings = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
+
 export const selectEligibleRunTasks = ({
   project,
   tasks,
@@ -25,13 +28,15 @@ export const selectEligibleRunTasks = ({
   tasks
     .filter(
       (task) =>
+        task.projectId === project.id &&
         task.lifecycleState === 'ready' &&
         task.blocked === null &&
         !currentAttemptTaskIds.has(task.id),
     )
     .sort(
       (left, right) =>
-        left.rank.localeCompare(right.rank) || left.id.localeCompare(right.id),
+        compareBinaryStrings(left.rank, right.rank) ||
+        compareBinaryStrings(left.id, right.id),
     )
     .map((task) => ({
       task,
@@ -54,7 +59,8 @@ export const occupiedSlots = (run: ProjectRun): number =>
   ).length;
 
 const compareQueuedItems = (left: ProjectRunItem, right: ProjectRunItem) =>
-  left.queuePosition - right.queuePosition || left.id.localeCompare(right.id);
+  left.queuePosition - right.queuePosition ||
+  compareBinaryStrings(left.id, right.id);
 
 export const planProjectRun = ({
   run,
