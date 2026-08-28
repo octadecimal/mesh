@@ -490,6 +490,52 @@ describe('reduceProjectProjection', () => {
     expect(subscribed.transport).toBe('subscribed');
     expect(subscribed.connection).toEqual({ status: 'ready' });
   });
+
+  it('preserves gap resync health across disconnect and resubscribe', () => {
+    const afterGap = reduceProjectProjection(ready(), {
+      type: 'runtime.event',
+      event: { ...completion, sequence: 7 },
+    });
+    expect(afterGap.transport).toBe('connecting');
+    expect(afterGap.connection).toEqual({
+      status: 'stale',
+      reason: 'runtime_gap',
+    });
+    expect(afterGap.runtimeCursor).toBe(5);
+    expect(afterGap.resyncRequested).toBe(true);
+
+    const afterDisconnect = reduceProjectProjection(afterGap, {
+      type: 'transport.disconnected',
+    });
+    expect(afterDisconnect.transport).toBe('disconnected');
+    expect(afterDisconnect.connection).toEqual({ status: 'disconnected' });
+    expect(afterDisconnect.runtimeCursor).toBe(5);
+    expect(afterDisconnect.resyncRequested).toBe(true);
+
+    const afterSubscribe = reduceProjectProjection(afterDisconnect, {
+      type: 'transport.subscribed',
+    });
+    expect(afterSubscribe.transport).toBe('subscribed');
+    expect(afterSubscribe.connection).toEqual({
+      status: 'stale',
+      reason: 'runtime_gap',
+    });
+    expect(afterSubscribe.runtimeCursor).toBe(5);
+    expect(afterSubscribe.resyncRequested).toBe(true);
+
+    const replacement = reduceProjectProjection(afterSubscribe, {
+      type: 'snapshot.received',
+      snapshot: {
+        ...snapshot,
+        cursors: { domain: 3, runtime: 7 },
+      },
+    });
+    expect(replacement.transport).toBe('subscribed');
+    expect(replacement.connection).toEqual({ status: 'ready' });
+    expect(replacement.domainCursor).toBe(3);
+    expect(replacement.runtimeCursor).toBe(7);
+    expect(replacement.resyncRequested).toBe(false);
+  });
 });
 
 describe('createV2Store', () => {

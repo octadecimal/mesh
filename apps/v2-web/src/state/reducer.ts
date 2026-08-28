@@ -38,6 +38,7 @@ export type ProjectProjection = {
   transport: 'connecting' | 'subscribed' | 'disconnected';
   snapshotReady: boolean;
   resyncRequested: boolean;
+  resyncReason: string | undefined;
   local: ProjectionLocalState;
 };
 
@@ -68,6 +69,7 @@ export const createInitialProjectProjection = (
   transport: 'connecting',
   snapshotReady: false,
   resyncRequested: false,
+  resyncReason: undefined,
   local: { route: '', repositoryDraft: '', selectedTab: 'board' },
 });
 
@@ -75,6 +77,7 @@ const stale = (state: ProjectProjection, reason: string): ProjectProjection => (
   ...state,
   connection: { status: 'stale', reason },
   resyncRequested: true,
+  resyncReason: reason,
 });
 
 const replaceExecution = (
@@ -243,6 +246,7 @@ export const reduceProjectProjection = (
               : { status: 'loading' },
         snapshotReady: true,
         resyncRequested: false,
+        resyncReason: undefined,
       };
     case 'domain.event':
       if (state.resyncRequested) return state;
@@ -255,7 +259,10 @@ export const reduceProjectProjection = (
         ...state,
         transport: 'subscribed',
         connection: state.resyncRequested
-          ? state.connection
+          ? {
+              status: 'stale',
+              reason: state.resyncReason ?? 'resync_required',
+            }
           : state.snapshotReady
             ? { status: 'ready' }
             : { status: 'loading' },
