@@ -223,19 +223,9 @@ export class V2EventStore {
       );
     }
 
-    const storedDiagnostic = rawDiagnosticSchema.parse({
-      ...parsedDiagnostic,
-      id: randomUUID(),
-    });
-    this.insertDiagnostic.run({
-      id: storedDiagnostic.id,
-      projectId: storedDiagnostic.projectId,
-      executionId: storedDiagnostic.executionId,
-      adapterId: storedDiagnostic.adapterId,
-      adapterCursor: storedDiagnostic.adapterCursor,
-      receivedAt: storedDiagnostic.receivedAt,
-      payloadJson: canonicalJson(storedDiagnostic.payload),
-    });
+    const storedDiagnostic = this.appendRawDiagnosticInTransaction(
+      parsedDiagnostic,
+    );
 
     const sequence = this.nextSequence(parsedProjectId, 'runtime');
     const event = runtimeEventSchema.parse({
@@ -269,6 +259,32 @@ export class V2EventStore {
       throw new Error('Runtime execution cursor update lost coherence');
     }
     return event;
+  }
+
+  appendRawDiagnosticInTransaction(
+    diagnostic: RawDiagnosticDraft,
+  ): RawDiagnostic {
+    assertTransaction(this.database);
+    const parsedDiagnostic = rawDiagnosticDraftSchema.parse(diagnostic);
+    const row: RawDiagnosticRow = {
+      id: randomUUID(),
+      project_id: parsedDiagnostic.projectId,
+      execution_id: parsedDiagnostic.executionId,
+      adapter_id: parsedDiagnostic.adapterId,
+      adapter_cursor: parsedDiagnostic.adapterCursor,
+      received_at: parsedDiagnostic.receivedAt,
+      payload_json: canonicalJson(parsedDiagnostic.payload),
+    };
+    this.insertDiagnostic.run({
+      id: row.id,
+      projectId: row.project_id,
+      executionId: row.execution_id,
+      adapterId: row.adapter_id,
+      adapterCursor: row.adapter_cursor,
+      receivedAt: row.received_at,
+      payloadJson: row.payload_json,
+    });
+    return toRawDiagnostic(row);
   }
 
   domainAfter(projectId: string, sequence: number): RetainedDomainWindow {

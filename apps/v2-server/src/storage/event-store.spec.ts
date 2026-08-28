@@ -5,6 +5,7 @@ import { dirname } from 'node:path';
 import type {
   DomainEventDraft,
   Project,
+  RawDiagnosticDraft,
   RuntimeEventDraft,
   V2Command,
   V2CommandResult,
@@ -68,6 +69,22 @@ const appendRuntime = (fixture: V2TestDatabase, adapterCursor: number) =>
       outputDraft(fixture, adapterCursor),
     ),
   );
+
+const reconciliationDiagnostic = (
+  fixture: V2TestDatabase,
+  overrides: Partial<RawDiagnosticDraft> = {},
+): RawDiagnosticDraft => ({
+  projectId: fixture.project.id,
+  executionId: fixture.execution.id,
+  adapterId: 'fake',
+  adapterCursor: null,
+  receivedAt: '2026-08-28T00:00:00.000Z',
+  payload: {
+    result: { status: 'resumable', afterAdapterCursor: 2 },
+    operation: 'probe',
+  },
+  ...overrides,
+});
 
 const runtimePersistenceState = (fixture: V2TestDatabase) => ({
   diagnostics: fixture.database
@@ -172,6 +189,110 @@ describe('V2CommandRepository', () => {
 });
 
 describe('V2EventStore', () => {
+  it('appends a parsed canonical reconciliation diagnostic without advancing cursors', () => {
+    const fixture = setup();
+    const beforeStreams = fixture.events.cursors(fixture.project.id);
+    const beforeExecution = fixture.database
+      .prepare(
+        `SELECT last_adapter_cursor, last_runtime_sequence
+         FROM worker_executions WHERE id = ?`,
+      )
+      .get(fixture.execution.id);
+
+    const stored = inImmediateTransaction(fixture.database, () =>
+      fixture.events.appendRawDiagnosticInTransaction(
+        reconciliationDiagnostic(fixture),
+      ),
+    );
+
+    expect(stored).toMatchObject({
+      projectId: fixture.project.id,
+      executionId: fixture.execution.id,
+      adapterId: 'fake',
+      adapterCursor: null,
+      payload: {
+        operation: 'probe',
+        result: { afterAdapterCursor: 2, status: 'resumable' },
+      },
+    });
+    expect(fixture.events.diagnosticById(stored.id)).toEqual(stored);
+    expect(
+      fixture.database
+        .prepare('SELECT payload_json FROM raw_diagnostics WHERE id = ?')
+        .get(stored.id),
+    ).toEqual({
+      payload_json:
+        '{"operation":"probe","result":{"afterAdapterCursor":2,"status":"resumable"}}',
+    });
+    expect(fixture.events.cursors(fixture.project.id)).toEqual(beforeStreams);
+    expect(
+      fixture.database
+        .prepare(
+          `SELECT last_adapter_cursor, last_runtime_sequence
+           FROM worker_executions WHERE id = ?`,
+        )
+        .get(fixture.execution.id),
+    ).toEqual(beforeExecution);
+  });
+
+  it('requires the caller transaction before appending a raw diagnostic', () => {
+    const fixture = setup();
+
+    expect(() =>
+      fixture.events.appendRawDiagnosticInTransaction(
+        reconciliationDiagnostic(fixture),
+      ),
+    ).toThrowError(/transaction/i);
+    expect(
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM raw_diagnostics')
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it('rolls back a raw diagnostic with its caller transaction', () => {
+    const fixture = setup();
+    const before = runtimePersistenceState(fixture);
+
+    expect(() =>
+      inImmediateTransaction(fixture.database, () => {
+        fixture.events.appendRawDiagnosticInTransaction(
+          reconciliationDiagnostic(fixture),
+        );
+        throw new Error('outer transaction failed');
+      }),
+    ).toThrowError('outer transaction failed');
+
+    expect(runtimePersistenceState(fixture)).toEqual(before);
+  });
+
+  it('rejects raw diagnostics with missing project or execution references', () => {
+    const fixture = setup();
+    const before = runtimePersistenceState(fixture);
+
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        fixture.events.appendRawDiagnosticInTransaction(
+          reconciliationDiagnostic(fixture, {
+            projectId: randomUUID(),
+            executionId: null,
+          }),
+        ),
+      ),
+    ).toThrowError(/foreign key/i);
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        fixture.events.appendRawDiagnosticInTransaction(
+          reconciliationDiagnostic(fixture, {
+            executionId: randomUUID(),
+          }),
+        ),
+      ),
+    ).toThrowError(/foreign key/i);
+
+    expect(runtimePersistenceState(fixture)).toEqual(before);
+  });
+
   it('atomically advances the referenced execution cursors with a runtime event', () => {
     const fixture = setup();
 
