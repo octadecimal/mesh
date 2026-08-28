@@ -1,5 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import {
+  compareCodeUnits,
   taskActorSchema,
   type AttemptRepair,
   type DeveloperBlockerReport,
@@ -15,6 +16,7 @@ import {
   type ReviewAutomationState,
   type Session,
   type Task,
+  type TaskActor,
   type TaskAttempt,
   type TaskLifecycleState,
   type TaskPriority,
@@ -65,7 +67,7 @@ const operator = taskActorSchema.parse({
   type: 'human',
   id: 'operator',
   displayName: 'Operator',
-});
+}) as Extract<TaskActor, { type: 'human' }>;
 
 const transitionLabels: Record<
   TaskLifecycleState,
@@ -165,6 +167,19 @@ const failureDetails = (caught: unknown) =>
       })
     : undefined;
 
+const dependencyFailureMessage = (caught: unknown) => {
+  const failure = failureDetails(caught);
+  const message = failure?.message ?? 'The dependency command failed.';
+  if (failure?.code === 'task_dependency_cycle')
+    return `Dependency cycle: ${message}`;
+  if (
+    failure?.code === 'task_dependency_conflict' ||
+    failure?.code === 'task_revision_conflict'
+  )
+    return `Dependency conflict: ${message}`;
+  return message;
+};
+
 export function TaskDrawer({
   open,
   onOpenChange,
@@ -182,7 +197,12 @@ export function TaskDrawer({
   qaReports,
   reviewAutomation,
   connected,
+  projectTasks,
+  prerequisiteTaskIds,
+  unmetPrerequisiteTaskIds,
+  dependentTaskIds,
   onCommand,
+  onSelectTask,
   onOpenSession,
 }: {
   open: boolean;
@@ -203,7 +223,12 @@ export function TaskDrawer({
     actions: ReviewAutomationAction[];
   };
   connected: boolean;
+  projectTasks: readonly Task[];
+  prerequisiteTaskIds: readonly string[];
+  unmetPrerequisiteTaskIds: readonly string[];
+  dependentTaskIds: readonly string[];
   onCommand: (command: MutatingCommand) => Promise<unknown> | void;
+  onSelectTask: (taskId: string) => void;
   onOpenSession?: (sessionId: string) => void;
 }) {
   const [draft, setDraft] = useState(() => draftFor(task));
@@ -221,6 +246,11 @@ export function TaskDrawer({
     workspaceFor(project),
   );
   const [sessionId, setSessionId] = useState<Session['id'] | ''>('');
+  const [prerequisiteTaskId, setPrerequisiteTaskId] = useState('');
+  const [dependencyPending, setDependencyPending] = useState<
+    'add' | 'remove'
+  >();
+  const [dependencyError, setDependencyError] = useState<string>();
   const readOnly = Boolean(project.archivedAt);
   const missingReadiness = readinessProblems(draft);
   const canonicalMissingReadiness = task
@@ -270,6 +300,59 @@ export function TaskDrawer({
     );
   }, [attempts, project.id, sessions]);
   const sessionToLink = linkChoices.find((session) => session.id === sessionId);
+  const projectTasksById = useMemo(
+    () =>
+      new Map<string, Task>(
+        projectTasks.map((candidate) => [candidate.id, candidate]),
+      ),
+    [projectTasks],
+  );
+  const prerequisiteIds = new Set(prerequisiteTaskIds);
+  const prerequisiteTasks = prerequisiteTaskIds.map((id) => ({
+    id,
+    task: projectTasksById.get(id),
+  }));
+  const dependentTasks = dependentTaskIds.map((id) => ({
+    id,
+    task: projectTasksById.get(id),
+  }));
+  const prerequisiteCandidates = projectTasks
+    .filter(
+      (candidate) =>
+        candidate.projectId === project.id &&
+        candidate.id !== task?.id &&
+        candidate.lifecycleState !== 'cancelled' &&
+        !prerequisiteIds.has(candidate.id),
+    )
+    .sort(
+      (left, right) =>
+        compareCodeUnits(left.rank, right.rank) ||
+        compareCodeUnits(left.id, right.id),
+    );
+  const hasCurrentAttempt = attempts.some(
+    ({ attempt }) => attempt.unlinkedAt === null,
+  );
+  const dependencyEditable = Boolean(
+    task &&
+      connected &&
+      !readOnly &&
+      (task.lifecycleState === 'backlog' || task.lifecycleState === 'ready') &&
+      !hasCurrentAttempt,
+  );
+  const dependencyControlsDisabled =
+    !dependencyEditable || pending || Boolean(dependencyPending);
+  const hasUnmetPrerequisites = unmetPrerequisiteTaskIds.length > 0;
+  const dependencyEditReason = !connected
+    ? 'Reconnect before editing dependencies.'
+    : readOnly
+      ? 'Archived projects keep dependencies read-only.'
+      : task &&
+          task.lifecycleState !== 'backlog' &&
+          task.lifecycleState !== 'ready'
+        ? 'Dependencies can only change while a task is in backlog or ready.'
+        : hasCurrentAttempt
+          ? 'Dependencies cannot change while this task has an active attempt.'
+          : undefined;
 
   useEffect(() => {
     setDraft(draftFor(task));
@@ -281,6 +364,9 @@ export function TaskDrawer({
     setReason('');
     setConfirmed(false);
     setError(undefined);
+    setPrerequisiteTaskId('');
+    setDependencyPending(undefined);
+    setDependencyError(undefined);
   }, [task?.id]);
 
   useEffect(() => {
@@ -454,6 +540,34 @@ export function TaskDrawer({
     });
   };
 
+  const executeDependency = async (
+    operation: 'add' | 'remove',
+    selectedPrerequisiteTaskId: string,
+  ) => {
+    if (!task || !selectedPrerequisiteTaskId || dependencyControlsDisabled)
+      return;
+    setDependencyPending(operation);
+    setDependencyError(undefined);
+    try {
+      await Promise.resolve(
+        onCommand({
+          type: `task.dependency.${operation}`,
+          payload: {
+            taskId: task.id,
+            prerequisiteTaskId: selectedPrerequisiteTaskId as Task['id'],
+            expectedRevision: task.revision,
+            actor: operator,
+          },
+        }),
+      );
+      if (operation === 'add') setPrerequisiteTaskId('');
+    } catch (caught) {
+      setDependencyError(dependencyFailureMessage(caught));
+    } finally {
+      setDependencyPending(undefined);
+    }
+  };
+
   const launch = () => {
     if (
       !task ||
@@ -522,6 +636,7 @@ export function TaskDrawer({
     task?.lifecycleState === 'ready' &&
     !task.blocked &&
     canonicalMissingReadiness.length === 0 &&
+    !hasUnmetPrerequisites &&
     Boolean(permissionMode) &&
     (workspace.type === 'shared'
       ? isAbsolutePath(workspace.sharedPath)
@@ -724,6 +839,161 @@ export function TaskDrawer({
             {task ? (
               <>
                 <section
+                  className="task-drawer-section task-dependencies"
+                  aria-label="Task dependencies"
+                >
+                  <div className="task-section-heading">
+                    <h3>Dependencies</h3>
+                    <span>
+                      {prerequisiteTasks.length} prerequisite
+                      {prerequisiteTasks.length === 1 ? '' : 's'} ·{' '}
+                      {dependentTasks.length} dependent
+                      {dependentTasks.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  {hasUnmetPrerequisites ? (
+                    <p className="notice notice-warning task-dependency-warning">
+                      {task.lifecycleState === 'ready'
+                        ? 'This task remains ready, but cannot launch while a prerequisite is reopened or otherwise not done.'
+                        : task.lifecycleState === 'backlog'
+                          ? 'This task cannot become ready or launch until every prerequisite is done.'
+                          : 'Unmet prerequisites do not interrupt active work, but they block the next launch.'}
+                    </p>
+                  ) : null}
+
+                  <div className="task-dependency-lists">
+                    <div>
+                      <h4>Prerequisites</h4>
+                      {prerequisiteTasks.length === 0 ? (
+                        <p className="task-empty-state">No prerequisites.</p>
+                      ) : (
+                        <ul aria-label="Prerequisites">
+                          {prerequisiteTasks.map(
+                            ({ id, task: prerequisite }) => (
+                              <li key={id}>
+                                <div className="task-dependency-entry">
+                                  <button
+                                    className="task-dependency-link"
+                                    type="button"
+                                    aria-label={`Open ${prerequisite?.title ?? id}`}
+                                    onClick={() => onSelectTask(id)}
+                                  >
+                                    {prerequisite?.title ?? id}
+                                  </button>
+                                  <span className="task-state">
+                                    {prerequisite?.lifecycleState.replace(
+                                      /_/g,
+                                      ' ',
+                                    ) ?? 'Unavailable'}
+                                  </span>
+                                </div>
+                                {prerequisite?.lifecycleState ===
+                                'cancelled' ? (
+                                  <p>
+                                    Cancelled — restore it before this task can
+                                    become ready or launch.
+                                  </p>
+                                ) : null}
+                                <button
+                                  className="button button-ghost task-dependency-remove"
+                                  type="button"
+                                  aria-label={`Remove ${prerequisite?.title ?? id} prerequisite`}
+                                  disabled={dependencyControlsDisabled}
+                                  onClick={() =>
+                                    void executeDependency('remove', id)
+                                  }
+                                >
+                                  Remove
+                                </button>
+                              </li>
+                            ),
+                          )}
+                        </ul>
+                      )}
+                    </div>
+
+                    <div>
+                      <h4>Dependents</h4>
+                      {dependentTasks.length === 0 ? (
+                        <p className="task-empty-state">No dependents.</p>
+                      ) : (
+                        <ul aria-label="Dependents">
+                          {dependentTasks.map(({ id, task: dependent }) => (
+                            <li key={id}>
+                              <div className="task-dependency-entry">
+                                <button
+                                  className="task-dependency-link"
+                                  type="button"
+                                  aria-label={`Open ${dependent?.title ?? id}`}
+                                  onClick={() => onSelectTask(id)}
+                                >
+                                  {dependent?.title ?? id}
+                                </button>
+                                <span className="task-state">
+                                  {dependent?.lifecycleState.replace(
+                                    /_/g,
+                                    ' ',
+                                  ) ?? 'Unavailable'}
+                                </span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="task-dependency-add">
+                    <label>
+                      Add prerequisite
+                      <select
+                        aria-label="Add prerequisite"
+                        value={prerequisiteTaskId}
+                        disabled={dependencyControlsDisabled}
+                        onChange={(event) =>
+                          setPrerequisiteTaskId(event.target.value)
+                        }
+                      >
+                        <option value="">Select task</option>
+                        {prerequisiteCandidates.map((candidate) => (
+                          <option key={candidate.id} value={candidate.id}>
+                            {candidate.title}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      className="button button-secondary"
+                      type="button"
+                      disabled={
+                        dependencyControlsDisabled || !prerequisiteTaskId
+                      }
+                      onClick={() =>
+                        void executeDependency('add', prerequisiteTaskId)
+                      }
+                    >
+                      {dependencyPending === 'add'
+                        ? 'Adding prerequisite…'
+                        : 'Add prerequisite'}
+                    </button>
+                  </div>
+                  {dependencyEditReason ? (
+                    <p className="task-empty-state">{dependencyEditReason}</p>
+                  ) : null}
+                  {dependencyPending ? (
+                    <p className="task-pending" role="status">
+                      Dependency change pending…
+                    </p>
+                  ) : null}
+                  {dependencyError ? (
+                    <p className="notice notice-error" role="alert">
+                      {dependencyError}
+                    </p>
+                  ) : null}
+                </section>
+
+                <section
                   className="task-drawer-section"
                   aria-label="Task lifecycle"
                 >
@@ -765,9 +1035,11 @@ export function TaskDrawer({
                             pending ||
                             awaitingConflictResync ||
                             (nextState === 'ready' &&
-                              canonicalMissingReadiness.length > 0) ||
+                              (canonicalMissingReadiness.length > 0 ||
+                                hasUnmetPrerequisites)) ||
                             (nextState === 'in_progress' &&
                               (canonicalMissingReadiness.length > 0 ||
+                                hasUnmetPrerequisites ||
                                 Boolean(task.blocked)))
                           }
                           onClick={() =>

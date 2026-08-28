@@ -12,6 +12,7 @@ import {
   type MutatingCommand,
   type DeveloperCompletionReport,
   type DeveloperExecutionCycle,
+  type Project,
   type Session,
   type Task,
 } from '@mesh-session-platform/contracts';
@@ -198,6 +199,258 @@ describe('TaskDrawer', () => {
       },
     });
   });
+
+  it('shows complete dependency evidence and explains cancelled and reopened prerequisites', async () => {
+    const user = userEvent.setup();
+    const readyTask = dependencyTask({ lifecycleState: 'ready' });
+    const reopened = dependencyTask({
+      id: 'prerequisite-reopened',
+      title: 'Reopened prerequisite',
+      lifecycleState: 'review',
+    });
+    const complete = dependencyTask({
+      id: 'prerequisite-complete',
+      title: 'Completed prerequisite',
+      lifecycleState: 'done',
+    });
+    const cancelled = dependencyTask({
+      id: 'prerequisite-cancelled',
+      title: 'Cancelled prerequisite',
+      lifecycleState: 'cancelled',
+    });
+    const dependent = dependencyTask({
+      id: 'dependent-task',
+      title: 'Dependent task',
+    });
+    const onSelectTask = vi.fn();
+    renderDrawer({
+      task: readyTask,
+      attemptRows: [],
+      taskRows: [readyTask, reopened, complete, cancelled, dependent],
+      prerequisiteTaskIds: [reopened.id, complete.id, cancelled.id],
+      unmetPrerequisiteTaskIds: [reopened.id, cancelled.id],
+      dependentTaskIds: [dependent.id],
+      onSelectTask,
+    });
+
+    const evidence = screen.getByRole('region', { name: 'Task dependencies' });
+    const prerequisites = within(evidence).getByRole('list', {
+      name: 'Prerequisites',
+    });
+    expect(
+      within(prerequisites).getByText('Reopened prerequisite'),
+    ).toBeVisible();
+    expect(
+      within(prerequisites).getByText('Completed prerequisite'),
+    ).toBeVisible();
+    expect(
+      within(prerequisites).getByText('Cancelled prerequisite'),
+    ).toBeVisible();
+    expect(within(prerequisites).getByText(/restore it before/i)).toBeVisible();
+    expect(
+      within(evidence).getByText(/remains ready.*reopened.*not done/i),
+    ).toBeVisible();
+    expect(
+      within(evidence).getByRole('list', { name: 'Dependents' }),
+    ).toHaveTextContent('Dependent task');
+
+    await user.selectOptions(
+      screen.getByLabelText('Permission mode'),
+      'safe_auto',
+    );
+    expect(
+      screen.getByRole('button', { name: 'Launch attempt' }),
+    ).toBeDisabled();
+
+    await user.click(
+      within(prerequisites).getByRole('button', {
+        name: 'Open Reopened prerequisite',
+      }),
+    );
+    expect(onSelectTask).toHaveBeenCalledWith(reopened.id);
+  });
+
+  it('adds and removes prerequisites with filtered candidates, exact revisions, and local pending state', async () => {
+    const user = userEvent.setup();
+    const existing = dependencyTask({
+      id: 'existing-prerequisite',
+      title: 'Existing prerequisite',
+    });
+    const candidate = dependencyTask({
+      id: 'candidate-prerequisite',
+      title: 'Candidate prerequisite',
+    });
+    const cancelled = dependencyTask({
+      id: 'cancelled-candidate',
+      title: 'Cancelled candidate',
+      lifecycleState: 'cancelled',
+    });
+    const otherProjectTask = dependencyTask({
+      id: 'other-project-task',
+      projectId: 'project-2',
+      title: 'Other project task',
+    });
+    const pendingAdd = deferred<unknown>();
+    const onCommand = vi
+      .fn()
+      .mockReturnValueOnce(pendingAdd.promise)
+      .mockResolvedValueOnce(undefined);
+    renderDrawer({
+      attemptRows: [],
+      taskRows: [task, existing, candidate, cancelled, otherProjectTask],
+      prerequisiteTaskIds: [existing.id],
+      unmetPrerequisiteTaskIds: [existing.id],
+      onCommand,
+    });
+
+    const choices = screen.getByLabelText('Add prerequisite');
+    expect(
+      within(choices).getByRole('option', { name: 'Candidate prerequisite' }),
+    ).toBeVisible();
+    expect(
+      within(choices).queryByRole('option', { name: 'Drawer task' }),
+    ).toBeNull();
+    expect(
+      within(choices).queryByRole('option', { name: 'Existing prerequisite' }),
+    ).toBeNull();
+    expect(
+      within(choices).queryByRole('option', { name: 'Cancelled candidate' }),
+    ).toBeNull();
+    expect(
+      within(choices).queryByRole('option', { name: 'Other project task' }),
+    ).toBeNull();
+
+    await user.selectOptions(choices, candidate.id);
+    await user.click(screen.getByRole('button', { name: 'Add prerequisite' }));
+    expect(onCommand).toHaveBeenLastCalledWith({
+      type: 'task.dependency.add',
+      payload: {
+        taskId: task.id,
+        prerequisiteTaskId: candidate.id,
+        expectedRevision: task.revision,
+        actor,
+      },
+    });
+    expect(
+      screen.getByRole('button', { name: 'Adding prerequisite…' }),
+    ).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Save task' })).toBeEnabled();
+
+    await act(async () => pendingAdd.resolve(undefined));
+    await user.click(
+      screen.getByRole('button', {
+        name: 'Remove Existing prerequisite prerequisite',
+      }),
+    );
+    expect(onCommand).toHaveBeenLastCalledWith({
+      type: 'task.dependency.remove',
+      payload: {
+        taskId: task.id,
+        prerequisiteTaskId: existing.id,
+        expectedRevision: task.revision,
+        actor,
+      },
+    });
+  });
+
+  it('shows dependency cycle and conflict failures without optimistic changes', async () => {
+    const user = userEvent.setup();
+    const existing = dependencyTask({
+      id: 'existing-prerequisite',
+      title: 'Existing prerequisite',
+    });
+    const candidate = dependencyTask({
+      id: 'cycle-candidate',
+      title: 'Cycle candidate',
+    });
+    const onCommand = vi
+      .fn()
+      .mockRejectedValueOnce({
+        code: 'task_dependency_cycle',
+        message: 'This edge would create a dependency cycle.',
+      })
+      .mockRejectedValueOnce({
+        code: 'task_dependency_conflict',
+        message: 'The dependency changed before removal.',
+      });
+    renderDrawer({
+      attemptRows: [],
+      taskRows: [task, existing, candidate],
+      prerequisiteTaskIds: [existing.id],
+      unmetPrerequisiteTaskIds: [existing.id],
+      onCommand,
+    });
+
+    await user.selectOptions(
+      screen.getByLabelText('Add prerequisite'),
+      candidate.id,
+    );
+    await user.click(screen.getByRole('button', { name: 'Add prerequisite' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Dependency cycle: This edge would create a dependency cycle.',
+    );
+    expect(screen.getByText('Existing prerequisite')).toBeVisible();
+    expect(
+      screen.queryByText('Cycle candidate', { selector: 'li *' }),
+    ).toBeNull();
+
+    await user.click(
+      screen.getByRole('button', {
+        name: 'Remove Existing prerequisite prerequisite',
+      }),
+    );
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Dependency conflict: The dependency changed before removal.',
+    );
+    expect(screen.getByText('Existing prerequisite')).toBeVisible();
+  });
+
+  it.each([
+    ['disconnected', { connected: false, attemptRows: [] }],
+    [
+      'archived',
+      { project: { ...project, archivedAt: timestamp }, attemptRows: [] },
+    ],
+    ['active attempt', { attemptRows: timelineAttempts() }],
+    [
+      'task lifecycle',
+      {
+        task: dependencyTask({ lifecycleState: 'in_progress' }),
+        attemptRows: [],
+      },
+    ],
+  ] as const)(
+    'keeps dependency editing read-only when gated by %s',
+    (_, options) => {
+      const existing = dependencyTask({
+        id: 'existing-prerequisite',
+        title: 'Existing prerequisite',
+      });
+      const candidate = dependencyTask({
+        id: 'candidate-prerequisite',
+        title: 'Candidate prerequisite',
+      });
+      const selectedTask =
+        'task' in options && options.task ? options.task : task;
+      renderDrawer({
+        ...options,
+        task: selectedTask,
+        taskRows: [selectedTask, existing, candidate],
+        prerequisiteTaskIds: [existing.id],
+        unmetPrerequisiteTaskIds: [existing.id],
+      });
+
+      expect(screen.getByLabelText('Add prerequisite')).toBeDisabled();
+      expect(
+        screen.getByRole('button', { name: 'Add prerequisite' }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole('button', {
+          name: 'Remove Existing prerequisite prerequisite',
+        }),
+      ).toBeDisabled();
+    },
+  );
 
   it.each([
     ['ready', 'backlog', 'Move back to backlog'],
@@ -575,6 +828,8 @@ const task = taskSchema.parse({
   createdAt: timestamp,
   updatedAt: timestamp,
 });
+const dependencyTask = (overrides: Partial<Task> = {}) =>
+  taskSchema.parse({ ...task, blocked: null, ...overrides });
 const failedSession = sessionSchema.parse({
   id: 'session-failed',
   projectId: project.id,
@@ -696,6 +951,7 @@ const timelineAttempts = () =>
   }));
 
 type DrawerOptions = {
+  project?: Project;
   task?: Task;
   onCommand?: (command: MutatingCommand) => Promise<unknown> | void;
   onOpenSession?: (sessionId: string) => void;
@@ -705,6 +961,11 @@ type DrawerOptions = {
   developerCycles?: DeveloperExecutionCycle[];
   developerCompletionReports?: DeveloperCompletionReport[];
   connected?: boolean;
+  taskRows?: Task[];
+  prerequisiteTaskIds?: string[];
+  unmetPrerequisiteTaskIds?: string[];
+  dependentTaskIds?: string[];
+  onSelectTask?: (taskId: string) => void;
 };
 
 const drawerElement = (options: DrawerOptions = {}) => {
@@ -714,7 +975,7 @@ const drawerElement = (options: DrawerOptions = {}) => {
   return (
     <TaskDrawer
       open
-      project={project}
+      project={options.project ?? project}
       task={selectedTask}
       attempts={selectedTask ? (options.attemptRows ?? timelineAttempts()) : []}
       transitions={selectedTask ? transitions : []}
@@ -739,8 +1000,13 @@ const drawerElement = (options: DrawerOptions = {}) => {
       qaReports={[]}
       reviewAutomation={undefined}
       connected={options.connected ?? true}
+      projectTasks={options.taskRows ?? (selectedTask ? [selectedTask] : [])}
+      prerequisiteTaskIds={options.prerequisiteTaskIds ?? []}
+      unmetPrerequisiteTaskIds={options.unmetPrerequisiteTaskIds ?? []}
+      dependentTaskIds={options.dependentTaskIds ?? []}
       onOpenChange={() => undefined}
       onCommand={onCommand}
+      onSelectTask={options.onSelectTask ?? vi.fn()}
       onOpenSession={onOpenSession}
     />
   );

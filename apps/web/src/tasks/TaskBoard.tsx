@@ -13,9 +13,11 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import type { MeshProjection } from '../state/reducer';
 import {
   selectBoardTasks,
+  selectDependentTaskIds,
   selectProjectRepairConditions,
   selectTaskAttempts,
   selectTaskTransitions,
+  selectUnmetPrerequisiteIds,
   type BoardColumn,
 } from '../state/selectors';
 import { ProjectRunPanel } from './ProjectRunPanel';
@@ -374,6 +376,9 @@ export function TaskBoard({
         readOnly={readOnly}
         pending={Boolean(pendingMoves[task.id])}
         error={moveErrors[task.id]}
+        unmetPrerequisiteCount={
+          selectUnmetPrerequisiteIds(projection, task.id).length
+        }
         canMoveUp={index > 0 && previousRank !== undefined}
         canMoveDown={Boolean(nextRank)}
         onSelectTask={selectTask}
@@ -570,7 +575,26 @@ export function TaskBoard({
               : undefined
           }
           connected={connected}
+          projectTasks={Object.values(projection.tasksById).filter(
+            (task) => task.projectId === project.id,
+          )}
+          prerequisiteTaskIds={
+            drawerTask
+              ? (projection.dependenciesByTaskId[drawerTask.id] ?? []).map(
+                  ({ prerequisiteTaskId }) => prerequisiteTaskId,
+                )
+              : []
+          }
+          unmetPrerequisiteTaskIds={
+            drawerTask
+              ? selectUnmetPrerequisiteIds(projection, drawerTask.id)
+              : []
+          }
+          dependentTaskIds={
+            drawerTask ? selectDependentTaskIds(projection, drawerTask.id) : []
+          }
           onCommand={onCommand}
+          onSelectTask={selectTask}
           onOpenSession={onOpenSession}
           onOpenChange={(open) => {
             if (open) return;

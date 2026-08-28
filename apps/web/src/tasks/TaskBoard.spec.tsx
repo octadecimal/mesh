@@ -14,11 +14,13 @@ import {
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
+  taskDependencySchema,
   taskSchema,
   type MutatingCommand,
   type ProjectSnapshot,
   type ProjectRun,
   type Task,
+  type TaskDependency,
 } from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
 
@@ -50,6 +52,44 @@ describe('TaskBoard', () => {
     expect(within(card).getByText('2 attempts')).toBeDefined();
     expect(within(card).getByText('Blocked')).toBeDefined();
     expect(within(card).getByText('Waiting for design')).toBeDefined();
+  });
+
+  it('shows only unmet prerequisite counts and preserves task selection through dependency links', async () => {
+    const user = userEvent.setup();
+    const onSelectTask = vi.fn();
+    const dependencies = [
+      dependency('second', 'ready'),
+      dependency('second', 'done'),
+      dependency('progress', 'second'),
+    ];
+    renderBoard({ dependencies, onSelectTask });
+
+    const card = screen.getByRole('article', {
+      name: 'Second task task card',
+    });
+    expect(within(card).getByText('1 unmet prerequisite')).toBeVisible();
+    expect(within(card).queryByText('2 unmet prerequisites')).toBeNull();
+
+    await user.click(
+      within(card).getByRole('button', { name: 'Open Second task' }),
+    );
+
+    const evidence = screen.getByRole('region', { name: 'Task dependencies' });
+    const prerequisites = within(evidence).getByRole('list', {
+      name: 'Prerequisites',
+    });
+    expect(within(prerequisites).getByText('Ready task')).toBeVisible();
+    expect(within(prerequisites).getByText('Finished task')).toBeVisible();
+    const dependents = within(evidence).getByRole('list', {
+      name: 'Dependents',
+    });
+    expect(within(dependents).getByText('Progress task')).toBeVisible();
+
+    await user.click(
+      within(prerequisites).getByRole('button', { name: 'Open Ready task' }),
+    );
+    expect(onSelectTask).toHaveBeenLastCalledWith('ready');
+    expect(screen.getByRole('dialog', { name: 'Ready task' })).toBeVisible();
   });
 
   it('shows completed and cancelled tasks only in their filtered views', async () => {
@@ -631,6 +671,18 @@ const task = (overrides: Record<string, unknown> = {}) =>
     ...overrides,
   });
 
+const dependency = (
+  taskId: string,
+  prerequisiteTaskId: string,
+): TaskDependency =>
+  taskDependencySchema.parse({
+    projectId: project.id,
+    taskId,
+    prerequisiteTaskId,
+    createdBy: actor,
+    createdAt: timestamp,
+  });
+
 const baseTasks = [
   task(),
   task({ id: 'second', title: 'Second task', rank: 'b', blocked: null }),
@@ -669,6 +721,7 @@ const baseTasks = [
 const boardProjection = (
   taskOverrides: Task[] = [],
   runs: ProjectRun[] = [],
+  dependencies: TaskDependency[] = [],
 ) => {
   const byTaskId = new Map(
     baseTasks.map((candidate) => [candidate.id, candidate]),
@@ -717,6 +770,7 @@ const boardProjection = (
     transitions: [],
     repairs: [],
     runs,
+    dependencies,
     projectRunLimits: { maxConcurrency: 4 },
     cursor: 1,
   };
@@ -740,16 +794,18 @@ const renderBoard = ({
   onCommand = vi.fn().mockResolvedValue(undefined),
   onSelectTask,
   runs = [],
+  dependencies = [],
 }: {
   archived?: boolean;
   onCommand?: (command: MutatingCommand) => Promise<unknown> | void;
   onSelectTask?: (taskId: string) => void;
   runs?: ProjectRun[];
+  dependencies?: TaskDependency[];
 } = {}) =>
   render(
     <TaskBoard
       project={archived ? { ...project, archivedAt: timestamp } : project}
-      projection={boardProjection([], runs)}
+      projection={boardProjection([], runs, dependencies)}
       onCommand={onCommand}
       onSelectTask={onSelectTask}
     />,

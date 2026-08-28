@@ -295,6 +295,9 @@ describe('ProjectRunPanel', () => {
       onCommand,
     });
 
+    expect(
+      screen.getByText('1 ready task waiting on prerequisites.'),
+    ).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Start run' }));
     expect(screen.queryByText('Dependent')).toBeNull();
     await user.click(

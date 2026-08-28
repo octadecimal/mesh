@@ -859,6 +859,13 @@ textarea:focus-visible {
   color: var(--muted);
   font-size: 0.65rem;
 }
+.task-dependency-count {
+  margin: 0;
+  border-left: 3px solid var(--warning);
+  padding-left: 0.55rem;
+  color: #fde68a;
+  font-size: 0.67rem;
+}
 .task-blocked {
   display: grid;
   gap: 0.18rem;
@@ -1047,8 +1054,69 @@ textarea:focus-visible {
   background: #17243b;
 }
 .task-readiness,
+.task-dependency-warning,
 .attempt-repair {
   margin: 0;
+}
+.task-dependency-lists {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.task-dependency-lists h4 {
+  margin: 0 0 0.45rem;
+  font-size: 0.75rem;
+}
+.task-dependency-lists ul {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.task-dependency-lists li {
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.55rem;
+  background: #111923;
+}
+.task-dependency-lists li > p {
+  margin: 0;
+  color: #fde68a;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+.task-dependency-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.task-dependency-link {
+  border: 0;
+  padding: 0;
+  color: #bfdbfe;
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.task-dependency-link:hover,
+.task-dependency-link:focus-visible {
+  color: #fff;
+  text-decoration: underline;
+}
+.task-dependency-remove {
+  justify-self: start;
+}
+.task-dependency-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.6rem;
 }
 .attempt-repair {
   display: flex;
@@ -2251,6 +2319,8 @@ textarea:focus-visible {
     padding-inline: 0.8rem;
   }
   .task-edit-row,
+  .task-dependency-lists,
+  .task-dependency-add,
   .task-link-controls {
     grid-template-columns: 1fr;
   }

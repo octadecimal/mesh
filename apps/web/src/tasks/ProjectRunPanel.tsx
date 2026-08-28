@@ -16,6 +16,7 @@ import {
   selectEligibleRunPreview,
   selectProjectRepairConditions,
   selectProjectRuns,
+  selectUnmetPrerequisiteCount,
 } from '../state/selectors';
 
 export type ProjectRunPanelProps = {
@@ -210,6 +211,14 @@ export function ProjectRunPanel({
   const activeRun = selectActiveProjectRun(projection, project.id);
   const history = projectRuns.filter(({ state }) => state === 'completed');
   const eligibleTasks = selectEligibleRunPreview(projection, project.id);
+  const dependencyBlockedReadyCount = Object.values(
+    projection.tasksById,
+  ).filter(
+    (task) =>
+      task.projectId === project.id &&
+      task.lifecycleState === 'ready' &&
+      selectUnmetPrerequisiteCount(projection, task.id) > 0,
+  ).length;
   const policyRevision = project.qaConfiguration?.revision ?? 1;
   const previewFingerprint = JSON.stringify({
     policyRevision,
@@ -521,6 +530,13 @@ export function ProjectRunPanel({
               {eligibleTasks.length === 1 ? 'task' : 'tasks'} in board order.
             </p>
           )}
+          {dependencyBlockedReadyCount > 0 ? (
+            <p className="project-run-dependency-waiting">
+              {dependencyBlockedReadyCount} ready{' '}
+              {dependencyBlockedReadyCount === 1 ? 'task' : 'tasks'} waiting on
+              prerequisites.
+            </p>
+          ) : null}
           {!authorizing ? (
             <button
               className="button button-primary"

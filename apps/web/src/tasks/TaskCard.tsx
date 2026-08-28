@@ -14,6 +14,7 @@ type TaskCardProps = {
   readOnly: boolean;
   pending: boolean;
   error?: string;
+  unmetPrerequisiteCount: number;
   canMoveUp: boolean;
   canMoveDown: boolean;
   onSelectTask?: (taskId: string) => void;
@@ -48,6 +49,7 @@ export function TaskCard({
   readOnly,
   pending,
   error,
+  unmetPrerequisiteCount,
   canMoveUp,
   canMoveDown,
   onSelectTask,
@@ -102,6 +104,12 @@ export function TaskCard({
         </span>
         <span aria-label={`Manual rank ${task.rank}`}>Rank {task.rank}</span>
       </div>
+      {unmetPrerequisiteCount > 0 ? (
+        <p className="task-dependency-count">
+          {unmetPrerequisiteCount} unmet{' '}
+          {unmetPrerequisiteCount === 1 ? 'prerequisite' : 'prerequisites'}
+        </p>
+      ) : null}
       {task.blocked ? (
         <div className="task-blocked" role="note">
           <strong>Blocked</strong>
