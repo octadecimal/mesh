@@ -3,7 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
+  HarnessEventEnvelope,
   HarnessSession,
+  HarnessStartRequest,
   InterruptExecutionEnvelope,
   ResolvedWorkerProfileSnapshot,
   StartExecutionEnvelope,
@@ -103,6 +105,44 @@ const createRuntime = (
     start,
   };
 };
+
+const emitUnknownHarnessInput = (
+  adapter: FakeHarnessAdapter,
+  candidate: (request: HarnessStartRequest) => unknown,
+) => {
+  const state = { closeCount: 0, yieldCount: 0, nativeHandle: '' };
+  vi.spyOn(adapter, 'start').mockImplementation(async (request) => {
+    state.nativeHandle = `malformed:${request.executionId}`;
+    const session: HarnessSession = {
+      nativeHandle: state.nativeHandle,
+      async *events() {
+        state.yieldCount += 1;
+        yield candidate(request) as HarnessEventEnvelope;
+        state.yieldCount += 1;
+        yield candidate(request) as HarnessEventEnvelope;
+      },
+      async close() {
+        state.closeCount += 1;
+      },
+    };
+    return session as unknown as Awaited<
+      ReturnType<FakeHarnessAdapter['start']>
+    >;
+  });
+  return state;
+};
+
+const normalizedOutput = (
+  request: HarnessStartRequest,
+  adapterCursor: number,
+) => ({
+  projectId: request.project.id,
+  executionId: request.executionId,
+  adapterCursor,
+  occurredAt: '2026-08-28T01:00:01.000Z',
+  type: 'worker_execution.output' as const,
+  payload: { text: 'malformed input fixture' },
+});
 
 describe('ExecutionRuntime', () => {
   it('durably rejects missing required capabilities before operation or adapter start', async () => {
@@ -207,6 +247,47 @@ describe('ExecutionRuntime', () => {
         },
       },
     ]);
+  });
+
+  it('interrupts the owned session handle when running finalization rolls back', async () => {
+    const context = createRuntime({
+      fake: new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 }),
+    });
+    context.fixture.database.exec(`
+      CREATE TRIGGER fail_running_finalization BEFORE INSERT ON domain_events
+      WHEN NEW.type = 'worker_execution.lifecycle_changed'
+        AND NEW.payload_json LIKE '%"lifecycle":"running"%'
+      BEGIN SELECT RAISE(ABORT, 'fail running finalization'); END
+    `);
+
+    const result = await context.runtime.start(context.start);
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+    const session = required(
+      context.fake.sessions[0],
+      'Expected an adapter-owned start session',
+    );
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(context.fake.interruptCalls).toEqual([session.nativeHandle]);
+    expect(session.closeCount).toBe(1);
+    expect(session.consumedAdapterCursors).toEqual([]);
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'starting',
+      nativeHandle: null,
+      lastAdapterCursor: 0,
+    });
+    expect(context.operations.listForExecution(executionId)).toMatchObject([
+      { kind: 'start', state: 'pending' },
+    ]);
+    expect(
+      context.fixture.events.domainAfter(context.fixture.project.id, 0).events,
+    ).toHaveLength(1);
+    expect(
+      context.fixture.events.runtimeAfter(context.fixture.project.id, 0).events,
+    ).toEqual([]);
+    expect(context.published.domain).toHaveLength(1);
+    expect(context.published.runtime).toEqual([]);
   });
 
   it('lets one of two runtime instances reserve start after both miss the fast lookup', async () => {
@@ -322,6 +403,225 @@ describe('ExecutionRuntime', () => {
       lifecycle: 'running',
       lastAdapterCursor: 5,
     });
+  });
+
+  it.each([
+    {
+      name: 'missing cursor',
+      expectedCursor: null,
+      candidate: (request: HarnessStartRequest) => ({
+        raw: { case: 'missing cursor' },
+        normalized: normalizedOutput(request, 1),
+      }),
+    },
+    {
+      name: 'non-integer cursor',
+      expectedCursor: null,
+      candidate: (request: HarnessStartRequest) => ({
+        adapterCursor: '1',
+        raw: { case: 'non-integer cursor' },
+        normalized: normalizedOutput(request, 1),
+      }),
+    },
+    {
+      name: 'non-next cursor',
+      expectedCursor: null,
+      candidate: (request: HarnessStartRequest) => ({
+        adapterCursor: 2,
+        raw: { case: 'non-next cursor' },
+        normalized: normalizedOutput(request, 2),
+      }),
+    },
+    {
+      name: 'coherent cursor with invalid normalized type',
+      expectedCursor: 1,
+      candidate: (request: HarnessStartRequest) => ({
+        adapterCursor: 1,
+        raw: { case: 'coherent cursor with invalid normalized type' },
+        normalized: {
+          ...normalizedOutput(request, 1),
+          type: 'worker_execution.not-real',
+        },
+      }),
+    },
+  ])(
+    'audits $name without a runtime event or cursor advance',
+    async ({ name, expectedCursor, candidate }) => {
+      const adapter = new FakeHarnessAdapter();
+      const session = emitUnknownHarnessInput(adapter, candidate);
+      const context = createRuntime({ fake: adapter });
+
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const executionId =
+        started.ok && 'execution' in started ? started.execution.id : '';
+      const diagnostics = context.fixture.database
+        .prepare(
+          `SELECT adapter_cursor, payload_json FROM raw_diagnostics
+           WHERE execution_id = ? ORDER BY id`,
+        )
+        .all(executionId) as Array<{
+        adapter_cursor: number | null;
+        payload_json: string;
+      }>;
+
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]?.adapter_cursor).toBe(expectedCursor);
+      expect(JSON.parse(required(diagnostics[0], 'Expected audit input').payload_json)).toMatchObject({
+        kind: 'mesh.v2.invalid-harness-input/v1',
+        input: { raw: { case: name } },
+      });
+      expect(context.executions.get(executionId)).toMatchObject({
+        lifecycle: 'failed',
+        lastAdapterCursor: 0,
+        failure: { code: 'internal_error' },
+      });
+      expect(
+        context.fixture.events.runtimeAfter(context.fixture.project.id, 0)
+          .events,
+      ).toEqual([]);
+      expect(
+        context.fixture.events
+          .domainAfter(context.fixture.project.id, 0)
+          .events.map((event) => event.payload.execution.lifecycle),
+      ).toEqual(['starting', 'running', 'failed']);
+      expect(context.operations.listForExecution(executionId)).toMatchObject([
+        { kind: 'start', state: 'succeeded' },
+      ]);
+      expect(context.published.runtime).toEqual([]);
+      expect(context.published.domain).toHaveLength(3);
+      expect(context.barrier.status).toBe('healthy');
+      expect(adapter.interruptCalls).toEqual([]);
+      expect(session.closeCount).toBe(1);
+      expect(session.yieldCount).toBe(1);
+    },
+  );
+
+  it.each([
+    ['raw insert', 'BEFORE INSERT ON raw_diagnostics'],
+    [
+      'failure lifecycle',
+      `BEFORE UPDATE ON worker_executions
+       WHEN NEW.lifecycle = 'failed'`,
+    ],
+  ])(
+    'rolls back malformed-input audit and contains a %s fault',
+    async (faultName, triggerTarget) => {
+      const adapter = new FakeHarnessAdapter();
+      const session = emitUnknownHarnessInput(adapter, (request) => ({
+        raw: { case: faultName },
+        normalized: normalizedOutput(request, 1),
+      }));
+      const context = createRuntime({ fake: adapter });
+      context.fixture.database.exec(`
+        CREATE TRIGGER fail_malformed_audit ${triggerTarget}
+        BEGIN SELECT RAISE(ABORT, 'fail malformed audit'); END
+      `);
+
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const executionId =
+        started.ok && 'execution' in started ? started.execution.id : '';
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(adapter.interruptCalls).toEqual([session.nativeHandle]);
+      expect(session.closeCount).toBe(1);
+      expect(session.yieldCount).toBe(1);
+      expect(context.executions.get(executionId)).toMatchObject({
+        lifecycle: 'running',
+        lastAdapterCursor: 0,
+      });
+      expect(
+        context.fixture.database
+          .prepare(
+            'SELECT * FROM raw_diagnostics WHERE execution_id = ?',
+          )
+          .all(executionId),
+      ).toEqual([]);
+      expect(
+        context.fixture.events.runtimeAfter(context.fixture.project.id, 0)
+          .events,
+      ).toEqual([]);
+      expect(
+        context.fixture.events
+          .domainAfter(context.fixture.project.id, 0)
+          .events.map((event) => event.payload.execution.lifecycle),
+      ).toEqual(['starting', 'running']);
+      expect(context.operations.listForExecution(executionId)).toMatchObject([
+        { kind: 'start', state: 'succeeded' },
+      ]);
+      expect(context.published.runtime).toEqual([]);
+      expect(context.published.domain).toHaveLength(2);
+    },
+  );
+
+  it('records a pending operation observation with malformed-input failure', async () => {
+    const context = createRuntime({
+      fake: new FakeHarnessAdapter({ holdAfterAdapterCursor: 1 }),
+    });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const operation = context.executions.transaction(() =>
+      context.operations.createPendingInTransaction({
+        executionId: running.id,
+        kind: 'interrupt',
+        request: { version: 'mesh.v2.execution-interrupt/v1' },
+        createdAt: '2026-08-28T01:00:02.000Z',
+      }),
+    );
+    let closeCount = 0;
+    const malformedSession: HarnessSession = {
+      nativeHandle: required(running.nativeHandle, 'Expected native handle'),
+      async *events() {
+        yield {
+          raw: { case: 'pending operation' },
+          normalized: {
+            projectId: running.projectId,
+            executionId: running.id,
+            adapterCursor: 2,
+            occurredAt: '2026-08-28T01:00:02.000Z',
+            type: 'worker_execution.output',
+            payload: { text: 'missing outer cursor' },
+          },
+        } as HarnessEventEnvelope;
+      },
+      async close() {
+        closeCount += 1;
+      },
+    };
+
+    context.runtime.attach(running.id, malformedSession);
+    await context.runtime.drain();
+
+    expect(context.operations.get(operation.id)).toMatchObject({
+      state: 'unknown',
+      result: { reason: expect.any(String) },
+    });
+    expect(context.executions.get(running.id)).toMatchObject({
+      lifecycle: 'failed',
+      lastAdapterCursor: 1,
+    });
+    expect(
+      context.fixture.database
+        .prepare(
+          `SELECT adapter_cursor FROM raw_diagnostics
+           WHERE execution_id = ?
+             AND payload_json LIKE '%invalid-harness-input%'
+           LIMIT 1`,
+        )
+        .get(running.id),
+    ).toEqual({ adapter_cursor: null });
+    expect(
+      context.fixture.events.runtimeAfter(context.fixture.project.id, 0).events,
+    ).toHaveLength(1);
+    expect(closeCount).toBe(1);
+    expect(context.barrier.status).toBe('healthy');
   });
 
   it('commits cursor-6 normalized completion and publishes runtime before domain', async () => {

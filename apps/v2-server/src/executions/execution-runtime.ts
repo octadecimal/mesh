@@ -73,6 +73,18 @@ const requireExecution = (
   return execution;
 };
 
+const trustedNextAdapterCursor = (
+  candidate: unknown,
+  expected: number,
+): number | null => {
+  if (typeof candidate !== 'object' || candidate === null) return null;
+  const adapterCursor = (candidate as { adapterCursor?: unknown })
+    .adapterCursor;
+  return Number.isSafeInteger(adapterCursor) && adapterCursor === expected
+    ? (adapterCursor as number)
+    : null;
+};
+
 export class ExecutionRuntime {
   private readonly active = new Map<string, ActiveSession>();
 
@@ -356,7 +368,7 @@ export class ExecutionRuntime {
       );
       this.dependencies.publisher.domain(runningEvent);
     } catch (error) {
-      await this.contain(executionId, session, error);
+      await this.contain(session, error);
       return acceptance;
     }
     this.attach(executionId, session);
@@ -500,7 +512,7 @@ export class ExecutionRuntime {
     } catch (error) {
       const owned = this.active.get(envelope.command.executionId);
       if (owned) {
-        await this.contain(envelope.command.executionId, owned.session, error);
+        await this.contain(owned.session, error);
       } else {
         this.dependencies.barrier.trip(error, completedAt);
       }
@@ -553,9 +565,10 @@ export class ExecutionRuntime {
     const starting = this.dependencies.executions.get(executionId);
     if (!starting) throw new Error('Execution was not found for attach');
     try {
-      for await (const candidate of session.events(
+      const input: AsyncIterable<unknown> = session.events(
         starting.lastAdapterCursor,
-      )) {
+      );
+      for await (const candidate of input) {
         let envelope: HarnessEventEnvelope;
         try {
           envelope = harnessEventEnvelopeSchema.parse(candidate);
@@ -564,6 +577,19 @@ export class ExecutionRuntime {
             executionId,
             candidate,
             error,
+            session,
+          );
+          return;
+        }
+        const current = requireExecution(
+          this.dependencies.executions,
+          executionId,
+        );
+        if (envelope.adapterCursor !== current.lastAdapterCursor + 1) {
+          await this.persistAdapterFailure(
+            executionId,
+            candidate,
+            new Error('Adapter cursor must be the next durable cursor'),
             session,
           );
           return;
@@ -619,7 +645,7 @@ export class ExecutionRuntime {
             },
           ));
         } catch (error) {
-          await this.contain(executionId, session, error);
+          await this.contain(session, error);
           return;
         }
         this.dependencies.publisher.runtime(runtimeEvent);
@@ -637,13 +663,13 @@ export class ExecutionRuntime {
 
   private async persistAdapterFailure(
     executionId: string,
-    candidate: HarnessEventEnvelope | undefined,
+    candidate: unknown,
     error: unknown,
     session: HarnessSession,
   ): Promise<void> {
     try {
       const occurredAt = this.dependencies.now();
-      let runtimeEvent: RuntimeEvent | undefined;
+      const message = error instanceof Error ? error.message : String(error);
       const domainEvent = inImmediateTransaction(
         this.dependencies.database,
         () => {
@@ -651,48 +677,40 @@ export class ExecutionRuntime {
             this.dependencies.executions,
             executionId,
           );
-          if (
-            candidate &&
-            candidate.adapterCursor === current.lastAdapterCursor + 1
-          ) {
-            runtimeEvent =
-              this.dependencies.events.appendRuntimeWithDiagnosticInTransaction(
-                current.projectId,
-                {
-                  projectId: current.projectId,
-                  executionId: current.id,
-                  adapterId: current.adapterId,
-                  adapterCursor: candidate.adapterCursor,
-                  receivedAt: occurredAt,
-                  payload: candidate.raw,
-                },
-                {
-                  projectId: current.projectId,
-                  executionId: current.id,
-                  adapterCursor: candidate.adapterCursor,
-                  occurredAt,
-                  type: 'worker_execution.adapter_failed',
-                  payload: {
-                    code: 'invalid_adapter_event',
-                    message:
-                      error instanceof Error ? error.message : String(error),
-                  },
-                },
-              );
+          this.dependencies.events.appendRawDiagnosticInTransaction({
+            projectId: current.projectId,
+            executionId: current.id,
+            adapterId: current.adapterId,
+            adapterCursor: trustedNextAdapterCursor(
+              candidate,
+              current.lastAdapterCursor + 1,
+            ),
+            receivedAt: occurredAt,
+            payload: {
+              kind: 'mesh.v2.invalid-harness-input/v1',
+              input: candidate ?? null,
+              error: message,
+            },
+          });
+          for (const operation of this.dependencies.operations
+            .listPending()
+            .filter((pending) => pending.executionId === executionId)) {
+            this.dependencies.operations.finishInTransaction(
+              operation.id,
+              'unknown',
+              { reason: message },
+              occurredAt,
+            );
           }
-          const afterCursor = requireExecution(
-            this.dependencies.executions,
-            executionId,
-          );
           const failed = this.dependencies.executions.transitionInTransaction(
             executionId,
-            afterCursor.revision,
+            current.revision,
             'failed',
             occurredAt,
             {
               failure: {
                 code: 'internal_error',
-                message: error instanceof Error ? error.message : String(error),
+                message,
               },
             },
           );
@@ -702,25 +720,20 @@ export class ExecutionRuntime {
           );
         },
       );
-      if (runtimeEvent) this.dependencies.publisher.runtime(runtimeEvent);
       this.dependencies.publisher.domain(domainEvent);
       await session.close();
     } catch (auditError) {
-      await this.contain(executionId, session, auditError);
+      await this.contain(session, auditError);
     }
   }
 
   private async contain(
-    executionId: string,
     session: HarnessSession,
     error: unknown,
   ): Promise<void> {
     this.dependencies.barrier.trip(error, this.dependencies.now());
-    const execution = this.dependencies.executions.get(executionId);
     try {
-      if (execution?.nativeHandle) {
-        await this.dependencies.adapter.interrupt(session.nativeHandle);
-      }
+      await this.dependencies.adapter.interrupt(session.nativeHandle);
     } catch (interruptError) {
       this.dependencies.barrier.record(
         'Adapter interrupt failed during containment',
