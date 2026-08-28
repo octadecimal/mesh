@@ -349,6 +349,12 @@ then a semantic-version match when supplied, otherwise the adapter's single
 approved descriptor. Ambiguous matches are unavailable. M1 does not download,
 import, inspect, or approve skill content.
 
+M1 accepts only an exact `major.minor.patch` version or a caret constraint with
+that complete triplet. Caret matching follows SemVer's left-most nonzero rule:
+`^1.2.3` is `>=1.2.3 <2.0.0`, `^0.2.3` is `>=0.2.3 <0.3.0`, and `^0.0.3` is
+`>=0.0.3 <0.0.4`. Prerelease/build syntax and malformed constraints are
+unavailable rather than guessed.
+
 A profile's `requiredCapabilities` are compared with the adapter capability
 snapshot before an operation intent is created and before `start` is called. A
 missing capability stores a terminal `failed` execution, domain event, and
@@ -384,6 +390,22 @@ revision, last committed runtime cursor, replacement link, timestamps, and
 failure diagnostics. It never stores or exposes a Claude session ID, Codex
 thread ID, provider transcript type, task, run, QA verdict, or integration
 result.
+
+Execution failures use one bounded public shape:
+
+```ts
+type ExecutionFailure = {
+  code: V2ErrorCode;
+  message: string; // trimmed, 1..4096 characters
+  missing?: readonly string[]; // when present, 1..64 entries, each 1..256 characters
+};
+```
+
+The optional `missing` list preserves structured capability or logical-skill
+identifiers for `required_capability_unavailable` and
+`required_skill_unavailable`. Other failures omit it. The list is diagnostic
+detail inside the execution snapshot; it does not create another lifecycle or
+domain-event variant.
 
 Lifecycle is explicit:
 
@@ -432,21 +454,69 @@ type HarnessEventEnvelope = {
 };
 ```
 
-`start` and `interrupt` are consequential side effects. The runtime records a
-pending `execution_operation` intent before calling either. It then records the
-observed native handle or result and lifecycle transition. A failure between
-intent and observation becomes restart reconciliation work, never inferred
-success.
+`RuntimeEventDraft` has an explicit terminal variant in addition to output,
+child, and adapter-failure variants:
+
+```ts
+type WorkerExecutionCompletedRuntimeEventDraft = {
+  projectId: ProjectId;
+  executionId: WorkerExecutionId;
+  adapterCursor: number;
+  occurredAt: string;
+  type: 'worker_execution.completed';
+  payload: { outcome: 'completed' };
+};
+```
+
+The Zod runtime draft and persisted runtime-event discriminated unions both
+contain that exact strict variant. The adapter alone converts native or fake
+input into it; the runtime never examines `raw` to infer completion. Receiving
+the normalized terminal variant while the execution is `running` causes one
+immediate transaction to persist its raw diagnostic, its runtime event, both
+cursors, the `completed` execution, and the sole domain event
+`worker_execution.lifecycle_changed`. Runtime publication precedes domain
+publication only after that transaction commits. Iterator exhaustion without a
+normalized terminal event cannot complete an execution.
+
+`start` and `interrupt` are consequential side effects. Both use a fast
+idempotency lookup and then recheck the same key and canonical request hash
+inside the owning `BEGIN IMMEDIATE` transaction before reserving any work. A
+same-key replay returns the immutable stored acceptance result and never calls
+the adapter again; different input returns `idempotency_conflict`.
+
+For start, the pre-side-effect transaction persists the `starting` execution, a
+pending start operation whose canonical `request_json` includes a version,
+command idempotency key, request hash, and exact adapter start request, the
+`worker_execution.lifecycle_changed` event, and a successful command result
+containing that `starting` execution. For interrupt, the corresponding
+transaction persists a pending interrupt operation with the same correlation
+fields, the `interrupting` execution and lifecycle event, and a successful
+command result containing that `interrupting` execution. Only the transaction
+winner may invoke `start` or `interrupt`. Later observed handle/result and
+`running`/`failed`/`interrupted`/`attention_required` transitions commit as
+lifecycle events without replacing either accepted command result. A failure
+between intent and observation becomes restart reconciliation work, never
+inferred success.
 
 The deterministic fake adapter implements the same interface. Its
 `todo-foundation-v1` script is keyed by Mesh execution ID and adapter cursor,
 emits output plus nested child start/finish activity, can inject malformed input
 or adapter failure, can hold after a configured cursor, and resumes from the
 next cursor in a fresh adapter instance. Its opaque handle is treated as a
-string by all non-adapter code. Fake controls are constructor/test configuration,
-not public production commands. The built-process e2e fixture may supply
+string by all non-adapter code. Inside the fake adapter it is a bounded,
+versioned `fake:v1:<base64url-canonical-json>` value containing exactly the Mesh
+execution ID, `todo-foundation-v1` scenario, and configured durable checkpoint
+cursor. `probe` parses that value in a fresh process or object and reports the
+encoded held cursor; `resume` rejects an execution, scenario, or
+`afterAdapterCursor` mismatch. Runtime reconciliation separately requires the
+probed cursor to equal the stored execution cursor. Process-local maps may help
+an active test session but are not recovery authority. Fake controls are
+constructor/test configuration, not public production commands. The
+built-process e2e fixture may supply
 `MESH_V2_FAKE_HOLD_AFTER_CURSOR` only with `NODE_ENV=test`; other modes reject
-that setting.
+that setting. A handle with no checkpoint, malformed/oversized content, or an
+unknown version returns `missing` or `unknown` from `probe` and can never be
+resumed.
 
 ## Datastore, Event Ordering, and Audit Barrier
 
@@ -512,6 +582,11 @@ Every mutating command carries an idempotency key. Reuse with the same canonical
 request hash returns the stored response; reuse with different input returns
 `idempotency_conflict`. One transaction updates canonical state, appends domain
 events, and stores the command result. Publication occurs only after commit.
+For `worker_execution.start` and `worker_execution.interrupt`, this transaction
+is deliberately before the matching adapter call and stores the accepted
+`starting` or `interrupting` result described above; later external observations
+never rewrite that command result. The in-transaction idempotency recheck closes
+the race between concurrent callers that both missed the fast lookup.
 
 Each project has independent `domain` and `runtime` high-water marks. Appending
 uses `BEGIN IMMEDIATE`, advances exactly one stream counter, inserts the event,
@@ -538,6 +613,15 @@ mutation commands return `audit_barrier_tripped`, and health/realtime clients
 show the failure. Restart clears the in-memory barrier only after the database
 opens successfully and reconciliation converts every ambiguous open execution
 or operation into an explicit state.
+
+Reconciliation probe results do not fabricate runtime events, but they are
+still raw adapter diagnostics. The event store therefore exposes a standalone
+`appendRawDiagnosticInTransaction(diagnostic)` operation that inserts into the
+existing `raw_diagnostics` table and returns the stored diagnostic. A
+reconciliation transaction uses it for the exact probe or interrupt result and
+atomically updates the pending operation, execution lifecycle, and
+`worker_execution.lifecycle_changed` domain event. This adds no table, column,
+migration, or new domain-event type.
 
 ## Commands, HTTP, Snapshots, and Realtime
 
@@ -572,8 +656,12 @@ exceptions and raw diagnostics are not exposed as authoritative domain data.
 ## Restart Reconciliation
 
 Startup runs after migrations and repository construction but before accepting
-HTTP or WebSocket traffic. It scans `created`, `starting`, `running`, and
-`interrupting` executions plus pending operations.
+HTTP or WebSocket traffic. It reconciles the union of `created`, `starting`,
+`running`, and `interrupting` executions and every pending operation, including
+a pending operation whose execution is already terminal. Pending operations are
+grouped as ordered lists per execution, not collapsed to one map entry, so both
+start and interrupt rows are reconciled exactly once. No pending row may be
+silently omitted because its execution was absent from the open-execution scan.
 
 - `created` with no external-operation intent becomes `failed` with
   `startup_interrupted_before_start`; Mesh does not start new work implicitly.
@@ -584,10 +672,19 @@ HTTP or WebSocket traffic. It scans `created`, `starting`, `running`, and
   same handle and cursor. A proven terminal observation is recorded; any other
   result becomes `attention_required`.
 - A pending interrupt or `interrupting` execution records `interrupted` only
-  when the adapter proves interruption; ambiguity becomes `attention_required`.
-- Terminal executions and complete operations are unchanged.
+  when the adapter proves the interrupt outcome. `succeeded` is proof;
+  `already_terminal` is proof only with a terminal probe whose outcome is
+  `interrupted`; `unknown`, an incompatible terminal outcome, or a failed probe
+  becomes `attention_required` and completes the pending operation as unknown.
+- Terminal executions without pending operations and complete operations are
+  unchanged. A pending operation attached to a terminal execution is still
+  audited and completed as `succeeded`, `failed`, or `unknown` without changing
+  the immutable terminal lifecycle. An incompatible or ambiguous observation
+  is retained in the operation result and reconciliation attention summary; it
+  does not reopen or rewrite the terminal execution.
 
-Every reconciliation change and observed probe result is audited and appended
+Every reconciliation change and observed probe or interrupt result is stored as
+a raw diagnostic in the same transaction as operation/lifecycle/domain changes
 before publication. Reconciliation never manufactures completion, silently
 restarts an assignment, reuses a different profile revision, advances a cursor
 without a matching raw diagnostic, or consults V1 sessions. The fake restart
@@ -688,7 +785,10 @@ databases, loopback ephemeral ports, and Playwright Chromium.
   publish, lifecycle legality, required-capability and required-skill
   fail-closed behavior with zero adapter starts, preferred fallback, all four
   audit-write failure points with rollback/session-stop/no-publication/no-later-
-  consumption evidence, and reconciliation outcomes.
+  consumption evidence, terminal-event atomicity, first terminalization-write
+  failure containment without a fallback write, full pending-operation
+  reconciliation, proven interrupt outcomes, exact and caret SemVer including
+  `0.x`, and reconciliation outcomes.
 - Transport tests cover local origin, strict commands, stable errors, project
   snapshots, replay, duplicate delivery, gaps, resync, stop-accepting, and
   deterministic domain/runtime publications interleaved with replay.
@@ -710,12 +810,17 @@ approves a global and extending project profile through V2 commands, and starts
 `todo-foundation-v1`.
 
 The fake emits the preferred fallback, required native resolution, output, and
-one nested child start event, then holds after a configured cursor. The fixture
+one nested child start event, then holds after a configured cursor. Its cursor 6
+envelope normalizes to `worker_execution.completed` with
+`{ outcome: 'completed' }`; the runtime does not complete from stream closure.
+The fixture
 terminates the server without graceful runtime completion, starts a new server
 and fresh fake adapter object against the same database, reconnects the browser,
 and releases the resumed script. The test asserts one execution ID, no duplicate
 events, continuous runtime and domain sequences, completed child and execution
-states, immutable profile/skill snapshots, and the same focused project. It
+states, an ordered cursor-6 completion runtime event followed by the committed
+`worker_execution.lifecycle_changed` projection, immutable profile/skill
+snapshots, and the same focused project. It
 also starts a required-unavailable execution and, through public commands,
 snapshots, and replay only, asserts terminal `required_skill_unavailable`, a null
 native handle, no start-operation transition, no runtime event for that
@@ -755,6 +860,10 @@ documents; formatting alone is not link proof.
 | How are unavailable capabilities or skills handled? | Required capabilities and skills store durable failure before an operation intent or `start`; preferred skills fall back to `mesh.foundation-check/v1`. | Preserves Mesh-owned workflow semantics and proves fail-closed behavior with zero external side effects. |
 | Which harness runs? | A deterministic fake adapter only. | Proves neutrality and recovery without subscription usage; real adapter work remains later. |
 | How does restart work? | Resume the same execution only after exact fake probe proof; otherwise require attention. | Demonstrates durable recovery without guessing or provider session concepts. |
+| What proves fake recovery after process loss? | A bounded versioned opaque handle carries only execution, scenario, and configured checkpoint facts; the adapter parses it and runtime requires exact stored-cursor equality. | Removes process-local fake state as recovery authority while keeping provider details outside the domain. |
+| What completes an execution? | The normalized cursor-6 `worker_execution.completed` runtime event; iterator exhaustion never completes. | Keeps raw/provider interpretation in the adapter and makes terminal runtime, execution, and lifecycle writes atomic. |
+| When is start idempotency durable? | The accepted `starting` command result and pending start intent commit before `adapter.start`; later running/failure events do not rewrite it. | A replay can return one immutable result without launching a second side effect. |
+| How are concurrent side-effect commands reserved? | Start and interrupt recheck idempotency inside `BEGIN IMMEDIATE`, store immutable acceptance before the adapter call, and allow only the transaction winner to act. | Closes the fast-lookup race and makes replay safe for both consequential operations. |
 | How are event orders modeled? | Independent domain and runtime sequences per project, joined by Mesh IDs; realtime subscribes before replay and drains buffered events against each replay high-water. | Separates authority from transport without a replay/listener lost-event window. |
 | What happens on audit failure? | Roll back, trip a server-wide mutation barrier, stop consuming, interrupt best-effort, and close the affected owned session. | Prevents publication or unaudited continuation at every write stage; restart reconciliation exposes ambiguity. |
 | How does the stop-condition browser avoid port and origin races? | One production-built V2 server binds an ephemeral loopback port and serves the explicitly configured built-web root on the same origin. | Eliminates Vite/server collision and cross-origin setup while retaining a real process restart. |
@@ -772,12 +881,19 @@ documents; formatting alone is not link proof.
   and immutable execution snapshots match the defined schema and merge rules.
 - WorkerExecution contains Mesh assignment/runtime facts only and the fake
   adapter satisfies the exact contract.
+- Start and interrupt acceptance, pending operation, and lifecycle intent are
+  idempotently durable before one adapter side effect; concurrent replays cannot
+  act twice.
 - Required capabilities plus preferred and required skills produce durable,
-  deterministic snapshots with zero-start fail-closed behavior or fallback.
+  deterministic snapshots with bounded structured missing evidence,
+  zero-start fail-closed behavior, or fallback.
 - Raw diagnostics and ordered events obey the audit barrier before publication;
-  every audit-stage failure rolls back and stops the owned session.
-- Restart reconciliation is evidence-based and demonstrated with a fresh server
-  and fake adapter object.
+  normalized cursor-6 completion commits terminal runtime and lifecycle facts
+  atomically, and every audit-stage failure rolls back and stops the owned
+  session without a fallback write.
+- Restart reconciliation audits every pending operation, requires proven
+  interrupt outcomes, and is demonstrated with a fresh server process whose
+  fake adapter parses a versioned opaque handle at the exact durable cursor.
 - UI loading, empty, disconnected, stale, failure, attention, and terminal
   states converge from snapshots and gap-free subscribe-before-replay delivery.
 - The Todo scenario and all default checks use fake or temporary resources and

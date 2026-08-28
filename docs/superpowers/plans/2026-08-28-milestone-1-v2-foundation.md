@@ -56,6 +56,13 @@ Library, and Playwright.
   lifecycle publication. Any failed audit write rolls back, trips the mutation
   barrier, stops event consumption, interrupts best-effort, closes the affected
   owned session, and publishes nothing.
+- Execution completion comes only from normalized runtime event
+  `worker_execution.completed` at fake cursor 6. The runtime never interprets
+  raw adapter data or iterator exhaustion as completion.
+- An accepted start or interrupt command, correlated pending operation,
+  `starting` or `interrupting` execution, and immutable command result commit
+  before the matching adapter call. Idempotency is rechecked inside
+  `BEGIN IMMEDIATE`; same-key replays return that result and never act again.
 - No M1 type, table, command, route, component, or copy may introduce
   `PlanningCycle`, Requirement Ledger records, milestones, tasks, attempts,
   runs, scheduling, QA, evidence verdicts, integration authority, worktree
@@ -172,6 +179,15 @@ export type RuntimeEventDraft = Omit<
   RuntimeEvent,
   'id' | 'sequence' | 'diagnosticId'
 >;
+export type WorkerExecutionCompletedRuntimeEventDraft = Extract<
+  RuntimeEventDraft,
+  { type: 'worker_execution.completed' }
+>;
+export type ExecutionFailure = {
+  code: V2ErrorCode;
+  message: string;
+  missing?: readonly string[];
+};
 export type RetainedDomainWindow = {
   lowWater: number;
   highWater: number;
@@ -197,6 +213,7 @@ export const inImmediateTransaction: <T>(
 
 export class V2EventStore {
   appendDomainInTransaction(projectId: string, draft: DomainEventDraft): DomainEvent;
+  appendRawDiagnosticInTransaction(diagnostic: RawDiagnosticDraft): RawDiagnostic;
   appendRuntimeWithDiagnosticInTransaction(
     projectId: string,
     diagnostic: RawDiagnosticDraft,
@@ -219,7 +236,9 @@ export class V2CommandRepository {
 | --- | --- | --- | --- | --- |
 | 0 | T01 | No implementation dependency | Sole owner of root dependency/path edits, V2 project scaffolds, and all `packages/v2-contracts/**` | Contract tests, scaffold typechecks/builds |
 | 1 | T02, T03 | T01 contracts accepted | T02 owns only `apps/v2-server/src/db`, `storage`, and test DB helper; T03 owns only `apps/v2-web/src/components`, component tests, and shell CSS | Source/production-output database tests plus presentational UI tests |
-| 2 | T04, T05, T06, T07 | T02 schema accepted for server work; T01 contracts accepted for web work | Separate server `projects`, `profiles`, `executions` directories and separate web `api`/`state` directories | All four focused suites and typechecks |
+| C | T01C, T02C | Whole-wave pause proved two settled interfaces incomplete | T01C owns only `packages/v2-contracts/**`; T02C owns only the existing event-store source/test | Contract and event-store correction gates |
+| 2R | T06, T07 | T01C/T02C accepted and integrated; both tasks restart from that corrected head | Separate server `executions` and web `api`/`state` directories | Restarted T06/T07 focused suites and typechecks |
+| 2I | Preserve T04, T05; integrate T06, T07 | Exact accepted T04/T05 patches do not consume corrected event/failure/store interfaces | Deterministic application of unchanged accepted patches; no worker edits in integration | Complete combined Wave 2 suite/typecheck/build gate |
 | 3 | T08 | Project, profile, execution services accepted | Sole owner of V2 server config, platform process/path boundary, HTTP, realtime, app, main, and server integration tests | V2 server tests including both replay interleavings, typecheck, and build |
 | 4 | T09 | Presentational shell, web projection, and server protocol accepted | Sole owner of V2 web app/main and integrated UI tests | V2 web test/typecheck/build |
 | 5 | T10 | Integrated V2 apps accepted | Sole owner of `e2e-v2/**` | Same-origin built-server Todo restart e2e |
@@ -237,7 +256,7 @@ evidence; a narrative success claim is insufficient.
 ```ts
 type TaskHandoff = {
   heading: 'TASK HANDOFF';
-  task: 'T01' | 'T02' | 'T03' | 'T04' | 'T05' | 'T06' | 'T07' | 'T08' | 'T09' | 'T10' | 'T11';
+  task: 'T01' | 'T01C' | 'T02' | 'T02C' | 'T03' | 'T04' | 'T05' | 'T06' | 'T07' | 'T08' | 'T09' | 'T10' | 'T11';
   status: 'ready_for_review' | 'blocked';
   branch: string;
   commit: string | 'none';
@@ -741,6 +760,249 @@ git commit -m "feat(v2): add project-focused shell views"
 future panes expose no active workflow action; provider terminology is confined
 to the diagnostics disclosure; components do not perform I/O.
 
+### Pre-resume correction protocol
+
+The first Wave 2 review exposed an unsettled T01/T02 interface, so the whole
+wave remains paused under the runbook. Preserve every existing worker branch,
+worktree, and commit. Do not rebase, reset, amend, or silently copy changes from
+the paused T06/T07 worktrees. The correction does not change migration 001,
+`mesh.v2/1`, or `mesh.dev/v1alpha1`.
+
+Run T01C and T02C in parallel from the exact accepted Wave 1 integration head
+`b88a1a981c02002650d5a233356a00cb03fcbb79`.
+Review each exact correction commit independently, then integrate T01C followed
+by T02C in a dedicated correction integration worktree and run the correction
+gate. That accepted correction head is the only base for fresh T06 and T07
+worktrees. The original T06 result at
+`98195e266cde808d92c8b8a05b0332eda85d688b` is superseded review evidence and
+never enters integration. The paused T07 worktree remains at the Wave 1 head
+with its untracked `apps/v2-web/src/api/**` and `apps/v2-web/src/state/**` state
+preserved but not copied.
+
+The already accepted T04 and T05 commit sets remain immutable. They do not
+consume `ExecutionFailure`, runtime completion, or the standalone diagnostic
+append, so their reviews remain valid. Preserve T04 as the ordered commits
+`152040dedaf0e47db6ed7e5e4faaab2c8243f34f` then
+`97c5bd0a687cd02f966bf02950aff1855540917f`, and T05 as
+`1a1781602266bf6d7b0fd5512a0b3ec263438930`. After restarted T06 and T07 are
+accepted,
+the Wave 2 integrator starts from the correction head and applies the exact
+accepted commits in order: T04, T05, restarted T06, restarted T07. A conflict,
+changed T04/T05 patch ID, newly discovered dependency on a corrected interface,
+or failed combined gate stops integration and returns the affected task to a
+fresh worker/reviewer; the integrator never resolves a semantic conflict.
+
+### Task T01C: Completion and Failure Contract Correction
+
+**Wave:** C
+
+**Outcome:** Add the normalized execution-completion runtime event and bounded
+structured missing-item evidence without adding another lifecycle domain event.
+
+**Files:**
+
+- Modify: `packages/v2-contracts/src/executions.ts`
+- Modify: `packages/v2-contracts/src/events.ts`
+- Modify: `packages/v2-contracts/src/contracts.spec.ts`
+
+**Owned surfaces:** The three files above only.
+
+**Prohibited surfaces:** Every server/web implementation, migration/schema,
+root configuration, V1 contract, and new domain-event discriminant.
+
+**Interfaces consumed:** Accepted T01 execution/event schemas and V2 error
+codes.
+
+**Interfaces produced:**
+
+```ts
+export const executionFailureSchema = z.strictObject({
+  code: v2ErrorCodeSchema,
+  message: z.string().trim().min(1).max(4096),
+  missing: z
+    .array(z.string().trim().min(1).max(256))
+    .min(1)
+    .max(64)
+    .readonly()
+    .optional(),
+});
+
+export const executionCompletedDraftSchema = z.strictObject({
+  ...runtimeEventBase,
+  type: z.literal('worker_execution.completed'),
+  payload: z.strictObject({ outcome: z.literal('completed') }),
+});
+```
+
+Add `executionCompletedDraftSchema` to both `runtimeEventDraftSchema` and the
+persisted `runtimeEventSchema` construction. Keep
+`domainEventDraftSchema` unchanged with its single execution lifecycle variant
+`worker_execution.lifecycle_changed`.
+
+- [ ] **Step 1: Write failing contract tests**
+
+```ts
+it('parses normalized completion and bounded missing evidence', () => {
+  expect(runtimeEventDraftSchema.parse({
+    ...runtimeBase,
+    adapterCursor: 6,
+    type: 'worker_execution.completed',
+    payload: { outcome: 'completed' },
+  }).type).toBe('worker_execution.completed');
+  expect(executionFailureSchema.parse({
+    code: 'required_capability_unavailable',
+    message: 'Required capabilities are unavailable',
+    missing: ['execution.stream'],
+  }).missing).toEqual(['execution.stream']);
+});
+
+it('keeps one lifecycle domain event and bounds missing evidence', () => {
+  expect(() => executionFailureSchema.parse({
+    code: 'required_skill_unavailable',
+    message: 'Unavailable',
+    missing: Array.from({ length: 65 }, (_, index) => `skill-${index}`),
+  })).toThrow();
+  expect(() => domainEventDraftSchema.parse({
+    projectId,
+    occurredAt: now,
+    type: 'worker_execution.failed',
+    payload: { execution },
+  })).toThrow();
+});
+```
+
+Also round-trip the cursor-6 draft through `runtimeEventSchema` with IDs,
+sequence, and diagnostic ID; reject unknown completion payload keys, an empty
+`missing` list, and a 257-character missing item.
+
+- [ ] **Step 2: Run red**
+
+```powershell
+corepack pnpm exec vitest run packages/v2-contracts/src/contracts.spec.ts --config packages/v2-contracts/vitest.config.ts
+```
+
+Expected: completion is not in the union and `missing` is rejected.
+
+- [ ] **Step 3: Implement only the corrected schemas**
+
+Export the two schemas and inferred types through the existing module exports.
+Do not loosen any base object, add `z.unknown()`, or add
+`worker_execution.failed` to the domain union.
+
+- [ ] **Step 4: Run the T01C gate**
+
+```powershell
+corepack pnpm nx test v2-contracts
+corepack pnpm nx typecheck v2-contracts
+corepack pnpm nx build v2-contracts
+git diff --check
+```
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add packages/v2-contracts/src/executions.ts packages/v2-contracts/src/events.ts packages/v2-contracts/src/contracts.spec.ts
+git commit -m "fix(v2): normalize execution completion"
+```
+
+**Acceptance criteria:** Cursor-6 completion is a strict runtime draft and
+persisted event; failure `missing` evidence is optional but bounded; the only
+execution lifecycle domain event remains `worker_execution.lifecycle_changed`;
+V1/provider shapes remain rejected.
+
+### Task T02C: Transactional Raw Diagnostic Append
+
+**Wave:** C
+
+**Outcome:** Let reconciliation audit an adapter probe or interrupt result in
+the same transaction as operation, lifecycle, and domain changes, using the
+existing schema.
+
+**Files:**
+
+- Modify: `apps/v2-server/src/storage/event-store.ts`
+- Modify: `apps/v2-server/src/storage/event-store.spec.ts`
+
+**Owned surfaces:** The two files above only.
+
+**Prohibited surfaces:** `db/**`, migration 001, contracts, executions,
+transport, web, V1 storage, and any new table or column.
+
+**Interfaces consumed:** T01 `RawDiagnosticDraft` and `RawDiagnostic`; accepted
+T02 transaction and canonical-JSON helpers.
+
+**Interface produced:**
+
+```ts
+export class V2EventStore {
+  appendRawDiagnosticInTransaction(
+    diagnostic: RawDiagnosticDraft,
+  ): RawDiagnostic;
+}
+```
+
+The method requires the caller's existing immediate transaction, inserts one
+row into `raw_diagnostics`, canonicalizes the unknown payload with the existing
+helper, and returns the parsed stored record. It does not advance either event
+stream and does not open or commit its own transaction.
+
+- [ ] **Step 1: Write failing storage tests**
+
+```ts
+it('appends a standalone reconciliation diagnostic without advancing cursors', () => {
+  const before = fixture.events.cursors(fixture.project.id);
+  const stored = inImmediateTransaction(fixture.database, () =>
+    fixture.events.appendRawDiagnosticInTransaction({
+      projectId: fixture.project.id,
+      executionId: fixture.execution.id,
+      adapterId: 'fake',
+      adapterCursor: null,
+      receivedAt: now,
+      payload: { operation: 'probe', result: { status: 'resumable', afterAdapterCursor: 2 } },
+    }),
+  );
+  expect(stored.payload).toMatchObject({ operation: 'probe' });
+  expect(fixture.events.cursors(fixture.project.id)).toEqual(before);
+});
+```
+
+Add a rollback test that appends the diagnostic and then throws inside the same
+`inImmediateTransaction`; assert the raw row count and both cursors equal their
+pre-transaction values.
+
+- [ ] **Step 2: Run red**
+
+```powershell
+corepack pnpm exec vitest run apps/v2-server/src/storage/event-store.spec.ts --config apps/v2-server/vitest.config.ts
+```
+
+- [ ] **Step 3: Extract the existing raw insert as the public transaction helper**
+
+Make `appendRuntimeWithDiagnosticInTransaction` call the new helper so there is
+one raw-diagnostic insertion path. Preserve its existing runtime insert,
+execution cursor update, sequence allocation, and rollback behavior exactly.
+
+- [ ] **Step 4: Run the T02C gate**
+
+```powershell
+corepack pnpm exec vitest run apps/v2-server/src/storage/event-store.spec.ts --config apps/v2-server/vitest.config.ts
+corepack pnpm nx test v2-server
+corepack pnpm nx typecheck v2-server
+corepack pnpm nx build v2-server
+git diff --check
+```
+
+- [ ] **Step 5: Commit**
+
+```powershell
+git add apps/v2-server/src/storage/event-store.ts apps/v2-server/src/storage/event-store.spec.ts
+git commit -m "fix(v2): expose transactional diagnostic append"
+```
+
+**Acceptance criteria:** Standalone diagnostics use migration 001 unchanged,
+rollback with the caller's transaction, leave stream cursors unchanged, and
+share the exact insert path used by runtime events.
+
 ### Task T04: Project Registry and Repository Identity
 
 **Wave:** 2
@@ -1037,7 +1299,7 @@ approvals.
 
 ### Task T06: Fake Harness and WorkerExecution Runtime
 
-**Wave:** 2
+**Wave:** 2R (restart in a fresh worktree from the accepted correction head)
 
 **Outcome:** Implement harness-neutral lifecycle, fake adapter conformance,
 skill resolution, audit barrier, interruption, and exact restart resumption.
@@ -1061,8 +1323,10 @@ skill resolution, audit barrier, interruption, and exact restart resumption.
 HTTP/realtime, web, real adapter/SDK imports, child processes, worktrees, tasks,
 QA, runs, and V1 runtime files.
 
-**Interfaces consumed:** T01 adapter/execution/skill/event/command contracts and
-T02 database, transaction, command, and event stores. To preserve Wave 2
+**Interfaces consumed:** Corrected T01 adapter/execution/skill/event/command
+contracts, including normalized completion and structured failure evidence, and
+corrected T02 database, transaction, command, and event stores, including
+`appendRawDiagnosticInTransaction`. To preserve Wave 2
 independence, this task owns the two read ports below; T08 wires them to T04 and
 T05 only after all three commits are accepted.
 
@@ -1131,15 +1395,22 @@ it('resumes the Todo script from the next durable adapter cursor', async () => {
   const restarted = new FakeHarnessAdapter();
   expect(await restarted.probe(session.nativeHandle)).toMatchObject({
     status: 'resumable',
+    afterAdapterCursor: 2,
   });
   const resumed = await restarted.resume({ ...resumeRequest, afterAdapterCursor: 2 });
   expect((await collect(resumed.events(2)))[0].adapterCursor).toBe(3);
+  await expect(
+    restarted.resume({ ...resumeRequest, afterAdapterCursor: 1 }),
+  ).rejects.toThrow('checkpoint');
 });
 ```
 
 Also cover capabilities, descriptors, nested child events, malformed envelope,
 adapter failure, interrupt idempotency, `HarnessSession.close()` stopping the
-iterator, and no cursor duplication.
+iterator, no cursor duplication, an invalid/oversized handle, execution/scenario
+mismatch, a missing checkpoint, unknown handle version, and a fresh adapter
+object with no shared process-local record. Invalid handles return a parsed
+`missing` or `unknown` probe result and cannot resume.
 
 - [ ] **Step 2: Run fake tests red**
 
@@ -1150,10 +1421,16 @@ corepack pnpm exec vitest run apps/v2-server/src/executions/fake-harness.spec.ts
 - [ ] **Step 3: Implement the deterministic fake and legal lifecycle**
 
 The fixed `todo-foundation-v1` script emits adapter cursors 1 through 6:
-`output`, `child.started`, `child.output`, `child.completed`, `output`, and
-`execution.completed`. Native handles encode only fake-adapter data and remain
-opaque to services. Constructor options inject hold, malformed event, failure,
-and availability.
+`worker_execution.output`, `worker_execution.child_started`,
+`worker_execution.output`, `worker_execution.child_finished`,
+`worker_execution.output`, and `worker_execution.completed`. Cursor 6 has the
+strict normalized payload `{ outcome: 'completed' }`. Native handles are
+`fake:v1:<base64url-canonical-json>` inside the adapter and encode only
+`{ executionId, scenario: 'todo-foundation-v1', checkpointCursor }`; enforce a
+bounded encoded and decoded size. All other code treats the handle as opaque.
+`probe` and `resume` parse the handle without a static/global recovery record,
+and resume requires the request execution, scenario, and cursor to match it.
+Constructor options inject hold, malformed event, failure, and availability.
 
 ```ts
 export const legalExecutionTransitions = new Set([
@@ -1190,10 +1467,67 @@ it('durably fails a missing required capability before adapter start', async () 
     },
   });
   expect(events.domainAfter(project.id, 0).events.at(-1)?.type)
-    .toBe('worker_execution.failed');
+    .toBe('worker_execution.lifecycle_changed');
   expect(commands.find(requiresExecutionStreamCommand.idempotencyKey)).toBeDefined();
   expect(operations.listForExecution(executionId)).toEqual([]);
   expect(fake.startCount).toBe(0);
+});
+
+it('makes start idempotent before calling the adapter', async () => {
+  fake.blockStart();
+  const first = runtime.start(startCommand);
+  await fake.waitUntilStartCalled();
+  const stored = commands.find(
+    startCommand.idempotencyKey,
+    hashV2Command(startCommand.command),
+  );
+  expect(stored?.result).toMatchObject({
+    ok: true,
+    execution: { lifecycle: 'starting', nativeHandle: null },
+  });
+  await expect(runtime.start(startCommand)).resolves.toEqual(stored?.result);
+  expect(fake.startCount).toBe(1);
+  fake.releaseStart();
+  await first;
+  expect(commands.find(
+    startCommand.idempotencyKey,
+    hashV2Command(startCommand.command),
+  )?.result).toEqual(stored?.result);
+});
+
+it('persists immutable interrupt acceptance before the side effect', async () => {
+  fake.blockInterrupt();
+  const first = runtime.interrupt(interruptCommand);
+  await fake.waitUntilInterruptCalled();
+  const stored = commands.find(
+    interruptCommand.idempotencyKey,
+    hashV2Command(interruptCommand.command),
+  );
+  expect(stored?.result).toMatchObject({
+    ok: true,
+    execution: { lifecycle: 'interrupting' },
+  });
+  await expect(runtime.interrupt(interruptCommand)).resolves.toEqual(stored?.result);
+  expect(fake.interruptCalls).toHaveLength(1);
+  fake.releaseInterrupt({ status: 'succeeded' });
+  await first;
+  expect(commands.find(
+    interruptCommand.idempotencyKey,
+    hashV2Command(interruptCommand.command),
+  )?.result).toEqual(stored?.result);
+});
+
+it('commits normalized completion and lifecycle atomically', async () => {
+  await fixture.releaseThroughAdapterCursor(6);
+  const runtimeEvent = events.runtimeAfter(project.id, 0).events.at(-1);
+  expect(runtimeEvent).toMatchObject({
+    adapterCursor: 6,
+    type: 'worker_execution.completed',
+    payload: { outcome: 'completed' },
+  });
+  expect(executions.get(executionId)?.lifecycle).toBe('completed');
+  expect(events.domainAfter(project.id, 0).events.at(-1)?.type)
+    .toBe('worker_execution.lifecycle_changed');
 });
 
 it('fails a missing required skill before adapter start', async () => {
@@ -1248,22 +1582,76 @@ is best-effort but closure and consumption stop are mandatory. The fake iterator
 records every `next()` request, so the final assertion proves no later envelope
 was consumed rather than relying on a timer.
 
+Add a distinct regression where the first database write that terminalizes a
+cursor-6 completion fails. Assert the barrier trips immediately, the owned
+session is interrupted and closed, all completion/runtime/lifecycle rows roll
+back, nothing publishes, and no second fallback terminalization transaction is
+attempted. Repeat for an adapter failure that would normally terminalize the
+execution.
+
+Add reconciliation fixtures with pending start and interrupt operations whose
+executions are open and terminal. Assert every pending operation receives one
+standalone raw diagnostic and a terminal operation state in the same
+transaction. An interrupt may become `interrupted` only for
+`{ status: 'succeeded' }`, or for `{ status: 'already_terminal' }` paired with a
+terminal interrupted probe; `unknown`, completed/failed terminal probes, and
+probe errors produce an unknown operation result. Open executions become
+`attention_required`; terminal executions remain immutable and the
+reconciliation summary reports the attention alongside the durable operation
+diagnostic.
+
+Add table tests for exact and caret versions: `^1.2.3` accepts `1.9.0` and
+rejects `2.0.0`; `^0.2.3` accepts `0.2.9` and rejects `0.3.0`; `^0.0.3` accepts
+only `0.0.3`; malformed and prerelease constraints resolve unavailable.
+
+For both start and interrupt, spy on the command repository and prove the
+idempotency key/hash is checked once on the fast path and again inside the
+immediate reservation transaction. For start, hold capability resolution until
+two concurrent calls have both missed the fast lookup, release them, and assert
+one stored acceptance result, one pending-operation lineage, and one adapter
+start. Use two runtime instances sharing the same test database for the
+reservation race.
+
 - [ ] **Step 5: Implement execution start, stream, interrupt, and reconcile**
 
 Read and store the adapter capability snapshot, then compare every effective
 profile `requiredCapabilities` value before skill resolution, operation intent,
 or `start`. Missing capabilities atomically store the terminal execution,
-`worker_execution.failed` domain event, command result, and structured missing
-list; publish that committed domain event and return without creating an
-operation or calling the adapter. Apply the same no-operation/no-start rule to a
-missing required skill.
+`worker_execution.lifecycle_changed` domain event, command result, and
+structured `failure.missing` list; publish that committed domain event and
+return without creating an operation or calling the adapter. Apply the same
+no-operation/no-start rule to a missing required skill.
 
-For allowed starts, snapshot profile/skills before side effects and persist the
-operation intent before `start` or `interrupt`. For every envelope use one
-immediate transaction for raw insert, runtime insert, execution cursor update,
-lifecycle change/domain append, and operation observation as applicable; only
-after commit publish runtime followed by domain events. Invalid normalized input
-is an audited adapter failure, never an unvalidated event.
+For an allowed start, perform a fast idempotency lookup, then one immediate
+transaction rechecks the same key/hash before it snapshots profile/skills,
+persists the `starting` execution, creates a pending operation whose canonical
+`request_json` is
+`{ version: 'mesh.v2.execution-start/v1', idempotencyKey, requestHash, request }`,
+appends `worker_execution.lifecycle_changed`, and stores a successful immutable
+command result containing the `starting` execution. Commit and publish before
+`adapter.start`. A replay returns that exact stored result and never invokes the
+adapter. After start, atomically store the native handle, complete the operation,
+transition to `running`, and append the lifecycle event; on start failure,
+complete the operation as failed and append the failed lifecycle event. Never
+rewrite the accepted command result.
+
+Interrupt follows the same two-look-up reservation discipline. Its immediate
+transaction creates canonical
+`{ version: 'mesh.v2.execution-interrupt/v1', idempotencyKey, requestHash, request }`
+operation input, transitions the execution to `interrupting`, appends the sole
+lifecycle domain event, and stores an immutable accepted `interrupting` command
+result before `adapter.interrupt`. Only the transaction winner performs the
+side effect; a replay returns the stored result. Later proof transitions the
+execution and operation without rewriting that result.
+
+For every envelope use one immediate transaction for raw insert, runtime insert,
+execution cursor update, lifecycle change/domain append, and operation
+observation as applicable; only after commit publish runtime followed by domain
+events. Cursor-6 normalized completion performs all terminal writes in that
+transaction, publishes runtime then domain, and immediately stops requesting
+envelopes and closes the session. Stream exhaustion does not complete an
+execution. Invalid normalized input is an audited adapter failure, never an
+unvalidated event.
 
 On any envelope-transaction error, trip `AuditBarrier` synchronously before the
 iterator can request another item, remove the owned session from active
@@ -1273,9 +1661,20 @@ recording them in in-memory unhealthy diagnostics because the durable audit path
 is unavailable. Resolve `drain()` only when that containment sequence finishes;
 publish nothing from the failed transaction.
 
-Reconciliation implements every design matrix row. A new fake adapter object
-must resume `running` at `lastAdapterCursor + 1`; unknown probes and pending
-side-effect ambiguity become `attention_required`.
+The first failed terminalization write follows this same path immediately. Do
+not enter a general catch that tries to write a second `failed` or
+`attention_required` lifecycle as a fallback; that masks the audit failure and
+can continue without the required containment.
+
+Reconciliation iterates the union of open executions and every pending
+operation, grouped as an ordered list per execution so no start/interrupt row is
+collapsed. Each observed probe/interrupt result is stored through
+`appendRawDiagnosticInTransaction` in the same immediate transaction as the
+operation and lifecycle/domain changes. Require the interrupt proof matrix
+above. A new fake adapter object must parse its opaque handle, probe the exact
+held cursor, and resume `running` at `lastAdapterCursor + 1` only when the probe
+cursor equals the stored cursor; unknown probes and pending side-effect
+ambiguity become `attention_required`.
 
 - [ ] **Step 6: Run the T06 gate**
 
@@ -1294,15 +1693,21 @@ git commit -m "feat(v2): add fake worker execution runtime"
 
 **Acceptance criteria:** Fake conformance passes; snapshots precede start;
 required capabilities and required skills durably fail with no operation and
-zero adapter starts; preferred skills visibly fall back; operation intent
-precedes side effect; each of the four audit failure points rolls back, trips
-the barrier, interrupts/closes the owned session, publishes nothing, and consumes
-nothing later; restart resumes only with proof; no provider or future-workflow
+zero adapter starts; preferred skills visibly fall back; the immutable accepted
+start and interrupt results, in-transaction idempotency rechecks, and correlated
+pending operations precede each single side effect;
+cursor-6 normalized completion commits runtime and lifecycle atomically; each
+audit failure point, including the first terminalization write, rolls back,
+trips the barrier, interrupts/closes the owned session, publishes nothing, and
+consumes nothing later without a fallback masking attempt; every pending
+operation is reconciled with raw diagnostic evidence; interrupt completion is
+proof-based; caret `0.x` semantics are correct; a fresh object resumes only
+from its parsed handle and exact stored cursor; no provider or future-workflow
 type exists.
 
 ### Task T07: V2 Web API, Projection, Replay, and Resync
 
-**Wave:** 2
+**Wave:** 2R (restart in a fresh worktree from the accepted correction head)
 
 **Outcome:** Provide a deterministic browser-side client and reducer that
 converges from V2 snapshots and the two ordered streams.
@@ -1325,8 +1730,9 @@ converges from V2 snapshots and the two ordered streams.
 **Prohibited surfaces:** UI components, app/main, server, contracts, e2e, local
 lifecycle rules, and V1 state code.
 
-**Interfaces consumed:** T01 commands, HTTP snapshots, errors, domain/runtime
-events, cursors, and realtime messages.
+**Interfaces consumed:** Corrected T01 commands, HTTP snapshots, errors,
+domain/runtime events (including `worker_execution.completed`), cursors, and
+realtime messages.
 
 **Interface produced:**
 
@@ -1369,11 +1775,28 @@ it('requests resync on a runtime gap without changing the cursor', () => {
   expect(result.connection).toEqual({ status: 'stale', reason: 'runtime_gap' });
   expect(result.resyncRequested).toBe(true);
 });
+
+it('projects completion activity but waits for the lifecycle domain event', () => {
+  const afterRuntime = reduceProjectProjection(runningAtRuntime5, {
+    type: 'runtime.event',
+    event: { ...completionEvent, sequence: 6, adapterCursor: 6 },
+  });
+  expect(afterRuntime.runtimeCursor).toBe(6);
+  expect(afterRuntime.executions[0]?.lifecycle).toBe('running');
+  expect(afterRuntime.activity.at(-1)?.type).toBe('worker_execution.completed');
+
+  const afterDomain = reduceProjectProjection(afterRuntime, {
+    type: 'domain.event',
+    event: lifecycleChangedToCompleted,
+  });
+  expect(afterDomain.executions[0]?.lifecycle).toBe('completed');
+});
 ```
 
 Cover exact duplicate ignore, project mismatch, domain gap, invalid server
 message, abort, stable error parsing, reconnect cursor hello, and single-flight
-snapshot refresh.
+snapshot refresh. Parse and project cursor-6 completion from both retained replay
+and live delivery; never infer lifecycle completion from that runtime activity.
 
 - [ ] **Step 2: Run red**
 
@@ -1413,7 +1836,10 @@ git commit -m "feat(v2): add snapshot and replay projection"
 
 **Acceptance criteria:** Client parsing fails closed; two cursors advance
 independently and contiguously; duplicates are harmless; gaps become stale and
-single-flight resync; no client-side domain transition is invented.
+single-flight resync; cursor-6 completion is visible as runtime activity while
+the execution lifecycle changes only from
+`worker_execution.lifecycle_changed`; no client-side domain transition is
+invented.
 
 ### Task T08: V2 Server Composition, HTTP, Realtime, and Startup Recovery
 
@@ -1753,11 +2179,33 @@ test('Todo foundation survives restart without V1 state', async ({ page }) => {
   await fixture.approveProfilesAndStartExecution();
   await expect(page.getByText('child.started')).toBeVisible();
 
+  const firstServerPid = fixture.serverPid;
   await fixture.crashServer();
   await fixture.restartWithFreshFake();
+  expect(fixture.serverPid).not.toBe(firstServerPid);
   await page.reload();
   await expect(page.getByText('completed')).toBeVisible();
   await fixture.expectContinuousStreamsAndStableSnapshots();
+
+  const allRuntime = await fixture.runtimeEventsAfter(0);
+  const completions = allRuntime.events.filter(
+    (event) => event.type === 'worker_execution.completed',
+  );
+  expect(completions).toEqual([
+    expect.objectContaining({
+      adapterCursor: 6,
+      payload: { outcome: 'completed' },
+    }),
+  ]);
+  const allDomain = await fixture.domainEventsAfter(0);
+  expect(allDomain.events).toContainEqual(
+    expect.objectContaining({
+      type: 'worker_execution.lifecycle_changed',
+      payload: expect.objectContaining({
+        execution: expect.objectContaining({ lifecycle: 'completed' }),
+      }),
+    }),
+  );
 
   const beforeFailure = await fixture.projectSnapshot();
   await expect(fixture.startRequiredUnavailable()).resolves.toMatchObject({
@@ -1793,8 +2241,10 @@ and contiguous unrelated domain sequencing. T10 must not read the adapter
 object, execution repository, operations table, or a test-only endpoint. T06's
 direct unit test supplies the stronger internal proof that
 `operations.listForExecution(failed.id)` is empty and `fake.startCount` remains
-zero. A separate T10 assertion hashes a copied non-empty unmarked database
-before and after rejected startup.
+zero. The completion assertions prove T07 receives the strict cursor-6 runtime
+variant once and the lifecycle remains represented by the single domain event.
+A separate T10 assertion hashes a copied non-empty unmarked database before and
+after rejected startup.
 
 - [ ] **Step 2: Run red**
 
@@ -1816,6 +2266,13 @@ line shaped like
 parsed port to be a positive integer returned by the child, reject a
 non-loopback origin, and use that same origin for Playwright, API, and WebSocket.
 Track the exact server PID and terminate only that PID.
+
+`restartWithFreshFake` must spawn a distinct Node child process with the same
+database and workspace root but without the hold environment setting. No module,
+static map, adapter object, or other JavaScript memory crosses the process
+boundary. Successful recovery therefore proves the new fake adapter parsed the
+opaque versioned handle and agreed with the stored cursor; the fixture treats
+the handle as an opaque string and never decodes it.
 
 ```ts
 const environment = {
@@ -1848,7 +2305,9 @@ git commit -m "test(v2): prove foundation restart scenario"
 ```
 
 **Acceptance criteria:** Browser proves selection and focus; execution/profile/
-skills remain stable; runtime resumes with no duplicate/gap; required failure
+skills remain stable; two distinct child PIDs prove a process boundary; runtime
+resumes with no duplicate/gap and contains exactly one strict cursor-6
+completion event plus a completed lifecycle domain projection; required failure
 has public durable terminal/no-handle/no-start-transition/no-runtime evidence
 without inspecting the fake, while T06 supplies direct no-operation/zero-start
 proof; database mismatch is non-mutating; teardown touches only owned temporary
@@ -1958,17 +2417,24 @@ commits in this order:
 
 1. Wave 0: T01.
 2. Wave 1: T02, then T03.
-3. Wave 2: T04, T05, T06, then T07.
-4. Wave 3: T08.
-5. Wave 4: T09.
-6. Wave 5: T10.
-7. Wave 6: T11.
+3. Correction Wave C: T01C, then T02C, applied to the accepted Wave 1 head.
+4. Wave 2R: restart T06 and T07 independently from the accepted correction
+   head; preserve but do not integrate the superseded/paused worktrees.
+5. Wave 2I: from the correction head apply the unchanged accepted T04 and T05
+   commit sets, then the accepted restarted T06 and T07 commits.
+6. Wave 3: T08.
+7. Wave 4: T09.
+8. Wave 5: T10.
+9. Wave 6: T11.
 
-The order within Waves 1 and 2 is deterministic for reproducible history; it
-does not add dependencies between tasks whose owned surfaces do not overlap. A
-semantic conflict, unexpected path, changed
-T01 wire contract, changed T02 schema, V1 edit, real-agent traffic, or base drift
-blocks integration and returns to the coordinator.
+The order within Waves 1, C, and 2I is deterministic for reproducible history;
+it does not add dependencies between tasks whose owned surfaces do not overlap.
+T04/T05 are applied as their exact reviewed commits, not rebased or amended.
+The pre-correction T06 commit and any paused T07 state remain preserved and are
+never applied. A semantic conflict, unexpected path, unplanned contract/schema
+change, changed accepted patch, V1 edit, real-agent traffic, or base drift
+blocks integration and returns to the coordinator; the integrator does not fix
+it.
 
 After Wave 0:
 
@@ -1988,13 +2454,36 @@ corepack pnpm nx typecheck v2-server
 corepack pnpm nx typecheck v2-web
 ```
 
-After Wave 2:
+After Correction Wave C:
 
 ```powershell
+corepack pnpm nx test v2-contracts
+corepack pnpm exec vitest run apps/v2-server/src/storage/event-store.spec.ts --config apps/v2-server/vitest.config.ts
+corepack pnpm nx typecheck v2-contracts
+corepack pnpm nx typecheck v2-server
+corepack pnpm nx build v2-contracts
+corepack pnpm nx build v2-server
+git diff --check
+```
+
+The correction gate additionally verifies that the two accepted commits changed
+only T01C/T02C owned paths and that `001_foundation.sql` and every other
+`apps/v2-server/src/db/**` path are byte-identical to the Wave 1 base.
+
+Wave 2R has no shared integration gate: each restarted T06/T07 task runs its
+complete focused gate and receives an independent review. After Wave 2I:
+
+```powershell
+corepack pnpm nx test v2-contracts
 corepack pnpm nx test v2-server
 corepack pnpm nx test v2-web
+corepack pnpm nx typecheck v2-contracts
 corepack pnpm nx typecheck v2-server
 corepack pnpm nx typecheck v2-web
+corepack pnpm nx build v2-contracts
+corepack pnpm nx build v2-server
+corepack pnpm nx build v2-web
+git diff --check
 ```
 
 After Waves 3 and 4:
@@ -2049,14 +2538,22 @@ design section:
    approval actor, merge rules, stale write, and old snapshot preservation.
 6. Skills/execution: verify assignment/profile/capability/skill snapshots,
    preferred fallback, required capability/skill durable zero-start failures,
-   fake conformance, child activity, lifecycle, and interrupt reverse state.
+   structured bounded missing evidence, SemVer caret behavior including `0.x`,
+   immutable pre-side-effect start idempotency, fake conformance, versioned
+   opaque-handle recovery in a distinct child process, child activity,
+   normalized cursor-6 completion, lifecycle, and interrupt reverse state.
 7. Persistence/audit: verify application ID, fresh/reopen/mismatch cases,
    transaction rollback, idempotency, independent ordering, raw diagnostic
-   reference, publish-after-commit, and all four audit-failure points with
-   session interrupt/close, no publication, and no later consumption.
+   reference, standalone reconciliation diagnostic atomicity without a schema
+   change, every pending-operation outcome, publish-after-commit, and all four
+   audit-failure points including immediate first-terminalization containment
+   with no fallback masking, session interrupt/close, no publication, and no
+   later consumption.
 8. Commands/realtime/UI: verify strict routes, local origin, snapshot/replay,
    duplicate/gap/resync, deterministic domain/runtime replay interleavings,
-   selector/focused-shell states, and inert future panes.
+   cursor-6 completion activity followed by the sole
+   `worker_execution.lifecycle_changed` projection, selector/focused-shell
+   states, and inert future panes.
 9. Restart/security/workspace/billing: verify a fresh process and fake adapter
    resume from durable cursor, ambiguity attention, loopback/path safety, no
    filesystem mutation, one ephemeral same-origin built server with no Vite, no
