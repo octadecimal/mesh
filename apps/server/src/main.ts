@@ -333,8 +333,8 @@ export const startServer = async (
       }
       return;
     }
-    const cursors = projectCursors();
     try {
+      const cursors = projectCursors();
       const result = reconcileTaskAttempts({
         database,
         projects,

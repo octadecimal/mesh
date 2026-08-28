@@ -32,6 +32,7 @@ import {
 import { resolveRepositoryIdentity } from './projects/repository-identity.js';
 import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
 import { PlanningRepository } from './repositories/planning-repository.js';
+import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProjectRunRepository } from './repositories/project-run-repository.js';
 import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
@@ -2194,6 +2195,131 @@ describe('production composition', () => {
         drainSpy.mockRestore();
       }
     }
+  });
+
+  it('trips the audit barrier when deferred stopped-runtime cursor capture fails', async () => {
+    const fixture = await createPlanningFixture('deferred-cursor-audit');
+    const database = openDatabase(fixture.databasePath);
+    const task = new TaskRepository(database).create(
+      taskSchema.parse({
+        id: 'task-deferred-cursor-audit',
+        projectId: fixture.project.id,
+        title: 'Hold one project run drain',
+        description: 'Keep stopped-runtime reconciliation deferred.',
+        acceptanceCriteria: [
+          'The cursor read failure stops command acceptance.',
+        ],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    database.close();
+    const driver = new FakeClaudeSessionDriver({
+      pmSteps: [{ type: 'pm.wait' }],
+    });
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    let releaseDrain!: () => void;
+    const drainGate = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const drainAvailableSlots = ProjectRunService.prototype.drainAvailableSlots;
+    const drainSpy = vi
+      .spyOn(ProjectRunService.prototype, 'drainAvailableSlots')
+      .mockImplementation(async function (runId) {
+        await drainGate;
+        return drainAvailableSlots.call(this, runId);
+      });
+    let cursorReadFailed!: () => void;
+    const cursorFailure = new Promise<void>((resolve) => {
+      cursorReadFailed = resolve;
+    });
+    let restoreCursorSpy = () => undefined;
+    const previousExitCode = process.exitCode;
+    let closeError: unknown;
+    try {
+      const planning = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'start-pm-deferred-cursor-audit',
+        ),
+      });
+      expect(planning.statusCode).toBe(200);
+
+      const run = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: 'start-run-deferred-cursor-audit',
+          command: {
+            type: 'project.run.start',
+            payload: {
+              projectId: fixture.project.id,
+              concurrency: 1,
+              expectedPolicyRevision: fixture.project.qaConfiguration.revision,
+              expectedTasks: [
+                {
+                  taskId: task.id,
+                  revision: task.revision,
+                  automationStatus: task.reviewAutomation.status,
+                  automationGeneration: task.reviewAutomation.generation,
+                },
+              ],
+              actor: { type: 'human', id: 'operator-deferred-cursor-audit' },
+            },
+          },
+        },
+      });
+      expect(run.statusCode).toBe(200);
+      await vi.waitFor(() => expect(drainSpy).toHaveBeenCalledOnce());
+
+      const pmRuntime = driver.createdSessions[0];
+      if (!pmRuntime) throw new Error('Expected a PM runtime');
+      await pmRuntime.close();
+      const cursorSpy = vi
+        .spyOn(ProjectEventRepository.prototype, 'latestSequence')
+        .mockImplementation(() => {
+          cursorReadFailed();
+          throw new Error('deferred cursor read failed');
+        });
+      restoreCursorSpy = () => cursorSpy.mockRestore();
+      releaseDrain();
+      await cursorFailure;
+      restoreCursorSpy();
+
+      const rejected = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'rejected-after-deferred-cursor-audit',
+        ),
+      });
+      expect(rejected.statusCode).toBe(503);
+    } finally {
+      restoreCursorSpy();
+      releaseDrain();
+      closeError = await running.close().catch((error: unknown) => error);
+      drainSpy.mockRestore();
+      process.exitCode = previousExitCode;
+    }
+    expect(closeError).toMatchObject({
+      message: 'deferred cursor read failed',
+    });
   });
 
   it('routes a trigger-based attempt audit failure through the central runtime barrier', async () => {
