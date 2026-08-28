@@ -417,6 +417,103 @@ describe('ProjectPlanningPanel', () => {
     ).toHaveLength(22);
   });
 
+  it('bridges a non-overlapping authoritative history window before continuing older pages', async () => {
+    const user = userEvent.setup();
+    const terminalSummary = (
+      id: string,
+      index: number,
+      minutesAfterNewest: number,
+    ) => {
+      const terminalAt = new Date(
+        Date.parse('2026-08-28T00:00:00.000Z') - minutesAfterNewest * 60_000,
+      ).toISOString();
+      return projectPlanSummarySchema.parse({
+        ...summary(id, index),
+        updatedAt: terminalAt,
+        terminalAt,
+      });
+    };
+    const oldWindow = Array.from({ length: 20 }, (_, index) =>
+      terminalSummary(`old-${index}`, 100 + index, 59 + index),
+    );
+    const newWindow = Array.from({ length: 20 }, (_, index) =>
+      terminalSummary(`new-${index}`, index, index),
+    );
+    const firstBridgePage = Array.from({ length: 20 }, (_, index) =>
+      terminalSummary(`gap-a-${index}`, 20 + index, 20 + index),
+    );
+    const secondBridgePage = [
+      ...Array.from({ length: 19 }, (_, index) =>
+        terminalSummary(`gap-b-${index}`, 40 + index, 40 + index),
+      ),
+      oldWindow[0],
+    ];
+    const firstPage = deferred<ProjectPlanHistoryPage>();
+    const loadHistory = vi
+      .fn<(_: string, __?: string) => Promise<ProjectPlanHistoryPage>>()
+      .mockReturnValueOnce(firstPage.promise)
+      .mockResolvedValueOnce({
+        plans: secondBridgePage,
+        nextAfter: secondBridgePage.at(-1)?.id,
+      })
+      .mockResolvedValueOnce({
+        plans: [terminalSummary('older-0', 120, 79)],
+      });
+    const rendered = renderPanel({ summaries: oldWindow, loadHistory });
+
+    rendered.rerender(panel({ summaries: newWindow, loadHistory }));
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+
+    expect(loadHistory).toHaveBeenNthCalledWith(1, project.id, 'new-19');
+    expect(
+      screen.getByRole('button', { name: 'Loading older plans…' }),
+    ).toBeDisabled();
+
+    await act(async () => {
+      firstPage.resolve({
+        plans: firstBridgePage,
+        nextAfter: firstBridgePage.at(-1)?.id,
+      });
+    });
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenNthCalledWith(2, project.id, 'gap-a-19');
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 58' }),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenNthCalledWith(3, project.id, 'old-19');
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 120' }),
+    ).toBeVisible();
+    expect(
+      screen.getAllByRole('button', { name: /View Plan history/i }),
+    ).toHaveLength(80);
+    expect(
+      screen
+        .getByRole('button', { name: 'View Plan history 20' })
+        .compareDocumentPosition(
+          screen.getByRole('button', { name: 'View Plan history 100' }),
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole('button', { name: 'Load older plans' }),
+    ).toBeNull();
+
+    const otherProject = projectSchema.parse({
+      ...project,
+      id: 'project-2',
+      displayName: 'Other project',
+      repositoryPath: 'C:\\other',
+      repositoryIdentity: 'other',
+    });
+    rendered.rerender(panel({ projectValue: otherProject, loadHistory }));
+    expect(screen.getByText('No completed plans yet.')).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: /View Plan history/i }),
+    ).toBeNull();
+  });
+
   it('opens the proposal session from historical plan details', async () => {
     const user = userEvent.setup();
     const onOpenSession = vi.fn();

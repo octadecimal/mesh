@@ -83,8 +83,18 @@ const appendUniquePlans = (
   incoming: readonly ProjectPlanSummary[],
 ) => {
   const ids = new Set(current.map(({ id }) => id));
-  const additions = incoming.filter(({ id }) => !ids.has(id));
-  return additions.length > 0 ? [...current, ...additions] : current;
+  const additions = incoming.filter(({ id }) => {
+    if (ids.has(id)) return false;
+    ids.add(id);
+    return true;
+  });
+  return additions.length > 0
+    ? [...current, ...additions].sort(
+        (left, right) =>
+          right.terminalAt.localeCompare(left.terminalAt) ||
+          right.id.localeCompare(left.id),
+      )
+    : current;
 };
 
 type PendingAction = {
@@ -97,6 +107,10 @@ type DetailState =
   | { status: 'loading' }
   | { status: 'error'; message: string }
   | { status: 'loaded'; details: ProjectPlanDetails };
+
+type HistoryBridge = {
+  resumeBefore: string | null;
+};
 
 function EvidenceList({
   label,
@@ -456,6 +470,7 @@ export function ProjectPlanningPanel({
     ProjectPlanSummary[]
   >([]);
   const [nextBefore, setNextBefore] = useState<string | null>();
+  const [historyBridge, setHistoryBridge] = useState<HistoryBridge>();
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string>();
   const currentProjectId = useRef(project.id);
@@ -477,6 +492,7 @@ export function ProjectPlanningPanel({
     setDetailStates({});
     setAccumulatedPlans([]);
     setNextBefore(undefined);
+    setHistoryBridge(undefined);
     setHistoryLoading(false);
     setHistoryError(undefined);
   }, [project.id]);
@@ -485,6 +501,18 @@ export function ProjectPlanningPanel({
     if (pendingAction?.settled && pendingAction.baseline !== fingerprint)
       setPendingAction(undefined);
   }, [fingerprint, pendingAction]);
+
+  useEffect(() => {
+    if (recentPlans.length < 20 || accumulatedPlans.length === 0) return;
+    const accumulatedIds = new Set(accumulatedPlans.map(({ id }) => id));
+    if (recentPlans.some(({ id }) => accumulatedIds.has(id))) return;
+    const boundary = recentPlans.at(-1)?.id;
+    if (!boundary) return;
+    setHistoryBridge(
+      (current) => current ?? { resumeBefore: nextBefore ?? null },
+    );
+    setNextBefore(boundary);
+  }, [accumulatedPlans, nextBefore, recentPlans]);
 
   useEffect(() => {
     setAccumulatedPlans((current) => appendUniquePlans(current, recentPlans));
@@ -565,10 +593,24 @@ export function ProjectPlanningPanel({
     try {
       const page = await loadHistory(project.id, nextBefore);
       if (currentProjectId.current !== requestProjectId) return;
+      const accumulatedIds = new Set(accumulatedPlans.map(({ id }) => id));
+      const bridgeReconnected = Boolean(
+        historyBridge && page.plans.some(({ id }) => accumulatedIds.has(id)),
+      );
       setAccumulatedPlans((current) =>
         appendUniquePlans(current, [...recentPlans, ...page.plans]),
       );
-      setNextBefore(page.nextAfter ?? null);
+      if (!historyBridge) {
+        setNextBefore(page.nextAfter ?? null);
+      } else if (!page.nextAfter) {
+        setHistoryBridge(undefined);
+        setNextBefore(null);
+      } else if (bridgeReconnected) {
+        setHistoryBridge(undefined);
+        setNextBefore(historyBridge.resumeBefore);
+      } else {
+        setNextBefore(page.nextAfter);
+      }
     } catch (caught) {
       if (currentProjectId.current !== requestProjectId) return;
       setHistoryError(
