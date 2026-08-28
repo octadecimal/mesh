@@ -363,10 +363,11 @@ describe('createClaudeSdkFacade', () => {
       ).resolves.toMatchObject({
         content: [{ text: expect.stringContaining('inside = true') }],
       });
-      await expect(
-        tools.glob_workspace_files?.handler({ pattern: '**/*.ts' }),
-      ).resolves.toMatchObject({
-        content: [{ text: expect.stringContaining('src\\\\inside.ts') }],
+      const globResult = (await tools.glob_workspace_files?.handler({
+        pattern: '**/*.ts',
+      })) as { content: Array<{ type: 'text'; text: string }> } | undefined;
+      expect(JSON.parse(globResult?.content[0]?.text ?? '{}')).toMatchObject({
+        files: [join('src', 'inside.ts')],
       });
       await expect(
         tools.search_workspace_text?.handler({ path: 'src', query: 'inside' }),
