@@ -11,7 +11,10 @@ import type {
   StartExecutionEnvelope,
 } from '@mesh/v2-contracts';
 
-import { hashV2Command } from '../storage/command-repository.js';
+import {
+  hashV2Command,
+  V2IdempotencyConflictError,
+} from '../storage/command-repository.js';
 import {
   createV2TestDatabase,
   type V2TestDatabase,
@@ -142,6 +145,19 @@ const normalizedOutput = (
   occurredAt: '2026-08-28T01:00:01.000Z',
   type: 'worker_execution.output' as const,
   payload: { text: 'malformed input fixture' },
+});
+
+const durableReservationState = (fixture: V2TestDatabase) => ({
+  executions: fixture.database
+    .prepare('SELECT * FROM worker_executions ORDER BY id')
+    .all(),
+  operations: fixture.database
+    .prepare('SELECT * FROM execution_operations ORDER BY id')
+    .all(),
+  domain: fixture.database.prepare('SELECT * FROM domain_events ORDER BY id').all(),
+  commands: fixture.database
+    .prepare('SELECT * FROM command_results ORDER BY idempotency_key')
+    .all(),
 });
 
 describe('ExecutionRuntime', () => {
@@ -354,6 +370,72 @@ describe('ExecutionRuntime', () => {
     await second.drain();
   });
 
+  it('keeps the barrier healthy for an inner start idempotency conflict', async () => {
+    const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
+    fake.blockCapabilities();
+    const context = createRuntime({ fake });
+    const second = new ExecutionRuntime({
+      database: context.fixture.database,
+      commands: context.fixture.commands,
+      events: context.fixture.events,
+      projects: { get: () => context.fixture.project },
+      profiles: {
+        resolveApproved: () => ({
+          profileId: context.fixture.profileRevision.profileId,
+          projectId: context.fixture.profileRevision.projectId,
+          profileRevision: context.fixture.profileRevision.revision,
+          baseProfileId: context.fixture.profileRevision.baseProfileId,
+          baseRevision: context.fixture.profileRevision.baseRevision,
+          document: context.fixture.profileRevision.document,
+          digest: context.fixture.profileRevision.digest,
+        }),
+      },
+      executions: context.executions,
+      operations: context.operations,
+      adapter: fake,
+      publisher: { domain: () => undefined, runtime: () => undefined },
+      barrier: context.barrier,
+      now: () => '2026-08-28T01:00:00.000Z',
+    });
+    const conflicting: StartExecutionEnvelope = {
+      ...context.start,
+      command: {
+        ...context.start.command,
+        assignment: {
+          ...context.start.command.assignment,
+          title: 'Conflicting foundation check',
+        },
+      },
+    };
+
+    const first = context.runtime.start(context.start);
+    const conflict = second.start(conflicting);
+    await fake.waitUntilCapabilitiesCalled(2);
+    fake.releaseCapabilities();
+    const settled = await Promise.allSettled([first, conflict]);
+
+    expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(
+      1,
+    );
+    const rejected = required(
+      settled.find((result) => result.status === 'rejected'),
+      'Expected one conflicting start',
+    );
+    expect(rejected).toMatchObject({
+      status: 'rejected',
+      reason: expect.any(V2IdempotencyConflictError),
+    });
+    expect(context.barrier.status).toBe('healthy');
+    expect(fake.startCount).toBe(1);
+    expect(
+      context.executions
+        .list(context.fixture.project.id)
+        .filter((execution) => execution.id !== context.fixture.execution.id),
+    ).toHaveLength(1);
+    await context.runtime.drain();
+    await second.drain();
+  });
+
   it('rejects start when the audit barrier trips during capability resolution', async () => {
     const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
     fake.blockCapabilities();
@@ -390,6 +472,42 @@ describe('ExecutionRuntime', () => {
     expect(fake.startCount).toBe(0);
     expect(fake.interruptCalls).toEqual([]);
   });
+
+  it.each([
+    ['execution', 'BEFORE INSERT ON worker_executions'],
+    ['operation', 'BEFORE INSERT ON execution_operations'],
+    ['domain', 'BEFORE INSERT ON domain_events'],
+    ['command', 'BEFORE INSERT ON command_results'],
+  ])(
+    'trips the audit barrier when start reservation %s persistence fails',
+    async (faultPoint, triggerTarget) => {
+      const context = createRuntime();
+      const before = durableReservationState(context.fixture);
+      context.fixture.database.exec(`
+        CREATE TRIGGER fail_start_${faultPoint} ${triggerTarget}
+        BEGIN SELECT RAISE(ABORT, 'fail start ${faultPoint}'); END
+      `);
+
+      await expect(context.runtime.start(context.start)).rejects.toThrow(
+        `fail start ${faultPoint}`,
+      );
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.fixture.commands.find(context.start.idempotencyKey)).toBe(
+        undefined,
+      );
+      expect(context.fake.startCount).toBe(0);
+      expect(context.fake.interruptCalls).toEqual([]);
+      expect(context.published).toEqual({ domain: [], runtime: [] });
+      await expect(
+        context.runtime.start({
+          ...context.start,
+          idempotencyKey: randomUUID(),
+        }),
+      ).rejects.toThrow('Audit barrier is tripped');
+    },
+  );
 
   it('does not infer completion from stream exhaustion', async () => {
     const context = createRuntime({
@@ -713,6 +831,41 @@ describe('ExecutionRuntime', () => {
     expect(context.executions.get(running.id)?.lifecycle).toBe('interrupted');
   });
 
+  it('keeps the barrier healthy for a fast interrupt idempotency conflict', async () => {
+    const context = createRuntime();
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const interrupt: InterruptExecutionEnvelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.interrupt',
+        projectId: running.projectId,
+        executionId: running.id,
+        expectedRevision: running.revision,
+      },
+    };
+    await context.runtime.interrupt(interrupt);
+
+    await expect(
+      context.runtime.interrupt({
+        ...interrupt,
+        command: {
+          ...interrupt.command,
+          expectedRevision: interrupt.command.expectedRevision + 1,
+        },
+      }),
+    ).rejects.toBeInstanceOf(V2IdempotencyConflictError);
+    expect(context.barrier.status).toBe('healthy');
+    expect(context.fake.interruptCalls).toHaveLength(1);
+  });
+
   it('lets one of two runtime instances reserve interrupt after both miss the fast lookup', async () => {
     const context = createRuntime();
     const started = await context.runtime.start(context.start);
@@ -823,6 +976,67 @@ describe('ExecutionRuntime', () => {
     }).toEqual(before);
     expect(context.fake.interruptCalls).toEqual([]);
   });
+
+  it.each([
+    [
+      'execution',
+      `BEFORE UPDATE ON worker_executions
+       WHEN NEW.lifecycle = 'interrupting'`,
+    ],
+    ['operation', 'BEFORE INSERT ON execution_operations'],
+    ['domain', 'BEFORE INSERT ON domain_events'],
+    ['command', 'BEFORE INSERT ON command_results'],
+  ])(
+    'trips the audit barrier when interrupt reservation %s persistence fails',
+    async (faultPoint, triggerTarget) => {
+      const context = createRuntime();
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const running = required(
+        context.executions.get(
+          started.ok && 'execution' in started ? started.execution.id : '',
+        ),
+        'Expected a running execution',
+      );
+      const interrupt: InterruptExecutionEnvelope = {
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'worker_execution.interrupt',
+          projectId: running.projectId,
+          executionId: running.id,
+          expectedRevision: running.revision,
+        },
+      };
+      const before = durableReservationState(context.fixture);
+      const publishedBefore = {
+        domain: [...context.published.domain],
+        runtime: [...context.published.runtime],
+      };
+      context.fixture.database.exec(`
+        CREATE TRIGGER fail_interrupt_${faultPoint} ${triggerTarget}
+        BEGIN SELECT RAISE(ABORT, 'fail interrupt ${faultPoint}'); END
+      `);
+
+      await expect(context.runtime.interrupt(interrupt)).rejects.toThrow(
+        `fail interrupt ${faultPoint}`,
+      );
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.fixture.commands.find(interrupt.idempotencyKey)).toBe(
+        undefined,
+      );
+      expect(context.fake.interruptCalls).toEqual([]);
+      expect(context.published).toEqual(publishedBefore);
+      await expect(
+        context.runtime.interrupt({
+          ...interrupt,
+          idempotencyKey: randomUUID(),
+        }),
+      ).rejects.toThrow('Audit barrier is tripped');
+    },
+  );
 
   it.each([
     ['raw_insert', 'BEFORE INSERT ON raw_diagnostics'],
