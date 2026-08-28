@@ -5,9 +5,11 @@ import {
   type ProjectionAction,
   type ProjectionDispatch,
 } from './reducer';
+import type { ProjectEventCursors } from '@mesh/v2-contracts';
 
 export type V2Store = {
   getState(): ProjectProjection;
+  getCursors(): ProjectEventCursors;
   dispatch: ProjectionDispatch;
   subscribe(listener: (state: ProjectProjection) => void): () => void;
 };
@@ -25,6 +27,10 @@ export const createV2Store = (projectId: string): V2Store => {
 
   return {
     getState: () => state,
+    getCursors: () => ({
+      domain: state.domainCursor,
+      runtime: state.runtimeCursor,
+    }),
     dispatch,
     subscribe(listener) {
       listeners.add(listener);

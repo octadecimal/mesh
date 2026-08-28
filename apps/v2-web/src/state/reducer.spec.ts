@@ -132,6 +132,48 @@ const ready = () =>
     snapshot,
   });
 
+const independentProjectProfileApproved = {
+  id: '00000000-0000-4000-8000-000000000008',
+  projectId,
+  sequence: 3,
+  occurredAt: '2026-08-28T00:00:07.000Z',
+  type: 'worker_profile.revision_approved',
+  payload: {
+    profileRevision: {
+      profileId: '00000000-0000-4000-8000-000000000009',
+      scope: 'project',
+      projectId,
+      name: 'project-foundation',
+      displayName: 'Project Foundation',
+      revision: 1,
+      sourceYaml: 'apiVersion: mesh.dev/v1alpha1',
+      document: {
+        apiVersion: 'mesh.dev/v1alpha1',
+        kind: 'WorkerProfile',
+        metadata: {
+          name: 'project-foundation',
+          displayName: 'Project Foundation',
+          scope: 'project',
+        },
+        spec: {
+          assignmentKinds: ['foundation-check'],
+          preferredRuntime: { harness: 'fake', model: 'fake-v1' },
+          alternatives: [],
+          requiredCapabilities: [],
+          skills: { preferred: [], required: [] },
+          instructions: 'Project instructions.',
+          outputSchema: 'mesh.foundation/v1',
+        },
+      },
+      baseProfileId: null,
+      baseRevision: null,
+      approvedBy: { kind: 'human' },
+      approvedAt: '2026-08-28T00:00:07.000Z',
+      digest: 'b'.repeat(64),
+    },
+  },
+} satisfies DomainEvent;
+
 describe('reduceProjectProjection', () => {
   it('requests resync on a runtime gap without changing either cursor', () => {
     const result = reduceProjectProjection(ready(), {
@@ -213,6 +255,203 @@ describe('reduceProjectProjection', () => {
       status: 'stale',
       reason: 'project_mismatch',
     });
+  });
+
+  it('marks direct domain gaps and stale events without advancing', () => {
+    const gap = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: { ...completedLifecycle, sequence: 5 },
+    });
+    expect(gap.domainCursor).toBe(2);
+    expect(gap.connection).toEqual({ status: 'stale', reason: 'domain_gap' });
+
+    const old = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: { ...completedLifecycle, sequence: 1 },
+    });
+    expect(old.domainCursor).toBe(2);
+    expect(old.connection).toEqual({
+      status: 'stale',
+      reason: 'domain_stale',
+    });
+  });
+
+  it('projects an independent approved project profile from its event', () => {
+    const result = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: independentProjectProfileApproved,
+    });
+
+    expect(result.domainCursor).toBe(3);
+    expect(result.profiles).toEqual([
+      {
+        profileId:
+          independentProjectProfileApproved.payload.profileRevision.profileId,
+        projectId,
+        profileRevision: 1,
+        baseProfileId: null,
+        baseRevision: null,
+        document: {
+          apiVersion: 'mesh.dev/v1alpha1',
+          kind: 'WorkerProfile',
+          metadata: {
+            name: 'project-foundation',
+            displayName: 'Project Foundation',
+            scope: 'project',
+          },
+          spec: independentProjectProfileApproved.payload.profileRevision.document
+            .spec,
+        },
+        digest: 'b'.repeat(64),
+      },
+    ]);
+  });
+
+  it('requests resync without advancing for an unresolved extending profile', () => {
+    const extending = {
+      ...independentProjectProfileApproved,
+      payload: {
+        profileRevision: {
+          ...independentProjectProfileApproved.payload.profileRevision,
+          document: {
+            ...independentProjectProfileApproved.payload.profileRevision.document,
+            extends: { profile: 'global/foundation' as const, revision: 1 },
+            spec: { instructions: 'Project override.' },
+          },
+          baseProfileId: profileId,
+          baseRevision: 1,
+        },
+      },
+    } satisfies DomainEvent;
+
+    const result = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: extending,
+    });
+
+    expect(result.domainCursor).toBe(2);
+    expect(result.profiles).toEqual([]);
+    expect(result.resyncRequested).toBe(true);
+    expect(result.connection).toEqual({
+      status: 'stale',
+      reason: 'profile_projection_incomplete',
+    });
+  });
+
+  it('keeps attention items derived from lifecycle execution failures', () => {
+    const failed = {
+      ...completedLifecycle,
+      payload: {
+        execution: {
+          ...execution,
+          lifecycle: 'attention_required' as const,
+          revision: 3,
+          failure: {
+            code: 'required_skill_unavailable' as const,
+            message: 'Required skill is unavailable.',
+            missing: ['mesh/reviewer'],
+          },
+        },
+      },
+    } satisfies DomainEvent;
+    const afterFailure = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: failed,
+    });
+    expect(afterFailure.attentionItems).toEqual([
+      {
+        executionId,
+        code: 'required_skill_unavailable',
+        message: 'Required skill is unavailable.',
+      },
+    ]);
+
+    const updated = reduceProjectProjection(afterFailure, {
+      type: 'domain.event',
+      event: {
+        ...failed,
+        id: '00000000-0000-4000-8000-000000000010',
+        sequence: 4,
+        payload: {
+          execution: {
+            ...failed.payload.execution,
+            revision: 4,
+            failure: {
+              code: 'required_capability_unavailable',
+              message: 'Required capability is unavailable.',
+              missing: ['resume'],
+            },
+          },
+        },
+      },
+    });
+    expect(updated.attentionItems).toEqual([
+      {
+        executionId,
+        code: 'required_capability_unavailable',
+        message: 'Required capability is unavailable.',
+      },
+    ]);
+
+    const cleared = reduceProjectProjection(updated, {
+      type: 'domain.event',
+      event: {
+        ...completedLifecycle,
+        id: '00000000-0000-4000-8000-000000000011',
+        sequence: 5,
+      },
+    });
+    expect(cleared.attentionItems).toEqual([]);
+  });
+
+  it('fails closed when an attention lifecycle lacks attention details', () => {
+    const incomplete = {
+      ...completedLifecycle,
+      payload: {
+        execution: {
+          ...execution,
+          lifecycle: 'attention_required' as const,
+          revision: 3,
+          failure: null,
+        },
+      },
+    } satisfies DomainEvent;
+
+    const result = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: incomplete,
+    });
+
+    expect(result.domainCursor).toBe(2);
+    expect(result.executions[0]?.lifecycle).toBe('running');
+    expect(result.connection).toEqual({
+      status: 'stale',
+      reason: 'attention_projection_incomplete',
+    });
+    expect(result.resyncRequested).toBe(true);
+  });
+
+  it('keeps subscription transport state separate from snapshot readiness', () => {
+    const initial = createInitialProjectProjection(projectId);
+    const subscribedFirst = reduceProjectProjection(initial, {
+      type: 'transport.subscribed',
+    });
+    expect(subscribedFirst.connection).toEqual({ status: 'loading' });
+    expect(subscribedFirst.transport).toBe('subscribed');
+
+    const snapshotAfter = reduceProjectProjection(subscribedFirst, {
+      type: 'snapshot.received',
+      snapshot,
+    });
+    expect(snapshotAfter.connection).toEqual({ status: 'ready' });
+    expect(snapshotAfter.transport).toBe('subscribed');
+
+    const snapshotFirst = ready();
+    const subscribedAfter = reduceProjectProjection(snapshotFirst, {
+      type: 'transport.subscribed',
+    });
+    expect(subscribedAfter.connection).toEqual({ status: 'ready' });
+    expect(subscribedAfter.transport).toBe('subscribed');
   });
 });
 

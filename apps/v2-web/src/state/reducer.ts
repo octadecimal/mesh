@@ -7,6 +7,11 @@ import type {
   V2ProjectSnapshot,
   WorkerExecution,
 } from '@mesh/v2-contracts';
+import {
+  resolvedWorkerProfileSnapshotSchema,
+  v2AttentionItemSchema,
+  workerProfileSpecSchema,
+} from '@mesh/v2-contracts';
 
 export type ProjectionConnection =
   | { status: 'loading' }
@@ -30,6 +35,7 @@ export type ProjectProjection = {
   domainCursor: number;
   runtimeCursor: number;
   connection: ProjectionConnection;
+  transport: 'connecting' | 'subscribed' | 'disconnected';
   resyncRequested: boolean;
   local: ProjectionLocalState;
 };
@@ -38,8 +44,8 @@ export type ProjectionAction =
   | { type: 'snapshot.received'; snapshot: V2ProjectSnapshot }
   | { type: 'domain.event'; event: DomainEvent }
   | { type: 'runtime.event'; event: RuntimeEvent }
-  | { type: 'connection.ready' }
-  | { type: 'connection.disconnected' }
+  | { type: 'transport.subscribed' }
+  | { type: 'transport.disconnected' }
   | { type: 'resync.required'; reason: string }
   | { type: 'local.route_changed'; route: string }
   | { type: 'local.repository_draft_changed'; draft: string }
@@ -58,6 +64,7 @@ export const createInitialProjectProjection = (
   domainCursor: 0,
   runtimeCursor: 0,
   connection: { status: 'loading' },
+  transport: 'connecting',
   resyncRequested: false,
   local: { route: '', repositoryDraft: '', selectedTab: 'board' },
 });
@@ -79,10 +86,78 @@ const replaceExecution = (
   );
 };
 
+const replaceProfile = (
+  profiles: readonly ResolvedWorkerProfileSnapshot[],
+  next: ResolvedWorkerProfileSnapshot,
+) => {
+  const index = profiles.findIndex(({ profileId }) => profileId === next.profileId);
+  if (index < 0) return [...profiles, next];
+  return profiles.map((profile, position) =>
+    position === index ? next : profile,
+  );
+};
+
+const projectApprovedProfile = (
+  event: Extract<DomainEvent, { type: 'worker_profile.revision_approved' }>,
+) => {
+  const revision = event.payload.profileRevision;
+  if (
+    revision.scope !== 'project' ||
+    revision.projectId === null ||
+    revision.document.extends !== undefined ||
+    revision.baseProfileId !== null ||
+    revision.baseRevision !== null
+  ) {
+    return undefined;
+  }
+  const spec = workerProfileSpecSchema.safeParse(revision.document.spec);
+  if (!spec.success) return undefined;
+  const resolved = resolvedWorkerProfileSnapshotSchema.safeParse({
+    profileId: revision.profileId,
+    projectId: revision.projectId,
+    profileRevision: revision.revision,
+    baseProfileId: null,
+    baseRevision: null,
+    document: {
+      apiVersion: revision.document.apiVersion,
+      kind: revision.document.kind,
+      metadata: revision.document.metadata,
+      spec: spec.data,
+    },
+    digest: revision.digest,
+  });
+  return resolved.success ? resolved.data : undefined;
+};
+
+const replaceAttention = (
+  attentionItems: readonly V2AttentionItem[],
+  execution: WorkerExecution,
+) => {
+  const others = attentionItems.filter(
+    ({ executionId }) => executionId !== execution.id,
+  );
+  if (execution.failure === null) return others;
+  return [
+    ...others,
+    v2AttentionItemSchema.parse({
+      executionId: execution.id,
+      code: execution.failure.code,
+      message: execution.failure.message,
+    }),
+  ];
+};
+
+const hasCompleteAttentionProjection = (execution: WorkerExecution) => {
+  const needsAttention =
+    execution.lifecycle === 'attention_required' ||
+    execution.lifecycle === 'failed';
+  return needsAttention === (execution.failure !== null);
+};
+
 const applyDomainEvent = (
   state: ProjectProjection,
   event: DomainEvent,
-): ProjectProjection => {
+): ProjectProjection | undefined => {
   switch (event.type) {
     case 'project.registered':
       return { ...state, project: event.payload.project };
@@ -93,9 +168,17 @@ const applyDomainEvent = (
           state.executions,
           event.payload.execution,
         ),
+        attentionItems: replaceAttention(
+          state.attentionItems,
+          event.payload.execution,
+        ),
       };
-    case 'worker_profile.revision_approved':
-      return state;
+    case 'worker_profile.revision_approved': {
+      const profile = projectApprovedProfile(event);
+      return profile
+        ? { ...state, profiles: replaceProfile(state.profiles, profile) }
+        : undefined;
+    }
   }
 };
 
@@ -112,7 +195,15 @@ const reduceEvent = (
   if (event.sequence !== cursor + 1) return stale(state, `${stream}_gap`);
 
   if (stream === 'domain') {
-    const projected = applyDomainEvent(state, event as DomainEvent);
+    const domainEvent = event as DomainEvent;
+    if (
+      domainEvent.type === 'worker_execution.lifecycle_changed' &&
+      !hasCompleteAttentionProjection(domainEvent.payload.execution)
+    ) {
+      return stale(state, 'attention_projection_incomplete');
+    }
+    const projected = applyDomainEvent(state, domainEvent);
+    if (!projected) return stale(state, 'profile_projection_incomplete');
     return {
       ...projected,
       domainCursor: event.sequence,
@@ -151,11 +242,14 @@ export const reduceProjectProjection = (
     case 'runtime.event':
       if (state.resyncRequested) return state;
       return reduceEvent(state, 'runtime', action.event);
-    case 'connection.ready':
-      if (state.resyncRequested) return state;
-      return { ...state, connection: { status: 'ready' } };
-    case 'connection.disconnected':
-      return { ...state, connection: { status: 'disconnected' } };
+    case 'transport.subscribed':
+      return { ...state, transport: 'subscribed' };
+    case 'transport.disconnected':
+      return {
+        ...state,
+        transport: 'disconnected',
+        connection: { status: 'disconnected' },
+      };
     case 'resync.required':
       return stale(state, action.reason);
     case 'local.route_changed':
