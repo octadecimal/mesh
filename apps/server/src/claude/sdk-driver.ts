@@ -7,7 +7,7 @@ import type {
   DiscoveredClaudeSession,
   DriverEvent,
   DriverSession,
-  RoleRuntimeConfiguration,
+  NonDeveloperRuntimeConfiguration,
   ResumeClaudeSessionRequest,
   StartClaudeSessionRequest,
 } from './driver.js';
@@ -60,7 +60,7 @@ export interface SdkQueryOptions {
   title?: string;
   resume?: string;
   developer?: DeveloperRuntimeConfiguration;
-  role?: RoleRuntimeConfiguration;
+  role?: NonDeveloperRuntimeConfiguration;
   onPermission?(request: SdkPermissionRequest): Promise<SdkPermissionDecision>;
 }
 

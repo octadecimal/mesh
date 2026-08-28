@@ -14,9 +14,15 @@ import {
 import {
   developerBlockerReportInputSchema,
   developerCompletionReportInputSchema,
+  projectPlanProposalInputSchema,
 } from '@mesh-session-platform/contracts';
 
-import type { DeveloperRuntimeControls, RoleControlServer } from './driver.js';
+import type {
+  DeveloperRuntimeControls,
+  PmRuntimeConfiguration,
+  RoleControlServer,
+} from './driver.js';
+import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
 import {
   UnsupportedSdkCapabilityError,
   type SdkFacade,
@@ -180,6 +186,93 @@ const createRoleMcpServer = (server: RoleControlServer) =>
     ),
   });
 
+const safePmControlErrorCodes = new Set([
+  'planning_capability_invalid',
+  'planning_capability_mismatch',
+  'planning_capability_expired',
+  'planning_capability_in_use',
+  'planning_proposal_invalid',
+  'planning_submission_failed',
+]);
+
+type PmControlProblem = {
+  code: string;
+  path: Array<string | number>;
+  message: string;
+};
+
+const pmControlFailure = (
+  error: unknown,
+  problems?: readonly PmControlProblem[],
+) => {
+  const record = asRecord(error);
+  const candidate =
+    typeof record?.code === 'string'
+      ? record.code
+      : typeof error === 'string'
+        ? error
+        : undefined;
+  const code =
+    candidate && safePmControlErrorCodes.has(candidate)
+      ? candidate
+      : 'planning_submission_failed';
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          status: 'error',
+          code,
+          ...(problems && problems.length > 0 ? { problems } : {}),
+        }),
+      },
+    ],
+    isError: true,
+  };
+};
+
+const createPmMcpServer = (configuration: PmRuntimeConfiguration) =>
+  createSdkMcpServer({
+    name: 'mesh_pm',
+    version: '1',
+    alwaysLoad: true,
+    tools: [
+      tool(
+        'submit_project_plan',
+        'Submit one complete structured project-plan proposal.',
+        projectPlanProposalInputSchema.shape,
+        async (input) => {
+          const parsed = projectPlanProposalInputSchema.safeParse(input);
+          if (!parsed.success)
+            return pmControlFailure(
+              'planning_proposal_invalid',
+              parsed.error.issues.map((issue) => ({
+                code: issue.code,
+                path: issue.path.filter(
+                  (entry): entry is string | number =>
+                    typeof entry === 'string' || typeof entry === 'number',
+                ),
+                message: issue.message,
+              })),
+            );
+          try {
+            await configuration.submitProposal(parsed.data);
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({ status: 'submitted' }),
+                },
+              ],
+            };
+          } catch (error) {
+            return pmControlFailure(error);
+          }
+        },
+      ),
+    ],
+  });
+
 const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
   if (message.type === 'system' && message.subtype === 'init') {
     return [
@@ -340,6 +433,13 @@ class ClaudeSdkQuery implements SdkQuery {
   }
 }
 
+const sameTools = (
+  actual: readonly string[],
+  expected: readonly string[],
+): boolean =>
+  actual.length === expected.length &&
+  actual.every((toolName, index) => toolName === expected[index]);
+
 export const createClaudeSdkFacade = (): SdkFacade => ({
   listSessions: async ({ cwd }) =>
     (await listSessions({ dir: cwd })).map((session) => ({
@@ -347,6 +447,13 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
       title: session.customTitle ?? session.summary,
     })),
   startQuery: (options: SdkQueryOptions) => {
+    if (
+      options.role?.role === 'pm' &&
+      (!sameTools(options.role.availableTools, PM_AVAILABLE_TOOLS) ||
+        !sameTools(options.role.allowedTools, PM_AVAILABLE_TOOLS))
+    ) {
+      throw new Error('PM runtime tools do not match the read-only policy.');
+    }
     const prompts = new AsyncPromptQueue();
     const sessionId = options.resume ?? randomUUID();
     const onPermission = options.onPermission;
@@ -377,7 +484,9 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
               settingSources: [],
               strictMcpConfig: true,
               allowedTools: [...options.role.allowedTools],
-              disallowedTools: [...options.role.disallowedTools],
+              ...(options.role.role === 'qa'
+                ? { disallowedTools: [...options.role.disallowedTools] }
+                : {}),
             }
           : {}),
         ...(canUseTool ? { canUseTool } : {}),
@@ -390,12 +499,19 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
               },
             }
           : {}),
-        ...(options.role
+        ...(options.role?.role === 'qa'
           ? {
               mcpServers: {
                 [options.role.controlServer.name]: createRoleMcpServer(
                   options.role.controlServer,
                 ),
+              },
+            }
+          : {}),
+        ...(options.role?.role === 'pm'
+          ? {
+              mcpServers: {
+                mesh_pm: createPmMcpServer(options.role),
               },
             }
           : {}),

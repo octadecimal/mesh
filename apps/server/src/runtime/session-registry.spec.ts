@@ -11,6 +11,7 @@ import type {
   ClaudeSessionDriver,
   DeveloperRuntimeConfiguration,
   DriverSession,
+  PmRuntimeConfiguration,
   RoleRuntimeConfiguration,
 } from '../claude/driver.js';
 import {
@@ -18,6 +19,7 @@ import {
   FakeDriverSession,
 } from '../claude/fake-driver.js';
 import { createTestRepositories } from '../test/create-test-database.js';
+import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
 import { SessionRegistry } from './session-registry.js';
 
 const now = '2026-08-25T12:00:00.000Z';
@@ -700,6 +702,36 @@ describe('SessionRegistry Developer attachment', () => {
     expect(driver.createdRequests[0]?.developer).toBeUndefined();
     expect(driver.createdSessions[0]?.prompts).toEqual([
       'Verify the assigned Developer cycle.',
+    ]);
+  });
+
+  it('passes PM role configuration without populating Developer controls', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'create-pm');
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    const configuration: PmRuntimeConfiguration = {
+      role: 'pm',
+      initialPrompt: 'Plan the approved project goal.',
+      availableTools: PM_AVAILABLE_TOOLS,
+      allowedTools: PM_AVAILABLE_TOOLS,
+      submitProposal: async () => undefined,
+    };
+
+    await registry.create('create-pm', configuration);
+
+    expect(driver.createdRequests[0]?.role).toBe(configuration);
+    expect(driver.createdRequests[0]?.developer).toBeUndefined();
+    expect(driver.createdSessions[0]?.prompts).toEqual([
+      'Plan the approved project goal.',
     ]);
   });
 

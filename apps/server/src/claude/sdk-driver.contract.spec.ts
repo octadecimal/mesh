@@ -12,6 +12,8 @@ import {
   type SdkStreamEvent,
 } from './sdk-driver.js';
 import { selectClaudeDriver } from '../main.js';
+import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
+import type { PmRuntimeConfiguration } from './driver.js';
 
 const collect = async <T>(events: AsyncIterable<T>): Promise<T[]> => {
   const values: T[] = [];
@@ -294,6 +296,78 @@ describe('SdkClaudeSessionDriver contract', () => {
         'Edit',
         'submit_for_review',
         'mark_blocked',
+      ]),
+    );
+  });
+
+  it('forwards the dedicated read-only PM runtime for create and resume', async () => {
+    const pm: PmRuntimeConfiguration = {
+      role: 'pm',
+      initialPrompt: 'Plan the approved project goal.',
+      availableTools: PM_AVAILABLE_TOOLS,
+      allowedTools: PM_AVAILABLE_TOOLS,
+      submitProposal: async () => undefined,
+    };
+    const createSdk = new ScriptedFacade([
+      { kind: 'started', sessionId: 'resume-pm-create', apiKeySource: 'none' },
+    ]);
+    const resumeSdk = new ScriptedFacade([
+      {
+        kind: 'started',
+        sessionId: 'resume-pm-existing',
+        apiKeySource: 'none',
+      },
+    ]);
+
+    await new SdkClaudeSessionDriver(createSdk).create({
+      title: 'PM',
+      workspacePath: 'C:\\repo',
+      permissionMode: 'inherit',
+      role: pm,
+    });
+    await new SdkClaudeSessionDriver(resumeSdk).resume({
+      claudeResumeId: 'resume-pm-existing',
+      workspacePath: 'C:\\repo',
+      permissionMode: 'inherit',
+      role: pm,
+    });
+
+    expect(createSdk.queryCalls[0]).toMatchObject({
+      cwd: 'C:\\repo',
+      role: pm,
+    });
+    expect(resumeSdk.queryCalls[0]).toMatchObject({
+      cwd: 'C:\\repo',
+      resume: 'resume-pm-existing',
+      role: pm,
+    });
+    expect(createSdk.queryCalls[0]?.developer).toBeUndefined();
+    expect(createSdk.queryCalls[0]).not.toHaveProperty('onPermission');
+    expect(createSdk.query.prompts).toEqual([
+      'Plan the approved project goal.',
+    ]);
+    expect(resumeSdk.query.prompts).toEqual([
+      'Plan the approved project goal.',
+    ]);
+    expect(pm.availableTools).toEqual([
+      'Read',
+      'Glob',
+      'Grep',
+      'mcp__mesh_pm__submit_project_plan',
+    ]);
+    expect(pm.allowedTools).toEqual(pm.availableTools);
+    expect(pm.availableTools).not.toEqual(
+      expect.arrayContaining([
+        'Bash',
+        'Write',
+        'Edit',
+        'NotebookEdit',
+        'WebFetch',
+        'WebSearch',
+        'Task',
+        'submit_for_review',
+        'mark_blocked',
+        'submit_qa_verdict',
       ]),
     );
   });

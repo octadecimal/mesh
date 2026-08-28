@@ -9,7 +9,7 @@ import type {
   ClaudeSessionDriver,
   DeveloperRuntimeConfiguration,
   DriverSession,
-  RoleRuntimeConfiguration,
+  NonDeveloperRuntimeConfiguration,
 } from '../claude/driver.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { EventRepository } from '../repositories/event-repository.js';
@@ -296,7 +296,7 @@ export class SessionRegistry {
     };
     let placeholder: DriverSession | undefined;
     let driverAttached = false;
-    const role = isRoleRuntimeConfiguration(configuration)
+    const role = isNonDeveloperRuntimeConfiguration(configuration)
       ? configuration
       : undefined;
     const developer = isDeveloperRuntimeConfiguration(configuration)
@@ -583,12 +583,10 @@ export class SessionRegistry {
   }
 }
 
-const isRoleRuntimeConfiguration = (
+const isNonDeveloperRuntimeConfiguration = (
   configuration: AgentRuntimeConfiguration | undefined,
-): configuration is RoleRuntimeConfiguration =>
-  configuration !== undefined &&
-  'role' in configuration &&
-  configuration.role === 'qa';
+): configuration is NonDeveloperRuntimeConfiguration =>
+  configuration !== undefined && 'role' in configuration;
 
 const isDeveloperRuntimeConfiguration = (
   configuration: AgentRuntimeConfiguration | undefined,

@@ -1,6 +1,7 @@
 import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
+  projectPlanProposalInputSchema,
   type DeveloperBlockerReport,
   type DeveloperBlockerReportInput,
   type DeveloperCompletionReport,
@@ -61,6 +62,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 import { createClaudeSdkFacade } from './sdk-adapter.js';
+import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
 
 describe('createClaudeSdkFacade', () => {
   beforeEach(() => {
@@ -196,6 +198,144 @@ describe('createClaudeSdkFacade', () => {
     expect(execute).toHaveBeenCalledWith({ disposition: 'verified' });
   });
 
+  it('installs only the read-only PM tools and delivers one structured proposal callback', async () => {
+    const proposal = projectPlanProposalInputSchema.parse({
+      tasks: [],
+      dependencies: [],
+      assumptions: ['The current board is authoritative.'],
+      risks: [],
+      exclusions: [],
+    });
+    const submitProposal = vi.fn(async () => undefined);
+
+    createClaudeSdkFacade().startQuery({
+      title: 'PM',
+      role: {
+        role: 'pm',
+        initialPrompt: 'Plan the approved project goal.',
+        availableTools: PM_AVAILABLE_TOOLS,
+        allowedTools: PM_AVAILABLE_TOOLS,
+        submitProposal,
+      },
+    });
+
+    const serverOptions = createSdkMcpServer.mock.calls.at(-1)?.[0] as {
+      name: string;
+      version: string;
+      alwaysLoad: boolean;
+      tools: ToolDefinition[];
+    };
+    expect(serverOptions).toMatchObject({
+      name: 'mesh_pm',
+      version: '1',
+      alwaysLoad: true,
+    });
+    expect(serverOptions.tools.map(({ name }) => name)).toEqual([
+      'submit_project_plan',
+    ]);
+    expect(query.mock.calls.at(-1)?.[0].options).toMatchObject({
+      tools: ['Read', 'Glob', 'Grep', 'mcp__mesh_pm__submit_project_plan'],
+      settingSources: [],
+      strictMcpConfig: true,
+      allowedTools: [
+        'Read',
+        'Glob',
+        'Grep',
+        'mcp__mesh_pm__submit_project_plan',
+      ],
+    });
+    const options = query.mock.calls.at(-1)?.[0].options;
+    expect(Object.keys(options.mcpServers ?? {})).toEqual(['mesh_pm']);
+    expect(options.tools).not.toEqual(
+      expect.arrayContaining([
+        'Bash',
+        'Write',
+        'Edit',
+        'NotebookEdit',
+        'WebFetch',
+        'WebSearch',
+        'Task',
+        'mcp__mesh_developer__submit_for_review',
+        'mcp__mesh_developer__mark_blocked',
+        'mcp__mesh_qa__submit_qa_verdict',
+      ]),
+    );
+    expect(options.allowedTools).toEqual(options.tools);
+
+    const result = await serverOptions.tools[0]?.handler(proposal);
+    expect(submitProposal).toHaveBeenCalledOnce();
+    expect(submitProposal).toHaveBeenCalledWith(proposal);
+    expect(result).toEqual({
+      content: [{ type: 'text', text: '{"status":"submitted"}' }],
+    });
+  });
+
+  it('rejects PM tool configuration that expands or reorders the fixed policy', () => {
+    expect(() =>
+      createClaudeSdkFacade().startQuery({
+        role: {
+          role: 'pm',
+          initialPrompt: 'Plan.',
+          availableTools: [...PM_AVAILABLE_TOOLS, 'Bash'],
+          allowedTools: [...PM_AVAILABLE_TOOLS].reverse(),
+          submitProposal: async () => undefined,
+        },
+      }),
+    ).toThrow('PM runtime tools do not match the read-only policy');
+    expect(query).not.toHaveBeenCalled();
+    expect(createSdkMcpServer).not.toHaveBeenCalled();
+  });
+
+  it('returns sanitized structured PM errors and does not invoke the callback for invalid payloads', async () => {
+    const secret = 'planning-capability-secret';
+    const error = Object.assign(new Error(`expired ${secret}`), {
+      code: 'planning_capability_expired',
+    });
+    const submitProposal = vi.fn(async () => {
+      throw error;
+    });
+    createClaudeSdkFacade().startQuery({
+      role: {
+        role: 'pm',
+        initialPrompt: 'Plan.',
+        availableTools: PM_AVAILABLE_TOOLS,
+        allowedTools: PM_AVAILABLE_TOOLS,
+        submitProposal,
+      },
+    });
+    const pmTool = pmTools().submit_project_plan;
+
+    const invalid = (await pmTool?.handler({})) as
+      | { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
+      | undefined;
+    expect(invalid).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: expect.stringContaining('"code":"planning_proposal_invalid"'),
+        },
+      ],
+      isError: true,
+    });
+    expect(JSON.parse(invalid?.content[0]?.text ?? '{}')).toMatchObject({
+      problems: expect.arrayContaining([
+        expect.objectContaining({ path: ['tasks'] }),
+      ]),
+    });
+    expect(submitProposal).not.toHaveBeenCalled();
+
+    const failed = await pmTool?.handler({
+      tasks: [],
+      dependencies: [],
+      assumptions: [],
+      risks: [],
+      exclusions: [],
+    });
+    expect(failed).toMatchObject({ isError: true });
+    expect(JSON.stringify(failed)).toContain('planning_capability_expired');
+    expect(JSON.stringify(failed)).not.toContain(secret);
+  });
+
   it('invokes Developer controls from model-visible evidence and an idempotency key', async () => {
     const capability = 'secret-capability-value';
     const {
@@ -311,6 +451,15 @@ describe('createClaudeSdkFacade', () => {
 });
 
 const developerTools = (): Record<string, ToolDefinition> => {
+  const serverOptions = createSdkMcpServer.mock.calls.at(-1)?.[0] as {
+    tools: ToolDefinition[];
+  };
+  return Object.fromEntries(
+    serverOptions.tools.map((entry) => [entry.name, entry]),
+  );
+};
+
+const pmTools = (): Record<string, ToolDefinition> => {
   const serverOptions = createSdkMcpServer.mock.calls.at(-1)?.[0] as {
     tools: ToolDefinition[];
   };
