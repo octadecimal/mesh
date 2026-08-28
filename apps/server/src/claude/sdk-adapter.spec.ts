@@ -400,6 +400,75 @@ describe('createClaudeSdkFacade', () => {
     }
   });
 
+  it('rejects path-affecting Glob expansions while preserving simple in-root patterns', async () => {
+    const repository = mkdtempSync(join(tmpdir(), 'mesh-pm-glob-boundary-'));
+    try {
+      createClaudeSdkFacade().startQuery({
+        cwd: repository,
+        role: {
+          role: 'pm',
+          initialPrompt: 'Plan.',
+          availableTools: PM_AVAILABLE_TOOLS,
+          allowedTools: PM_AVAILABLE_TOOLS,
+          submitProposal: async () => undefined,
+        },
+      });
+      const hook =
+        query.mock.calls.at(-1)?.[0].options.hooks?.PreToolUse?.[0]?.hooks[0];
+      const invoke = async (pattern: string) =>
+        hook?.({
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Glob',
+          tool_input: { pattern },
+        });
+      const allowed = {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'defer',
+        },
+      };
+      const denied = {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason:
+            'PM repository reads are confined to the session working directory.',
+        },
+      };
+
+      for (const pattern of [
+        '**/*.ts',
+        'src/**/*.{ts,tsx}',
+        'src/{feature-one,feature_two}/**/*.ts',
+      ]) {
+        await expect(invoke(pattern)).resolves.toEqual(allowed);
+      }
+
+      for (const pattern of [
+        '{../outside,src}/**/*',
+        '{/etc,src}/**/*',
+        '{C:/Windows,src}/**/*',
+        '{C,D}:/Windows/**/*',
+        '{.,safe}./outside/**/*',
+        '{src,{../outside,safe}}/**/*',
+        'src/{nested/path,flat}/**/*',
+        '[.][.]/outside/**/*',
+        '\\.\\./outside/**/*',
+        'safe/\\.\\./\\.\\./outside/**/*',
+        '@(../outside|src)/**/*',
+        '!(C:/Windows|src)/**/*',
+        '+(/etc|src)/**/*',
+        'src/{ts,tsx',
+        'src/ts,tsx}/**/*',
+        'src/{ts,,tsx}/**/*',
+      ]) {
+        await expect(invoke(pattern)).resolves.toEqual(denied);
+      }
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
   it('rejects PM tool configuration that expands or reorders the fixed policy', () => {
     expect(() =>
       createClaudeSdkFacade().startQuery({

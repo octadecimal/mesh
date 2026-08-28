@@ -307,13 +307,41 @@ describe('PlanningCapabilityRegistry', () => {
     expect(accept).toHaveBeenCalledOnce();
   });
 
-  it('clears generation tombstones only with process-lifetime state', () => {
+  it('clears active tokens while retaining tombstones until a new registry is constructed', async () => {
     const capabilities = registry();
-    capabilities.issue(binding);
+    const firstToken = capabilities.issue(binding);
+    const secondBinding = { ...binding, generation: 7 };
+    const secondToken = capabilities.issue(secondBinding);
+    const accept = vi.fn(async () => undefined);
 
     capabilities.clear();
 
-    expect(() => capabilities.issue({ ...binding })).not.toThrow();
+    await expect(
+      capabilities.submit({
+        token: firstToken,
+        context,
+        proposal,
+        accept,
+      }),
+    ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+    await expect(
+      capabilities.submit({
+        token: secondToken,
+        context: { ...context, generation: 7 },
+        proposal,
+        accept,
+      }),
+    ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+    expect(() => capabilities.issue({ ...binding })).toThrow(
+      'Planning capability generation has already been issued',
+    );
+    expect(() => capabilities.issue(secondBinding)).toThrow(
+      'Planning capability generation has already been issued',
+    );
+    expect(accept).not.toHaveBeenCalled();
+
+    const restarted = registry();
+    expect(() => restarted.issue({ ...binding })).not.toThrow();
   });
 
   it('restores a generation when the submission callback rejects', async () => {

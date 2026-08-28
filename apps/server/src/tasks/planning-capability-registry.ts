@@ -184,7 +184,6 @@ export class PlanningCapabilityRegistry {
     this.entries.clear();
     this.tokensByPlan.clear();
     this.tokensBySession.clear();
-    this.issuedGenerationTombstones.clear();
   }
 
   private assertContext(

@@ -81,12 +81,44 @@ const isContainedExistingPath = (root: string, inputPath: unknown): boolean => {
   }
 };
 
+const safeBraceAlternative = /^[A-Za-z0-9_-]+$/u;
+
+const hasOnlySafeBraceAlternatives = (pattern: string): boolean => {
+  let openBrace = -1;
+  for (let index = 0; index < pattern.length; index += 1) {
+    if (pattern[index] === '{') {
+      if (openBrace !== -1) return false;
+      openBrace = index;
+      continue;
+    }
+    if (pattern[index] !== '}') continue;
+    if (openBrace === -1) return false;
+    const alternatives = pattern.slice(openBrace + 1, index).split(',');
+    if (
+      alternatives.length < 2 ||
+      alternatives.some(
+        (alternative) => !safeBraceAlternative.test(alternative),
+      )
+    ) {
+      return false;
+    }
+    openBrace = -1;
+  }
+  return openBrace === -1;
+};
+
 const isSafeGlobPattern = (pattern: unknown): pattern is string =>
   typeof pattern === 'string' &&
   pattern.trim().length > 0 &&
   !isAbsolute(pattern) &&
   !win32.isAbsolute(pattern) &&
-  !hasParentTraversal(pattern);
+  !hasParentTraversal(pattern) &&
+  !pattern.includes(':') &&
+  !pattern.includes('\\') &&
+  !pattern.includes('[') &&
+  !pattern.includes(']') &&
+  !/[?*+@!]\(/u.test(pattern) &&
+  hasOnlySafeBraceAlternatives(pattern);
 
 const isSafePmRead = (
   root: string,
