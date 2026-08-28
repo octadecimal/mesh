@@ -116,8 +116,7 @@ const createPlan = (
       revision,
       lifecycleState,
       blocked,
-    }))
-    .sort((left, right) => compareText(left.id, right.id));
+    }));
   const dependencies = repositories.dependencies
     .listByProject(project.id)
     .sort(

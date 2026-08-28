@@ -960,15 +960,12 @@ export class PlanningExecutionService {
 
   private captureComparableBase(project: Project) {
     return {
-      tasks: this.dependencies.tasks
-        .listByProject(project.id)
-        .map((task) => ({
-          id: task.id,
-          revision: task.revision,
-          lifecycleState: task.lifecycleState,
-          blocked: task.blocked,
-        }))
-        .sort((left, right) => compareText(left.id, right.id)),
+      tasks: this.dependencies.tasks.listByProject(project.id).map((task) => ({
+        id: task.id,
+        revision: task.revision,
+        lifecycleState: task.lifecycleState,
+        blocked: task.blocked,
+      })),
       dependencies: this.dependencies.dependencies
         .listByProject(project.id)
         .sort(

@@ -14,6 +14,7 @@ import {
 import type { RepositoryIdentity } from '../projects/repository-identity.js';
 import { EventPublisher } from '../runtime/event-publisher.js';
 import { createTestRepositories } from '../test/create-test-database.js';
+import { PlanApprovalService } from './plan-approval-service.js';
 import { PlanningCapabilityRegistry } from './planning-capability-registry.js';
 import {
   PlanningExecutionService,
@@ -347,6 +348,44 @@ describe('PlanningExecutionService', () => {
     expect(runtimeConfiguration(registry).initialPrompt).toContain(
       `Plan ID: ${started.plan.id}`,
     );
+  });
+
+  it('approves a fresh base whose board rank order is inverse to task ID order', async () => {
+    const { registry, repositories, service } = arrange();
+    repositories.database.exec(`
+      UPDATE tasks
+      SET lifecycle_state = 'backlog',
+          rank = CASE id WHEN 'task-b' THEN 'a' ELSE 'b' END
+      WHERE id IN ('task-a', 'task-b')
+    `);
+    const started = await start(service);
+    const submitted = await service.submitProposal({
+      capability: runtimeConfiguration(registry).capability,
+      proposal: proposal(),
+    });
+    if (!submitted.proposal) throw new Error('Expected a submitted proposal');
+    let nextApprovalId = 0;
+    const approval = new PlanApprovalService({
+      ...repositories,
+      publisher: registry.publisher,
+      now: () => now,
+      createId: () => `approval-order-${++nextApprovalId}`,
+    });
+
+    const approved = await approval.approve({
+      projectId: started.plan.projectId,
+      planId: submitted.plan.id,
+      proposalId: submitted.proposal.id,
+      expectedPlanRevision: submitted.plan.revision,
+      actor: human,
+      commandId: 'approve-inverse-rank-order',
+    });
+
+    expect(started.base.tasks.map(({ id }) => id)).toEqual([
+      'task-b',
+      'task-a',
+    ]);
+    expect(approved.plan.status).toBe('approved');
   });
 
   it('returns the committed start for a duplicate command without starting twice', async () => {
