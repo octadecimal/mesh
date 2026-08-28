@@ -149,6 +149,12 @@ export type WorkerExecutionLifecycle = z.infer<
 export const executionFailureSchema = z.strictObject({
   code: v2ErrorCodeSchema,
   message: z.string().trim().min(1).max(4096),
+  missing: z
+    .array(z.string().trim().min(1).max(256))
+    .min(1)
+    .max(64)
+    .readonly()
+    .optional(),
 });
 export type ExecutionFailure = z.infer<typeof executionFailureSchema>;
 

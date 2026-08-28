@@ -7,6 +7,7 @@ import {
   clientRealtimeMessageSchema,
   domainEventDraftSchema,
   domainEventSchema,
+  executionFailureSchema,
   foundationCheckAssignmentSchema,
   harnessCapabilitiesSchema,
   harnessEventEnvelopeSchema,
@@ -657,6 +658,96 @@ describe('V2 foundation contracts', () => {
     expect(() =>
       domainEventDraftSchema.parse({ ...lifecycle, projectId: otherProjectId }),
     ).toThrow(/project/i);
+  });
+
+  it('parses normalized completion and bounded missing evidence', () => {
+    const completion = {
+      projectId,
+      executionId,
+      adapterCursor: 6,
+      occurredAt: now,
+      type: 'worker_execution.completed' as const,
+      payload: { outcome: 'completed' as const },
+    };
+
+    expect(runtimeEventDraftSchema.parse(completion)).toEqual(completion);
+    expect(
+      runtimeEventSchema.parse({
+        ...completion,
+        id: randomUUID(),
+        diagnosticId: randomUUID(),
+        sequence: 6,
+      }).type,
+    ).toBe('worker_execution.completed');
+    expect(
+      executionFailureSchema.parse({
+        code: 'required_capability_unavailable',
+        message: 'Required capabilities are unavailable',
+        missing: ['execution.stream'],
+      }).missing,
+    ).toEqual(['execution.stream']);
+    expect(
+      executionFailureSchema.parse({
+        code: 'required_skill_unavailable',
+        message: 'Required skills are unavailable',
+      }),
+    ).toEqual({
+      code: 'required_skill_unavailable',
+      message: 'Required skills are unavailable',
+    });
+  });
+
+  it('keeps completion strict and bounds missing evidence', () => {
+    const completion = {
+      projectId,
+      executionId,
+      adapterCursor: 6,
+      occurredAt: now,
+      type: 'worker_execution.completed' as const,
+      payload: { outcome: 'completed' as const },
+    };
+
+    expect(() =>
+      runtimeEventDraftSchema.parse({
+        ...completion,
+        payload: { outcome: 'completed', providerSessionId: 'native-1' },
+      }),
+    ).toThrow();
+    expect(() =>
+      runtimeEventDraftSchema.parse({
+        ...completion,
+        sessionId: executionId,
+      }),
+    ).toThrow();
+    expect(() =>
+      executionFailureSchema.parse({
+        code: 'required_skill_unavailable',
+        message: 'Unavailable',
+        missing: [],
+      }),
+    ).toThrow();
+    expect(() =>
+      executionFailureSchema.parse({
+        code: 'required_skill_unavailable',
+        message: 'Unavailable',
+        missing: Array.from({ length: 65 }, (_, index) => `skill-${index}`),
+      }),
+    ).toThrow();
+    expect(() =>
+      executionFailureSchema.parse({
+        code: 'required_skill_unavailable',
+        message: 'Unavailable',
+        missing: ['x'.repeat(257)],
+      }),
+    ).toThrow();
+    expect(() =>
+      domainEventDraftSchema.parse({
+        projectId,
+        occurredAt: now,
+        type: 'worker_execution.failed',
+        payload: { execution },
+      }),
+    ).toThrow();
   });
 
   it('round-trips every runtime event and raw diagnostic variant', () => {

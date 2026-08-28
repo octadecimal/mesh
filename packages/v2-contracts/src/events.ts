@@ -119,12 +119,21 @@ const adapterFailedDraftSchema = z.strictObject({
     message: z.string().trim().min(1).max(4096),
   }),
 });
+export const executionCompletedDraftSchema = z.strictObject({
+  ...runtimeEventBase,
+  type: z.literal('worker_execution.completed'),
+  payload: z.strictObject({ outcome: z.literal('completed') }),
+});
+export type WorkerExecutionCompletedRuntimeEventDraft = z.infer<
+  typeof executionCompletedDraftSchema
+>;
 
 export const runtimeEventDraftSchema = z.discriminatedUnion('type', [
   outputDraftSchema,
   childStartedDraftSchema,
   childFinishedDraftSchema,
   adapterFailedDraftSchema,
+  executionCompletedDraftSchema,
 ]);
 export type RuntimeEventDraft = z.infer<typeof runtimeEventDraftSchema>;
 
@@ -149,8 +158,17 @@ export const runtimeEventSchema = z.discriminatedUnion('type', [
     diagnosticId: rawDiagnosticIdSchema,
     sequence: nonNegativeIntegerSchema,
   }),
+  executionCompletedDraftSchema.extend({
+    id: runtimeEventIdSchema,
+    diagnosticId: rawDiagnosticIdSchema,
+    sequence: nonNegativeIntegerSchema,
+  }),
 ]);
 export type RuntimeEvent = z.infer<typeof runtimeEventSchema>;
+export type WorkerExecutionCompletedRuntimeEvent = Extract<
+  RuntimeEvent,
+  { type: 'worker_execution.completed' }
+>;
 
 export const rawDiagnosticDraftSchema = z.strictObject({
   projectId: projectIdSchema,
