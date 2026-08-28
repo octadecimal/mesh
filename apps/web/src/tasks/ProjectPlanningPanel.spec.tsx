@@ -514,10 +514,10 @@ describe('ProjectPlanningPanel', () => {
     ).toBeNull();
   });
 
-  it('keeps the newest bridge cursor when an older page resolves after another resync', async () => {
+  it('drains a stale segment before resuming older history after another resync', async () => {
     const user = userEvent.setup();
     const oldWindow = Array.from({ length: 20 }, (_, index) =>
-      summary(`old-race-${index}`, 100 + index),
+      summary(`old-race-${index}`, 99 + index),
     );
     const firstWindow = Array.from({ length: 20 }, (_, index) =>
       summary(`first-race-${index}`, index),
@@ -532,7 +532,16 @@ describe('ProjectPlanningPanel', () => {
       ...Array.from({ length: 19 }, (_, index) =>
         summary(`reconnect-race-${index}`, 60 + index),
       ),
-      firstWindow[0],
+      stalePage[0],
+    ];
+    const continuationPage = Array.from({ length: 20 }, (_, index) =>
+      summary(`continuation-race-${index}`, 79 + index),
+    );
+    const reconnectOlderPage = [
+      ...Array.from({ length: 19 }, (_, index) =>
+        summary(`reconnect-older-race-${index}`, 119 + index),
+      ),
+      oldWindow[0],
     ];
     const pendingPage = deferred<ProjectPlanHistoryPage>();
     const loadHistory = vi
@@ -542,7 +551,15 @@ describe('ProjectPlanningPanel', () => {
         plans: reconnectPage,
         nextAfter: reconnectPage.at(-1)?.id,
       })
-      .mockResolvedValueOnce({ plans: [summary('older-race', 120)] });
+      .mockResolvedValueOnce({
+        plans: continuationPage,
+        nextAfter: continuationPage.at(-1)?.id,
+      })
+      .mockResolvedValueOnce({
+        plans: reconnectOlderPage,
+        nextAfter: reconnectOlderPage.at(-1)?.id,
+      })
+      .mockResolvedValueOnce({ plans: [summary('older-race', 138)] });
     const rendered = renderPanel({ summaries: oldWindow, loadHistory });
 
     rendered.rerender(panel({ summaries: firstWindow, loadHistory }));
@@ -571,13 +588,38 @@ describe('ProjectPlanningPanel', () => {
     ).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: 'Load older plans' }));
-    expect(loadHistory).toHaveBeenNthCalledWith(3, project.id, 'old-race-19');
+    expect(loadHistory).toHaveBeenNthCalledWith(3, project.id, 'stale-race-19');
     expect(
-      await screen.findByRole('button', { name: 'View Plan history 120' }),
+      await screen.findByRole('button', { name: 'View Plan history 98' }),
     ).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenNthCalledWith(
+      4,
+      project.id,
+      'continuation-race-19',
+    );
     expect(
-      screen.getAllByRole('button', { name: /View Plan history/i }),
-    ).toHaveLength(100);
+      await screen.findByRole('button', { name: 'View Plan history 137' }),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenNthCalledWith(5, project.id, 'old-race-19');
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 138' }),
+    ).toBeVisible();
+    const historyButtons = screen.getAllByRole('button', {
+      name: /View Plan history/i,
+    });
+    expect(historyButtons).toHaveLength(139);
+    expect(
+      historyButtons.map((button) => button.getAttribute('aria-label')).sort(),
+    ).toEqual(
+      Array.from(
+        { length: 139 },
+        (_, index) => `View Plan history ${index}`,
+      ).sort(),
+    );
     expect(
       screen.queryByRole('button', { name: 'Load older plans' }),
     ).toBeNull();

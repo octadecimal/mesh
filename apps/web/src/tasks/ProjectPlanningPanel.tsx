@@ -110,6 +110,7 @@ type DetailState =
 
 type HistoryBridge = {
   resumeBefore: string | null;
+  pendingContinuations: string[];
 };
 
 function EvidenceList({
@@ -512,7 +513,11 @@ export function ProjectPlanningPanel({
     if (!boundary || boundary === nextBefore) return;
     historyCursorGeneration.current += 1;
     setHistoryBridge(
-      (current) => current ?? { resumeBefore: nextBefore ?? null },
+      (current) =>
+        current ?? {
+          resumeBefore: nextBefore ?? null,
+          pendingContinuations: [],
+        },
     );
     setNextBefore(boundary);
   }, [accumulatedPlans, nextBefore, recentPlans]);
@@ -604,9 +609,37 @@ export function ProjectPlanningPanel({
       setAccumulatedPlans((current) =>
         appendUniquePlans(current, [...recentPlans, ...page.plans]),
       );
-      if (historyCursorGeneration.current !== requestCursorGeneration) return;
+      if (historyCursorGeneration.current !== requestCursorGeneration) {
+        const continuation = page.nextAfter;
+        if (continuation) {
+          setHistoryBridge((current) => {
+            if (
+              !current ||
+              current.resumeBefore === continuation ||
+              current.pendingContinuations.includes(continuation)
+            )
+              return current;
+            return {
+              ...current,
+              pendingContinuations: [
+                continuation,
+                ...current.pendingContinuations,
+              ],
+            };
+          });
+        }
+        return;
+      }
       if (!historyBridge) {
         setNextBefore(page.nextAfter ?? null);
+      } else if (
+        bridgeReconnected &&
+        historyBridge.pendingContinuations.length > 0
+      ) {
+        const [continuation, ...pendingContinuations] =
+          historyBridge.pendingContinuations;
+        setHistoryBridge({ ...historyBridge, pendingContinuations });
+        setNextBefore(continuation);
       } else if (!page.nextAfter) {
         setHistoryBridge(undefined);
         setNextBefore(null);
