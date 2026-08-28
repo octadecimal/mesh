@@ -16,6 +16,7 @@ import {
   type ProjectPlanProposal,
   type ProjectPlanProposalInput,
   type Session,
+  type SessionEvent,
   type StableTaskErrorCode,
   type TaskActor,
   type Workspace,
@@ -38,6 +39,7 @@ import {
   type CommandRepository,
 } from '../repositories/command-repository.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
+import type { EventRepository } from '../repositories/event-repository.js';
 import type { PlanningRepository } from '../repositories/planning-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
@@ -46,6 +48,8 @@ import type { TaskDependencyRepository } from '../repositories/task-dependency-r
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import type { EventPublisher } from '../runtime/event-publisher.js';
+import { transition } from '../runtime/lifecycle.js';
+import { appendAuditedSessionEvent } from '../runtime/session-runtime.js';
 import {
   PlanningCapabilityError,
   type PlanningCapabilityBinding,
@@ -125,7 +129,7 @@ type PlanningRegistry = {
   ): Promise<void>;
   interrupt(sessionId: string): Promise<void>;
   reportAuditFailure(error: unknown): void;
-  publisher: Pick<EventPublisher, 'publishProject'>;
+  publisher: Pick<EventPublisher, 'publish' | 'publishProject'>;
 };
 
 type PlanningExecutionServiceDependencies = {
@@ -137,6 +141,7 @@ type PlanningExecutionServiceDependencies = {
   sessions: SessionRepository;
   workspaces: WorkspaceRepository;
   diagnostics: DiagnosticRepository;
+  events: EventRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
   capabilities: PlanningCapabilityRegistry;
@@ -153,6 +158,11 @@ type RuntimePreparation = {
   base: ProjectPlanBase;
   session: Session;
   generation: number;
+};
+
+type LifecycleCommandExecution<Result> = {
+  executed: boolean;
+  result: Result;
 };
 
 const nonterminalStatuses = new Set<ProjectPlan['status']>([
@@ -194,7 +204,7 @@ export class PlanningExecutionService {
     const commandId = idSchema.parse(input.commandId);
     const existing =
       this.dependencies.commands.getExisting<PlanningMutationResult>(commandId);
-    if (existing.found) return existing.response;
+    if (existing.found) return this.reconcileCommandReplay(existing.response);
 
     this.assertBillingSafe();
     const candidate = this.requireActiveProject(input.projectId);
@@ -206,7 +216,7 @@ export class PlanningExecutionService {
     }
     const identity = await this.resolveProjectIdentity(candidate);
 
-    const result = this.executeCommand(commandId, () => {
+    const execution = this.executeCommand(commandId, () => {
       this.assertBillingSafe();
       const project = this.requireActiveProject(candidate.id);
       this.assertIdentityCurrent(project, candidate, identity);
@@ -261,6 +271,8 @@ export class PlanningExecutionService {
       const event = this.appendPlanEvent(plan, occurredAt);
       return { plan, base, session, events: [event] };
     });
+    const { result } = execution;
+    if (!execution.executed) return this.reconcileCommandReplay(result);
 
     return this.activate(this.prepareRuntime(result), 'create');
   }
@@ -310,7 +322,7 @@ export class PlanningExecutionService {
     const commandId = idSchema.parse(input.commandId);
     const existing =
       this.dependencies.commands.getExisting<PlanningMutationResult>(commandId);
-    if (existing.found) return existing.response;
+    if (existing.found) return this.reconcileCommandReplay(existing.response);
 
     this.assertBillingSafe();
     const candidate = this.requireControlPlan(input);
@@ -327,7 +339,7 @@ export class PlanningExecutionService {
     const candidateProject = this.requireActiveProject(candidate.projectId);
     const identity = await this.resolveProjectIdentity(candidateProject);
 
-    const result = this.executeCommand(commandId, () => {
+    const execution = this.executeCommand(commandId, () => {
       const plan = this.requireControlPlan(input);
       if (plan.status !== 'awaiting_review') {
         this.throwLifecycle(plan, 'request revision');
@@ -388,6 +400,8 @@ export class PlanningExecutionService {
       const event = this.appendPlanEvent(revised, occurredAt);
       return { plan: revised, base, session, events: [event] };
     });
+    const { result } = execution;
+    if (!execution.executed) return this.reconcileCommandReplay(result);
 
     this.dependencies.capabilities.invalidatePlan(result.plan.id);
     return this.activate(this.prepareRuntime(result), 'resume');
@@ -406,7 +420,7 @@ export class PlanningExecutionService {
     const commandId = idSchema.parse(input.commandId);
     const existing =
       this.dependencies.commands.getExisting<PlanningMutationResult>(commandId);
-    if (existing.found) return existing.response;
+    if (existing.found) return this.reconcileCommandReplay(existing.response);
     const reason = input.reason.trim();
     if (!reason) {
       throw new PlanningExecutionError(
@@ -415,7 +429,7 @@ export class PlanningExecutionService {
       );
     }
 
-    const result = this.executeCommand(commandId, () => {
+    const execution = this.executeCommand(commandId, () => {
       const plan = this.requireControlPlan(input);
       if (!nonterminalStatuses.has(plan.status)) {
         this.throwLifecycle(plan, 'cancel');
@@ -440,6 +454,8 @@ export class PlanningExecutionService {
         ? { plan: cancelled, session, events: [event] }
         : { plan: cancelled, events: [event] };
     });
+    const { result } = execution;
+    if (!execution.executed) return this.reconcileCommandReplay(result);
 
     this.dependencies.capabilities.invalidatePlan(result.plan.id);
     result.events.forEach((event) =>
@@ -463,7 +479,7 @@ export class PlanningExecutionService {
     const commandId = idSchema.parse(input.commandId);
     const existing =
       this.dependencies.commands.getExisting<PlanningMutationResult>(commandId);
-    if (existing.found) return existing.response;
+    if (existing.found) return this.reconcileCommandReplay(existing.response);
     this.assertBillingSafe();
     const candidate = this.requireControlPlan(input);
     if (candidate.status !== 'attention_required') {
@@ -472,7 +488,7 @@ export class PlanningExecutionService {
     const candidateProject = this.requireActiveProject(candidate.projectId);
     const identity = await this.resolveProjectIdentity(candidateProject);
 
-    const result = this.executeCommand(commandId, () => {
+    const execution = this.executeCommand(commandId, () => {
       const plan = this.requireControlPlan(input);
       if (plan.status !== 'attention_required') {
         this.throwLifecycle(plan, mode);
@@ -538,6 +554,8 @@ export class PlanningExecutionService {
       const event = this.appendPlanEvent(recovered, occurredAt);
       return { plan: recovered, base, session, events: [event] };
     });
+    const { result } = execution;
+    if (!execution.executed) return this.reconcileCommandReplay(result);
 
     this.dependencies.capabilities.invalidatePlan(result.plan.id);
     return this.activate(
@@ -770,16 +788,43 @@ export class PlanningExecutionService {
     }
   }
 
+  private reconcileCommandReplay(
+    result: PlanningMutationResult,
+  ): PlanningMutationResult {
+    const authoritative = this.dependencies.plans.get(result.plan.id);
+    if (
+      authoritative?.status === 'attention_required' &&
+      authoritative.attention?.type === 'runtime_failure'
+    ) {
+      throw new PlanningExecutionError(
+        'project_plan_repair_required',
+        'The committed planning command requires explicit runtime recovery',
+        {
+          planId: authoritative.id,
+          sessionId: authoritative.currentSessionId,
+          error: authoritative.attention.message,
+        },
+      );
+    }
+    return result;
+  }
+
   private executeCommand<Result>(
     commandId: string,
     execute: () => Result,
-  ): Result {
+  ): LifecycleCommandExecution<Result> {
     this.assertAuditAvailable();
+    let executed = false;
     try {
-      return this.dependencies.commands.executeOnceInImmediateTransaction(
-        commandId,
-        execute,
-      );
+      const result =
+        this.dependencies.commands.executeOnceInImmediateTransaction(
+          commandId,
+          () => {
+            executed = true;
+            return execute();
+          },
+        );
+      return { executed, result };
     } catch (error) {
       this.reportUnexpectedAuditFailure(error);
       throw error;
@@ -1035,44 +1080,40 @@ export class PlanningExecutionService {
     error: unknown,
   ): void {
     this.assertAuditAvailable();
+    const sessionEvents: SessionEvent[] = [];
+    let projectEvent: ProjectEvent | undefined;
     try {
       this.dependencies.database.exec('BEGIN IMMEDIATE');
       const plan = this.dependencies.plans.get(planId);
-      if (!plan || !nonterminalStatuses.has(plan.status)) {
-        throw new PlanningExecutionError(
-          'project_plan_repair_required',
-          'Planning runtime failed after its plan stopped being controllable',
-        );
-      }
       const occurredAt = this.now();
-      this.dependencies.diagnostics.insert(
-        rawDiagnosticSchema.parse({
-          id: this.createId(),
-          sessionId,
-          capturedAt: occurredAt,
-          payload: {
-            kind: 'pm_planning_runtime',
-            stage: 'startup_or_resume',
-            outcome: 'failed',
-            error: errorMessage(error),
+      if (!plan || !nonterminalStatuses.has(plan.status)) {
+        this.insertRuntimeFailureDiagnostic(sessionId, occurredAt, error);
+        this.dependencies.database.exec('COMMIT');
+      } else {
+        sessionEvents.push(
+          ...this.appendSessionFailureEvents(sessionId, error),
+        );
+        const attention = this.dependencies.plans.update(
+          plan.id,
+          plan.revision,
+          {
+            status: 'attention_required',
+            attention: {
+              type: 'runtime_failure',
+              message: errorMessage(error),
+            },
+            updatedAt: occurredAt,
+            terminalAt: null,
+            terminalBy: null,
+            terminalReason: null,
           },
-        }),
-      );
-      const attention = this.dependencies.plans.update(plan.id, plan.revision, {
-        status: 'attention_required',
-        attention: {
-          type: 'runtime_failure',
-          message: errorMessage(error),
-        },
-        updatedAt: occurredAt,
-        terminalAt: null,
-        terminalBy: null,
-        terminalReason: null,
-      });
-      if (!attention) this.throwRevisionConflict(plan.id);
-      const event = this.appendPlanEvent(attention, occurredAt);
-      this.dependencies.database.exec('COMMIT');
-      this.dependencies.registry.publisher.publishProject(event);
+        );
+        if (!attention) {
+          throw new Error(`Plan '${plan.id}' runtime repair update failed`);
+        }
+        projectEvent = this.appendPlanEvent(attention, occurredAt);
+        this.dependencies.database.exec('COMMIT');
+      }
     } catch (auditError) {
       if (this.dependencies.database.inTransaction) {
         this.dependencies.database.exec('ROLLBACK');
@@ -1080,6 +1121,95 @@ export class PlanningExecutionService {
       this.dependencies.registry.reportAuditFailure(auditError);
       throw auditError;
     }
+    sessionEvents.forEach((event) =>
+      this.dependencies.registry.publisher.publish(event),
+    );
+    if (projectEvent) {
+      this.dependencies.registry.publisher.publishProject(projectEvent);
+    }
+  }
+
+  private appendSessionFailureEvents(
+    sessionId: string,
+    error: unknown,
+  ): SessionEvent[] {
+    const session = this.dependencies.sessions.get(sessionId);
+    if (!session) return [];
+    const events: SessionEvent[] = [];
+    let current = session.lifecycleState;
+    const startTrigger =
+      current === 'idle'
+        ? 'start'
+        : current === 'interrupted' || current === 'completed'
+          ? 'resume'
+          : undefined;
+    if (startTrigger) {
+      const starting = transition(current, startTrigger);
+      events.push(
+        appendAuditedSessionEvent(this.dependencies.events, {
+          sessionId,
+          stableId: this.createId(),
+          draft: {
+            type: 'session.status',
+            payload: { from: current, to: starting },
+          },
+          raw: {
+            kind: 'runtime_transition',
+            role: 'pm',
+            trigger: startTrigger,
+          },
+          sessionUpdate: { lifecycleState: starting },
+        }),
+      );
+      current = starting;
+    }
+    if (current !== 'starting') {
+      this.insertRuntimeFailureDiagnostic(sessionId, this.now(), error);
+      return events;
+    }
+    const failed = transition(current, 'driver_failed');
+    events.push(
+      appendAuditedSessionEvent(this.dependencies.events, {
+        sessionId,
+        stableId: this.createId(),
+        draft: {
+          type: 'session.status',
+          payload: {
+            from: current,
+            to: failed,
+            reason: 'pm_runtime_failed',
+          },
+        },
+        raw: {
+          kind: 'runtime_transition',
+          role: 'pm',
+          trigger: 'driver_failed',
+          error: errorMessage(error),
+        },
+        sessionUpdate: { lifecycleState: failed },
+      }),
+    );
+    return events;
+  }
+
+  private insertRuntimeFailureDiagnostic(
+    sessionId: string,
+    capturedAt: string,
+    error: unknown,
+  ): void {
+    this.dependencies.diagnostics.insert(
+      rawDiagnosticSchema.parse({
+        id: this.createId(),
+        sessionId,
+        capturedAt,
+        payload: {
+          kind: 'pm_planning_runtime',
+          stage: 'startup_or_resume',
+          outcome: 'failed',
+          error: errorMessage(error),
+        },
+      }),
+    );
   }
 
   private recordInterruptionFailure(sessionId: string, error: unknown): void {

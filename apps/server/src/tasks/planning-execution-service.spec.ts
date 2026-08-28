@@ -24,6 +24,41 @@ const now = '2026-08-27T12:00:00.000Z';
 const repositoryPath = 'C:/code/project-one';
 const repositoryIdentity = 'C:/code/.git';
 
+const resolvedIdentity = {
+  canonicalPath: repositoryPath,
+  commonDirectory: repositoryIdentity,
+  repositoryIdentity,
+  associatedWorktreePaths: [repositoryPath],
+  headCommit: 'a'.repeat(40),
+} as unknown as RepositoryIdentity;
+
+const deferred = <Value = void>() => {
+  let resolve!: (value: Value | PromiseLike<Value>) => void;
+  const promise = new Promise<Value>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+};
+
+const identityRace = (skipCalls = 0) => {
+  const ready = deferred();
+  const release = deferred();
+  let calls = 0;
+  let waiting = 0;
+  return {
+    ready: ready.promise,
+    release: () => release.resolve(),
+    resolveIdentity: async (): Promise<RepositoryIdentity> => {
+      calls += 1;
+      if (calls <= skipCalls) return resolvedIdentity;
+      waiting += 1;
+      if (waiting === 2) ready.resolve();
+      await release.promise;
+      return resolvedIdentity;
+    },
+  };
+};
+
 const human = taskActorSchema.parse({
   type: 'human',
   id: 'operator-1',
@@ -166,6 +201,7 @@ const setup = (options?: {
   archived?: boolean;
   billingConflict?: boolean;
   repositories?: Parameters<typeof createTestRepositories>[0];
+  resolveIdentity?: () => Promise<RepositoryIdentity>;
   sharedWorkspace?: boolean;
 }) => {
   const repositories = createTestRepositories(options?.repositories);
@@ -191,14 +227,9 @@ const setup = (options?: {
       ? [{ variable: 'ANTHROPIC_API_KEY' }]
       : [],
     pathOptions: { baseDirectory: 'C:/code' },
-    resolveIdentity: async (): Promise<RepositoryIdentity> =>
-      ({
-        canonicalPath: repositoryPath,
-        commonDirectory: repositoryIdentity,
-        repositoryIdentity,
-        associatedWorktreePaths: [repositoryPath],
-        headCommit: 'a'.repeat(40),
-      }) as unknown as RepositoryIdentity,
+    resolveIdentity:
+      options?.resolveIdentity ??
+      (async (): Promise<RepositoryIdentity> => resolvedIdentity),
     now: () => now,
     createId: () => `generated-${++nextId}`,
   });
@@ -329,6 +360,24 @@ describe('PlanningExecutionService', () => {
     await expect(start(service, { actor: agent })).rejects.toMatchObject({
       code: 'project_plan_unauthorized',
     });
+  });
+
+  it('starts and publishes once when concurrent duplicate starts both miss preflight', async () => {
+    const race = identityRace();
+    const { registry, service } = arrange({
+      resolveIdentity: race.resolveIdentity,
+    });
+    const published = vi.spyOn(registry.publisher, 'publishProject');
+
+    const first = start(service);
+    const second = start(service);
+    await race.ready;
+    race.release();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(secondResult).toEqual(firstResult);
+    expect(registry.create).toHaveBeenCalledTimes(1);
+    expect(published).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -547,6 +596,44 @@ describe('PlanningExecutionService', () => {
     ).toEqual({ capability_generation: 2 });
   });
 
+  it('revises and resumes once when concurrent duplicate revisions both miss preflight', async () => {
+    const race = identityRace(1);
+    const {
+      registry,
+      repositories: repos,
+      service,
+    } = arrange({
+      resolveIdentity: race.resolveIdentity,
+    });
+    const started = await start(service);
+    const submitted = await service.submitProposal({
+      capability: runtimeConfiguration(registry).capability,
+      proposal: proposal(),
+    });
+    makeResumable(repos, started.session!.id);
+    const input = {
+      projectId: 'project-1',
+      planId: started.plan.id,
+      proposalId: submitted.proposal!.id,
+      expectedPlanRevision: submitted.plan.revision,
+      feedback: 'Split the runtime boundary.',
+      actor: human,
+      commandId: 'plan-revise-race',
+    };
+    const published = vi.spyOn(registry.publisher, 'publishProject');
+    published.mockClear();
+
+    const first = service.requestRevision(input);
+    const second = service.requestRevision(input);
+    await race.ready;
+    race.release();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(secondResult).toEqual(firstResult);
+    expect(registry.resume).toHaveBeenCalledTimes(1);
+    expect(published).toHaveBeenCalledTimes(1);
+  });
+
   it('rejects a stale human control revision without changing or interrupting the plan', async () => {
     const { registry, service } = arrange();
     const started = await start(service);
@@ -578,15 +665,54 @@ describe('PlanningExecutionService', () => {
       status: 'attention_required',
       attention: { type: 'runtime_failure' },
     });
-    expect(repos.sessions.get(plan.currentSessionId!)).toBeDefined();
-    expect(repos.diagnostics.list(plan.currentSessionId!)).toHaveLength(1);
+    expect(repos.sessions.get(plan.currentSessionId!)).toMatchObject({
+      lifecycleState: 'failed',
+    });
+    expect(
+      repos.events
+        .after(plan.currentSessionId!, 0)
+        .map((event) => event.payload),
+    ).toMatchObject([
+      { from: 'idle', to: 'starting' },
+      { from: 'starting', to: 'failed', reason: 'pm_runtime_failed' },
+    ]);
+    expect(repos.diagnostics.list(plan.currentSessionId!)).toHaveLength(2);
     expect(repos.projectEvents.after('project-1', 0)).toHaveLength(2);
+    await expect(start(service)).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
+    expect(registry.create).toHaveBeenCalledTimes(1);
     await expect(
       service.submitProposal({
         capability: runtimeConfiguration(registry).capability,
         proposal: proposal(),
       }),
     ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+  });
+
+  it('rolls back session failure and plan attention together when repair audit persistence fails', async () => {
+    const { registry, repositories: repos, service } = arrange();
+    repos.database.exec(`
+      CREATE TRIGGER fail_second_planning_runtime_diagnostic
+      BEFORE INSERT ON raw_diagnostics
+      WHEN (SELECT COUNT(*) FROM raw_diagnostics WHERE session_id = NEW.session_id) >= 1
+      BEGIN
+        SELECT RAISE(FAIL, 'second planning runtime diagnostic failed');
+      END;
+    `);
+    registry.create.mockRejectedValueOnce(new Error('driver unavailable'));
+
+    await expect(start(service)).rejects.toBeDefined();
+
+    const plan = repos.plans.getActiveByProject('project-1')!;
+    expect(plan.status).toBe('planning');
+    expect(repos.sessions.get(plan.currentSessionId!)).toMatchObject({
+      lifecycleState: 'idle',
+    });
+    expect(repos.events.after(plan.currentSessionId!, 0)).toEqual([]);
+    expect(repos.diagnostics.list(plan.currentSessionId!)).toEqual([]);
+    expect(repos.projectEvents.after('project-1', 0)).toHaveLength(1);
+    expect(registry.reportAuditFailure).toHaveBeenCalledTimes(1);
   });
 
   it('resumes an interrupted attention session with a fresh generation', async () => {
@@ -614,6 +740,40 @@ describe('PlanningExecutionService', () => {
       (registry.resume.mock.calls[0]?.[2] as PlanningRuntimeConfiguration)
         .capabilityGeneration,
     ).toBe(2);
+  });
+
+  it('resumes once when concurrent duplicate resumes both miss preflight', async () => {
+    const race = identityRace(1);
+    const {
+      registry,
+      repositories: repos,
+      service,
+    } = arrange({
+      resolveIdentity: race.resolveIdentity,
+    });
+    registry.create.mockRejectedValueOnce(new Error('driver unavailable'));
+    await expect(start(service)).rejects.toBeDefined();
+    const attention = repos.plans.getActiveByProject('project-1')!;
+    makeResumable(repos, attention.currentSessionId!);
+    const input = {
+      projectId: 'project-1',
+      planId: attention.id,
+      expectedPlanRevision: attention.revision,
+      actor: human,
+      commandId: 'plan-resume-race',
+    };
+    const published = vi.spyOn(registry.publisher, 'publishProject');
+    published.mockClear();
+
+    const first = service.resume(input);
+    const second = service.resume(input);
+    await race.ready;
+    race.release();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(secondResult).toEqual(firstResult);
+    expect(registry.resume).toHaveBeenCalledTimes(1);
+    expect(published).toHaveBeenCalledTimes(1);
   });
 
   it('retries attention with a replacement session without changing plan identity', async () => {
@@ -655,6 +815,41 @@ describe('PlanningExecutionService', () => {
     ]);
   });
 
+  it('retries once when concurrent duplicate retries both miss preflight', async () => {
+    const race = identityRace(1);
+    const {
+      registry,
+      repositories: repos,
+      service,
+    } = arrange({
+      resolveIdentity: race.resolveIdentity,
+    });
+    registry.create.mockRejectedValueOnce(new Error('driver unavailable'));
+    await expect(start(service)).rejects.toBeDefined();
+    const attention = repos.plans.getActiveByProject('project-1')!;
+    registry.create.mockClear();
+    const input = {
+      projectId: 'project-1',
+      planId: attention.id,
+      expectedPlanRevision: attention.revision,
+      actor: human,
+      commandId: 'plan-retry-race',
+    };
+    const published = vi.spyOn(registry.publisher, 'publishProject');
+    published.mockClear();
+
+    const first = service.retry(input);
+    const second = service.retry(input);
+    await race.ready;
+    race.release();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(secondResult).toEqual(firstResult);
+    expect(registry.create).toHaveBeenCalledTimes(1);
+    expect(published).toHaveBeenCalledTimes(1);
+    expect(repos.sessions.listByProject('project-1')).toHaveLength(2);
+  });
+
   it('keeps committed revision evidence and returns to attention when resume fails', async () => {
     const { registry, repositories: repos, service } = arrange();
     const started = await start(service);
@@ -665,17 +860,18 @@ describe('PlanningExecutionService', () => {
     makeResumable(repos, started.session!.id);
     registry.resume.mockRejectedValueOnce(new Error('resume failed'));
 
-    await expect(
-      service.requestRevision({
-        projectId: 'project-1',
-        planId: started.plan.id,
-        proposalId: submitted.proposal!.id,
-        expectedPlanRevision: submitted.plan.revision,
-        feedback: 'Try a smaller runtime boundary.',
-        actor: human,
-        commandId: 'plan-revise-failed',
-      }),
-    ).rejects.toMatchObject({ code: 'project_plan_repair_required' });
+    const input = {
+      projectId: 'project-1',
+      planId: started.plan.id,
+      proposalId: submitted.proposal!.id,
+      expectedPlanRevision: submitted.plan.revision,
+      feedback: 'Try a smaller runtime boundary.',
+      actor: human,
+      commandId: 'plan-revise-failed',
+    };
+    await expect(service.requestRevision(input)).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
 
     const details = repos.plans.getDetails(started.plan.id)!;
     expect(details.plan).toMatchObject({
@@ -686,7 +882,161 @@ describe('PlanningExecutionService', () => {
     expect(details.feedback).toMatchObject([
       { content: 'Try a smaller runtime boundary.' },
     ]);
+    expect(repos.diagnostics.list(started.session!.id)).toHaveLength(2);
+    await expect(service.requestRevision(input)).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
+    expect(registry.resume).toHaveBeenCalledTimes(1);
+  });
+
+  it('replays a failed resume as repair-required instead of stale success', async () => {
+    const { registry, repositories: repos, service } = arrange();
+    registry.create.mockRejectedValueOnce(new Error('driver unavailable'));
+    await expect(start(service)).rejects.toBeDefined();
+    const attention = repos.plans.getActiveByProject('project-1')!;
+    makeResumable(repos, attention.currentSessionId!);
+    registry.resume.mockRejectedValueOnce(new Error('resume failed'));
+    const input = {
+      projectId: 'project-1',
+      planId: attention.id,
+      expectedPlanRevision: attention.revision,
+      actor: human,
+      commandId: 'plan-resume-failed',
+    };
+
+    await expect(service.resume(input)).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
+    await expect(service.resume(input)).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
+    expect(registry.resume).toHaveBeenCalledTimes(1);
+  });
+
+  it('replays a failed replacement retry as repair-required instead of stale success', async () => {
+    const { registry, repositories: repos, service } = arrange();
+    registry.create.mockRejectedValueOnce(new Error('driver unavailable'));
+    await expect(start(service)).rejects.toBeDefined();
+    const attention = repos.plans.getActiveByProject('project-1')!;
+    registry.create.mockRejectedValueOnce(new Error('retry failed'));
+    const input = {
+      projectId: 'project-1',
+      planId: attention.id,
+      expectedPlanRevision: attention.revision,
+      actor: human,
+      commandId: 'plan-retry-failed',
+    };
+
+    await expect(service.retry(input)).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
+    await expect(service.retry(input)).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
+    expect(registry.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves cancellation when a pending start fails without tripping the audit barrier', async () => {
+    const { registry, repositories: repos, service } = arrange();
+    const entered = deferred();
+    const release = deferred();
+    registry.create.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      throw new Error('start cancelled');
+    });
+
+    const starting = start(service);
+    await entered.promise;
+    const active = repos.plans.getActiveByProject('project-1')!;
+    const configuration = runtimeConfiguration(registry);
+    const cancelled = await service.cancel({
+      projectId: 'project-1',
+      planId: active.id,
+      expectedPlanRevision: active.revision,
+      actor: human,
+      commandId: 'plan-cancel-pending-start',
+      reason: 'Stop the pending runtime.',
+    });
+    release.resolve();
+    await expect(starting).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
+
+    expect(repos.plans.get(active.id)).toMatchObject({
+      status: 'cancelled',
+      terminalReason: 'Stop the pending runtime.',
+    });
+    expect(cancelled.plan.status).toBe('cancelled');
+    expect(repos.diagnostics.list(active.currentSessionId!)).toHaveLength(1);
+    expect(registry.reportAuditFailure).not.toHaveBeenCalled();
+    await expect(
+      service.submitProposal({
+        capability: configuration.capability,
+        proposal: proposal(),
+      }),
+    ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+  });
+
+  it('preserves cancellation when a pending resume fails without tripping the audit barrier', async () => {
+    const { registry, repositories: repos, service } = arrange();
+    const started = await start(service);
+    makeResumable(repos, started.session!.id);
+    const attention = repos.plans.update(
+      started.plan.id,
+      started.plan.revision,
+      {
+        status: 'attention_required',
+        attention: { type: 'runtime_failure', message: 'Needs recovery.' },
+        updatedAt: now,
+        terminalAt: null,
+        terminalBy: null,
+        terminalReason: null,
+      },
+    )!;
+    const entered = deferred();
+    const release = deferred();
+    registry.resume.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+      throw new Error('resume cancelled');
+    });
+
+    const resuming = service.resume({
+      projectId: 'project-1',
+      planId: attention.id,
+      expectedPlanRevision: attention.revision,
+      actor: human,
+      commandId: 'plan-resume-before-cancel',
+    });
+    await entered.promise;
+    const recovered = repos.plans.get(attention.id)!;
+    const configuration = registry.resume.mock.calls[0]?.[2];
+    await service.cancel({
+      projectId: 'project-1',
+      planId: recovered.id,
+      expectedPlanRevision: recovered.revision,
+      actor: human,
+      commandId: 'plan-cancel-pending-resume',
+      reason: 'Stop recovery.',
+    });
+    release.resolve();
+    await expect(resuming).rejects.toMatchObject({
+      code: 'project_plan_repair_required',
+    });
+
+    expect(repos.plans.get(attention.id)).toMatchObject({
+      status: 'cancelled',
+      terminalReason: 'Stop recovery.',
+    });
     expect(repos.diagnostics.list(started.session!.id)).toHaveLength(1);
+    expect(registry.reportAuditFailure).not.toHaveBeenCalled();
+    await expect(
+      service.submitProposal({
+        capability: configuration.capability,
+        proposal: proposal(),
+      }),
+    ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
   });
 
   it('cancels durably, revokes authority, and records interruption failure without restoring it', async () => {
@@ -723,5 +1073,29 @@ describe('PlanningExecutionService', () => {
     await expect(
       service.submitProposal({ capability, proposal: proposal() }),
     ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+  });
+
+  it('interrupts once when concurrent duplicate cancels both miss preflight', async () => {
+    const { registry, repositories: repos, service } = arrange();
+    const started = await start(service);
+    vi.spyOn(repos.commands, 'getExisting').mockReturnValue({ found: false });
+    const interrupted = deferred();
+    registry.interrupt.mockImplementationOnce(() => interrupted.promise);
+    const input = {
+      projectId: 'project-1',
+      planId: started.plan.id,
+      expectedPlanRevision: started.plan.revision,
+      actor: human,
+      commandId: 'plan-cancel-race',
+      reason: 'The goal changed.',
+    };
+
+    const first = service.cancel(input);
+    const second = service.cancel(input);
+    interrupted.resolve();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    expect(secondResult).toEqual(firstResult);
+    expect(registry.interrupt).toHaveBeenCalledTimes(1);
   });
 });
