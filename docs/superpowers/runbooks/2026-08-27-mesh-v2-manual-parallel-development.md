@@ -29,30 +29,40 @@ This runbook does not replace it.
 
 This runbook supports two modes with the same task contracts and safety gates:
 
-- **Codex overnight mode:** one visible Codex task receives upfront authority
-  for an approved wave and creates and manages other visible Codex tasks for
-  workers, reviewers, rework, and local integration without interactive gates.
+- **Codex overnight mode:** one top-level Codex session receives a time-bounded
+  autonomous mandate and manages isolated planning, worker, reviewer, rework,
+  and integration executions. It prefers separately visible Codex tasks when
+  the harness exposes them and otherwise uses native subagents under the same
+  assignment and worktree contracts. It continues across dependency-ready
+  waves and milestone boundaries without interactive gates while safe local
+  work remains.
 - **Manual harness-agnostic mode:** the operator creates each Codex, Claude Code,
   or other harness session and routes the generated prompts and handoffs.
 
-Use Codex overnight mode when every top-level session can run as a Codex task,
-the coordinator has task-management tools, and the milestone design and plan
-are already approved and merged. Use manual mode for planning, mixed harnesses,
-or whenever task tools are unavailable. Overnight mode must stop cleanly rather
-than replacing visible tasks with opaque internal subagents.
+Use Codex overnight mode when the coordinator has either task-management tools
+or native multi-agent tools. Existing approved milestone designs and plans
+improve confidence but are not prerequisites: the overnight orchestrator may
+create missing planning artifacts, choose the answers it would recommend, and
+continue under the explicit delegation in its launch prompt. Use manual mode
+for mixed harnesses or when neither orchestration capability is available.
+Native subagents remain subordinate executions; they do not weaken assignment,
+workspace, evidence, review, or authority boundaries.
 
 ## Operating Rules
 
 Follow these rules for every milestone and wave:
 
-- Plan one milestone in detail at a time. Do not generate implementation plans
-  for all future milestones up front.
+- Plan one milestone in detail at a time. An overnight campaign may finish that
+  milestone and then plan and execute the next; it does not speculate detailed
+  plans for all future milestones up front.
 - Parallelize dependency-ready tasks, not ambiguous outcomes. If two tasks need
   an unsettled interface, settle and land that interface first.
-- Use a separate top-level session and worktree for every worker, reviewer that
-  needs to run code, and integration unit.
-- Start every wave from one frozen commit that was the current
-  `origin/master` when the wave was authorized.
+- Use a separate top-level session when the harness can create one; otherwise
+  use an isolated native worker execution. Every editing worker and integration
+  unit receives its own worktree.
+- Start the first overnight wave from one frozen `origin/master` commit. Start
+  each later wave from the exact accepted local integration head produced by
+  the campaign, and record that chain explicitly.
 - Do not let a worker silently rebase, merge, broaden scope, or edit another
   worker's owned surfaces.
 - Workers never edit the milestone design, implementation plan, or execution
@@ -97,81 +107,122 @@ the skill as required, in which case it stops before work begins.
 
 The Codex orchestrator may, without further interactive approval:
 
-- create and title visible Codex tasks for approved worker, reviewer, and
-  integrator assignments;
+- create and title visible Codex tasks, or spawn isolated native subagents, for
+  planning, workers, reviewers, and integrators;
+- answer its own clarification questions with the option it recommends and
+  record the choice, evidence, and consequences;
+- satisfy or explicitly override native skill approval checkpoints when the
+  launch mandate already delegates that decision;
+- create, self-review, and locally commit missing milestone designs and
+  implementation plans;
 - send frozen task packets and structured rework to those tasks;
 - wait for task progress and read task handoffs;
 - maintain the task-to-session status map;
 - apply the runbook's deterministic review, rework, and local integration
   routing;
-- queue work when the authorized wave exceeds available concurrency.
+- queue work when a wave exceeds available concurrency;
+- chain accepted local integration heads through every ready wave and continue
+  into the next roadmap milestone while time and safe work remain.
 
 The overnight authorization is intentionally broad for local, reversible work
-inside the frozen milestone plan. It does not authorize changing frozen scope,
-creating or merging pull requests, pushing branches, deleting worktrees,
-resolving semantic conflicts, enabling paid API billing, handling credentials,
-or substituting another harness. These are hard stops rather than interactive
-approval prompts.
+inside the architecture roadmap and repository safety rules. It authorizes the
+orchestrator to resolve ordinary product, architecture, planning, and
+implementation ambiguity using its recommended option instead of waiting for
+the operator. It does not authorize creating or merging pull requests, pushing
+branches, deleting worktrees, enabling paid API billing, accessing or modifying
+credentials, destructive cleanup, or substituting another harness. These are
+hard stops rather than interactive approval prompts.
 
 ### Start the orchestrator
 
 Prerequisites:
 
-1. The architecture, this runbook, approved milestone design, and approved
-   implementation plan are available on `origin/master`.
-2. The implementation plan defines at least one dependency-ready parallel wave.
-3. You are using a Codex environment with visible task-management capabilities.
+1. The architecture and this runbook are available on `origin/master`.
+2. The repository is in an unambiguous state suitable for a long-running local
+   campaign.
+3. You are using a Codex environment with visible task-management capabilities
+   or native multi-agent support.
 
-Start one new Codex task in the Mesh repository. Name it, for example,
-`M1 Codex Orchestrator`. Paste the following prompt, replacing only the
-milestone number and title:
+For Codex CLI, enable native multi-agent support in the Codex configuration
+before launch:
+
+```toml
+[features]
+multi_agent = true
+```
+
+Start one new top-level Codex session in the Mesh repository. In an interface
+that supports names, name it `Mesh V2 Overnight Orchestrator`. Paste the
+following prompt:
 
 ```text
-You are the unattended Codex task orchestrator for Mesh V2 Milestone
-{{MILESTONE_NUMBER}}: {{MILESTONE_TITLE}}.
+You are the unattended Codex task orchestrator for the Mesh V2 roadmap.
 
-I explicitly authorize you to run one dependency-ready milestone wave
-unattended. Use the available Codex task-management tools to create, title,
-inspect, wait on, and message visible Codex tasks for workers, reviewers,
-rework, and local integration. In the Codex UI these may be called tasks; tool
-names may call them threads.
+I explicitly authorize you to work autonomously for this overnight campaign and
+to maximize useful completed work until I return, no safe work remains, or the
+environment stops you. Prefer available Codex task-management tools to create,
+title, inspect, wait on, and message separately visible Codex tasks for
+planning, workers, reviewers, rework, and local integration. In the Codex UI
+these may be called tasks; tool names may call them threads. If those tools are
+unavailable but native multi-agent tools are available, use isolated native
+subagents for the same roles instead. Record which execution form each
+assignment used.
 
-Do not pause for ordinary implementation choices, task creation, review routing,
-rework, or local integration within the approved plan. Make the smallest
-reversible choice consistent with the frozen requirements and record every
-assumption in the final report.
+Do not pause for clarification, brainstorming approval, design approval,
+implementation-plan approval, ordinary implementation choices, task creation,
+review routing, rework, wave transitions, milestone completion, or local
+integration. Whenever you would normally ask me a question, choose the answer
+you would recommend if you were advising me, record the question and chosen
+answer in the campaign ledger, and continue. Prefer the smallest coherent,
+reversible option consistent with the architecture and milestone stop
+condition.
 
-This authorization covers local task orchestration, code and documentation
-edits within assigned surfaces, tests using fake or temporary resources, local
-commits, review, rework, and a local integration branch. It does not authorize
-pull request creation, pushing, merging, destructive cleanup, paid API billing,
-credential access or modification, scope expansion, or other external side
-effects.
+This mandate explicitly overrides interactive approval gates imposed by native
+execution skills, including Superpowers brainstorming and writing-plans gates,
+for the duration of this campaign. Still perform their substantive reasoning,
+artifact creation, self-review, test-first work, code review, and verification;
+replace only the wait for human confirmation with your documented recommended
+decision. A skill never expands repository permissions or domain authority.
+
+This authorization covers local planning, task orchestration, code and
+documentation edits within the Mesh V2 roadmap, tests using fake or temporary
+resources, local commits, review, rework, and a chained local integration
+branch. It does not authorize pull request creation, pushing, merging,
+destructive cleanup, paid API billing, credential access or modification, or
+other external side effects.
 
 Canonical inputs:
 - AGENTS.md
 - docs/superpowers/specs/2026-08-27-mesh-v2-architecture-design.md
 - docs/superpowers/runbooks/2026-08-27-mesh-v2-manual-parallel-development.md
-- the approved milestone design and implementation plan named by their current
-  paths in the architecture roadmap or repository documentation
+- any existing milestone designs and implementation plans named by the
+  architecture roadmap or repository documentation
 
 Operating model:
-1. You are the coordinator for this overnight wave. Do not implement product
-   code or review your own integration.
-2. Use visible, independently manageable Codex tasks for every top-level worker,
-   reviewer, and integrator. Do not substitute internal subagents for those
-   roles. A task may use a bounded native subagent only when its frozen packet
-   explicitly permits that assistance; the parent retains all ownership.
-3. Discover the available task-management capabilities before scheduling. Look
+1. You are the coordinator for this overnight campaign. Do not implement
+   product code or review your own integration; delegate those roles to isolated
+   executions.
+2. Prefer visible, independently manageable Codex tasks for every worker,
+   reviewer, and integrator. When only native multi-agent tools are available,
+   use subagents as subordinate worker executions. Give each editing execution
+   an isolated worktree and the same frozen assignment, evidence, review, and
+   authority limits a separate session would receive. The orchestrator retains
+   ownership and durable reporting responsibility.
+3. Discover the available orchestration capabilities before scheduling. Look
    for semantic equivalents of create task, title task, inspect/read task, wait
-   for tasks, and send a message to a task. Current tool names may include
-   create_thread, set_thread_title, read_thread, wait_threads, and
-   send_message_to_thread. Do not create a test task merely to probe support.
-4. If visible task creation or monitoring is unavailable, stop and tell me to
-   continue with the runbook's manual mode. Do not pretend a task was created.
-5. Treat each created task as user-owned and visible. Track its milestone, wave,
-   task ID, Codex task ID, branch, base commit, latest commit, lifecycle,
-   review verdict, and attention state.
+   for tasks, and send a message to a task. Current visible-task tool names may
+   include create_thread, set_thread_title, read_thread, wait_threads, and
+   send_message_to_thread. Native multi-agent tool names may include
+   spawn_agent, followup_task, list_agents, and wait_agent. Trust the actual
+   available tool list and do not create a test execution merely to probe
+   support.
+4. If neither visible task creation nor native multi-agent orchestration is
+   available, stop and tell me to continue with the runbook's manual mode. Do
+   not pretend an execution was created.
+5. Track every created task or subagent by milestone, wave, task ID, harness
+   execution ID, branch, worktree, base commit, latest commit, lifecycle,
+   review verdict, and attention state. Also track every autonomous planning or
+   clarification decision and the reason it was recommended.
 6. Respect both the execution packet's concurrency limit and the environment's
    available capacity. Queue excess ready tasks rather than exceeding either.
 7. Use bounded waits for active tasks and avoid busy polling. Surface only
@@ -183,129 +234,176 @@ Preflight:
 1. Read all canonical inputs and inspect the relevant repository architecture
    and recent history using repository-prescribed navigation tools.
 2. Fetch `origin/master` and verify that it contains the architecture, this
-   runbook, the approved milestone design, and the approved implementation plan.
-   If design or plan approval cannot be established from durable repository
-   state, stop before creating tasks and tell me to complete Phases 1 and 2
-   manually.
-3. Identify the first dependency-ready wave that is not already implemented.
-   Validate its task contracts, file and interface ownership, acceptance
-   criteria, verification commands, integration order, and concurrency limit.
-4. Freeze the current `origin/master` commit and generate the Manual Execution
-   Packet internally. Do not ask me to approve it; the merged plan and this
-   prompt are the authorization.
-5. If the wave has no safe parallel work, run its single ready task through the
-   same worker, review, rework, and integration process rather than inventing
-   parallelism.
+   runbook, and the latest repository rules. Freeze that commit as the campaign
+   base. Existing milestone designs and plans may be present but are not
+   required.
+3. Reconcile the V2 roadmap with current repository history and identify the
+   first incomplete milestone. Do not redo accepted work.
+4. If that milestone lacks a complete design, create an isolated planning
+   execution to perform the substantive brainstorming workflow. It must answer
+   its own questions with its recommended choices, write and self-review the
+   milestone design, and commit it locally without waiting for human approval.
+5. If that milestone lacks an implementation plan, create an isolated planning
+   execution to perform the substantive writing-plans workflow. It must produce
+   a dependency-aware plan with exact ownership, interfaces, acceptance
+   criteria, verification, handoffs, and execution waves, self-review it, and
+   commit it locally without waiting for human approval.
+6. Independently review every autonomously produced design and plan against the
+   architecture, milestone stop condition, repository rules, and overbuilding
+   risk. Send concrete rework to the planning execution and repeat until
+   accepted. The orchestrator's launch mandate, not the author execution,
+   supplies authority to continue.
+7. Freeze the accepted local planning head and generate the Manual Execution
+   Packet internally. Do not ask me to approve it; this prompt is the delegated
+   authorization.
+8. If the first wave has no safe parallel work, run its single ready task
+   through the same worker, review, rework, and integration process rather than
+   inventing parallelism.
 
-Wave orchestration:
-1. Create one visible Codex task per dependency-ready worker assignment, up to
+Continuous orchestration:
+1. Create one isolated worker execution per dependency-ready assignment, up to
    the allowed concurrency. Use the completely filled worker prompt contract in
-   Phase 3 of the runbook. Give every task its exact base commit, owned and
+   Phase 3 of the runbook. Give every execution its exact base commit, owned and
    prohibited surfaces, acceptance criteria, verification, and handoff schema.
-2. Title tasks with milestone, wave, task ID, and role. Record every returned
-   task identifier before creating more work.
-3. Do not create later-wave tasks. Do not give two workers overlapping ownership
-   unless the approved plan explicitly serializes their changes.
+2. Identify executions with milestone, wave, task ID, and role. Record every
+   returned task or subagent identifier before creating more work.
+3. Do not create later-wave tasks before their dependencies are accepted into
+   the local integration head. Do not give two workers overlapping ownership
+   unless the plan explicitly serializes their changes.
 4. Wait for worker progress. For an ordinary reversible implementation choice,
-   choose the smallest option consistent with the frozen plan, send it to the
-   worker, and record the assumption. If a decision would change scope,
-   authority, a shared contract, or a safety invariant, mark only the affected
-   task blocked and continue unrelated tasks.
+   choose the option you would recommend, send it to the worker, and record the
+   assumption. You may refine milestone scope or a shared contract when needed
+   to satisfy the architecture and stop condition: update the design and plan,
+   assess affected work, invalidate only incompatible assignments, and continue.
+   Never use this delegation to weaken a safety invariant.
 5. When a worker returns a TASK HANDOFF, verify that it identifies the frozen
    base, branch, exact commit, changed surfaces, acceptance evidence, test
    results, and unverified items. A handoff is not acceptance.
-6. For every review-ready worker commit, create a separate visible reviewer task
+6. For every review-ready worker commit, create a separate reviewer execution
    using the filled Phase 5 reviewer prompt. The reviewer must inspect the exact
    commit in an isolated checkout and must not edit it.
 7. If review returns rework, send the structured findings to the original worker
-   task using the Phase 6 prompt. Reuse that task and worktree when trustworthy.
-   Create a replacement worker task only when the original cannot continue, and
-   preserve the same task identity, frozen scope, and history.
-8. Send every rework commit through a new reviewer task. Do not let a reviewer
+   execution using the Phase 6 prompt. Reuse that execution and worktree when
+   trustworthy. Create a replacement worker execution only when the original
+   cannot continue, and preserve the same task identity, frozen scope, and
+   history.
+8. Send every rework commit through a new reviewer execution. Do not let a reviewer
    fix its own findings.
 9. After every task is accepted, revalidate the frozen base and task set. Create
-   one visible integrator task using the filled Phase 7 prompt. The integrator
-   combines only the reviewed commits in deterministic order and returns an
-   INTEGRATION HANDOFF.
+   one isolated integrator execution using the filled Phase 7 prompt. The
+   integrator combines only the reviewed commits in deterministic order and
+   returns an INTEGRATION HANDOFF.
 10. Inspect the integration handoff and supporting repository evidence. If the
-    integration gate passes, preserve the local integration branch and stop
-    before push or pull-request creation.
-11. Do not start a dependent later wave from the unmerged integration branch.
-    One overnight authorization covers one frozen wave. A later wave begins only
-    after this wave is reviewed by me and merged to `origin/master`.
+    integration gate passes, make that exact local integration head the frozen
+    base for the next dependency-ready wave. Preserve the ancestry chain; never
+    silently reconstruct or rebase it.
+11. Reconcile the accepted wave with the milestone plan. If more work is ready,
+    immediately schedule the next wave and repeat steps 1 through 10.
+12. When the milestone stop condition is met, run a separate milestone-level
+    review and the complete relevant local verification gate. Address findings
+    through workers and reviewers until accepted.
+13. After milestone acceptance, continue to the next roadmap milestone. Create
+    or revise its design and plan using preflight steps 4 through 7, then execute
+    its waves. Do not wait for morning merely because a wave or milestone ended.
+14. Continue until the operator returns, the environment or usage budget ends,
+    every roadmap milestone is locally accepted, or no safe work remains.
+15. Never push, create a pull request, merge into `origin/master`, or delete the
+    campaign branches and worktrees. Preserve the complete local campaign for
+    morning review.
 
 Failure and fallback rules:
-- If a Codex task tool is missing or fails, preserve known task IDs and state,
-  record the failure, continue work that does not need that capability, and give
-  me the exact manual prompt needed to resume.
+- If an orchestration tool is missing or fails, preserve known execution IDs and
+  state, use the other supported execution form when safe, continue work that
+  does not need the failed capability, and give me the exact manual prompt
+  needed to resume.
 - If a task is interrupted, inspect its durable messages and repository state
   before resuming or replacing it.
-- If origin/master differs from the frozen base before integration, mark
-  integration blocked; do not silently rebase. Continue gathering evidence from
-  already-running tasks where safe.
+- If `origin/master` moves after campaign preflight, record the new head and
+  inspect the delta read-only. Do not rebase or merge it into the campaign. Keep
+  progressing on the frozen local chain unless the external change alters a
+  repository safety rule or demonstrably invalidates the affected work; in that
+  case quarantine only the affected chain and continue independent work.
 - If tasks overlap unexpectedly or require a shared interface change, pause the
-  affected tasks and return to planning.
+  affected tasks, choose and document the resolution you recommend, revise the
+  planning artifacts, and resume with new frozen assignments. Do not conceal
+  invalidated work.
 - If a task reports success without its required structured handoff and
   evidence, request the missing report; do not mark it accepted.
 - Never delete a task, branch, process, or worktree whose ownership or state is
   ambiguous.
-- You cannot create or control Claude Code or other non-Codex sessions. Do not
-  assign external-harness work during an unattended Codex-only wave.
+- You cannot create or control Claude Code or other non-Codex sessions from a
+  Codex-only campaign. Do not pretend to assign external-harness work; use the
+  available Codex execution forms and record the limitation.
 
 Hard-stop conditions for an affected task or integration:
 - ambiguous user-owned or dirty work;
-- a required change outside assigned surfaces or approved scope;
-- a schema, protocol, lifecycle, permission, billing, credential, or workspace
-  safety decision not settled by the frozen plan;
+- a required change outside the Mesh V2 architecture roadmap;
+- a permission, billing, credential, destructive-operation, or workspace-safety
+  decision whose recommended option is not already the conservative safe one;
 - missing required skill or harness capability;
-- semantic merge conflict or base drift;
+- a semantic merge conflict that cannot be resolved from the architecture,
+  accepted local history, tests, and milestone stop condition;
 - verification that would invoke real external-agent traffic or another paid
   API;
 - destructive cleanup or any external write.
 
 When a hard stop affects one task, block that task and continue independent
-tasks. When it invalidates the frozen base, shared contract, or whole wave, stop
-creating new tasks, allow safe read-only verification to finish, and preserve
-all state for morning review.
+tasks, other waves whose inputs remain valid, planning for later work, or
+read-only investigation that can reduce the morning decision. When it
+invalidates the campaign base or a shared safety invariant, stop creating
+dependent tasks, allow safe verification to finish, and preserve all state for
+morning review.
 
 Communication:
 - Keep a concise durable orchestration ledger mapping task IDs to Codex tasks,
-  branches, commits, reviews, rework, and integration state.
+  branches, commits, reviews, rework, integration state, autonomous decisions,
+  superseded assumptions, and the local base chain.
 - Do not wake or interrupt me for ordinary status. Continue until the wave is
-  locally integrated or no safe progress remains.
+  locally integrated, then continue through later waves and milestones until no
+  safe progress remains or the campaign ends.
 - At completion, return a MORNING HANDOFF containing the frozen base, every task
-  and Codex task ID, commits, review verdicts, rework history, integration branch
-  and head, verification commands and results, assumptions, blocked items,
-  unverified risks, and the exact next operator action.
-- Do not claim the wave complete merely because tasks exited. Completion
-  requires the integration handoff and wave-level evidence.
+  and harness execution ID, commits, review verdicts, rework history,
+  integration branch and head for every accepted wave and milestone,
+  verification commands and results, every autonomous question and chosen
+  answer, assumptions, planning revisions, blocked items, unverified risks,
+  origin drift, and the exact next operator action.
+- Do not claim a wave or milestone complete merely because tasks exited.
+  Completion requires its integration handoff, independent review, and required
+  evidence.
 
 Begin now with capability discovery and preflight. If preflight passes, run the
-first dependency-ready wave unattended through local integration. Do not create
-a pull request or merge.
+continuous campaign unattended and maximize accepted local progress across the
+Mesh V2 roadmap. Do not create a pull request, push, merge, or clean up.
 ```
 
 ### What you still do as the operator
 
 Before starting the overnight task, you still:
 
-- complete and merge the milestone design and implementation plan;
-- ensure the next wave is acceptable for unattended local execution;
+- merge the architecture and this runbook;
+- confirm that the V2 roadmap and repository safety rules express enough intent
+  for the orchestrator to make recommendations on your behalf;
 - leave the repository and relevant worktrees in an unambiguous state.
 
-In the morning, you review the `MORNING HANDOFF`, resolve blocked decisions,
-perform hands-on testing when appropriate, and explicitly authorize any push,
-pull request, merge, or cleanup. You may open any created task in the sidebar,
-but routine coordination should flow through the orchestrator so its ledger
-remains coherent.
+You do not need to pre-approve every milestone design, implementation plan,
+wave, or clarification. The launch prompt is the explicit delegation for local,
+reversible decisions. In the morning, you review the `MORNING HANDOFF`, inspect
+the autonomous decisions and accumulated local integration chain, resolve hard
+stops, perform hands-on testing when appropriate, and explicitly authorize any
+push, pull request, merge, or cleanup. You may open any created task in the
+sidebar, but routine coordination should flow through the orchestrator so its
+ledger remains coherent.
 
 ### Overnight-mode fallback
 
-If preflight finds that visible task tools, the approved plan, or a safe frozen
-wave are unavailable, overnight execution does not begin. Continue at Phase 1
-below or use the recorded manual prompts. If automation fails after tasks have
-started, do not recreate them blindly. Give the orchestrator's task ledger to a
-manual coordinator and follow the recovery procedures in this document.
+If preflight finds that neither visible task tools nor native multi-agent tools
+are available, or that the architecture, this runbook, or a safe campaign base
+is unavailable, overnight execution does not begin.
+Continue at Phase 1 below or use the recorded manual prompts. A missing
+milestone design or plan is not a fallback condition; the orchestrator creates
+and independently reviews it. If automation fails after tasks have started, do
+not recreate them blindly. Give the orchestrator's task ledger to a manual
+coordinator and follow the recovery procedures in this document.
 
 ## Session Roles
 
@@ -313,9 +411,9 @@ manual coordinator and follow the recovery procedures in this document.
 
 You are the operator. In manual mode you create sessions, paste prompts, and
 route worker reports. In overnight mode the Codex orchestrator performs those
-mechanical steps for one preauthorized wave. You approve and merge the design
-and plan before launch, then review the morning evidence before authorizing any
-external write, pull request, merge, or cleanup.
+steps under one time-bounded autonomous mandate and continues across ready waves
+and milestones. You review the morning evidence and autonomous decisions before
+authorizing any external write, pull request, merge, or cleanup.
 
 ### Coordinator
 
