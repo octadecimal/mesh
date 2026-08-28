@@ -261,6 +261,42 @@ describe('QaWorkspaceReader', () => {
     }
   });
 
+  it('matches bounded workspace files with the static PM glob grammar', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'mesh-workspace-reader-glob-'));
+    try {
+      mkdirSync(join(root, 'src'));
+      mkdirSync(join(root, 'docs'));
+      writeFileSync(join(root, 'src', 'app.ts'), 'export const app = true;');
+      writeFileSync(join(root, 'src', 'app.tsx'), 'export const view = true;');
+      writeFileSync(join(root, 'docs', 'readme.md'), '# Read me');
+      const reader = new QaWorkspaceReader();
+
+      await expect(
+        reader.glob(root, '.', 'src/**/*.{ts,tsx}'),
+      ).resolves.toEqual({
+        path: '.',
+        files: [join('src', 'app.ts'), join('src', 'app.tsx')],
+        truncated: false,
+      });
+
+      for (const pattern of [
+        '../outside/**/*',
+        '{../outside,src}/**/*',
+        '{C:/Windows,src}/**/*',
+        '[.][.]/outside/**/*',
+        '\\.\\../outside/**/*',
+        '@(../outside|src)/**/*',
+        'src/{nested/path,flat}/**/*',
+      ]) {
+        await expect(reader.glob(root, '.', pattern)).rejects.toMatchObject({
+          code: 'qa_workspace_path_rejected',
+        });
+      }
+    } finally {
+      rmSync(root, { force: true, recursive: true });
+    }
+  });
+
   it('searches safely when the assigned workspace root is a directory link', async () => {
     const target = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-target-'));
     const links = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-links-'));
@@ -317,7 +353,7 @@ describe('QaWorkspaceReader', () => {
     }
   });
 
-  it.each(['read', 'list', 'search'] as const)(
+  it.each(['read', 'list', 'search', 'glob'] as const)(
     'refuses an ancestor replaced by an external junction during %s',
     async (operation) => {
       const root = mkdtempSync(join(tmpdir(), 'mesh-qa-reader-root-'));
@@ -366,7 +402,9 @@ describe('QaWorkspaceReader', () => {
             ? reader.read(root, 'src/app.ts')
             : operation === 'list'
               ? reader.list(root, 'src')
-              : reader.search(root, 'src', 'external secret');
+              : operation === 'search'
+                ? reader.search(root, 'src', 'external secret')
+                : reader.glob(root, 'src', '**/*.ts');
         await expect(pending).rejects.toMatchObject({
           code: 'qa_workspace_path_rejected',
         });

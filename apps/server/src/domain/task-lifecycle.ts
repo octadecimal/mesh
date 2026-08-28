@@ -1,14 +1,10 @@
-import type {
-  Task,
-  TaskActor,
-  TaskLifecycleState,
+import {
+  idSchema,
+  type Task,
+  type TaskActor,
+  type TaskLifecycleState,
+  type TaskReadinessProblem,
 } from '@mesh-session-platform/contracts';
-
-export type TaskReadinessProblem =
-  | 'title'
-  | 'description'
-  | 'acceptanceCriteria'
-  | 'priority';
 
 export type AuthorizeTaskTransitionInput = {
   task: Task;
@@ -20,6 +16,7 @@ export type AuthorizeTaskTransitionInput = {
     | 'developer_submit_review'
     | 'developer_mark_blocked'
     | 'project_run_launch';
+  incompletePrerequisiteIds?: readonly string[];
 };
 
 export type AuthorizeQaVerdictInput = {
@@ -192,7 +189,18 @@ export const authorizeTaskTransition = (
   }
 
   if (nextState === 'ready' || nextState === 'in_progress') {
-    const problems = readinessProblems(task);
+    const dependencyReadinessApplies =
+      (task.lifecycleState === 'backlog' && nextState === 'ready') ||
+      nextState === 'in_progress';
+    const problems: TaskReadinessProblem[] = [
+      ...readinessProblems(task),
+      ...(dependencyReadinessApplies
+        ? (input.incompletePrerequisiteIds ?? []).map((taskId) => ({
+            type: 'dependency_incomplete' as const,
+            taskId: idSchema.parse(taskId),
+          }))
+        : []),
+    ];
     if (problems.length > 0) throw new TaskReadinessError(problems);
   }
 

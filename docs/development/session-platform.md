@@ -54,6 +54,59 @@ do not delete history or guess the missing outcome. Inspect the task, attempt,
 session diagnostics, and preserved workspace before choosing a human recovery
 action.
 
+### PM planning and task dependencies
+
+Use **Start planning** to ask a PM role for a structured proposal against the
+current imported repository and task/policy base. Confirm the displayed Claude
+subscription-capacity warning before starting. The PM receives read-only
+repository access plus one scoped `submit_project_plan` control. It receives no
+Claude SDK built-in filesystem tools; Mesh-owned bounded controls provide read,
+glob, and text search while rejecting absolute paths, traversal, unsafe glob
+grammar, and symlink or junction escapes. Mesh revalidates opened-handle and
+root/parent/target identity around each access, and cancellation or session end
+revokes the controls. The PM cannot write files, change canonical tasks or
+dependencies, approve or reject a proposal, or launch Developer work. A
+transcript or a completed PM process is not a plan outcome; only a validated
+structured submission becomes reviewable.
+
+Review the proposed tasks, prerequisite graph, assumptions, risks, exclusions,
+and revision history. **Request changes** records operator feedback, captures a
+fresh immutable base, and resumes the PM with newly scoped authority. **Approve
+plan** rechecks that base against current canonical task and policy truth. If
+anything changed during review, approval fails as stale and creates no proposal
+task or dependency rows. A valid approval creates the complete proposal graph
+as backlog tasks in one transaction. **Reject plan** preserves the terminal plan
+history without materializing it. **Cancel planning** first revokes the PM's
+submission capability, then interrupts the linked runtime, so an interrupt-time
+submission cannot race cancellation.
+
+Planning lifecycle and audit ordering are server-owned. Start, revision,
+submission, approval, rejection, cancellation, resume, and retry commit their
+plan state and ordered project events before publication. Bases and proposal
+revisions are immutable. PM capability tokens and live handlers are in-memory
+only: restart invalidates them rather than reconstructing authority. A plan in
+`awaiting_review` therefore survives restart and remains reviewable without a
+live PM. A formerly live `planning` or `revising` plan becomes
+`attention_required`; inspect the linked session and diagnostics, then choose
+the explicit **Resume planning** or **Retry planning** operation. Neither repair
+manufactures a proposal or reuses stale capability authority.
+
+Dependencies become canonical task truth only after approval. Every
+prerequisite must be `done` before its dependent can move to `ready`, launch
+manually, or appear in a new project-run preview. The board and task drawer show
+the unmet prerequisites and keep the ready action disabled. If a prerequisite
+is reopened after a dependent has already advanced, Mesh does not roll back the
+dependent or interrupt active work. The reopened edge instead blocks that
+dependent's next launch and excludes it from future run previews until the
+prerequisite is done again.
+
+Project-run waves remain finite across dependency changes. Satisfying a
+prerequisite after a run starts does not append the newly eligible dependent to
+that run's frozen membership; authorize another run after reviewing the fresh
+preview. Likewise, reopening a prerequisite does not rewrite an existing run's
+frozen history or interrupt its active item, but readiness is revalidated at
+the next launch boundary and unsafe new work fails closed.
+
 ### Finite project runs
 
 Use **Start run** to authorize the current ordered set of eligible ready tasks.
@@ -302,15 +355,16 @@ creates a fallback attempt, or bypasses workspace ownership checks.
 
 Mesh uses the installed Claude subscription through the Claude Agent SDK. It
 does not support an API-key or pay-per-token fallback. This applies equally to
-starting Developer, starting QA, and the resume paths after rejection or
-unblock. Startup now requires the SDK to positively report a first-party
-subscription and no API-key source. Environment keys, API-key helpers, and
-keys managed by `/login` are all refused; ambiguous account metadata also fails
-closed. Remove the conflicting key outside Mesh, verify the intended Claude
-subscription login is active, and restart Mesh. Manual QA consumes subscription quota when a human
-starts it. Enabled autonomous review may consume quota for each automatic QA
-start and each Developer resume; the explicit consent, rejection ceiling, and
-pause control bound that behavior.
+starting or resuming PM planning, starting Developer, starting QA, and the
+resume paths after rejection or unblock. Startup now requires the SDK to
+positively report a first-party subscription and no API-key source. Environment
+keys, API-key helpers, and keys managed by `/login` are all refused; ambiguous
+account metadata also fails closed. Remove the conflicting key outside Mesh,
+verify the intended Claude subscription login is active, and restart Mesh. PM
+planning and manual QA consume subscription quota when a human starts them.
+Enabled autonomous review may consume quota for each automatic QA start and
+each Developer resume; the explicit consent, rejection ceiling, and pause
+control bound that behavior.
 
 A finite project run can start several Developer sessions up to its confirmed
 concurrency and can also trigger autonomous QA or Developer rework. The start
@@ -336,7 +390,12 @@ repositories, and an in-process fake Claude driver available only under
 explicit test configuration. It covers explicit import, task launch and failure
 retention, manual QA, bounded autonomous rejection/rework, verified completion,
 and refresh recovery without contacting Claude or consuming Claude subscription
-quota. The finite-run acceptance path additionally proves concurrency two,
+quota. The PM acceptance path records the exact read-only role/tool
+configuration and invokes the scoped proposal callback in process. It proves
+start, revision, approval, stale rejection without partial rows, dependency
+readiness, restart repair, and cancel-before-interrupt ordering without a Claude
+executable, credentials, or subscription traffic. The finite-run acceptance
+path additionally proves concurrency two,
 autonomous completion, manual and blocker attention, later queue progress,
 Pause/Resume, browser refresh, backend restart, Stop/drain, durable history, and
 an absent API-billing environment. It uses only the fake driver, a temporary Git
@@ -352,4 +411,7 @@ $env:MESH_RUN_CLAUDE_SMOKE = '1'
 corepack pnpm nx external-smoke server
 ```
 
-This consumes real subscription capacity and can hit subscription limits. Never add it to `pnpm verify`, CI defaults, or an API-key-backed fallback.
+This consumes real subscription capacity and can hit subscription limits. Use
+it only when an operator deliberately budgets a real-driver smoke; deterministic
+fake acceptance is the normal planning and workflow proof. Never add it to
+`pnpm verify`, CI defaults, or an API-key-backed fallback.

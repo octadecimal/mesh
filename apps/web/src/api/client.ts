@@ -1,6 +1,8 @@
 import {
   commandEnvelopeSchema,
   projectHistorySchema,
+  projectPlanDetailsSchema,
+  projectPlanHistoryPageSchema,
   projectSnapshotSchema,
   sessionDiagnosticsSchema,
   sessionHistorySchema,
@@ -8,6 +10,8 @@ import {
   type DiscoveryCommand,
   type MutatingCommand,
   type ProjectHistory,
+  type ProjectPlanDetails,
+  type ProjectPlanHistoryPage,
   type ProjectSnapshot,
   type SessionDiagnostics,
   type SessionHistory,
@@ -103,6 +107,30 @@ export class MeshApi {
     return projectHistorySchema.parse(
       await this.request(
         `/api/projects/${encodeURIComponent(projectId)}/history${query}`,
+      ),
+    );
+  }
+
+  async projectPlanHistory(
+    projectId: string,
+    before?: string,
+  ): Promise<ProjectPlanHistoryPage> {
+    const query =
+      before === undefined ? '' : `?before=${encodeURIComponent(before)}`;
+    return projectPlanHistoryPageSchema.parse(
+      await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/plans${query}`,
+      ),
+    );
+  }
+
+  async projectPlanDetails(
+    projectId: string,
+    planId: string,
+  ): Promise<ProjectPlanDetails> {
+    return projectPlanDetailsSchema.parse(
+      await this.request(
+        `/api/projects/${encodeURIComponent(projectId)}/plans/${encodeURIComponent(planId)}`,
       ),
     );
   }

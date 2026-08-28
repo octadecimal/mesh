@@ -6,6 +6,7 @@ import {
   type DeveloperCompletionReportInput,
   type DeveloperExecutionCycle,
   type MutatingCommand,
+  type ProjectPlanProposalInput,
   type ProjectSnapshot,
   type QaReportInput,
 } from '@mesh-session-platform/contracts';
@@ -404,6 +405,82 @@ const enableTaskAutomation = async (
   );
 };
 
+const proposalTask = (
+  key: string,
+  title: string,
+): ProjectPlanProposalInput['tasks'][number] => ({
+  key: idSchema.parse(key),
+  title,
+  description: `Deliver the ${title.toLowerCase()} scope.`,
+  acceptanceCriteria: [`${title} is complete and verified.`],
+  priority: 'high',
+  labels: ['pm-plan'],
+  rationale: `${title} is required by the approved project goal.`,
+  goalMapping: `Advances dependency-aware delivery through ${title}.`,
+});
+
+const proposalDependency = (
+  dependentTaskKey: string,
+  prerequisiteTaskKey: string,
+): ProjectPlanProposalInput['dependencies'][number] => ({
+  dependentTaskKey: idSchema.parse(dependentTaskKey),
+  prerequisite: {
+    type: 'proposal_task',
+    taskKey: idSchema.parse(prerequisiteTaskKey),
+  },
+});
+
+const planningProposal = (
+  foundationTitle = 'Foundation contract',
+): ProjectPlanProposalInput => ({
+  tasks: [
+    proposalTask('foundation', foundationTitle),
+    proposalTask('feature', 'Feature delivery'),
+  ],
+  dependencies: [proposalDependency('feature', 'foundation')],
+  assumptions: ['The imported repository is the planning authority.'],
+  risks: ['Canonical task truth may change during review.'],
+  exclusions: ['Continuous scheduling remains out of scope.'],
+});
+
+const startProjectPlanning = async (
+  page: Page,
+  harness: FakeClaudeHarness,
+  goal: string,
+  expectedRuntimeCount = 1,
+) => {
+  const panel = page.getByRole('region', { name: 'Project planning' });
+  await panel.getByLabel('Project goal').fill(goal);
+  await panel
+    .getByLabel('I understand planning consumes Claude subscription capacity.')
+    .check();
+  await panel.getByRole('button', { name: 'Start planning' }).click();
+  await expect
+    .poll(() => harness.pmRuntimeConfigurations().length)
+    .toBe(expectedRuntimeCount);
+  return panel;
+};
+
+const reviewCurrentProposal = async (page: Page) => {
+  const panel = page.getByRole('region', { name: 'Project planning' });
+  const review = panel.getByRole('button', { name: 'Review proposal' });
+  await expect(review).toBeVisible();
+  await review.click();
+  await expect(
+    panel.getByRole('list', { name: 'Proposed tasks' }),
+  ).toBeVisible();
+  await expect(
+    panel.getByRole('button', { name: 'Approve plan' }),
+  ).toBeEnabled();
+  return panel;
+};
+
+const fakeDriverRequestCounts = (harness: FakeClaudeHarness) => ({
+  createRequests: harness.driver.createdRequests.length,
+  resumeRequests: harness.driver.resumedRequests.length,
+  pmConfigurations: harness.pmRuntimeConfigurations().length,
+});
+
 test('keeps the empty cockpit usable at a narrow viewport', async ({
   page,
   harness,
@@ -467,6 +544,68 @@ test('gives the project kanban the remaining board height', async ({
   const bottomGap = layout.viewportHeight - layout.columnsBottom;
   expect(bottomGap).toBeGreaterThanOrEqual(0);
   expect(bottomGap).toBeLessThanOrEqual(20);
+});
+
+test('gives every mobile project board section an explicit row without nested planning overflow', async ({
+  page,
+  harness,
+}) => {
+  await page.setViewportSize({ width: 700, height: 900 });
+  await ensureImportedProject(harness, 'repository');
+  await harness.snapshot();
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'Board' }).click();
+
+  const planning = page.getByRole('region', { name: 'Project planning' });
+  const taskBoard = page.locator('.task-board');
+  await expect(planning).toBeVisible();
+  await expect(taskBoard).toBeAttached();
+
+  const layout = await page.evaluate(() => {
+    const boundary = document.querySelector('.project-board-boundary');
+    const planningPanel = document.querySelector('.project-planning-panel');
+    const runPanel = document.querySelector('.project-run-panel');
+    const board = document.querySelector('.task-board');
+    if (!boundary || !planningPanel || !runPanel || !board) {
+      throw new Error('Expected all mobile project board sections');
+    }
+    const flattenRules = (rules: CSSRuleList): CSSRule[] =>
+      [...rules].flatMap((rule) =>
+        'cssRules' in rule && rule.cssRules instanceof CSSRuleList
+          ? [rule, ...flattenRules(rule.cssRules)]
+          : [rule],
+      );
+    const boundaryRule = [...document.styleSheets]
+      .flatMap((sheet) => flattenRules(sheet.cssRules))
+      .filter(
+        (rule): rule is CSSStyleRule =>
+          rule instanceof CSSStyleRule &&
+          rule.selectorText === '.project-board-boundary' &&
+          Boolean(rule.style.gridTemplateRows),
+      )
+      .at(-1);
+    if (!boundaryRule) {
+      throw new Error('Expected the mobile project board grid rule');
+    }
+    const rows =
+      boundaryRule.style.gridTemplateRows.match(/auto|minmax\([^)]*\)/g) ?? [];
+    return {
+      directChildCount: boundary.children.length,
+      explicitRowCount: rows.length,
+      planningClientHeight: planningPanel.clientHeight,
+      planningScrollHeight: planningPanel.scrollHeight,
+      planningOverflow: getComputedStyle(planningPanel).overflow,
+      planningBottom: planningPanel.getBoundingClientRect().bottom,
+      runTop: runPanel.getBoundingClientRect().top,
+      runBottom: runPanel.getBoundingClientRect().bottom,
+      boardTop: board.getBoundingClientRect().top,
+    };
+  });
+  expect(layout.explicitRowCount).toBe(layout.directChildCount);
+  expect(layout.planningOverflow).toBe('visible');
+  expect(layout.planningClientHeight).toBe(layout.planningScrollHeight);
+  expect(layout.runTop).toBeGreaterThanOrEqual(layout.planningBottom);
+  expect(layout.boardTop).toBeGreaterThanOrEqual(layout.runBottom);
 });
 
 test('creates shared and worktree sessions with the production-built server', async ({
@@ -1898,6 +2037,356 @@ test('finite project run preserves bounded progress and durable history', async 
     restartedRunPanel.getByRole('region', { name: 'Run history' }),
   ).toContainText('2 completed, 3 attention, 1 not started');
   expect(harness.apiBillingEnvironmentValues()).toEqual([undefined, undefined]);
+});
+
+test('plans and approves dependency-aware work with fake pm planning', async ({
+  page,
+  harness,
+}) => {
+  await importTemporaryRepository(page, harness, 'Dependency planning');
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  const planning = page.getByRole('region', { name: 'Project planning' });
+  await expect(planning).toContainText(
+    'The PM can read this repository but cannot edit files, change tasks, approve plans, or launch work.',
+  );
+  await expect(
+    planning.getByLabel(
+      'I understand planning consumes Claude subscription capacity.',
+    ),
+  ).toBeVisible();
+
+  await startProjectPlanning(page, harness, 'Plan dependency-aware delivery');
+  expect(harness.pmRuntimeConfigurations()).toEqual([
+    {
+      source: 'create',
+      role: 'pm',
+      availableTools: [],
+      allowedTools: [
+        'mcp__mesh_pm__read_workspace_file',
+        'mcp__mesh_pm__glob_workspace_files',
+        'mcp__mesh_pm__search_workspace_text',
+        'mcp__mesh_pm__submit_project_plan',
+      ],
+      request: {
+        title: 'Planning: Dependency planning',
+        workspacePath: harness.repositoryPath,
+        permissionMode: 'safe_auto',
+      },
+    },
+  ]);
+
+  await harness.submitProjectPlan(planningProposal('Foundation draft'));
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.activePlan?.status === 'awaiting_review' &&
+      snapshot.activePlan.latestProposalOrdinal === 1,
+    'The first structured PM proposal did not become reviewable',
+  );
+  let review = await reviewCurrentProposal(page);
+  await expect(
+    review.getByRole('list', { name: 'Proposed tasks' }),
+  ).toContainText('Foundation draft');
+  await review
+    .getByLabel('Revision feedback')
+    .fill('Use the refreshed board base and clarify the foundation contract.');
+  await review.getByRole('button', { name: 'Request changes' }).click();
+  await harness.waitForResumed(1);
+  await expect.poll(() => harness.pmRuntimeConfigurations().length).toBe(2);
+  const revisedRuntime = harness.pmRuntimeConfigurations().at(-1);
+  expect(revisedRuntime).toEqual({
+    source: 'resume',
+    role: 'pm',
+    availableTools: [],
+    allowedTools: [
+      'mcp__mesh_pm__read_workspace_file',
+      'mcp__mesh_pm__glob_workspace_files',
+      'mcp__mesh_pm__search_workspace_text',
+      'mcp__mesh_pm__submit_project_plan',
+    ],
+    request: {
+      claudeResumeId: 'fake-resume-1',
+      workspacePath: harness.repositoryPath,
+      permissionMode: 'safe_auto',
+    },
+  });
+  expect(revisedRuntime?.availableTools).not.toEqual(
+    expect.arrayContaining(['Bash', 'Write', 'Edit', 'NotebookEdit']),
+  );
+  expect(revisedRuntime?.allowedTools).not.toEqual(
+    expect.arrayContaining(['Bash', 'Write', 'Edit', 'NotebookEdit']),
+  );
+
+  await harness.submitProjectPlan(planningProposal());
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.activePlan?.status === 'awaiting_review' &&
+      snapshot.activePlan.latestProposalOrdinal === 2,
+    'The revised structured PM proposal did not become reviewable',
+  );
+  review = page.getByRole('region', { name: 'Project planning' });
+  await review.getByRole('button', { name: 'Refresh proposal' }).click();
+  await expect(
+    review.getByRole('heading', { name: 'Revision 2' }),
+  ).toBeVisible();
+  await review.getByRole('button', { name: 'Approve plan' }).click();
+
+  const approved = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.terminalPlanSummaries.some(
+        ({ status }) => status === 'approved',
+      ) &&
+      snapshot.tasks.length === 2 &&
+      snapshot.dependencies.length === 1,
+    'Approved planning truth did not create two tasks and one dependency',
+  );
+  expect(approved.tasks.map(({ lifecycleState }) => lifecycleState)).toEqual([
+    'backlog',
+    'backlog',
+  ]);
+  const foundation = approved.tasks.find(
+    ({ title }) => title === 'Foundation contract',
+  );
+  const feature = approved.tasks.find(
+    ({ title }) => title === 'Feature delivery',
+  );
+  expect(approved.dependencies).toEqual([
+    expect.objectContaining({
+      taskId: feature?.id,
+      prerequisiteTaskId: foundation?.id,
+    }),
+  ]);
+
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  const backlog = page.getByRole('region', { name: 'Backlog tasks' });
+  await expect(
+    backlog.getByRole('article', { name: 'Foundation contract task card' }),
+  ).toBeVisible();
+  await expect(
+    backlog.getByRole('article', { name: 'Feature delivery task card' }),
+  ).toContainText('1 unmet prerequisite');
+  let openFeature = page.getByRole('button', {
+    name: 'Open Feature delivery',
+  });
+  await openFeature.focus();
+  await openFeature.press('Enter');
+  let featureDialog = page.getByRole('dialog', { name: 'Feature delivery' });
+  await expect(
+    featureDialog.getByRole('list', { name: 'Prerequisites' }),
+  ).toContainText('Foundation contract');
+  await expect(
+    featureDialog.getByRole('button', { name: 'Move to ready' }),
+  ).toBeDisabled();
+
+  await featureDialog.getByRole('button', { name: 'Close' }).click();
+  for (const lifecycleState of [
+    'ready',
+    'in_progress',
+    'review',
+    'done',
+  ] as const) {
+    await page
+      .getByLabel('Move Foundation contract to')
+      .selectOption(lifecycleState);
+    await waitForProjectSnapshot(
+      harness,
+      projectId,
+      (snapshot) =>
+        snapshot.tasks.some(
+          ({ title, lifecycleState: currentState }) =>
+            title === 'Foundation contract' && currentState === lifecycleState,
+        ),
+      `The prerequisite task did not move to ${lifecycleState}`,
+    );
+  }
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  openFeature = page.getByRole('button', { name: 'Open Feature delivery' });
+  await openFeature.focus();
+  await openFeature.press('Enter');
+  featureDialog = page.getByRole('dialog', { name: 'Feature delivery' });
+  const moveToReady = featureDialog.getByRole('button', {
+    name: 'Move to ready',
+  });
+  await expect(moveToReady).toBeEnabled();
+  await moveToReady.click();
+  await expect(
+    featureDialog.getByRole('region', { name: 'Task lifecycle' }),
+  ).toContainText('ready');
+  await featureDialog.getByRole('button', { name: 'Close' }).click();
+
+  const runPanel = page.getByRole('region', {
+    name: 'Project run',
+    exact: true,
+  });
+  await runPanel.getByRole('button', { name: 'Start run' }).click();
+  const preview = runPanel.getByRole('list', { name: 'Eligible run order' });
+  await expect(preview.getByRole('listitem')).toHaveCount(1);
+  await expect(preview).toContainText('Feature delivery');
+  await expect(preview).not.toContainText('Foundation contract');
+});
+
+test('pm planning rejects stale approval without proposal rows', async ({
+  page,
+  harness,
+}) => {
+  await importTemporaryRepository(page, harness, 'Stale planning');
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  await startProjectPlanning(page, harness, 'Plan against current board');
+  await harness.submitProjectPlan(planningProposal());
+  await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.activePlan?.status === 'awaiting_review',
+    'The stale-test proposal did not become reviewable',
+  );
+
+  const addTask = page.getByRole('button', { name: 'Add task' });
+  await addTask.focus();
+  await addTask.press('Enter');
+  const createDialog = page.getByRole('dialog', { name: 'Create task' });
+  await createDialog.getByLabel('Task title').fill('Canonical board edit');
+  await createDialog.getByRole('button', { name: 'Create task' }).click();
+  const edited = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.tasks.some(({ title }) => title === 'Canonical board edit'),
+    'The canonical board edit was not persisted',
+  );
+  const addedTaskId = edited.tasks.find(
+    ({ title }) => title === 'Canonical board edit',
+  )?.id;
+  if (!addedTaskId) throw new Error('The canonical board task ID was missing');
+
+  const planning = await reviewCurrentProposal(page);
+  await planning.getByRole('button', { name: 'Approve plan' }).click();
+  await expect(
+    planning
+      .getByRole('alert')
+      .filter({ hasText: /task or policy base changed/i }),
+  ).toBeVisible();
+  const evidence = planning
+    .getByRole('alert')
+    .filter({ hasText: /task board changed after this plan was prepared/i });
+  await expect(evidence).toContainText('Added tasks: 1 total.');
+  await expect(evidence).toContainText(addedTaskId);
+  const stale = await readProjectSnapshot(harness, projectId);
+  expect(stale.activePlan?.status).toBe('awaiting_review');
+  expect(stale.tasks.map(({ title }) => title)).toEqual([
+    'Canonical board edit',
+  ]);
+  expect(stale.dependencies).toEqual([]);
+});
+
+test('pm planning awaiting review survives restart without a live pm', async ({
+  page,
+  harness,
+}) => {
+  await importTemporaryRepository(page, harness, 'Review restart');
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  await startProjectPlanning(page, harness, 'Preserve review across restart');
+  await harness.submitProjectPlan(planningProposal());
+  const beforeRestart = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.activePlan?.status === 'awaiting_review',
+    'The review proposal was not durable before restart',
+  );
+  const sessionId = beforeRestart.activePlan?.currentSessionId;
+  if (!sessionId) throw new Error('Expected the PM planning session');
+  const driverCountsBeforeRestart = fakeDriverRequestCounts(harness);
+
+  await harness.restart({ recoverSessionId: sessionId });
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'Board' }).click();
+  const afterRestart = await readProjectSnapshot(harness, projectId);
+  expect(afterRestart.activePlan).toMatchObject({
+    id: beforeRestart.activePlan?.id,
+    status: 'awaiting_review',
+    latestProposalOrdinal: 1,
+  });
+  await expect(
+    page.getByRole('region', { name: 'Project planning' }),
+  ).toContainText('Proposal ready for review');
+  expect(fakeDriverRequestCounts(harness)).toEqual(driverCountsBeforeRestart);
+});
+
+test('pm planning marks a formerly live runtime for attention', async ({
+  page,
+  harness,
+}) => {
+  await importTemporaryRepository(page, harness, 'Planning recovery');
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  await startProjectPlanning(page, harness, 'Recover interrupted planning');
+  const planning = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) => snapshot.activePlan?.status === 'planning',
+    'The live PM plan did not start',
+  );
+  const sessionId = planning.activePlan?.currentSessionId;
+  if (!sessionId) throw new Error('Expected the live PM session');
+
+  await harness.restart({ recoverSessionId: sessionId });
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'Board' }).click();
+  const recovered = await readProjectSnapshot(harness, projectId);
+  expect(recovered.activePlan).toMatchObject({
+    id: planning.activePlan?.id,
+    status: 'attention_required',
+  });
+  const panel = page.getByRole('region', { name: 'Project planning' });
+  await expect(panel).toContainText('Planning needs attention');
+  await expect(
+    panel.getByRole('button', { name: 'Resume planning' }),
+  ).toBeVisible();
+  await expect(
+    panel.getByRole('button', { name: 'Retry planning' }),
+  ).toBeVisible();
+});
+
+test('pm planning cancel revokes submission before interrupt', async ({
+  page,
+  harness,
+}) => {
+  await importTemporaryRepository(page, harness, 'Cancel planning');
+  const projectId = await page.getByLabel('Selected project').inputValue();
+  const panel = await startProjectPlanning(
+    page,
+    harness,
+    'Cancel without preserving PM authority',
+  );
+  const submissionAtInterrupt =
+    harness.submitProjectPlanOnInterrupt(planningProposal());
+  await panel
+    .getByLabel('Cancellation reason')
+    .fill('The operator no longer wants this plan.');
+  await panel.getByRole('button', { name: 'Cancel planning' }).click();
+
+  await expect(submissionAtInterrupt).resolves.toEqual({
+    accepted: false,
+    code: 'planning_capability_invalid',
+  });
+  await expect.poll(() => harness.latestPmSessionInterrupted()).toBe(true);
+  const cancelled = await waitForProjectSnapshot(
+    harness,
+    projectId,
+    (snapshot) =>
+      snapshot.activePlan === null &&
+      snapshot.terminalPlanSummaries.some(
+        ({ status }) => status === 'cancelled',
+      ),
+    'Cancellation did not become durable',
+  );
+  expect(cancelled.tasks).toEqual([]);
+  expect(cancelled.dependencies).toEqual([]);
 });
 
 test('refuses API-billing conflicts without invoking Claude', async ({

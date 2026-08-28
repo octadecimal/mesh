@@ -26,7 +26,9 @@ import {
 import { sessionEventSchema } from './events.js';
 import { projectEventSchema } from './project-events.js';
 import { projectRunSchema } from './project-runs.js';
+import { projectPlanSchema, projectPlanSummarySchema } from './planning.js';
 import { protocolVersionSchema } from './protocol.js';
+import { taskDependencySchema } from './task-dependencies.js';
 
 export const sessionSnapshotSchema = z.object({
   protocolVersion: protocolVersionSchema,
@@ -72,6 +74,12 @@ export const projectSnapshotSchema = z
     qaReports: z.array(qaReportSchema).default([]),
     reviewAutomationActions: z.array(reviewAutomationActionSchema).default([]),
     runs: z.array(projectRunSchema).default([]),
+    activePlan: projectPlanSchema.nullable().default(null),
+    terminalPlanSummaries: z
+      .array(projectPlanSummarySchema)
+      .max(20)
+      .default([]),
+    dependencies: z.array(taskDependencySchema).default([]),
     projectRunLimits: z
       .object({ maxConcurrency: z.number().int().positive() })
       .default({

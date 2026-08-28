@@ -8,6 +8,10 @@ import {
   developerCompletionReportSchema,
   developerExecutionCycleSchema,
   idSchema,
+  projectPlanBaseSchema,
+  projectPlanDetailsSchema,
+  projectPlanProposalInputSchema,
+  projectPlanSchema,
   projectSchema,
   qaExecutionCycleSchema,
   sessionSchema,
@@ -27,6 +31,8 @@ import {
 } from './platform/process-runner.js';
 import { resolveRepositoryIdentity } from './projects/repository-identity.js';
 import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
+import { PlanningRepository } from './repositories/planning-repository.js';
+import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProjectRunRepository } from './repositories/project-run-repository.js';
 import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
@@ -229,10 +235,556 @@ describe('process lifecycle', () => {
 describe('production composition', () => {
   const directories: string[] = [];
 
+  const proposal = projectPlanProposalInputSchema.parse({
+    tasks: [
+      {
+        key: 'foundation',
+        title: 'Build the foundation',
+        description: 'Create the smallest durable planning foundation.',
+        acceptanceCriteria: ['The planning foundation is verified.'],
+        priority: 'normal',
+        labels: ['planning'],
+        rationale: 'The remaining work depends on a durable foundation.',
+        goalMapping: 'Provides the requested planning workflow.',
+      },
+    ],
+    dependencies: [],
+    assumptions: [],
+    risks: [],
+    exclusions: [],
+  });
+
+  const createPlanningFixture = async (suffix: string) => {
+    const directory = mkdtempSync(join(tmpdir(), `mesh-main-pm-${suffix}-`));
+    directories.push(directory);
+    const repositoryPath = join(directory, 'repository');
+    const databasePath = join(directory, 'mesh.sqlite');
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: directory,
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    execFileSync(trustedGitExecutable.path, ['init', repositoryPath], {
+      cwd: directory,
+      windowsHide: true,
+    });
+    seedRepositoryCommit(trustedGitExecutable.path, repositoryPath, directory);
+    const identity = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: directory },
+      new NodeProcessRunner({ trustedGitExecutable }),
+    );
+    const database = openDatabase(databasePath);
+    migrate(database);
+    const project = new ProjectRepository(database).create(
+      projectSchema.parse({
+        id: `project-pm-${suffix}`,
+        displayName: `PM planning ${suffix}`,
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    database.close();
+    return {
+      databasePath,
+      directory,
+      project,
+      environment: {
+        NODE_ENV: 'test',
+        MESH_PORT: '0',
+        MESH_DATA_DIR: directory,
+        MESH_DATABASE_PATH: 'mesh.sqlite',
+        MESH_WORKSPACE_ROOT: directory,
+        MESH_GIT_EXECUTABLE: trustedGitExecutable.path,
+      },
+    };
+  };
+
+  const startPlanningCommand = (
+    projectId: string,
+    expectedProjectRevision: number,
+    idempotencyKey: string,
+  ) => ({
+    protocolVersion: 1,
+    idempotencyKey,
+    command: {
+      type: 'project.plan.start',
+      payload: {
+        projectId,
+        expectedProjectRevision,
+        goal: 'Plan the milestone.',
+        constraints: ['Use the shared repository.'],
+        nonGoals: ['Do not change billing mode.'],
+        actor: { type: 'human' as const, id: 'operator-pm' },
+      },
+    },
+  });
+
   afterEach(() => {
     for (const directory of directories.splice(0)) {
       rmSync(directory, { force: true, recursive: true });
     }
+  });
+
+  it('shares planning persistence and accepts fake-driver proposals without external traffic', async () => {
+    const fixture = await createPlanningFixture('proposal');
+    const driver = new FakeClaudeSessionDriver({
+      pmSteps: [{ type: 'pm.proposal', proposal }],
+    });
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const started = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'start-pm-proposal',
+        ),
+      });
+      expect(started.statusCode).toBe(200);
+      expect(JSON.stringify(started.json())).not.toContain('capability');
+      expect(driver.createdRequests).toHaveLength(1);
+      expect(driver.createdRequests[0]?.role?.role).toBe('pm');
+      await driver.drainPmSteps();
+
+      const planId = started.json().result.plan.id as string;
+      const details = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${fixture.project.id}/plans/${planId}`,
+      });
+      expect(details.statusCode).toBe(200);
+      expect(projectPlanDetailsSchema.parse(details.json())).toMatchObject({
+        plan: { id: planId, status: 'awaiting_review' },
+        proposals: [{ ordinal: 1 }],
+      });
+
+      const observation = openDatabase(fixture.databasePath);
+      try {
+        expect(
+          new PlanningRepository(observation).getDetails(planId),
+        ).toMatchObject({
+          plan: { id: planId, status: 'awaiting_review' },
+          proposals: [{ ordinal: 1 }],
+        });
+      } finally {
+        observation.close();
+      }
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('invalidates the PM proposal capability when its session stops', async () => {
+    const fixture = await createPlanningFixture('stop');
+    const driver = new FakeClaudeSessionDriver({
+      pmSteps: [{ type: 'pm.wait' }],
+    });
+    const publishedProjectEvents: Array<{
+      projectId: string;
+      sequence: number;
+      type: string;
+      payload: unknown;
+    }> = [];
+    const publishProject = EventPublisher.prototype.publishProject;
+    const publishSpy = vi
+      .spyOn(EventPublisher.prototype, 'publishProject')
+      .mockImplementation(function (event) {
+        publishedProjectEvents.push(event);
+        publishProject.call(this, event);
+      });
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const started = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'start-pm-stop',
+        ),
+      });
+      expect(started.statusCode).toBe(200);
+      const sessionId = started.json().result.session.id as string;
+      const role = driver.createdRequests[0]?.role;
+      if (!role || role.role !== 'pm') {
+        throw new Error('Expected a PM runtime configuration');
+      }
+      const snapshot = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${fixture.project.id}/snapshot`,
+      });
+      const cursor = snapshot.json().cursor as number;
+      const runtime = driver.createdSessions[0];
+      if (!runtime) throw new Error('Expected a PM runtime');
+      await runtime.close();
+      await expect
+        .poll(async () => {
+          const snapshot = await running.app.inject({
+            method: 'GET',
+            url: '/api/snapshot',
+          });
+          return snapshot
+            .json()
+            .sessions?.find(
+              (session: { id?: string }) => session.id === sessionId,
+            )?.lifecycleState;
+        })
+        .toBe('interrupted');
+      await expect(role.submitProposal(proposal)).rejects.toMatchObject({
+        code: 'planning_capability_invalid',
+      });
+      await expect
+        .poll(async () => {
+          const details = await running.app.inject({
+            method: 'GET',
+            url: `/api/projects/${fixture.project.id}/plans/${started.json().result.plan.id}`,
+          });
+          return details.json().plan?.status;
+        })
+        .toBe('attention_required');
+      await expect
+        .poll(() =>
+          publishedProjectEvents.find(
+            (event) =>
+              event.projectId === fixture.project.id &&
+              event.sequence > cursor &&
+              event.type === 'project.plan_changed' &&
+              (event.payload as { plan?: { status?: string } }).plan?.status ===
+                'attention_required',
+          ),
+        )
+        .toMatchObject({
+          projectId: fixture.project.id,
+          sequence: cursor + 1,
+          type: 'project.plan_changed',
+        });
+      expect(driver.createdRequests).toHaveLength(1);
+    } finally {
+      publishSpy.mockRestore();
+      await running.close();
+    }
+  });
+
+  it('reconciles planning only after generic interruption recovery and before acceptance', async () => {
+    const fixture = await createPlanningFixture('restart');
+    const database = openDatabase(fixture.databasePath);
+    const workspace = new WorkspaceRepository(database).create(
+      workspaceSchema.parse({
+        id: 'workspace-pm-restart',
+        projectId: fixture.project.id,
+        type: 'shared',
+        path: fixture.project.repositoryPath,
+        cleanupState: 'active',
+      }),
+    );
+    const session = new SessionRepository(database).create(
+      sessionSchema.parse({
+        id: 'session-pm-restart',
+        projectId: fixture.project.id,
+        workspaceId: workspace.id,
+        title: 'Interrupted PM planning',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const base = projectPlanBaseSchema.parse({
+      id: 'base-pm-restart',
+      planId: 'plan-pm-restart',
+      ordinal: 1,
+      repositoryIdentity: fixture.project.repositoryIdentity,
+      tasks: [],
+      dependencies: [],
+      projectArchivedAt: null,
+      projectRevision: fixture.project.revision,
+      policyRevision: fixture.project.qaConfiguration.revision,
+      createdAt: now,
+    });
+    new PlanningRepository(database).create({
+      plan: projectPlanSchema.parse({
+        id: 'plan-pm-restart',
+        projectId: fixture.project.id,
+        goal: 'Recover planning truth.',
+        constraints: [],
+        nonGoals: [],
+        policyVersion: 'pm-readonly-v1',
+        status: 'planning',
+        revision: 1,
+        currentBaseId: base.id,
+        currentSessionId: session.id,
+        latestProposalOrdinal: 0,
+        feedback: [],
+        attention: null,
+        createdBy: { type: 'human', id: 'operator-pm' },
+        createdAt: now,
+        updatedAt: now,
+        terminalAt: null,
+        terminalBy: null,
+        terminalReason: null,
+      }),
+      base,
+      sessionId: session.id,
+    });
+    database.close();
+    const driver = new FakeClaudeSessionDriver();
+
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const response = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${fixture.project.id}/plans/plan-pm-restart`,
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        plan: {
+          id: 'plan-pm-restart',
+          status: 'attention_required',
+          attention: { type: 'session_unavailable' },
+        },
+      });
+      expect(driver.createdRequests).toEqual([]);
+
+      const observation = openDatabase(fixture.databasePath);
+      try {
+        expect(
+          new SessionRepository(observation).get(session.id),
+        ).toMatchObject({
+          lifecycleState: 'interrupted',
+        });
+        expect(
+          observation
+            .prepare(
+              "SELECT COUNT(*) AS count FROM project_events WHERE project_id = ? AND type = 'project.plan_changed'",
+            )
+            .get(fixture.project.id),
+        ).toEqual({ count: 1 });
+      } finally {
+        observation.close();
+      }
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('trips the central barrier when stopped-PM reconciliation cannot persist its audit event', async () => {
+    const fixture = await createPlanningFixture('reconcile-audit');
+    const driver = new FakeClaudeSessionDriver({
+      pmSteps: [{ type: 'pm.wait' }],
+    });
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    let closeError: unknown;
+    const previousExitCode = process.exitCode;
+    try {
+      const command = startPlanningCommand(
+        fixture.project.id,
+        fixture.project.revision,
+        'start-pm-reconcile-audit',
+      );
+      const started = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: command,
+      });
+      expect(started.statusCode).toBe(200);
+
+      const database = openDatabase(fixture.databasePath);
+      database.exec(`
+        CREATE TRIGGER fail_plan_reconciliation_event
+        BEFORE INSERT ON project_events
+        WHEN NEW.project_id = '${fixture.project.id}'
+          AND NEW.type = 'project.plan_changed'
+        BEGIN
+          SELECT RAISE(FAIL, 'planning reconciliation audit failed');
+        END;
+      `);
+      database.close();
+
+      const runtime = driver.createdSessions[0];
+      if (!runtime) throw new Error('Expected a PM runtime');
+      await runtime.close();
+
+      await expect
+        .poll(async () => {
+          const rejected = await running.app.inject({
+            method: 'POST',
+            url: '/api/commands',
+            payload: {
+              ...command,
+              idempotencyKey: 'rejected-after-plan-reconciliation-audit',
+            },
+          });
+          return rejected.statusCode;
+        })
+        .toBe(503);
+    } finally {
+      closeError = await running.close().catch((error: unknown) => error);
+      process.exitCode = previousExitCode;
+    }
+    expect(closeError).toMatchObject({
+      message: 'planning reconciliation audit failed',
+    });
+
+    const observation = openDatabase(fixture.databasePath);
+    try {
+      const planId = (
+        observation
+          .prepare('SELECT id FROM project_plans WHERE project_id = ?')
+          .get(fixture.project.id) as { id: string }
+      ).id;
+      expect(new PlanningRepository(observation).get(planId)).toMatchObject({
+        status: 'planning',
+        attention: null,
+      });
+    } finally {
+      observation.close();
+    }
+  });
+
+  it('refuses planning when a pay-per-token billing override is present', async () => {
+    const fixture = await createPlanningFixture('billing');
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: {
+        ...fixture.environment,
+        ANTHROPIC_API_KEY: 'must-not-be-used',
+      },
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const response = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'start-pm-billing-conflict',
+        ),
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: { code: 'project_plan_billing_conflict' },
+      });
+      expect(driver.createdRequests).toEqual([]);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('refuses a stale project revision before planning runtime or driver effects', async () => {
+    const fixture = await createPlanningFixture('stale');
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const response = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision + 1,
+          'start-pm-stale-project',
+        ),
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: {
+          code: 'project_revision_conflict',
+          details: {
+            project: {
+              id: fixture.project.id,
+              revision: fixture.project.revision,
+            },
+          },
+        },
+      });
+      expect(driver.createdRequests).toEqual([]);
+      expect(driver.createdSessions).toEqual([]);
+
+      const observation = openDatabase(fixture.databasePath);
+      try {
+        expect(
+          observation
+            .prepare('SELECT COUNT(*) AS count FROM project_plans')
+            .get(),
+        ).toEqual({ count: 0 });
+        expect(
+          observation.prepare('SELECT COUNT(*) AS count FROM sessions').get(),
+        ).toEqual({ count: 0 });
+      } finally {
+        observation.close();
+      }
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('routes planning audit failures through the central runtime barrier', async () => {
+    const fixture = await createPlanningFixture('audit');
+    const database = openDatabase(fixture.databasePath);
+    database.exec(`
+      CREATE TRIGGER fail_planning_event
+      BEFORE INSERT ON project_events
+      WHEN NEW.project_id = '${fixture.project.id}'
+        AND NEW.type = 'project.plan_changed'
+      BEGIN
+        SELECT RAISE(FAIL, 'planning audit insert failed');
+      END;
+    `);
+    database.close();
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    let closeError: unknown;
+    const previousExitCode = process.exitCode;
+    try {
+      const command = startPlanningCommand(
+        fixture.project.id,
+        fixture.project.revision,
+        'start-pm-audit',
+      );
+      const failed = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: command,
+      });
+      const rejected = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: { ...command, idempotencyKey: 'rejected-after-pm-audit' },
+      });
+      expect(failed.statusCode).toBe(500);
+      expect(rejected.statusCode).toBe(503);
+      expect(driver.createdRequests).toEqual([]);
+    } finally {
+      closeError = await running.close().catch((error: unknown) => error);
+      process.exitCode = previousExitCode;
+    }
+    expect(closeError).toMatchObject({
+      message: 'planning audit insert failed',
+    });
   });
 
   it('retries one QA launch key after approved Git is restored', async () => {
@@ -1643,6 +2195,131 @@ describe('production composition', () => {
         drainSpy.mockRestore();
       }
     }
+  });
+
+  it('trips the audit barrier when deferred stopped-runtime cursor capture fails', async () => {
+    const fixture = await createPlanningFixture('deferred-cursor-audit');
+    const database = openDatabase(fixture.databasePath);
+    const task = new TaskRepository(database).create(
+      taskSchema.parse({
+        id: 'task-deferred-cursor-audit',
+        projectId: fixture.project.id,
+        title: 'Hold one project run drain',
+        description: 'Keep stopped-runtime reconciliation deferred.',
+        acceptanceCriteria: [
+          'The cursor read failure stops command acceptance.',
+        ],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'ready',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    database.close();
+    const driver = new FakeClaudeSessionDriver({
+      pmSteps: [{ type: 'pm.wait' }],
+    });
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    let releaseDrain!: () => void;
+    const drainGate = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const drainAvailableSlots = ProjectRunService.prototype.drainAvailableSlots;
+    const drainSpy = vi
+      .spyOn(ProjectRunService.prototype, 'drainAvailableSlots')
+      .mockImplementation(async function (runId) {
+        await drainGate;
+        return drainAvailableSlots.call(this, runId);
+      });
+    let cursorReadFailed!: () => void;
+    const cursorFailure = new Promise<void>((resolve) => {
+      cursorReadFailed = resolve;
+    });
+    let restoreCursorSpy = () => undefined;
+    const previousExitCode = process.exitCode;
+    let closeError: unknown;
+    try {
+      const planning = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'start-pm-deferred-cursor-audit',
+        ),
+      });
+      expect(planning.statusCode).toBe(200);
+
+      const run = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: 'start-run-deferred-cursor-audit',
+          command: {
+            type: 'project.run.start',
+            payload: {
+              projectId: fixture.project.id,
+              concurrency: 1,
+              expectedPolicyRevision: fixture.project.qaConfiguration.revision,
+              expectedTasks: [
+                {
+                  taskId: task.id,
+                  revision: task.revision,
+                  automationStatus: task.reviewAutomation.status,
+                  automationGeneration: task.reviewAutomation.generation,
+                },
+              ],
+              actor: { type: 'human', id: 'operator-deferred-cursor-audit' },
+            },
+          },
+        },
+      });
+      expect(run.statusCode).toBe(200);
+      await vi.waitFor(() => expect(drainSpy).toHaveBeenCalledOnce());
+
+      const pmRuntime = driver.createdSessions[0];
+      if (!pmRuntime) throw new Error('Expected a PM runtime');
+      await pmRuntime.close();
+      const cursorSpy = vi
+        .spyOn(ProjectEventRepository.prototype, 'latestSequence')
+        .mockImplementation(() => {
+          cursorReadFailed();
+          throw new Error('deferred cursor read failed');
+        });
+      restoreCursorSpy = () => cursorSpy.mockRestore();
+      releaseDrain();
+      await cursorFailure;
+      restoreCursorSpy();
+
+      const rejected = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'rejected-after-deferred-cursor-audit',
+        ),
+      });
+      expect(rejected.statusCode).toBe(503);
+    } finally {
+      restoreCursorSpy();
+      releaseDrain();
+      closeError = await running.close().catch((error: unknown) => error);
+      drainSpy.mockRestore();
+      process.exitCode = previousExitCode;
+    }
+    expect(closeError).toMatchObject({
+      message: 'deferred cursor read failed',
+    });
   });
 
   it('routes a trigger-based attempt audit failure through the central runtime barrier', async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   projectSchema,
+  projectPlanSchema,
   projectRunSchema,
   projectSnapshotSchema,
   qaExecutionCycleSchema,
@@ -125,17 +126,66 @@ const projectSnapshot = (projectId: string, cursor: number) => {
   });
 };
 
+const planningProjectSnapshot = (
+  projectId: string,
+  cursor: number,
+  revision: number,
+) => {
+  const current = projectSnapshot(projectId, cursor);
+  const prerequisite = taskSchema.parse({
+    ...task(projectId),
+    id: `prerequisite-${projectId}`,
+    title: `Prerequisite for ${projectId}`,
+    lifecycleState: 'ready',
+    rank: '0',
+  });
+  return projectSnapshotSchema.parse({
+    ...current,
+    tasks: [prerequisite, ...current.tasks],
+    activePlan: projectPlanSchema.parse({
+      id: `plan-${projectId}`,
+      projectId,
+      goal: `Plan ${projectId}`,
+      constraints: [],
+      nonGoals: [],
+      policyVersion: 'pm-v1',
+      status: 'planning',
+      revision,
+      currentBaseId: `base-${projectId}`,
+      currentSessionId: `pm-session-${projectId}`,
+      latestProposalOrdinal: 0,
+      feedback: [],
+      attention: null,
+      createdBy: { type: 'human', id: 'operator' },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      terminalAt: null,
+      terminalBy: null,
+      terminalReason: null,
+    }),
+    dependencies: [
+      {
+        projectId,
+        taskId: `task-${projectId}`,
+        prerequisiteTaskId: prerequisite.id,
+        createdBy: { type: 'human', id: 'operator' },
+        createdAt: timestamp,
+      },
+    ],
+  });
+};
+
 describe('project resync', () => {
   it('refreshes project-local QA and run state for only the project that owns the sequence gap', async () => {
     const store = createMeshStore(sessionSnapshot);
-    store.replaceProjectSnapshot(projectSnapshot('project-2', 4));
+    store.replaceProjectSnapshot(planningProjectSnapshot('project-2', 4, 1));
     const requested: string[] = [];
     const coordinator = createResyncCoordinator(
       {
         snapshot: async () => sessionSnapshot,
         projectSnapshot: async (projectId) => {
           requested.push(projectId);
-          return projectSnapshot(projectId, 7);
+          return planningProjectSnapshot(projectId, 7, 2);
         },
       },
       store,
@@ -168,6 +218,20 @@ describe('project resync', () => {
     expect(
       store.state.projectRunMaxConcurrencyByProjectId['project-1'].get(),
     ).toBe(4);
+    expect(store.state.activePlanByProjectId['project-1'].revision.get()).toBe(
+      2,
+    );
+    expect(store.state.activePlanByProjectId['project-2'].revision.get()).toBe(
+      1,
+    );
+    expect(
+      store.state.dependenciesByTaskId[
+        'task-project-1'
+      ][0].prerequisiteTaskId.get(),
+    ).toBe('prerequisite-project-1');
+    expect(
+      store.state.dependentsByTaskId['prerequisite-project-2'][0].taskId.get(),
+    ).toBe('task-project-2');
   });
 
   it('keeps the current projection when the resync snapshot has cross-project or duplicate runs', async () => {

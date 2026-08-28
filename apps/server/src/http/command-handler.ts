@@ -28,6 +28,7 @@ import type { CommandRepository } from '../repositories/command-repository.js';
 import type { DiagnosticRepository } from '../repositories/diagnostic-repository.js';
 import type { EventRepository } from '../repositories/event-repository.js';
 import type { LayoutRepository } from '../repositories/layout-repository.js';
+import type { PlanningRepository } from '../repositories/planning-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
@@ -53,6 +54,18 @@ import type {
   ReviewAutomationService,
 } from '../tasks/review-automation-service.js';
 import type { ProjectRunService } from '../tasks/project-run-service.js';
+import type {
+  PlanningExecutionService,
+  PlanningMutationResult,
+} from '../tasks/planning-execution-service.js';
+import type {
+  PlanApprovalResult,
+  PlanApprovalService,
+} from '../tasks/plan-approval-service.js';
+import type {
+  DependencyMutationResult,
+  TaskDependencyService,
+} from '../tasks/task-dependency-service.js';
 import {
   RepositoryIdentityError,
   resolveRepositoryIdentity,
@@ -71,6 +84,13 @@ const commandResponseSchema = z.object({
 
 export type CommandResponse = z.infer<typeof commandResponseSchema>;
 
+type PlanningExecutionBoundary = Pick<
+  PlanningExecutionService,
+  'start' | 'requestRevision' | 'resume' | 'retry' | 'cancel'
+>;
+type PlanApprovalBoundary = Pick<PlanApprovalService, 'approve' | 'reject'>;
+type TaskDependencyBoundary = Pick<TaskDependencyService, 'add' | 'remove'>;
+
 export interface CommandDependencies {
   database: Database;
   projects: ProjectRepository;
@@ -85,6 +105,10 @@ export interface CommandDependencies {
   diagnostics: DiagnosticRepository;
   layouts: LayoutRepository;
   commands: CommandRepository;
+  plans: Pick<
+    PlanningRepository,
+    'getActiveByProject' | 'getDetails' | 'listSummaries'
+  >;
   taskService: TaskService;
   tasks: Pick<TaskRepository, 'get'>;
   qaExecutions: Pick<
@@ -105,6 +129,9 @@ export interface CommandDependencies {
     ProjectRunService,
     'startRun' | 'pauseRun' | 'resumeRun' | 'stopRun' | 'observeTaskOutcome'
   >;
+  planningExecutionService?: PlanningExecutionBoundary;
+  planApprovalService?: PlanApprovalBoundary;
+  taskDependencyService?: TaskDependencyBoundary;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
   git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
@@ -240,6 +267,160 @@ const reviewAutomationResponse = (result: ReviewAutomationCommandOutcome) => ({
   event: result.event,
   projectEventCursor: result.event.sequence,
 });
+
+const planningResponse = (result: PlanningMutationResult) => ({
+  plan: result.plan,
+  base: result.base,
+  proposal: result.proposal,
+  session: result.session,
+  events: result.events,
+  projectEventCursor: result.events.at(-1)?.sequence,
+});
+
+const planApprovalResponse = (result: PlanApprovalResult) => ({
+  ...planningResponse(result),
+  createdTasks: result.createdTasks,
+  dependencies: result.dependencies,
+  taskMappings: result.taskMappings,
+});
+
+const dependencyResponse = (result: DependencyMutationResult) => ({
+  task: result.task,
+  dependencies: result.dependencies,
+  event: result.event,
+  projectEventCursor: result.event.sequence,
+});
+
+const requirePlanningExecutionService = (dependencies: CommandDependencies) => {
+  if (!dependencies.planningExecutionService) {
+    throw new CommandError(
+      'invalid_command',
+      'Project planning support is unavailable',
+    );
+  }
+  return dependencies.planningExecutionService;
+};
+
+const requirePlanApprovalService = (dependencies: CommandDependencies) => {
+  if (!dependencies.planApprovalService) {
+    throw new CommandError(
+      'invalid_command',
+      'Project plan approval support is unavailable',
+    );
+  }
+  return dependencies.planApprovalService;
+};
+
+const requireTaskDependencyService = (dependencies: CommandDependencies) => {
+  if (!dependencies.taskDependencyService) {
+    throw new CommandError(
+      'invalid_command',
+      'Task dependency support is unavailable',
+    );
+  }
+  return dependencies.taskDependencyService;
+};
+
+type PlanningCommand = Extract<
+  MutatingCommand,
+  { type: `project.plan.${string}` }
+>;
+
+const executePlanningCommand = async (
+  command: PlanningCommand,
+  commandId: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  if (command.type === 'project.plan.start') {
+    const result = await requirePlanningExecutionService(dependencies).start({
+      projectId: command.payload.projectId,
+      expectedProjectRevision: command.payload.expectedProjectRevision,
+      goal: command.payload.goal,
+      constraints: command.payload.constraints.join('\n'),
+      nonGoals: command.payload.nonGoals.join('\n'),
+      actor: command.payload.actor,
+      commandId,
+    });
+    return response(command.type, planningResponse(result));
+  }
+  if (command.type === 'project.plan.request_revision') {
+    const details = dependencies.plans.getDetails(command.payload.planId);
+    if (!details || details.plan.projectId !== command.payload.projectId) {
+      throw new CommandError(
+        'project_plan_not_found',
+        `Project plan '${command.payload.planId}' was not found`,
+      );
+    }
+    const proposal = details.proposals.at(-1);
+    if (!proposal) {
+      throw new CommandError(
+        'project_plan_proposal_invalid',
+        `Project plan '${command.payload.planId}' has no proposal to revise`,
+      );
+    }
+    const result = await requirePlanningExecutionService(
+      dependencies,
+    ).requestRevision({
+      ...command.payload,
+      proposalId: proposal.id,
+      commandId,
+    });
+    return response(command.type, planningResponse(result));
+  }
+  if (command.type === 'project.plan.approve') {
+    const result = await requirePlanApprovalService(dependencies).approve({
+      ...command.payload,
+      commandId,
+    });
+    return response(command.type, planApprovalResponse(result));
+  }
+  if (command.type === 'project.plan.reject') {
+    const result = await requirePlanApprovalService(dependencies).reject({
+      ...command.payload,
+      commandId,
+    });
+    return response(command.type, planningResponse(result));
+  }
+  const execution = requirePlanningExecutionService(dependencies);
+  const result = await (command.type === 'project.plan.cancel'
+    ? execution.cancel({ ...command.payload, commandId })
+    : command.type === 'project.plan.resume'
+      ? execution.resume({ ...command.payload, commandId })
+      : execution.retry({ ...command.payload, commandId }));
+  return response(command.type, planningResponse(result));
+};
+
+type DependencyCommand = Extract<
+  MutatingCommand,
+  { type: `task.dependency.${string}` }
+>;
+
+const executeDependencyCommand = async (
+  command: DependencyCommand,
+  commandId: string,
+  dependencies: CommandDependencies,
+): Promise<CommandResponse> => {
+  const task = dependencies.tasks.get(command.payload.taskId);
+  if (!task) {
+    throw new CommandError(
+      'task_not_found',
+      `Task '${command.payload.taskId}' was not found`,
+    );
+  }
+  const service = requireTaskDependencyService(dependencies);
+  const input = {
+    projectId: task.projectId,
+    taskId: command.payload.taskId,
+    prerequisiteTaskId: command.payload.prerequisiteTaskId,
+    expectedTaskRevision: command.payload.expectedRevision,
+    actor: command.payload.actor,
+    commandId,
+  };
+  const result = await (command.type === 'task.dependency.add'
+    ? service.add(input)
+    : service.remove(input));
+  return response(command.type, dependencyResponse(result));
+};
 
 type DeveloperLaunchCommand = Extract<
   Extract<Command, { idempotencyKey: string }>['command'],
@@ -756,6 +937,11 @@ type QaConfigurationUpdateCommand = Extract<
   { type: 'project.qa_configuration.update' }
 >;
 
+type ProjectArchiveCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'project.archive' }
+>;
+
 const executeQaConfigurationUpdate = (
   command: QaConfigurationUpdateCommand,
   idempotencyKey: string,
@@ -833,6 +1019,69 @@ const hasRunningTaskAttempt = (
         (isLive(session) &&
           dependencies.attempts.getCurrentBySession(session.id)),
     );
+
+const executeProjectArchive = (
+  command: ProjectArchiveCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): CommandResponse => {
+  assertMilestoneTwoHumanActor(command);
+  const existing =
+    dependencies.commands.getExisting<CommandResponse>(idempotencyKey);
+  if (existing.found) return existing.response;
+
+  let event: ProjectEvent | undefined;
+  const commandResponse =
+    dependencies.commands.executeOnceInImmediateTransaction(
+      idempotencyKey,
+      () => {
+        const project = requireActiveProject(
+          dependencies,
+          command.payload.projectId,
+        );
+        if (hasRunningTaskAttempt(dependencies, project.id)) {
+          throw new CommandError(
+            'project_has_running_attempt',
+            'A project with a running task attempt cannot be archived',
+            { project },
+          );
+        }
+        const plan = dependencies.plans.getActiveByProject(project.id);
+        if (plan) {
+          throw new CommandError(
+            'project_plan_lifecycle_invalid',
+            'A project with a nonterminal plan cannot be archived',
+            { project, plan },
+          );
+        }
+        const occurredAt = (
+          dependencies.now ?? (() => new Date().toISOString())
+        )();
+        const updated = dependencies.projects.update(
+          { ...project, archivedAt: occurredAt, updatedAt: occurredAt },
+          command.payload.expectedRevision,
+        );
+        if (!updated) {
+          throw new CommandError(
+            'project_revision_conflict',
+            `Project '${project.id}' has changed`,
+            { project: dependencies.projects.get(project.id) },
+          );
+        }
+        event = dependencies.projectEvents.appendInTransaction(project.id, {
+          protocolVersion: 1,
+          id: (dependencies.createId ?? randomUUID)(),
+          projectId: project.id,
+          occurredAt,
+          type: 'project.changed',
+          payload: { project: updated },
+        });
+        return response(command.type, updated);
+      },
+    );
+  if (event) dependencies.registry.publisher.publishProject(event);
+  return commandResponse;
+};
 
 const reconcileLegacyProjectIdentities = async (
   dependencies: CommandDependencies,
@@ -1044,6 +1293,14 @@ const executeMutation = async (
           'project_has_running_attempt',
           'A project with a running task attempt cannot be archived',
           { project },
+        );
+      }
+      const plan = dependencies.plans.getActiveByProject(project.id);
+      if (plan) {
+        throw new CommandError(
+          'project_plan_lifecycle_invalid',
+          'A project with a nonterminal plan cannot be archived',
+          { project, plan },
         );
       }
       const now = (dependencies.now ?? (() => new Date().toISOString()))();
@@ -1389,8 +1646,29 @@ export const executeCommand = async (
 ): Promise<CommandResponse> => {
   const command = commandSchema.parse(input);
   if ('idempotencyKey' in command) {
+    if (command.command.type.startsWith('project.plan.')) {
+      return executePlanningCommand(
+        command.command as PlanningCommand,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (command.command.type.startsWith('task.dependency.')) {
+      return executeDependencyCommand(
+        command.command as DependencyCommand,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
     if (command.command.type === 'project.qa_configuration.update') {
       return executeQaConfigurationUpdate(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (command.command.type === 'project.archive') {
+      return executeProjectArchive(
         command.command,
         command.idempotencyKey,
         dependencies,

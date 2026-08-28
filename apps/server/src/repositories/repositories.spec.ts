@@ -27,6 +27,8 @@ import { waitForWorkerMessage } from '../test/wait-for-worker-message.js';
 import { assertWorkspaceAvailable } from './workspace-occupancy.js';
 import { CommandReconciliationRequiredError } from './command-repository.js';
 import { TaskAttemptRepository } from './task-attempt-repository.js';
+import { PlanningRepository } from './planning-repository.js';
+import { TaskDependencyRepository } from './task-dependency-repository.js';
 
 const project = () =>
   projectSchema.parse({
@@ -106,6 +108,14 @@ describe('repositories', () => {
         policy: 'exclusive',
       }),
     ).toThrow('active transaction');
+  });
+
+  it('wires planning and dependency repositories into the temporary database', () => {
+    const repos = createTestRepositories();
+    disposers.push(repos.dispose);
+
+    expect(repos.plans).toBeInstanceOf(PlanningRepository);
+    expect(repos.dependencies).toBeInstanceOf(TaskDependencyRepository);
   });
 
   it('allows a session to retain its own protected workspace', () => {

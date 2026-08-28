@@ -122,6 +122,7 @@ describe('project run policy', () => {
         task('not-ready', { lifecycleState: 'backlog' }),
       ],
       currentAttemptTaskIds: new Set(['not-ready']),
+      dependencyBlockedTaskIds: new Set(),
     });
 
     expect(eligible).toEqual([
@@ -145,6 +146,7 @@ describe('project run policy', () => {
         project,
         tasks: [task('already-running'), task('available')],
         currentAttemptTaskIds: new Set(['already-running']),
+        dependencyBlockedTaskIds: new Set(),
       }).map(({ task: eligibleTask }) => eligibleTask.id),
     ).toEqual(['available']);
   });
@@ -158,6 +160,7 @@ describe('project run policy', () => {
           task('project-task'),
         ],
         currentAttemptTaskIds: new Set(),
+        dependencyBlockedTaskIds: new Set(),
       }).map(({ task: eligibleTask }) => eligibleTask.id),
     ).toEqual(['project-task']);
   });
@@ -174,8 +177,24 @@ describe('project run policy', () => {
           task('uppercase-rank', { rank: 'A' }),
         ],
         currentAttemptTaskIds: new Set(),
+        dependencyBlockedTaskIds: new Set(),
       }).map(({ task: eligibleTask }) => eligibleTask.id),
     ).toEqual(['uppercase-rank', 'lowercase-rank', 'Z', 'a', 'ä']);
+  });
+
+  it('excludes tasks whose current prerequisites are incomplete without changing order', () => {
+    expect(
+      selectEligibleRunTasks({
+        project,
+        tasks: [
+          task('later', { rank: 'z' }),
+          task('dependent', { rank: 'a' }),
+          task('first', { rank: 'm' }),
+        ],
+        currentAttemptTaskIds: new Set(),
+        dependencyBlockedTaskIds: new Set(['dependent']),
+      }).map(({ task: eligibleTask }) => eligibleTask.id),
+    ).toEqual(['first', 'later']);
   });
 
   it('counts launch-pending and active items as occupied capacity', () => {
