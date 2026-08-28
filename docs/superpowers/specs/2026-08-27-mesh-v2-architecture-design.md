@@ -83,6 +83,10 @@ The core product principle is:
    begin as a configurable pipeline framework.
 8. **Reuse mechanisms, redesign concepts.** V1 code is a source of proven
    techniques, not a compatibility constraint.
+9. **Workflow semantics belong to Mesh.** Skills are pluggable execution
+   strategies that may improve worker behavior, but durable Mesh domain
+   workflows remain authoritative and available without any particular skill
+   package.
 
 ## Product Workflow
 
@@ -237,7 +241,8 @@ workers happen to be idle.
 `WorkerExecution` is the harness-neutral runtime record. It contains a Mesh ID,
 project, immutable profile snapshot, role and assignment, harness identity,
 opaque native handle, workspace binding, lifecycle, parent/child activity,
-event cursor, and failure diagnostics.
+event cursor, failure diagnostics, and the resolved skill identities, versions
+or content digests, and effective instructions used for that execution.
 
 It reports runtime facts but cannot decide that a plan is approved, a task is
 complete, QA passed, or integration is acceptable. Concrete domain services
@@ -292,17 +297,21 @@ A harness adapter owns:
 - native session creation and exact resumption where supported;
 - transport and event normalization;
 - mapping semantic capabilities to native tools and permissions;
+- discovery and resolution of logical skill identifiers to supported native
+  skill implementations;
+- reporting resolved skill identities, versions or digests, and unavailable
+  skill capabilities;
 - interruption and termination behavior;
 - opaque provider identifiers;
 - capability reporting;
 - observation of harness-native child agents;
 - detection and reporting of harness failures.
 
-Native subagents are child activities of their parent `WorkerExecution`. They
-do not independently claim Mesh tasks, receive new worktrees, advance domain
-lifecycles, or survive the parent execution. If a child needs independent
-ownership or durability, Mesh explicitly promotes the work into a new
-assignment and execution.
+Native subagents, including subagents launched by a skill, are child activities
+of their parent `WorkerExecution`. They do not independently claim Mesh tasks,
+receive new worktrees, advance domain lifecycles, or survive the parent
+execution. If a child needs independent ownership or durability, Mesh
+explicitly promotes the work into a new assignment and execution.
 
 This makes separate durable sessions the default for top-level parallel work,
 while still benefiting from a harness's internal subagents for local delegation.
@@ -339,6 +348,11 @@ spec:
     - repository.read
     - repository.write-assigned-workspace
     - tests.run
+  skills:
+    preferred:
+      - test-driven-development
+    required:
+      - verification-before-completion
   instructions: |
     Preserve the project's component conventions and include keyboard behavior
     in UI acceptance evidence.
@@ -351,9 +365,9 @@ global profile revision. Inheritance is one level only: no multiple or recursive
 inheritance.
 
 The UI shows the resolved profile and its diff from the base, including
-instruction, harness, model, and permission changes. Updating a global profile
-does not silently alter project profiles; the operator previews and explicitly
-rebases them. Existing executions retain their original snapshots.
+instruction, harness, model, skill, and permission changes. Updating a global
+profile does not silently alter project profiles; the operator previews and
+explicitly rebases them. Existing executions retain their original snapshots.
 
 Profiles request semantic capabilities but do not grant authority. Unknown,
 unsupported, or unsafe fields fail closed. A project extension may request
@@ -365,6 +379,83 @@ Effective execution authority is the intersection of:
 
 > global safety policy ∩ project policy ∩ assignment authority ∩ approved
 > profile permissions ∩ harness capabilities
+
+## Workflow Semantics and Pluggable Skills
+
+The governing principle is:
+
+> Workflow semantics belong to Mesh; skill implementations are pluggable
+> execution strategies.
+
+Mesh preserves Superpowers-style workflows in two complementary ways:
+
+1. When a harness supports native skills, a worker profile may request actual
+   skills such as `brainstorming`, `test-driven-development`, or
+   `verification-before-completion`. The harness executes the supported native
+   implementation as part of the assignment.
+2. Mesh provides harness-neutral equivalents through durable domain workflows.
+   Planning approvals, workspace ownership, scheduling, evidence, QA, rework,
+   completion, and integration therefore do not depend on one harness or skill
+   package.
+
+The conceptual mapping is:
+
+| Superpowers-style skill | Authoritative Mesh workflow |
+| --- | --- |
+| `brainstorming` | PM discovery and approved `PlanningCycle` |
+| `writing-plans` | Requirement, milestone, and task proposals |
+| `using-git-worktrees` | Automatic workspace reservation and validation |
+| `dispatching-parallel-agents` | Dependency-ready finite `ExecutionRun` |
+| `test-driven-development` | Developer assignment policy and evidence contract |
+| `requesting-code-review` | QA attempt |
+| `receiving-code-review` | Structured rework loop |
+| `verification-before-completion` | Domain completion gate |
+| `finishing-a-development-branch` | Integration or release authority |
+
+This mapping does not mean that Mesh reimplements each skill as a prompt. Mesh
+owns the durable state transitions, contracts, approvals, and evidence implied
+by the workflow. A native skill is one strategy for helping a worker satisfy
+those contracts.
+
+### Resolution and fallback
+
+Profiles reference skills by logical, portable identifiers such as
+`test-driven-development`, optionally with a version or digest constraint. They
+never reference a provider-specific filesystem path. Harness adapters resolve
+those identifiers to native implementations and report their supported
+identities, versions or digests, and capabilities.
+
+Profiles distinguish two request modes:
+
+- **Preferred skills** use a supported native implementation when available and
+  otherwise continue under the corresponding Mesh-native domain workflow.
+- **Required skills** must resolve to an approved native implementation. If the
+  selected harness cannot satisfy the request, execution fails closed before
+  the assignment starts; Mesh may choose an approved alternative harness only
+  when the frozen run policy permits it.
+
+Each `WorkerExecution` snapshots the logical requests, resolved native skill
+identities, versions or content digests, profile revision, and final effective
+instructions. This record supports audit, replay diagnostics, and reproducible
+comparison even when installed skills later change.
+
+### Authority and extensibility
+
+Skills guide worker behavior but never grant domain authority. A skill reporting
+success cannot approve a plan, complete a task, pass QA, or integrate work
+without the structured output and evidence required by the owning Mesh domain
+service. Skill-created subagents remain subordinate to Mesh's worker,
+assignment, workspace, and authority model.
+
+Imported or project-defined skills require schema and content validation,
+capability and permission review, and explicit operator approval before use.
+Approved revisions are immutable and identified by version or content digest.
+Skill definitions cannot contain credentials or API keys.
+
+Adding skills remains an execution extensibility mechanism, not a way to create
+new authoritative workflow nodes. Planning, Developer, QA, integration, and
+future authoritative gates remain concrete Mesh domain services; V2 does not
+become a generic workflow engine.
 
 ## Runs, Parallelism, and Workspaces
 
@@ -495,13 +586,18 @@ Normal verification must not consume subscription capacity or require an
 installed real harness.
 
 - A deterministic fake harness covers streaming, interruption, restart, child
-  activities, malformed structured output, and adapter failures.
+  activities, malformed structured output, adapter failures, native-skill
+  availability, preferred fallback, and required-skill rejection.
 - Every real adapter passes the same conformance suite for creation, supported
   resumption, interruption, normalization, capability reporting, child
-  observation, and failure behavior.
+  observation, logical skill resolution, resolved version or digest reporting,
+  and failure behavior.
 - Domain tests cover planning approvals, immutable revisions, dependency
   readiness, claims, Developer/QA handoffs, evidence, and completion authority
   without a model.
+- Domain scenarios run without native skills to prove that harness-neutral
+  workflow semantics remain complete, and adapter scenarios confirm that a
+  native skill cannot bypass the same domain gates.
 - Workspace tests use temporary repositories for deterministic naming,
   collisions, dirty-state preservation, base drift, and owned cleanup.
 - Persistence tests cover event ordering, idempotency, transactional proposal
@@ -546,15 +642,21 @@ general framework from V1.
 
 Each milestone has an outcome and stop condition. Later milestones may be
 replanned as evidence emerges, but they may not silently absorb deferred scope.
+Milestones 2 through 6 establish the harness-neutral workflow semantics in the
+skill mapping above. Native skill integrations may enhance those workflows but
+cannot gate them; native resolution and imported-skill extensibility mature in
+Milestone 7.
 
 ### 1. V2 foundation
 
 Deliver the fresh datastore, project selector and focused shell,
 harness-neutral execution records, deterministic fake harness, audit stream,
-and global/project profile registry.
+global/project profile registry, logical skill requests, and resolved-skill
+snapshots.
 
 Stop when a selected project, approved profile snapshot, fake execution, durable
-event stream, and restart can be exercised without V1 state.
+event stream, skill capability result, and restart can be exercised without V1
+state.
 
 ### 2. Intent and Requirement Ledger
 
@@ -600,18 +702,19 @@ recorded QA and integration evidence.
 ### 7. Extensible expertise
 
 Deliver advisory assignments, research and architecture profiles, additional
-specialist profiles, another real harness adapter, and controlled project
-profile extensions.
+specialist profiles, native-skill resolution, validated and approved imported
+skills, another real harness adapter, and controlled project profile extensions.
 
 Stop when one plan uses bounded advisory work and multiple worker profiles
-without adding a generic workflow subsystem or leaking provider IDs into the
-domain.
+while one preferred skill demonstrates Mesh-native fallback and one required
+skill fails closed when unavailable, without adding a generic workflow
+subsystem or leaking provider IDs into the domain.
 
 ### 8. Operational readiness and V1 retirement
 
 Deliver adapter conformance suites, end-to-end scenarios, diagnostics,
-export/recovery tools, operating documentation, and a hands-on replacement
-checklist.
+skill-resolution and domain-gate compatibility coverage, export/recovery tools,
+operating documentation, and a hands-on replacement checklist.
 
 Stop when the maintainer verifies the core V2 journey with real repositories,
 confirms recovery and workspace safety, and explicitly approves V1 retirement.
@@ -633,6 +736,8 @@ This WIP design is ready to become an implementation plan when review confirms:
   necessary narrative context;
 - worker executions and harness-native subagents have distinct ownership;
 - profile flexibility cannot grant domain authority or bypass safety;
+- native skills are portable, auditable strategies whose absence cannot remove
+  Mesh's required workflow semantics;
 - automatic workspace management preserves ambiguous or user-owned work;
 - parallel scheduling is finite, frozen, and dependency-aware;
 - successful process exit cannot complete a task;
