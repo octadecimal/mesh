@@ -1,10 +1,17 @@
-import type { ProjectRun, Task } from '@mesh-session-platform/contracts';
+import type {
+  ProjectRun,
+  Task,
+  TaskDependency,
+} from '@mesh-session-platform/contracts';
 
 import { createProjection, type MeshProjection } from './reducer';
 import {
   selectActiveProjectRun,
+  selectDependentTaskIds,
   selectEligibleRunPreview,
   selectProjectRuns,
+  selectUnmetPrerequisiteCount,
+  selectUnmetPrerequisiteIds,
 } from './selectors';
 
 const timestamp = '2026-08-27T00:00:00.000Z';
@@ -68,6 +75,17 @@ const task = (
     updatedAt: timestamp,
   },
   ...overrides,
+});
+
+const dependency = (
+  taskId: string,
+  prerequisiteTaskId: string,
+): TaskDependency => ({
+  projectId,
+  taskId,
+  prerequisiteTaskId,
+  createdBy: { type: 'human', id: 'operator' },
+  createdAt: timestamp,
 });
 
 describe('project run selectors', () => {
@@ -176,5 +194,57 @@ describe('project run selectors', () => {
     expect(
       selectEligibleRunPreview(state, projectId).map(({ id }) => id),
     ).toEqual(['ascii', 'emoji', 'private-use']);
+  });
+});
+
+describe('task dependency selectors', () => {
+  it('selects unmet prerequisite IDs, counts, and dependent task IDs', () => {
+    const prerequisiteA = task('task-a', 'a');
+    const prerequisiteDone = task('task-done', 'b', {
+      lifecycleState: 'done',
+    });
+    const dependent = task('task-b', 'c');
+    const edgeA = dependency(dependent.id, prerequisiteA.id);
+    const edgeDone = dependency(dependent.id, prerequisiteDone.id);
+    const state = projection({
+      tasksById: {
+        [prerequisiteA.id]: prerequisiteA,
+        [prerequisiteDone.id]: prerequisiteDone,
+        [dependent.id]: dependent,
+      },
+      dependenciesByTaskId: {
+        [dependent.id]: [edgeA, edgeDone],
+      },
+      dependentsByTaskId: {
+        [prerequisiteA.id]: [edgeA],
+        [prerequisiteDone.id]: [edgeDone],
+      },
+    });
+
+    expect(selectUnmetPrerequisiteIds(state, dependent.id)).toEqual([
+      prerequisiteA.id,
+    ]);
+    expect(selectUnmetPrerequisiteCount(state, dependent.id)).toBe(1);
+    expect(selectDependentTaskIds(state, prerequisiteA.id)).toEqual([
+      dependent.id,
+    ]);
+    expect(
+      selectEligibleRunPreview(state, projectId).map(({ id }) => id),
+    ).toEqual([prerequisiteA.id]);
+  });
+
+  it('treats a missing projected prerequisite as unmet', () => {
+    const dependent = task('task-b', 'b');
+    const state = projection({
+      tasksById: { [dependent.id]: dependent },
+      dependenciesByTaskId: {
+        [dependent.id]: [dependency(dependent.id, 'missing-task')],
+      },
+    });
+
+    expect(selectUnmetPrerequisiteIds(state, dependent.id)).toEqual([
+      'missing-task',
+    ]);
+    expect(selectEligibleRunPreview(state, projectId)).toEqual([]);
   });
 });

@@ -3,7 +3,9 @@ import {
   attemptRepairSchema,
   idSchema,
   projectEventSchema,
+  projectPlanSchema,
   projectRunSchema,
+  taskDependencySchema,
   taskSchema,
   type ProjectEvent,
 } from '@mesh-session-platform/contracts';
@@ -149,6 +151,59 @@ const runEvent = projectEventSchema.parse({
   },
 });
 
+const planEvent = projectEventSchema.parse({
+  protocolVersion: 1,
+  id: 'plan-event-1',
+  projectId: 'project-1',
+  sequence: 4,
+  occurredAt: '2026-08-24T00:04:00.000Z',
+  type: 'project.plan_changed',
+  payload: {
+    plan: projectPlanSchema.parse({
+      id: 'plan-1',
+      projectId: 'project-1',
+      goal: 'Project dependency-aware work.',
+      constraints: [],
+      nonGoals: [],
+      policyVersion: 'pm-v1',
+      status: 'planning',
+      revision: 1,
+      currentBaseId: 'base-1',
+      currentSessionId: 'pm-session-1',
+      latestProposalOrdinal: 0,
+      feedback: [],
+      attention: null,
+      createdBy: { type: 'human', id: 'operator' },
+      createdAt: '2026-08-24T00:04:00.000Z',
+      updatedAt: '2026-08-24T00:04:00.000Z',
+      terminalAt: null,
+      terminalBy: null,
+      terminalReason: null,
+    }),
+  },
+});
+
+const dependencyEvent = projectEventSchema.parse({
+  protocolVersion: 1,
+  id: 'dependency-event-1',
+  projectId: 'project-1',
+  sequence: 5,
+  occurredAt: '2026-08-24T00:05:00.000Z',
+  type: 'task.dependencies_changed',
+  payload: {
+    taskId: 'task-project-1',
+    dependencies: [
+      taskDependencySchema.parse({
+        projectId: 'project-1',
+        taskId: 'task-project-1',
+        prerequisiteTaskId: 'prerequisite-1',
+        createdBy: { type: 'human', id: 'operator' },
+        createdAt: '2026-08-24T00:05:00.000Z',
+      }),
+    ],
+  },
+});
+
 describe('ProjectReplayService', () => {
   it('replays repair-bearing project events without losing repair data', () => {
     const replay = new ProjectReplayService({
@@ -196,6 +251,28 @@ describe('ProjectReplayService', () => {
       highWaterByProject: { 'project-1': 3 },
     });
     expect(replay.after({ 'project-1': 3 }).events).toEqual([]);
+  });
+
+  it('replays planning and dependency changes in sequence without redelivery', () => {
+    const retained = [planEvent, dependencyEvent];
+    const replay = new ProjectReplayService({
+      retainedAfter: (_projectId, after) => ({
+        events: retained.filter(({ sequence }) => sequence > after),
+        lowWater: 4,
+        highWater: 5,
+      }),
+    });
+
+    expect(replay.after({ 'project-1': 3 })).toEqual({
+      events: retained,
+      highWaterByProject: { 'project-1': 5 },
+      resyncProjectIds: [],
+    });
+    expect(replay.after({ 'project-1': 5 })).toEqual({
+      events: [],
+      highWaterByProject: { 'project-1': 5 },
+      resyncProjectIds: [],
+    });
   });
 
   it('replays retained project events after independent cursors', () => {

@@ -5,6 +5,8 @@ import type {
   DeveloperExecutionCycle,
   DeveloperReviewFeedback,
   ProjectEvent,
+  ProjectPlan,
+  ProjectPlanSummary,
   ProjectRun,
   ProjectSnapshot,
   QaExecutionCycle,
@@ -330,6 +332,45 @@ const dependency = (
   ...overrides,
 });
 
+const activePlan = (overrides: Partial<ProjectPlan> = {}): ProjectPlan => ({
+  id: 'plan-active',
+  projectId: project.id,
+  goal: 'Plan the next milestone.',
+  constraints: [],
+  nonGoals: [],
+  policyVersion: 'pm-v1',
+  status: 'planning',
+  revision: 1,
+  currentBaseId: 'base-1',
+  currentSessionId: 'pm-session-1',
+  latestProposalOrdinal: 0,
+  feedback: [],
+  attention: null,
+  createdBy: { type: 'human', id: 'operator' },
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  terminalAt: null,
+  terminalBy: null,
+  terminalReason: null,
+  ...overrides,
+});
+
+const terminalPlanSummary = (
+  id: string,
+  overrides: Partial<ProjectPlanSummary> = {},
+): ProjectPlanSummary => ({
+  id,
+  projectId: project.id,
+  goal: `Goal for ${id}`,
+  status: 'approved',
+  revision: 2,
+  latestProposalOrdinal: 1,
+  createdAt: timestamp,
+  updatedAt: timestamp,
+  terminalAt: timestamp,
+  ...overrides,
+});
+
 describe('applyEvent', () => {
   it('reports duplicate, gap, then applied without changing the input projection', () => {
     const state = createProjection(snapshot());
@@ -463,6 +504,126 @@ describe('replaceSnapshot', () => {
 });
 
 describe('project projection', () => {
+  it('replaces active and terminal planning state for only the snapshotted project', () => {
+    const otherProject = { ...project, id: 'project-2' };
+    const otherActive = activePlan({
+      id: 'plan-other',
+      projectId: otherProject.id,
+    });
+    const otherTerminal = terminalPlanSummary('plan-other-terminal', {
+      projectId: otherProject.id,
+    });
+    const withBothProjects = replaceProjectSnapshot(
+      replaceProjectSnapshot(
+        createProjection(snapshot()),
+        projectSnapshot({
+          activePlan: activePlan(),
+          terminalPlanSummaries: [terminalPlanSummary('plan-terminal-1')],
+        }),
+      ),
+      projectSnapshot({
+        project: otherProject,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        activePlan: otherActive,
+        terminalPlanSummaries: [otherTerminal],
+      }),
+    );
+    const replacement = activePlan({ revision: 2, status: 'revising' });
+
+    const next = replaceProjectSnapshot(
+      withBothProjects,
+      projectSnapshot({
+        activePlan: replacement,
+        terminalPlanSummaries: [terminalPlanSummary('plan-terminal-2')],
+      }),
+    );
+
+    expect(next.activePlanByProjectId).toEqual({
+      [project.id]: replacement,
+      [otherProject.id]: otherActive,
+    });
+    expect(next.planSummariesByProjectId).toEqual({
+      [project.id]: [terminalPlanSummary('plan-terminal-2')],
+      [otherProject.id]: [otherTerminal],
+    });
+  });
+
+  it('upserts active plans and moves terminal plans into bounded summary history', () => {
+    const summaries = Array.from({ length: 20 }, (_, index) =>
+      terminalPlanSummary(`plan-terminal-${String(index).padStart(2, '0')}`, {
+        terminalAt: new Date(Date.UTC(2026, 7, 23, 0, index, 0)).toISOString(),
+      }),
+    );
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({
+        activePlan: activePlan(),
+        terminalPlanSummaries: summaries.slice().reverse(),
+      }),
+    );
+    const revised = activePlan({ revision: 2, status: 'awaiting_review' });
+    const active = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-plan-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: '2026-08-24T01:00:00.000Z',
+      type: 'project.plan_changed',
+      payload: { plan: revised },
+    });
+    expect(active.kind).toBe('applied');
+    if (active.kind !== 'applied') return;
+    expect(active.state.activePlanByProjectId[project.id]).toEqual(revised);
+
+    const approved: ProjectPlan = {
+      ...revised,
+      status: 'approved',
+      revision: 3,
+      updatedAt: '2026-08-24T02:00:00.000Z',
+      terminalAt: '2026-08-24T02:00:00.000Z',
+      terminalBy: { type: 'human', id: 'operator' },
+    };
+    const terminal = applyProjectEvent(active.state, {
+      protocolVersion: 1,
+      id: 'project-plan-event-5',
+      projectId: project.id,
+      sequence: 5,
+      occurredAt: approved.updatedAt,
+      type: 'project.plan_changed',
+      payload: { plan: approved },
+    });
+    expect(terminal.kind).toBe('applied');
+    if (terminal.kind !== 'applied') return;
+    expect(terminal.state.activePlanByProjectId[project.id]).toBeUndefined();
+    expect(terminal.state.planSummariesByProjectId[project.id]).toHaveLength(
+      20,
+    );
+    expect(terminal.state.planSummariesByProjectId[project.id][0]).toEqual(
+      terminalPlanSummary(approved.id, {
+        goal: approved.goal,
+        revision: approved.revision,
+        latestProposalOrdinal: approved.latestProposalOrdinal,
+        createdAt: approved.createdAt,
+        updatedAt: approved.updatedAt,
+        terminalAt: approved.terminalAt,
+      }),
+    );
+    expect(
+      applyProjectEvent(terminal.state, {
+        protocolVersion: 1,
+        id: 'project-plan-event-5',
+        projectId: project.id,
+        sequence: 5,
+        occurredAt: approved.updatedAt,
+        type: 'project.plan_changed',
+        payload: { plan: approved },
+      }),
+    ).toEqual({ kind: 'duplicate' });
+  });
+
   it('normalizes snapshot runs and replaces only the snapshotted project run history', () => {
     const completedRun: ProjectRun = {
       ...run({ id: 'run-completed' }),
@@ -802,6 +963,9 @@ describe('project projection', () => {
     );
 
     expect(starting.dependenciesByTaskId[task().id]).toEqual([initial]);
+    expect(starting.dependentsByTaskId[initial.prerequisiteTaskId]).toEqual([
+      initial,
+    ]);
 
     const applied = applyProjectEvent(starting, {
       protocolVersion: 1,
@@ -818,7 +982,105 @@ describe('project projection', () => {
       expect(applied.state.dependenciesByTaskId[task().id]).toEqual([
         replacement,
       ]);
+      expect(
+        applied.state.dependentsByTaskId[initial.prerequisiteTaskId],
+      ).toBeUndefined();
+      expect(
+        applied.state.dependentsByTaskId[replacement.prerequisiteTaskId],
+      ).toEqual([replacement]);
     }
+  });
+
+  it('applies dependency-event task revisions and cleans both edge directions on task removal', () => {
+    const prerequisite = task({ id: 'prerequisite', rank: '0' });
+    const initial = dependency();
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({
+        tasks: [prerequisite, task()],
+        dependencies: [initial],
+      }),
+    );
+    const occurredAt = '2026-08-24T01:00:00.000Z';
+
+    const applied = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'dependency-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt,
+      type: 'task.dependencies_changed',
+      payload: { taskId: task().id, dependencies: [] },
+    });
+
+    expect(applied.kind).toBe('applied');
+    if (applied.kind !== 'applied') return;
+    expect(applied.state.tasksById[task().id]).toMatchObject({
+      revision: 2,
+      updatedAt: occurredAt,
+    });
+    expect(applied.state.dependenciesByTaskId[task().id]).toEqual([]);
+    expect(applied.state.dependentsByTaskId[prerequisite.id]).toBeUndefined();
+
+    const resynced = replaceProjectSnapshot(
+      applied.state,
+      projectSnapshot({ tasks: [task()], dependencies: [], cursor: 4 }),
+    );
+    expect(resynced.dependenciesByTaskId[task().id]).toBeUndefined();
+    expect(resynced.dependentsByTaskId[prerequisite.id]).toBeUndefined();
+  });
+
+  it('keeps approval-created task revisions convergent across ordered task and dependency events', () => {
+    const prerequisite = task({ id: 'prerequisite', rank: '0' });
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({
+        tasks: [prerequisite],
+        attempts: [],
+        transitions: [],
+        cursor: 3,
+      }),
+    );
+    const occurredAt = '2026-08-24T01:00:00.000Z';
+    const created = task({
+      id: 'approved-task',
+      rank: 'b',
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+    });
+    const createdEvent = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'task-created-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt,
+      type: 'task.changed',
+      payload: { task: created },
+    });
+    expect(createdEvent.kind).toBe('applied');
+    if (createdEvent.kind !== 'applied') return;
+    const edge = dependency({
+      taskId: created.id,
+      prerequisiteTaskId: prerequisite.id,
+      createdAt: occurredAt,
+    });
+
+    const dependencyChanged = applyProjectEvent(createdEvent.state, {
+      protocolVersion: 1,
+      id: 'dependency-created-event-5',
+      projectId: project.id,
+      sequence: 5,
+      occurredAt,
+      type: 'task.dependencies_changed',
+      payload: { taskId: created.id, dependencies: [edge] },
+    });
+
+    expect(dependencyChanged.kind).toBe('applied');
+    if (dependencyChanged.kind !== 'applied') return;
+    expect(dependencyChanged.state.tasksById[created.id].revision).toBe(1);
+    expect(dependencyChanged.state.dependenciesByTaskId[created.id]).toEqual([
+      edge,
+    ]);
   });
 
   it('orders project events and projects task, transition, attempt, and repair updates', () => {

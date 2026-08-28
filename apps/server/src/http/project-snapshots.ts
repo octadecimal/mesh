@@ -7,6 +7,7 @@ import {
 
 import type { Database } from '../db/database.js';
 import type { DeveloperExecutionRepository } from '../repositories/developer-execution-repository.js';
+import type { PlanningRepository } from '../repositories/planning-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectRunRepository } from '../repositories/project-run-repository.js';
@@ -20,6 +21,7 @@ import { CommandError } from './errors.js';
 export interface ProjectSnapshotDependencies {
   database: Database;
   projects: ProjectRepository;
+  plans: Pick<PlanningRepository, 'getActiveByProject' | 'listSummaries'>;
   tasks: TaskRepository;
   dependencies: Pick<TaskDependencyRepository, 'listByProject'>;
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
@@ -102,6 +104,10 @@ export const buildProjectSnapshot = (
       reviewAutomationActions:
         dependencies.qaExecutions.listAutomationActionsForTasks(taskIds),
       runs: dependencies.projectRuns.listByProject(project.id),
+      activePlan: dependencies.plans.getActiveByProject(project.id) ?? null,
+      terminalPlanSummaries: dependencies.plans.listSummaries(project.id, {
+        limit: 20,
+      }),
       dependencies: dependencies.dependencies.listByProject(project.id),
       projectRunLimits: {
         maxConcurrency: dependencies.projectRunMaxConcurrency ?? 1,

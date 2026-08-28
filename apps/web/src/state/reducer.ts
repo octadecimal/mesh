@@ -7,6 +7,8 @@ import type {
   PermissionRequest,
   Project,
   ProjectEvent,
+  ProjectPlan,
+  ProjectPlanSummary,
   ProjectRun,
   ProjectSnapshot,
   QaExecutionCycle,
@@ -39,6 +41,9 @@ export type MeshProjection = {
   projectsById: Record<string, Project>;
   tasksById: Record<string, Task>;
   dependenciesByTaskId: Record<string, TaskDependency[]>;
+  dependentsByTaskId: Record<string, TaskDependency[]>;
+  activePlanByProjectId: Record<string, ProjectPlan>;
+  planSummariesByProjectId: Record<string, ProjectPlanSummary[]>;
   attemptsById: Record<string, TaskAttempt>;
   transitionsByTaskId: Record<string, TaskTransition[]>;
   repairsByProjectId: Record<string, AttemptRepair[]>;
@@ -118,6 +123,9 @@ export const createProjection = (
   projectsById: byId(snapshot.projects),
   tasksById: {},
   dependenciesByTaskId: {},
+  dependentsByTaskId: {},
+  activePlanByProjectId: {},
+  planSummariesByProjectId: {},
   attemptsById: {},
   transitionsByTaskId: {},
   repairsByProjectId: {},
@@ -201,6 +209,17 @@ export const replaceSnapshot = (
     ...createProjection(snapshot),
     tasksById: state.tasksById,
     dependenciesByTaskId: state.dependenciesByTaskId,
+    dependentsByTaskId: state.dependentsByTaskId,
+    activePlanByProjectId: Object.fromEntries(
+      Object.entries(state.activePlanByProjectId).filter(([projectId]) =>
+        projectIds.has(projectId),
+      ),
+    ),
+    planSummariesByProjectId: Object.fromEntries(
+      Object.entries(state.planSummariesByProjectId).filter(([projectId]) =>
+        projectIds.has(projectId),
+      ),
+    ),
     attemptsById: state.attemptsById,
     transitionsByTaskId: state.transitionsByTaskId,
     repairsByProjectId: state.repairsByProjectId,
@@ -262,17 +281,23 @@ const transitionsByTask = (transitions: readonly TaskTransition[]) =>
     return result;
   }, {});
 
-const dependenciesByTask = (dependencies: readonly TaskDependency[]) =>
-  dependencies.reduce<Record<string, TaskDependency[]>>(
-    (result, dependency) => {
-      result[dependency.taskId] = [
-        ...(result[dependency.taskId] ?? []),
-        dependency,
-      ];
-      return result;
-    },
-    {},
-  );
+const dependencyProjection = (
+  dependencies: readonly TaskDependency[],
+): Pick<MeshProjection, 'dependenciesByTaskId' | 'dependentsByTaskId'> => {
+  const dependenciesByTaskId: Record<string, TaskDependency[]> = {};
+  const dependentsByTaskId: Record<string, TaskDependency[]> = {};
+  for (const dependency of dependencies) {
+    dependenciesByTaskId[dependency.taskId] = [
+      ...(dependenciesByTaskId[dependency.taskId] ?? []),
+      dependency,
+    ];
+    dependentsByTaskId[dependency.prerequisiteTaskId] = [
+      ...(dependentsByTaskId[dependency.prerequisiteTaskId] ?? []),
+      dependency,
+    ];
+  }
+  return { dependenciesByTaskId, dependentsByTaskId };
+};
 
 const cyclesByAttempt = (cycles: readonly DeveloperExecutionCycle[]) =>
   cycles.reduce<Record<string, DeveloperExecutionCycle[]>>((result, cycle) => {
@@ -350,11 +375,12 @@ export const replaceProjectSnapshot = (
       ([, attempt]) => !replacedTaskIds.has(attempt.taskId),
     ),
   ) as Record<string, TaskAttempt>;
-  const dependenciesByTaskId = Object.fromEntries(
-    Object.entries(state.dependenciesByTaskId).filter(
-      ([taskId]) => !replacedTaskIds.has(taskId),
-    ),
-  ) as Record<string, TaskDependency[]>;
+  const dependencies = [
+    ...Object.values(state.dependenciesByTaskId)
+      .flat()
+      .filter((dependency) => !replacedTaskIds.has(dependency.taskId)),
+    ...(snapshot.dependencies ?? []),
+  ];
   const replacedAttemptIds = new Set<string>([
     ...Object.values(state.attemptsById)
       .filter((attempt) => replacedTaskIds.has(attempt.taskId))
@@ -423,6 +449,12 @@ export const replaceProjectSnapshot = (
       ([taskId]) => !replacedTaskIds.has(taskId),
     ),
   ) as Record<string, TaskTransition[]>;
+  const activePlanByProjectId = { ...state.activePlanByProjectId };
+  if (snapshot.activePlan == null) {
+    delete activePlanByProjectId[snapshot.project.id];
+  } else {
+    activePlanByProjectId[snapshot.project.id] = snapshot.activePlan;
+  }
 
   return {
     ...state,
@@ -432,9 +464,11 @@ export const replaceProjectSnapshot = (
       [snapshot.project.id]: snapshot.project,
     },
     tasksById: { ...tasksById, ...byId(snapshot.tasks) },
-    dependenciesByTaskId: {
-      ...dependenciesByTaskId,
-      ...dependenciesByTask(snapshot.dependencies),
+    ...dependencyProjection(dependencies),
+    activePlanByProjectId,
+    planSummariesByProjectId: {
+      ...state.planSummariesByProjectId,
+      [snapshot.project.id]: snapshot.terminalPlanSummaries ?? [],
     },
     attemptsById: { ...attemptsById, ...byId(snapshot.attempts) },
     transitionsByTaskId: {
@@ -489,6 +523,39 @@ export const replaceProjectSnapshot = (
   };
 };
 
+const compareCodeUnits = (left: string, right: string) =>
+  left === right ? 0 : left < right ? -1 : 1;
+
+const planSummary = (plan: ProjectPlan): ProjectPlanSummary | undefined => {
+  if (
+    (plan.status !== 'approved' &&
+      plan.status !== 'rejected' &&
+      plan.status !== 'cancelled') ||
+    plan.terminalAt === null
+  ) {
+    return undefined;
+  }
+
+  return {
+    id: plan.id,
+    projectId: plan.projectId,
+    goal: plan.goal,
+    status: plan.status,
+    revision: plan.revision,
+    latestProposalOrdinal: plan.latestProposalOrdinal,
+    terminalAt: plan.terminalAt,
+    createdAt: plan.createdAt,
+    updatedAt: plan.updatedAt,
+  };
+};
+
+const comparePlanSummaries = (
+  left: ProjectPlanSummary,
+  right: ProjectPlanSummary,
+) =>
+  compareCodeUnits(right.terminalAt, left.terminalAt) ||
+  compareCodeUnits(right.id, left.id);
+
 export const applyProjectEvent = (
   state: MeshProjection,
   event: ProjectEvent,
@@ -520,6 +587,33 @@ export const applyProjectEvent = (
         [event.payload.project.id]: event.payload.project,
       },
     };
+  }
+
+  if (event.type === 'project.plan_changed') {
+    const plan = event.payload.plan;
+    const summary = planSummary(plan);
+    const activePlanByProjectId = { ...next.activePlanByProjectId };
+    if (summary === undefined) {
+      activePlanByProjectId[plan.projectId] = plan;
+      next = { ...next, activePlanByProjectId };
+    } else {
+      delete activePlanByProjectId[plan.projectId];
+      next = {
+        ...next,
+        activePlanByProjectId,
+        planSummariesByProjectId: {
+          ...next.planSummariesByProjectId,
+          [plan.projectId]: [
+            ...(next.planSummariesByProjectId[plan.projectId] ?? []).filter(
+              (candidate) => candidate.id !== summary.id,
+            ),
+            summary,
+          ]
+            .sort(comparePlanSummaries)
+            .slice(0, 20),
+        },
+      };
+    }
   }
 
   if (
@@ -554,10 +648,32 @@ export const applyProjectEvent = (
   }
 
   if (event.type === 'task.dependencies_changed') {
+    const dependencies = [
+      ...Object.values(next.dependenciesByTaskId)
+        .flat()
+        .filter((dependency) => dependency.taskId !== event.payload.taskId),
+      ...event.payload.dependencies,
+    ];
+    const task = next.tasksById[event.payload.taskId];
+    const projectedDependencies = dependencyProjection(dependencies);
     next = {
       ...next,
+      tasksById: task
+        ? {
+            ...next.tasksById,
+            [task.id]: {
+              ...task,
+              revision:
+                task.updatedAt === event.occurredAt
+                  ? task.revision
+                  : task.revision + 1,
+              updatedAt: event.occurredAt,
+            },
+          }
+        : next.tasksById,
+      ...projectedDependencies,
       dependenciesByTaskId: {
-        ...next.dependenciesByTaskId,
+        ...projectedDependencies.dependenciesByTaskId,
         [event.payload.taskId]: event.payload.dependencies,
       },
     };

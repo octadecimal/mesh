@@ -90,6 +90,30 @@ export const selectActiveProjectRun = (
 ): ProjectRun | undefined =>
   selectProjectRuns(state, projectId).find((run) => run.state !== 'completed');
 
+export const selectUnmetPrerequisiteIds = (
+  state: MeshProjection,
+  taskId: string,
+): string[] =>
+  (state.dependenciesByTaskId[taskId] ?? [])
+    .filter(
+      ({ prerequisiteTaskId }) =>
+        state.tasksById[prerequisiteTaskId]?.lifecycleState !== 'done',
+    )
+    .map(({ prerequisiteTaskId }) => prerequisiteTaskId);
+
+export const selectUnmetPrerequisiteCount = (
+  state: MeshProjection,
+  taskId: string,
+): number => selectUnmetPrerequisiteIds(state, taskId).length;
+
+export const selectDependentTaskIds = (
+  state: MeshProjection,
+  taskId: string,
+): string[] =>
+  (state.dependentsByTaskId[taskId] ?? []).map(
+    ({ taskId: dependentTaskId }) => dependentTaskId,
+  );
+
 export const selectEligibleRunPreview = (
   state: MeshProjection,
   projectId: string,
@@ -99,18 +123,13 @@ export const selectEligibleRunPreview = (
       .filter((attempt) => attempt.unlinkedAt === null)
       .map((attempt) => attempt.taskId),
   );
-  const dependenciesAreComplete = (taskId: string) =>
-    (state.dependenciesByTaskId[taskId] ?? []).every(
-      ({ prerequisiteTaskId }) =>
-        state.tasksById[prerequisiteTaskId]?.lifecycleState === 'done',
-    );
   return Object.values(state.tasksById)
     .filter(
       (task) =>
         task.projectId === projectId &&
         task.lifecycleState === 'ready' &&
         task.blocked === null &&
-        dependenciesAreComplete(task.id) &&
+        selectUnmetPrerequisiteCount(state, task.id) === 0 &&
         !taskIdsWithCurrentAttempt.has(task.id),
     )
     .sort(
