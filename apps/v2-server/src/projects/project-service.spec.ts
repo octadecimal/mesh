@@ -192,6 +192,26 @@ describe('ProjectService', () => {
     );
   });
 
+  it('registers a committed in-root repository whose basename begins with two dots', async () => {
+    const repository = createRepository(directory, '..repo');
+
+    const result = await service.register(
+      registerCommand(repository, 'register-dot-prefixed'),
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'project.register',
+      project: {
+        displayName: '..repo',
+        repositoryPath: resolve(repository),
+        revision: 1,
+      },
+    });
+    expect(projects.list()).toHaveLength(1);
+    expect(commands.find('register-dot-prefixed')?.result).toEqual(result);
+  });
+
   it('replays an idempotent command without resolving Git or writing again', async () => {
     const repository = createRepository(directory, 'todo');
     const first = await service.register(

@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 import type { V2ErrorCode } from '@mesh/v2-contracts';
 
@@ -62,7 +62,9 @@ const isContained = (
   const pathFromRoot = relative(rootKey, candidateKey);
   return (
     pathFromRoot === '' ||
-    (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
+    (pathFromRoot !== '..' &&
+      !pathFromRoot.startsWith(`..${sep}`) &&
+      !isAbsolute(pathFromRoot))
   );
 };
 
