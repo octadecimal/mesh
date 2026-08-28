@@ -235,12 +235,30 @@ describe('ExecutionRuntime', () => {
       barrier: context.barrier,
       now: () => '2026-08-28T01:00:00.000Z',
     });
+    const requestHash = hashV2Command(context.start.command);
+    const lookupTransactions: boolean[] = [];
+    const originalFind = context.fixture.commands.find.bind(
+      context.fixture.commands,
+    );
+    vi.spyOn(context.fixture.commands, 'find').mockImplementation(
+      (idempotencyKey, expectedRequestHash) => {
+        if (
+          idempotencyKey === context.start.idempotencyKey &&
+          expectedRequestHash === requestHash
+        ) {
+          lookupTransactions.push(context.fixture.database.inTransaction);
+        }
+        return originalFind(idempotencyKey, expectedRequestHash);
+      },
+    );
     const firstResult = context.runtime.start(context.start);
     const secondResult = second.start(context.start);
     await fake.waitUntilCapabilitiesCalled(2);
     fake.releaseCapabilities();
     const [first, replay] = await Promise.all([firstResult, secondResult]);
     expect(replay).toEqual(first);
+    expect(lookupTransactions.filter((inside) => !inside)).toHaveLength(2);
+    expect(lookupTransactions.filter(Boolean)).toHaveLength(2);
     expect(fake.startCount).toBe(1);
     const created = context.executions
       .list(context.fixture.project.id)
@@ -253,6 +271,43 @@ describe('ExecutionRuntime', () => {
     ).toHaveLength(1);
     await context.runtime.drain();
     await second.drain();
+  });
+
+  it('rejects start when the audit barrier trips during capability resolution', async () => {
+    const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
+    fake.blockCapabilities();
+    const context = createRuntime({ fake });
+    const before = {
+      executions: context.executions.list(context.fixture.project.id),
+      pending: context.operations.listPending(),
+      domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
+        .events,
+      raw: context.fixture.database
+        .prepare('SELECT * FROM raw_diagnostics ORDER BY id')
+        .all(),
+    };
+
+    const pending = context.runtime.start(context.start);
+    await fake.waitUntilCapabilitiesCalled(1);
+    context.barrier.trip(new Error('concurrent audit failure'));
+    fake.releaseCapabilities();
+
+    await expect(pending).rejects.toThrow('Audit barrier is tripped');
+    expect(context.fixture.commands.find(context.start.idempotencyKey)).toBe(
+      undefined,
+    );
+    expect({
+      executions: context.executions.list(context.fixture.project.id),
+      pending: context.operations.listPending(),
+      domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
+        .events,
+      raw: context.fixture.database
+        .prepare('SELECT * FROM raw_diagnostics ORDER BY id')
+        .all(),
+    }).toEqual(before);
+    expect(fake.resolveSkillsCount).toBe(1);
+    expect(fake.startCount).toBe(0);
+    expect(fake.interruptCalls).toEqual([]);
   });
 
   it('does not infer completion from stream exhaustion', async () => {
@@ -424,6 +479,49 @@ describe('ExecutionRuntime', () => {
     expect(
       context.fixture.commands.find(interrupt.idempotencyKey)?.result,
     ).toEqual(first);
+  });
+
+  it('rejects interrupt when the audit barrier trips before reservation', async () => {
+    const context = createRuntime();
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const interrupt: InterruptExecutionEnvelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.interrupt',
+        projectId: running.projectId,
+        executionId: running.id,
+        expectedRevision: running.revision,
+      },
+    };
+    const before = {
+      execution: context.executions.get(running.id),
+      operations: context.operations.listForExecution(running.id),
+      domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
+        .events,
+    };
+
+    const pending = context.runtime.interrupt(interrupt);
+    context.barrier.trip(new Error('concurrent audit failure'));
+
+    await expect(pending).rejects.toThrow('Audit barrier is tripped');
+    expect(context.fixture.commands.find(interrupt.idempotencyKey)).toBe(
+      undefined,
+    );
+    expect({
+      execution: context.executions.get(running.id),
+      operations: context.operations.listForExecution(running.id),
+      domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
+        .events,
+    }).toEqual(before);
+    expect(context.fake.interruptCalls).toEqual([]);
   });
 
   it.each([

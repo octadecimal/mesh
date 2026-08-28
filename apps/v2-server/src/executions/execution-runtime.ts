@@ -211,6 +211,7 @@ export class ExecutionRuntime {
           requestHash,
         );
         if (stored) return stored.result;
+        this.dependencies.barrier.assertHealthy();
         const execution =
           this.dependencies.executions.insertInTransaction(initial);
         domainEvent = this.dependencies.events.appendDomainInTransaction(
@@ -412,6 +413,7 @@ export class ExecutionRuntime {
             },
           } satisfies V2CommandResult;
         }
+        this.dependencies.barrier.assertHealthy();
         nativeHandle = current.nativeHandle;
         const interrupting =
           this.dependencies.executions.transitionInTransaction(

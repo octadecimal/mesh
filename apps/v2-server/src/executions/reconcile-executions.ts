@@ -79,7 +79,11 @@ const operationObservation = async (
       },
     };
   }
-  if (interrupt.status === 'succeeded') {
+  if (
+    interrupt.status === 'succeeded' &&
+    (probe.status === 'resumable' ||
+      (probe.status === 'terminal' && probe.outcome === 'interrupted'))
+  ) {
     return {
       state: 'succeeded',
       result: { probe, interrupt },
@@ -339,8 +343,17 @@ export const reconcileExecutions = async (
         );
       });
     } catch (error) {
-      if (recoveredSession) await recoveredSession.close();
       dependencies.barrier.trip(error, occurredAt);
+      if (recoveredSession) {
+        try {
+          await recoveredSession.close();
+        } catch (closeError) {
+          dependencies.barrier.record(
+            'Recovered session close failed after reconciliation audit failure',
+            closeError,
+          );
+        }
+      }
       throw error;
     }
     if (recoveredSession) {
@@ -348,7 +361,16 @@ export const reconcileExecutions = async (
         await dependencies.attach(execution.id, recoveredSession);
         summary.resumed.push(execution.id);
       } catch (error) {
-        await recoveredSession.close();
+        let cleanupError: unknown;
+        try {
+          await recoveredSession.close();
+        } catch (closeError) {
+          cleanupError = closeError;
+          dependencies.barrier.record(
+            'Recovered session close failed after attach failure',
+            closeError,
+          );
+        }
         const attachmentFailedAt = new Date().toISOString();
         try {
           dependencies.executions.transaction(() => {
@@ -361,6 +383,14 @@ export const reconcileExecutions = async (
               payload: {
                 kind: 'mesh.v2.reconciliation-attach-failed/v1',
                 reason: error instanceof Error ? error.message : String(error),
+                ...(cleanupError === undefined
+                  ? {}
+                  : {
+                      cleanupError:
+                        cleanupError instanceof Error
+                          ? cleanupError.message
+                          : String(cleanupError),
+                    }),
               },
             });
             const current = dependencies.executions.get(execution.id);

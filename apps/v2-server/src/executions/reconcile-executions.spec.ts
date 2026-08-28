@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   HarnessOperationResult,
   HarnessProbeResult,
+  HarnessSession,
   WorkerExecution,
 } from '@mesh/v2-contracts';
 
@@ -206,7 +207,7 @@ describe('reconcileExecutions', () => {
         lifecycle: 'completed',
         revision: completed.revision,
       });
-      expect(context.operations.get(operation.id)?.state).toBe('succeeded');
+      expect(context.operations.get(operation.id)?.state).toBe('unknown');
       expect(result.attentionRequired).toEqual([completed.id]);
       expect(diagnosticCount(context.fixture)).toBe(1);
     } finally {
@@ -313,6 +314,51 @@ describe('reconcileExecutions', () => {
       interrupt: 'already_terminal' as const,
       operationState: 'succeeded',
       lifecycle: 'interrupted',
+    },
+    {
+      name: 'succeeded with interrupted terminal proof',
+      probe: {
+        status: 'terminal',
+        outcome: 'interrupted',
+      } as HarnessProbeResult,
+      interrupt: 'succeeded' as const,
+      operationState: 'succeeded',
+      lifecycle: 'interrupted',
+    },
+    {
+      name: 'succeeded but completed terminal mismatch',
+      probe: { status: 'terminal', outcome: 'completed' } as HarnessProbeResult,
+      interrupt: 'succeeded' as const,
+      operationState: 'unknown',
+      lifecycle: 'attention_required',
+    },
+    {
+      name: 'succeeded but failed terminal mismatch',
+      probe: { status: 'terminal', outcome: 'failed' } as HarnessProbeResult,
+      interrupt: 'succeeded' as const,
+      operationState: 'unknown',
+      lifecycle: 'attention_required',
+    },
+    {
+      name: 'succeeded but missing probe',
+      probe: { status: 'missing' } as HarnessProbeResult,
+      interrupt: 'succeeded' as const,
+      operationState: 'unknown',
+      lifecycle: 'attention_required',
+    },
+    {
+      name: 'succeeded but unknown probe',
+      probe: { status: 'unknown', reason: 'unknown' } as HarnessProbeResult,
+      interrupt: 'succeeded' as const,
+      operationState: 'unknown',
+      lifecycle: 'attention_required',
+    },
+    {
+      name: 'succeeded but probe errored',
+      probe: 'error' as const,
+      interrupt: 'succeeded' as const,
+      operationState: 'unknown',
+      lifecycle: 'attention_required',
     },
     {
       name: 'unknown interrupt',
@@ -557,6 +603,242 @@ describe('reconcileExecutions', () => {
         lastAdapterCursor: 6,
       });
       expect(result.resumed).toEqual([context.fixture.execution.id]);
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('rolls back no-session reconciliation evidence, operation, lifecycle, and domain together', async () => {
+    const context = setup();
+    try {
+      const starting = advance(context.fixture, context.executions, 'starting');
+      const operation = context.executions.transaction(() =>
+        context.operations.createPendingInTransaction({
+          executionId: starting.id,
+          kind: 'start',
+          request: { version: 'mesh.v2.execution-start/v1' },
+          createdAt: '2026-08-28T02:00:03.000Z',
+        }),
+      );
+      const before = {
+        execution: context.executions.get(starting.id),
+        operation: context.operations.get(operation.id),
+        diagnostics: diagnosticCount(context.fixture),
+        domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
+          .events,
+      };
+      context.fixture.database.exec(`
+        CREATE TRIGGER fail_reconciliation_domain BEFORE INSERT ON domain_events
+        BEGIN SELECT RAISE(ABORT, 'fail reconciliation domain'); END
+      `);
+      const adapter = new FakeHarnessAdapter();
+      const attach = vi.fn();
+
+      await expect(
+        reconcileExecutions({
+          executions: context.executions,
+          operations: context.operations,
+          adapter,
+          events: context.fixture.events,
+          barrier: context.barrier,
+          attach,
+        }),
+      ).rejects.toThrow('fail reconciliation domain');
+
+      expect({
+        execution: context.executions.get(starting.id),
+        operation: context.operations.get(operation.id),
+        diagnostics: diagnosticCount(context.fixture),
+        domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
+          .events,
+      }).toEqual(before);
+      expect(context.barrier.status).toBe('tripped');
+      expect(attach).not.toHaveBeenCalled();
+      expect(adapter.startCount).toBe(0);
+      expect(adapter.resumeCount).toBe(0);
+      expect(adapter.interruptCalls).toEqual([]);
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('trips before recovered-session cleanup and preserves the audit failure when close rejects', async () => {
+    const context = setup();
+    let rejectClose: ((error: Error) => void) | undefined;
+    let closeStartedResolve: (() => void) | undefined;
+    const closeStarted = new Promise<void>((resolve) => {
+      closeStartedResolve = resolve;
+    });
+    const closeRelease = new Promise<void>((_resolve, reject) => {
+      rejectClose = reject;
+    });
+    try {
+      const running = advance(context.fixture, context.executions, 'running', 2);
+      const operation = context.executions.transaction(() =>
+        context.operations.createPendingInTransaction({
+          executionId: running.id,
+          kind: 'start',
+          request: { version: 'mesh.v2.execution-start/v1' },
+          createdAt: '2026-08-28T02:00:03.000Z',
+        }),
+      );
+      const before = {
+        execution: context.executions.get(running.id),
+        operation: context.operations.get(operation.id),
+        diagnostics: diagnosticCount(context.fixture),
+        domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
+          .events,
+      };
+      const adapter = new FakeHarnessAdapter();
+      const recovered: HarnessSession = {
+        nativeHandle: requiredExecution(context.executions, running.id)
+          .nativeHandle as string,
+        async *events() {
+          yield* [];
+        },
+        async close() {
+          closeStartedResolve?.();
+          await closeRelease;
+        },
+      };
+      vi.spyOn(adapter, 'resume').mockResolvedValue(recovered);
+      context.fixture.database.exec(`
+        CREATE TRIGGER fail_reconciliation_operation AFTER UPDATE ON execution_operations
+        BEGIN SELECT RAISE(ABORT, 'fail reconciliation operation'); END
+      `);
+      const attach = vi.fn();
+
+      const pending = reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach,
+      });
+      await closeStarted;
+      expect(context.barrier.status).toBe('tripped');
+      rejectClose?.(new Error('recovered close failed'));
+      await expect(pending).rejects.toThrow('fail reconciliation operation');
+
+      expect({
+        execution: context.executions.get(running.id),
+        operation: context.operations.get(operation.id),
+        diagnostics: diagnosticCount(context.fixture),
+        domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
+          .events,
+      }).toEqual(before);
+      expect(attach).not.toHaveBeenCalled();
+      expect(context.barrier.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            message: 'Recovered session close failed after reconciliation audit failure',
+            cause: 'recovered close failed',
+          }),
+        ]),
+      );
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('persists attention when attach and recovered-session cleanup both fail', async () => {
+    const context = setup();
+    try {
+      const running = advance(context.fixture, context.executions, 'running', 2);
+      const adapter = new FakeHarnessAdapter();
+      let closeCount = 0;
+      const recovered: HarnessSession = {
+        nativeHandle: running.nativeHandle as string,
+        async *events() {
+          yield* [];
+        },
+        async close() {
+          closeCount += 1;
+          throw new Error('attach cleanup failed');
+        },
+      };
+      vi.spyOn(adapter, 'resume').mockResolvedValue(recovered);
+
+      const result = await reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach: () => {
+          throw new Error('attach failed');
+        },
+      });
+
+      expect(closeCount).toBe(1);
+      expect(context.executions.get(running.id)?.lifecycle).toBe(
+        'attention_required',
+      );
+      expect(result.attentionRequired).toEqual([running.id]);
+      expect(diagnosticCount(context.fixture)).toBe(2);
+      expect(context.barrier.health()).toMatchObject({
+        status: 'healthy',
+        diagnostics: [
+          {
+            message: 'Recovered session close failed after attach failure',
+            cause: 'attach cleanup failed',
+          },
+        ],
+      });
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('trips the barrier when attach-failure evidence cannot be persisted after cleanup rejects', async () => {
+    const context = setup();
+    try {
+      const running = advance(context.fixture, context.executions, 'running', 2);
+      const adapter = new FakeHarnessAdapter();
+      const recovered: HarnessSession = {
+        nativeHandle: running.nativeHandle as string,
+        async *events() {
+          yield* [];
+        },
+        async close() {
+          throw new Error('attach cleanup failed');
+        },
+      };
+      vi.spyOn(adapter, 'resume').mockResolvedValue(recovered);
+      context.fixture.database.exec(`
+        CREATE TRIGGER fail_attach_audit BEFORE INSERT ON raw_diagnostics
+        WHEN NEW.payload_json LIKE '%reconciliation-attach-failed%'
+        BEGIN SELECT RAISE(ABORT, 'fail attach audit'); END
+      `);
+
+      await expect(
+        reconcileExecutions({
+          executions: context.executions,
+          operations: context.operations,
+          adapter,
+          events: context.fixture.events,
+          barrier: context.barrier,
+          attach: () => {
+            throw new Error('attach failed');
+          },
+        }),
+      ).rejects.toThrow('fail attach audit');
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(context.executions.get(running.id)?.lifecycle).toBe('running');
+      expect(diagnosticCount(context.fixture)).toBe(1);
+      expect(context.barrier.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            message: 'Recovered session close failed after attach failure',
+          }),
+          expect.objectContaining({
+            message: 'Durable audit persistence failed',
+            cause: 'fail attach audit',
+          }),
+        ]),
+      );
     } finally {
       context.fixture.close();
     }
