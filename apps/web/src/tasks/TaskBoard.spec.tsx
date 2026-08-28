@@ -218,6 +218,94 @@ describe('TaskBoard', () => {
     );
   });
 
+  it('allows keyboard reordering within in progress when prerequisites are unmet', async () => {
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderBoard({
+      taskOverrides: [
+        task({
+          id: 'progress',
+          title: 'Progress task',
+          rank: 'a',
+          lifecycleState: 'in_progress',
+          blocked: null,
+        }),
+        task({
+          id: 'later-progress',
+          title: 'Later progress task',
+          rank: 'b',
+          lifecycleState: 'in_progress',
+          blocked: null,
+        }),
+      ],
+      dependencies: [dependency('progress', 'ready')],
+      onCommand,
+    });
+
+    const card = screen.getByRole('article', {
+      name: 'Progress task task card',
+    });
+    expect(within(card).getByText('1 unmet prerequisite')).toBeVisible();
+
+    await user.click(
+      within(card).getByRole('button', { name: 'Move Progress task down' }),
+    );
+
+    expect(onCommand).toHaveBeenCalledWith({
+      type: 'task.reorder',
+      payload: {
+        taskId: 'progress',
+        expectedRevision: 1,
+        rank: 'b',
+        actor: expect.objectContaining({ type: 'human', id: 'operator' }),
+      },
+    });
+  });
+
+  it('allows drag reordering within in progress when prerequisites are unmet', () => {
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    renderBoard({
+      taskOverrides: [
+        task({
+          id: 'progress',
+          title: 'Progress task',
+          rank: 'a',
+          lifecycleState: 'in_progress',
+          blocked: null,
+        }),
+        task({
+          id: 'later-progress',
+          title: 'Later progress task',
+          rank: 'b',
+          lifecycleState: 'in_progress',
+          blocked: null,
+        }),
+      ],
+      dependencies: [dependency('progress', 'ready')],
+      onCommand,
+    });
+    const transfer = dataTransfer();
+
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Progress task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(
+      screen.getByRole('article', { name: 'Later progress task task card' }),
+      { dataTransfer: transfer },
+    );
+
+    expect(onCommand).toHaveBeenCalledWith({
+      type: 'task.reorder',
+      payload: {
+        taskId: 'progress',
+        expectedRevision: 1,
+        rank: 'b',
+        actor: expect.objectContaining({ type: 'human', id: 'operator' }),
+      },
+    });
+  });
+
   it('shows completed and cancelled tasks only in their filtered views', async () => {
     const user = userEvent.setup();
     renderBoard();
@@ -921,17 +1009,19 @@ const renderBoard = ({
   onSelectTask,
   runs = [],
   dependencies = [],
+  taskOverrides = [],
 }: {
   archived?: boolean;
   onCommand?: (command: MutatingCommand) => Promise<unknown> | void;
   onSelectTask?: (taskId: string) => void;
   runs?: ProjectRun[];
   dependencies?: TaskDependency[];
+  taskOverrides?: Task[];
 } = {}) =>
   render(
     <TaskBoard
       project={archived ? { ...project, archivedAt: timestamp } : project}
-      projection={boardProjection([], runs, dependencies)}
+      projection={boardProjection(taskOverrides, runs, dependencies)}
       onCommand={onCommand}
       onSelectTask={onSelectTask}
     />,

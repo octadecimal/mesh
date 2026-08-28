@@ -49,6 +49,7 @@ export const isDependencyBlockedForwardTransition = (
   unmetPrerequisiteCount: number,
 ) =>
   unmetPrerequisiteCount > 0 &&
+  currentState !== nextState &&
   ((currentState === 'backlog' && nextState === 'ready') ||
     nextState === 'in_progress');
 
