@@ -474,6 +474,7 @@ export function ProjectPlanningPanel({
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string>();
   const currentProjectId = useRef(project.id);
+  const historyCursorGeneration = useRef(0);
   currentProjectId.current = project.id;
   const controlsDisabled =
     !connected || Boolean(project.archivedAt) || Boolean(pendingAction);
@@ -491,6 +492,7 @@ export function ProjectPlanningPanel({
     setExpandedPlanIds(new Set());
     setDetailStates({});
     setAccumulatedPlans([]);
+    historyCursorGeneration.current += 1;
     setNextBefore(undefined);
     setHistoryBridge(undefined);
     setHistoryLoading(false);
@@ -507,7 +509,8 @@ export function ProjectPlanningPanel({
     const accumulatedIds = new Set(accumulatedPlans.map(({ id }) => id));
     if (recentPlans.some(({ id }) => accumulatedIds.has(id))) return;
     const boundary = recentPlans.at(-1)?.id;
-    if (!boundary) return;
+    if (!boundary || boundary === nextBefore) return;
+    historyCursorGeneration.current += 1;
     setHistoryBridge(
       (current) => current ?? { resumeBefore: nextBefore ?? null },
     );
@@ -588,6 +591,7 @@ export function ProjectPlanningPanel({
   const loadOlderPlans = async () => {
     if (!loadHistory || historyLoading || !nextBefore) return;
     const requestProjectId = project.id;
+    const requestCursorGeneration = historyCursorGeneration.current;
     setHistoryLoading(true);
     setHistoryError(undefined);
     try {
@@ -600,6 +604,7 @@ export function ProjectPlanningPanel({
       setAccumulatedPlans((current) =>
         appendUniquePlans(current, [...recentPlans, ...page.plans]),
       );
+      if (historyCursorGeneration.current !== requestCursorGeneration) return;
       if (!historyBridge) {
         setNextBefore(page.nextAfter ?? null);
       } else if (!page.nextAfter) {
@@ -612,7 +617,11 @@ export function ProjectPlanningPanel({
         setNextBefore(page.nextAfter);
       }
     } catch (caught) {
-      if (currentProjectId.current !== requestProjectId) return;
+      if (
+        currentProjectId.current !== requestProjectId ||
+        historyCursorGeneration.current !== requestCursorGeneration
+      )
+        return;
       setHistoryError(
         failureMessage(caught, 'Older plans could not be loaded.'),
       );

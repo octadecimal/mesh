@@ -514,6 +514,88 @@ describe('ProjectPlanningPanel', () => {
     ).toBeNull();
   });
 
+  it('keeps the newest bridge cursor when an older page resolves after another resync', async () => {
+    const user = userEvent.setup();
+    const oldWindow = Array.from({ length: 20 }, (_, index) =>
+      summary(`old-race-${index}`, 100 + index),
+    );
+    const firstWindow = Array.from({ length: 20 }, (_, index) =>
+      summary(`first-race-${index}`, index),
+    );
+    const secondWindow = Array.from({ length: 20 }, (_, index) =>
+      summary(`second-race-${index}`, 20 + index),
+    );
+    const stalePage = Array.from({ length: 20 }, (_, index) =>
+      summary(`stale-race-${index}`, 40 + index),
+    );
+    const reconnectPage = [
+      ...Array.from({ length: 19 }, (_, index) =>
+        summary(`reconnect-race-${index}`, 60 + index),
+      ),
+      firstWindow[0],
+    ];
+    const pendingPage = deferred<ProjectPlanHistoryPage>();
+    const loadHistory = vi
+      .fn<(_: string, __?: string) => Promise<ProjectPlanHistoryPage>>()
+      .mockReturnValueOnce(pendingPage.promise)
+      .mockResolvedValueOnce({
+        plans: reconnectPage,
+        nextAfter: reconnectPage.at(-1)?.id,
+      })
+      .mockResolvedValueOnce({ plans: [summary('older-race', 120)] });
+    const rendered = renderPanel({ summaries: oldWindow, loadHistory });
+
+    rendered.rerender(panel({ summaries: firstWindow, loadHistory }));
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenNthCalledWith(1, project.id, 'first-race-19');
+
+    rendered.rerender(panel({ summaries: secondWindow, loadHistory }));
+    await act(async () => {
+      pendingPage.resolve({
+        plans: stalePage,
+        nextAfter: stalePage.at(-1)?.id,
+      });
+    });
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 40' }),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenNthCalledWith(
+      2,
+      project.id,
+      'second-race-19',
+    );
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 78' }),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenNthCalledWith(3, project.id, 'old-race-19');
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 120' }),
+    ).toBeVisible();
+    expect(
+      screen.getAllByRole('button', { name: /View Plan history/i }),
+    ).toHaveLength(100);
+    expect(
+      screen.queryByRole('button', { name: 'Load older plans' }),
+    ).toBeNull();
+
+    const otherProject = projectSchema.parse({
+      ...project,
+      id: 'project-race-reset',
+      displayName: 'Race reset project',
+      repositoryPath: 'C:\\race-reset',
+      repositoryIdentity: 'race-reset',
+    });
+    rendered.rerender(panel({ projectValue: otherProject, loadHistory }));
+    expect(screen.getByText('No completed plans yet.')).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: /View Plan history/i }),
+    ).toBeNull();
+  });
+
   it('opens the proposal session from historical plan details', async () => {
     const user = userEvent.setup();
     const onOpenSession = vi.fn();
