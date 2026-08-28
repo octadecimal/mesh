@@ -14,8 +14,10 @@ own applications, contracts, datastore, project focus, approved worker-profile
 snapshots, harness-neutral worker executions, deterministic fake harness,
 durable audit and runtime streams, and restart reconciliation.
 
-The milestone stops when one deterministic Todo-repository scenario proves all
-of the following without reading or migrating V1 state:
+The milestone stops when one deterministic Todo-repository scenario proves the
+public vertical slice below, with the focused T02/T04/T06/T08 gates supplying
+the internal build, process, side-effect, audit, and replay-race proofs that a
+black-box browser cannot observe. No proof reads or migrates V1 state:
 
 1. the V2 web application opens on project selection, registers a temporary Todo
    Git repository, and opens its focused shell;
@@ -24,7 +26,9 @@ of the following without reading or migrating V1 state:
 3. a human-authorized global profile revision and a project profile extending
    that exact global revision are stored, resolved, and snapshotted;
 4. one preferred logical skill falls back to the Mesh-native workflow and one
-   required logical skill fails closed before harness start when unavailable;
+   unavailable required logical skill produces durable public terminal evidence;
+   T06 directly proves that this path stores no operation and never calls
+   harness start;
 5. a fake `WorkerExecution` starts with a frozen assignment, profile, adapter
    capability result, and resolved-skill snapshot;
 6. raw fake-harness input and its normalized runtime event commit before either
@@ -191,7 +195,10 @@ Unborn HEAD fails as `repository_head_unborn`, ambiguity or multiple/invalid
 successful output fails as `repository_head_ambiguous`, and process
 spawn/timeout or other nonzero failure fails as `repository_head_failed`. Every
 case writes nothing; Mesh never substitutes a working-tree hash or empty
-sentinel.
+sentinel. The unborn classification is proven with a real temporary repository
+created by `git init` and left without a commit. Only process failure/timeout and
+ambiguous, multiple-line, or invalid-success outcomes use injected process
+results.
 
 Registering the same identity and path is idempotent. Registering a different
 path for an existing identity returns `repository_identity_conflict`; M1 does
@@ -667,8 +674,10 @@ databases, loopback ephemeral ports, and Playwright Chromium.
   through the production-built database entrypoint with packaged migration SQL.
 - Project tests cover Windows path normalization, Git common-directory identity,
   boundary escape, duplicate import, identity conflict, and valid, unborn,
-  failed, and ambiguous results from the separate HEAD command using temporary
-  Git repositories plus an injected process boundary.
+  failed, and ambiguous results from the separate HEAD command. Valid and
+  unborn cases use real temporary Git repositories, including an actual
+  no-commit `git init`; only failed/timeout and ambiguity/output-shape cases use
+  the injected process boundary.
 - Profile tests cover strict YAML, immutable revisions, stale approval, global
   and project scope, pinned one-level extension, forbidden recursion, exact
   replacement/append merge rules, digest stability, and preserved old snapshots.
@@ -707,8 +716,13 @@ and fresh fake adapter object against the same database, reconnects the browser,
 and releases the resumed script. The test asserts one execution ID, no duplicate
 events, continuous runtime and domain sequences, completed child and execution
 states, immutable profile/skill snapshots, and the same focused project. It
-also asserts a required-unavailable execution is terminal and the fake start
-count did not increase.
+also starts a required-unavailable execution and, through public commands,
+snapshots, and replay only, asserts terminal `required_skill_unavailable`, a null
+native handle, no start-operation transition, no runtime event for that
+execution, an unchanged runtime cursor, and contiguous unrelated domain
+sequences. The T06 runtime unit test—not the black-box browser fixture—directly
+proves that no execution operation is stored and the fake start count remains
+zero.
 
 The scenario finally opens a fresh empty V2 database successfully and attempts
 to open a copied non-empty V1-format fixture, which must fail with

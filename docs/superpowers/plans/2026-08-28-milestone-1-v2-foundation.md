@@ -813,11 +813,26 @@ initialized repository with no commit for the unborn case, and the injected
 process runner for failed and ambiguous results:
 
 ```ts
+it('classifies an actual git init repository with no commit as unborn', async () => {
+  const unbornRepository = await createTemporaryGitRepository({ commit: false });
+  await expect(resolveRepositoryIdentity(unbornRepository)).rejects.toMatchObject({
+    code: 'repository_head_unborn',
+  });
+  expect(projects.list()).toEqual([]);
+  expect(processRunner.injectedHeadOutcomes).toEqual([]);
+});
+
 it.each([
-  ['unborn', 'repository_head_unborn'],
-  ['failed', 'repository_head_failed'],
-  ['ambiguous', 'repository_head_ambiguous'],
-] as const)('rejects a %s HEAD without storing a project', async (outcome, code) => {
+  ['spawn_failure', 'repository_head_failed'],
+  ['timeout', 'repository_head_failed'],
+  ['nonzero_failure', 'repository_head_failed'],
+  ['git_ambiguity', 'repository_head_ambiguous'],
+  ['multiple_success_lines', 'repository_head_ambiguous'],
+  ['invalid_success_oid', 'repository_head_ambiguous'],
+] as const)('rejects injected %s HEAD evidence without storing a project', async (
+  outcome,
+  code,
+) => {
   processRunner.headOutcome = outcome;
   await expect(resolveRepositoryIdentity(repository)).rejects.toMatchObject({ code });
   expect(projects.list()).toEqual([]);
@@ -865,11 +880,14 @@ const head = await processRunner.run(
 ```
 
 Do not combine the root/common-directory and HEAD queries. Accept exactly one
-trimmed lowercase 40- or 64-hex object ID. Map the real empty-repository result
-to `repository_head_unborn`, process spawn/timeout or other nonzero failure to
-`repository_head_failed`, and Git ambiguity or multiple/invalid successful
-output lines to `repository_head_ambiguous`; every case fails before the
-registration transaction.
+trimmed lowercase 40- or 64-hex object ID. The unborn test must execute the real
+Git binary against a fixture created by `git init` with no commit and observe
+the real `rev-parse --verify HEAD^{commit}` failure; do not inject or synthesize
+that classification. Reserve process-runner injection for spawn failure,
+timeout, other nonzero failure, Git ambiguity, multiple successful output lines,
+and an invalid successful object ID. Map those injected results to
+`repository_head_failed` or `repository_head_ambiguous` as shown above. Every
+case fails before the registration transaction.
 
 Registration transaction inserts the project at revision 1, appends
 `project.registered`, and stores the command result before commit. Publish is a
@@ -894,7 +912,9 @@ git commit -m "feat(v2): add explicit project registry"
 registration writes one project, one command result, and one ordered domain
 event; duplicate identity never changes the stored path; no Git write occurs.
 Valid, unborn, failed, and ambiguous HEAD outcomes have focused executable
-tests, and `Project.headCommit` always comes from the separate verified command.
+tests; unborn proof uses a real no-commit Git repository, injected results cover
+only process/ambiguity classifications, and `Project.headCommit` always comes
+from the separate verified command.
 
 ### Task T05: Approved WorkerProfile Registry and Resolution
 
@@ -1182,9 +1202,16 @@ it('fails a missing required skill before adapter start', async () => {
     ok: false,
     error: { code: 'required_skill_unavailable' },
   });
+  const failed = executions.list(project.id)[0];
   expect(fake.startCount).toBe(0);
-  expect(executions.list(project.id)[0].resolvedSkills[0].resolution.kind)
-    .toBe('unavailable');
+  expect(failed.resolvedSkills[0].resolution.kind).toBe('unavailable');
+  expect(failed.nativeHandle).toBeNull();
+  expect(operations.listForExecution(failed.id)).toEqual([]);
+  expect(
+    events.runtimeAfter(project.id, 0).events.filter(
+      (event) => event.executionId === failed.id,
+    ),
+  ).toEqual([]);
 });
 
 it.each([
@@ -1731,12 +1758,43 @@ test('Todo foundation survives restart without V1 state', async ({ page }) => {
   await page.reload();
   await expect(page.getByText('completed')).toBeVisible();
   await fixture.expectContinuousStreamsAndStableSnapshots();
+
+  const beforeFailure = await fixture.projectSnapshot();
+  await expect(fixture.startRequiredUnavailable()).resolves.toMatchObject({
+    ok: false,
+    error: { code: 'required_skill_unavailable' },
+  });
+  const afterFailure = await fixture.projectSnapshot();
+  const failed = afterFailure.executions.find(
+    (execution) => execution.failure?.code === 'required_skill_unavailable',
+  );
+  expect(failed).toMatchObject({ lifecycle: 'failed', nativeHandle: null });
+
+  const domain = await fixture.domainEventsAfter(beforeFailure.cursors.domain);
+  const runtime = await fixture.runtimeEventsAfter(beforeFailure.cursors.runtime);
+  expect(
+    domain.events
+      .filter((event) => event.payload.executionId === failed?.id)
+      .map((event) => event.type),
+  ).not.toContain('worker_execution.starting');
+  expect(runtime.events.filter((event) => event.executionId === failed?.id)).toEqual([]);
+  expect(afterFailure.cursors.runtime).toBe(beforeFailure.cursors.runtime);
+  expect(domain.events.map((event) => event.sequence)).toEqual(
+    contiguousAfter(beforeFailure.cursors.domain, afterFailure.cursors.domain),
+  );
 });
 ```
 
-The same test also starts a required-unavailable execution and asserts stored
-failure plus unchanged fake start count. A separate assertion hashes a copied
-non-empty unmarked database before and after rejected startup.
+These are black-box assertions through the command result, project snapshot,
+and both replay routes. They prove durable terminal
+`required_skill_unavailable`, a null native handle, no public start-operation
+transition, no runtime event for the failed execution, no runtime-cursor advance,
+and contiguous unrelated domain sequencing. T10 must not read the adapter
+object, execution repository, operations table, or a test-only endpoint. T06's
+direct unit test supplies the stronger internal proof that
+`operations.listForExecution(failed.id)` is empty and `fake.startCount` remains
+zero. A separate T10 assertion hashes a copied non-empty unmarked database
+before and after rejected startup.
 
 - [ ] **Step 2: Run red**
 
@@ -1791,9 +1849,11 @@ git commit -m "test(v2): prove foundation restart scenario"
 
 **Acceptance criteria:** Browser proves selection and focus; execution/profile/
 skills remain stable; runtime resumes with no duplicate/gap; required failure
-never starts; database mismatch is non-mutating; teardown touches only owned
-temporary paths; the UI/API/socket share one ephemeral server origin; no Vite,
-port collision, cross-origin allowance, or external-agent traffic occurs.
+has public durable terminal/no-handle/no-start-transition/no-runtime evidence
+without inspecting the fake, while T06 supplies direct no-operation/zero-start
+proof; database mismatch is non-mutating; teardown touches only owned temporary
+paths; the UI/API/socket share one ephemeral server origin; no Vite, port
+collision, cross-origin allowance, or external-agent traffic occurs.
 
 ### Task T11: V2 Foundation Operating Documentation
 
@@ -1973,8 +2033,10 @@ After Wave 6 integrates, dispatch a separate read-only milestone reviewer. It
 must inspect the exact integrated head and map repository evidence to every
 design section:
 
-1. Outcome and Stop Condition: cite the Todo Playwright assertions for all eight
-   clauses.
+1. Outcome and Stop Condition: cite the Todo Playwright assertions for every
+   public clause and the named T02/T04/T06/T08 focused tests for internal facts;
+   specifically pair T10 required-skill terminal/replay evidence with T06's
+   empty-operation and zero-start-count assertions.
 2. Scope and deferrals: search V2 symbols and routes for every prohibited
    future concept and real adapter dependency; any implementation is a finding.
 3. V2/V1 boundaries: inspect imports, Nx projects, ports, environment variables,
