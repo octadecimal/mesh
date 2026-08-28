@@ -32,6 +32,11 @@ The core product principle is:
 > specifications, milestones, tasks, implementations, and evidence are
 > projections or consequences of that intent.
 
+Until V2 automates this model, the
+[manual parallel-development runbook](../runbooks/2026-08-27-mesh-v2-manual-parallel-development.md)
+defines the operator-driven coordinator, worker, review, rework, and integration
+procedure used to build it.
+
 ## Goals
 
 - Let an operator describe an application conversationally and refine it with a
@@ -415,7 +420,11 @@ The conceptual mapping is:
 This mapping does not mean that Mesh reimplements each skill as a prompt. Mesh
 owns the durable state transitions, contracts, approvals, and evidence implied
 by the workflow. A native skill is one strategy for helping a worker satisfy
-those contracts.
+those contracts. It also does not mean every mapped skill should be invoked
+natively. Reasoning and technique skills are useful execution strategies;
+resource coordination, workspace ownership, completion authority, and release
+skills normally remain Mesh-owned so a worker cannot duplicate or conflict with
+domain side effects.
 
 ### Resolution and fallback
 
