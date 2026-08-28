@@ -9,7 +9,7 @@
     "test": "nx run-many -t test",
     "build": "nx run-many -t build",
     "e2e": "nx run-many -t e2e --exclude=external-smoke",
-    "verify": "nx format:check && nx run-many -t lint typecheck test build --exclude=external-smoke && nx e2e e2e --project=chromium"
+    "verify": "nx format:check && nx run-many -t lint typecheck test build --exclude=external-smoke && nx e2e e2e --project=chromium && nx e2e v2-e2e --project=chromium"
   },
   "private": true,
   "devDependencies": {
@@ -67,6 +67,7 @@
     "fastify": "^5.12.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "yaml": "^2.9.0",
     "zod": "^4.4.3"
   }
 }
