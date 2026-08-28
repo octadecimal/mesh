@@ -269,7 +269,12 @@ export class TaskDependencyService {
         projectId: project.id,
         occurredAt,
         type: 'task.dependencies_changed',
-        payload: { taskId: task.id, dependencies },
+        payload: {
+          taskId: updated.id,
+          taskRevision: updated.revision,
+          taskUpdatedAt: updated.updatedAt,
+          dependencies,
+        },
       });
     } catch (error) {
       this.reportAuditFailure(error);

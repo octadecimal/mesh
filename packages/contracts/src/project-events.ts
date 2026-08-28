@@ -101,7 +101,12 @@ export const projectPlanChangedEventSchema = projectEvent(
 });
 export const taskDependenciesChangedEventSchema = projectEvent(
   'task.dependencies_changed',
-  z.object({ taskId: idSchema, dependencies: z.array(taskDependencySchema) }),
+  z.object({
+    taskId: idSchema,
+    taskRevision: z.number().int().positive(),
+    taskUpdatedAt: isoTimestampSchema,
+    dependencies: z.array(taskDependencySchema),
+  }),
 ).superRefine(({ projectId, payload }, context) => {
   for (const [index, dependency] of payload.dependencies.entries()) {
     if (dependency.projectId !== projectId) {

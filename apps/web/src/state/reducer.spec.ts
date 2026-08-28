@@ -974,7 +974,12 @@ describe('project projection', () => {
       sequence: 4,
       occurredAt: timestamp,
       type: 'task.dependencies_changed',
-      payload: { taskId: task().id, dependencies: [replacement] },
+      payload: {
+        taskId: task().id,
+        taskRevision: 2,
+        taskUpdatedAt: timestamp,
+        dependencies: [replacement],
+      },
     });
 
     expect(applied.kind).toBe('applied');
@@ -1010,7 +1015,12 @@ describe('project projection', () => {
       sequence: 4,
       occurredAt,
       type: 'task.dependencies_changed',
-      payload: { taskId: task().id, dependencies: [] },
+      payload: {
+        taskId: task().id,
+        taskRevision: 2,
+        taskUpdatedAt: occurredAt,
+        dependencies: [],
+      },
     });
 
     expect(applied.kind).toBe('applied');
@@ -1028,6 +1038,56 @@ describe('project projection', () => {
     );
     expect(resynced.dependenciesByTaskId[task().id]).toBeUndefined();
     expect(resynced.dependentsByTaskId[prerequisite.id]).toBeUndefined();
+  });
+
+  it('applies authoritative revisions for dependency mutations in the same millisecond', () => {
+    const prerequisite = task({ id: 'prerequisite', rank: '0' });
+    const dependent = task();
+    const edge = dependency({ prerequisiteTaskId: prerequisite.id });
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({ tasks: [prerequisite, dependent], cursor: 3 }),
+    );
+    const occurredAt = '2026-08-24T01:00:00.000Z';
+
+    const added = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'dependency-added-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt,
+      type: 'task.dependencies_changed',
+      payload: {
+        taskId: dependent.id,
+        taskRevision: 2,
+        taskUpdatedAt: occurredAt,
+        dependencies: [edge],
+      },
+    });
+    expect(added.kind).toBe('applied');
+    if (added.kind !== 'applied') return;
+
+    const removed = applyProjectEvent(added.state, {
+      protocolVersion: 1,
+      id: 'dependency-removed-event-5',
+      projectId: project.id,
+      sequence: 5,
+      occurredAt,
+      type: 'task.dependencies_changed',
+      payload: {
+        taskId: dependent.id,
+        taskRevision: 3,
+        taskUpdatedAt: occurredAt,
+        dependencies: [],
+      },
+    });
+
+    expect(removed.kind).toBe('applied');
+    if (removed.kind !== 'applied') return;
+    expect(removed.state.tasksById[dependent.id]).toMatchObject({
+      revision: 3,
+      updatedAt: occurredAt,
+    });
   });
 
   it('keeps approval-created task revisions convergent across ordered task and dependency events', () => {
@@ -1072,7 +1132,12 @@ describe('project projection', () => {
       sequence: 5,
       occurredAt,
       type: 'task.dependencies_changed',
-      payload: { taskId: created.id, dependencies: [edge] },
+      payload: {
+        taskId: created.id,
+        taskRevision: created.revision,
+        taskUpdatedAt: created.updatedAt,
+        dependencies: [edge],
+      },
     });
 
     expect(dependencyChanged.kind).toBe('applied');

@@ -663,11 +663,8 @@ export const applyProjectEvent = (
             ...next.tasksById,
             [task.id]: {
               ...task,
-              revision:
-                task.updatedAt === event.occurredAt
-                  ? task.revision
-                  : task.revision + 1,
-              updatedAt: event.occurredAt,
+              revision: event.payload.taskRevision,
+              updatedAt: event.payload.taskUpdatedAt,
             },
           }
         : next.tasksById,

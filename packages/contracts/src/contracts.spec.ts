@@ -2106,7 +2106,12 @@ describe('session platform contracts', () => {
         sequence: 2,
         occurredAt: planningNow,
         type: 'task.dependencies_changed',
-        payload: { taskId: 'task-2', dependencies: [dependency] },
+        payload: {
+          taskId: 'task-2',
+          taskRevision: 7,
+          taskUpdatedAt: planningNow,
+          dependencies: [dependency],
+        },
       });
       const project = projectSchema.parse({
         id: 'project-1',
@@ -2141,6 +2146,20 @@ describe('session platform contracts', () => {
 
       expect(planEvent.type).toBe('project.plan_changed');
       expect(dependencyEvent.type).toBe('task.dependencies_changed');
+      expect(dependencyEvent.payload).toMatchObject({
+        taskRevision: 7,
+        taskUpdatedAt: planningNow,
+      });
+      expect(() =>
+        projectEventSchema.parse({
+          ...dependencyEvent,
+          payload: {
+            taskId: dependencyEvent.payload.taskId,
+            taskUpdatedAt: planningNow,
+            dependencies: dependencyEvent.payload.dependencies,
+          },
+        }),
+      ).toThrow();
       expect(snapshot.terminalPlanSummaries).toHaveLength(1);
       expect(snapshot.dependencies).toEqual([dependency]);
       expect(() =>

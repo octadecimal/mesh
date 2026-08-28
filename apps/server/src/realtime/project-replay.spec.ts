@@ -192,6 +192,8 @@ const dependencyEvent = projectEventSchema.parse({
   type: 'task.dependencies_changed',
   payload: {
     taskId: 'task-project-1',
+    taskRevision: 2,
+    taskUpdatedAt: '2026-08-24T00:05:00.000Z',
     dependencies: [
       taskDependencySchema.parse({
         projectId: 'project-1',
@@ -267,6 +269,12 @@ describe('ProjectReplayService', () => {
       events: retained,
       highWaterByProject: { 'project-1': 5 },
       resyncProjectIds: [],
+    });
+    expect(replay.after({ 'project-1': 3 }).events[1]).toMatchObject({
+      payload: {
+        taskRevision: 2,
+        taskUpdatedAt: '2026-08-24T00:05:00.000Z',
+      },
     });
     expect(replay.after({ 'project-1': 5 })).toEqual({
       events: [],

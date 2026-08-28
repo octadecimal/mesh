@@ -284,7 +284,12 @@ export class PlanApprovalService {
           projectId: project.id,
           occurredAt,
           type: 'task.dependencies_changed',
-          payload: { taskId: task.id, dependencies },
+          payload: {
+            taskId: task.id,
+            taskRevision: task.revision,
+            taskUpdatedAt: task.updatedAt,
+            dependencies,
+          },
         }),
       );
     }

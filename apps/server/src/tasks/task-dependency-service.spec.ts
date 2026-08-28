@@ -160,7 +160,11 @@ describe('TaskDependencyService', () => {
         projectId: 'project-1',
         sequence: 1,
         type: 'task.dependencies_changed',
-        payload: { taskId: dependent.id },
+        payload: {
+          taskId: dependent.id,
+          taskRevision: 2,
+          taskUpdatedAt: now,
+        },
       },
     });
     expect(publicationSnapshots).toEqual([
@@ -307,12 +311,36 @@ describe('TaskDependencyService', () => {
       event: {
         sequence: 2,
         type: 'task.dependencies_changed',
-        payload: { taskId: 'dependent', dependencies: [] },
+        payload: {
+          taskId: 'dependent',
+          taskRevision: 3,
+          taskUpdatedAt: now,
+          dependencies: [],
+        },
       },
     });
     expect(repositories.dependencies.listByProject('project-1')).toEqual([]);
     expect(repositories.projectEvents.after('project-1', 0)).toHaveLength(2);
     expect(publisher.publishProject).toHaveBeenCalledTimes(2);
+  });
+
+  it('emits each authoritative revision when sequential mutations share a millisecond', async () => {
+    const { repositories, service } = setup();
+    seedProject(repositories);
+    seedTask(repositories, 'prerequisite');
+    seedTask(repositories, 'dependent');
+
+    const added = await service.add(addInput());
+    const removed = await service.remove({
+      ...addInput(),
+      expectedTaskRevision: added.task.revision,
+      commandId: 'dependency-remove-same-millisecond',
+    });
+
+    expect([added.event.payload, removed.event.payload]).toEqual([
+      expect.objectContaining({ taskRevision: 2, taskUpdatedAt: now }),
+      expect.objectContaining({ taskRevision: 3, taskUpdatedAt: now }),
+    ]);
   });
 
   it('applies human authority and active-attempt safety to removals', async () => {

@@ -829,7 +829,12 @@ describe('PlanApprovalService approval', () => {
       approved.events.at(-1)?.type === 'task.dependencies_changed'
         ? approved.events.at(-1)?.payload
         : undefined,
-    ).toEqual({ taskId: 'approval-2', dependencies: approved.dependencies });
+    ).toEqual({
+      taskId: 'approval-2',
+      taskRevision: 1,
+      taskUpdatedAt: later,
+      dependencies: approved.dependencies,
+    });
     expect(context.published).toEqual(
       approved.events.map((event) => ({
         eventId: event.id,
