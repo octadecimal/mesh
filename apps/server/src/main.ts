@@ -34,6 +34,7 @@ import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
 import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
 import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
+import { PlanningRepository } from './repositories/planning-repository.js';
 import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProjectRunRepository } from './repositories/project-run-repository.js';
@@ -50,6 +51,9 @@ import { AttemptService } from './tasks/attempt-service.js';
 import { DeveloperCapabilityRegistry } from './tasks/developer-capability-registry.js';
 import { DeveloperExecutionService } from './tasks/developer-execution-service.js';
 import { DeveloperReworkService } from './tasks/developer-rework-service.js';
+import { PlanApprovalService } from './tasks/plan-approval-service.js';
+import { PlanningCapabilityRegistry } from './tasks/planning-capability-registry.js';
+import { PlanningExecutionService } from './tasks/planning-execution-service.js';
 import { QaCapabilityRegistry } from './tasks/qa-capability-registry.js';
 import { QaExecutionService } from './tasks/qa-execution-service.js';
 import {
@@ -65,6 +69,7 @@ import {
 } from './tasks/project-run-workspace.js';
 import { reconcileProjectRuns } from './tasks/reconcile-project-runs.js';
 import { TaskService } from './tasks/task-service.js';
+import { TaskDependencyService } from './tasks/task-dependency-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
   constructor(private readonly conflicts: readonly BillingConflict[]) {}
@@ -206,6 +211,7 @@ export const startServer = async (
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
+  const plans = new PlanningRepository(database);
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const taskService = new TaskService({
     database,
@@ -224,6 +230,7 @@ export const startServer = async (
   );
   const capabilities = new DeveloperCapabilityRegistry();
   const qaCapabilities = new QaCapabilityRegistry();
+  const planningCapabilities = new PlanningCapabilityRegistry();
   const roleServices: {
     reviewAutomation?: ReviewAutomationService;
     projectRuns?: ProjectRunService;
@@ -354,6 +361,9 @@ export const startServer = async (
       qaCapabilities.invalidateSession(sessionId);
       qaExecutionService.cancelRuntime(sessionId);
     },
+    invalidatePlanningCapability: (sessionId) => {
+      planningCapabilities.invalidateSession(sessionId);
+    },
     onRuntimeStopped: () => reconcileStoppedRuntime(registry),
   });
   const developerExecutionService = new DeveloperExecutionService({
@@ -404,6 +414,55 @@ export const startServer = async (
       processRunner,
     );
   const git = new GitAdapter(processRunner, pathOptions);
+  const planningRegistry = {
+    get auditStatus() {
+      return registry.auditStatus;
+    },
+    create: registry.create.bind(registry),
+    resume: registry.resume.bind(registry),
+    interrupt: registry.interrupt.bind(registry),
+    reportAuditFailure: failProjectRunAudit,
+    publisher: registry.publisher,
+  };
+  const planningExecutionService = new PlanningExecutionService({
+    database,
+    projects,
+    tasks,
+    dependencies,
+    plans,
+    sessions,
+    workspaces,
+    diagnostics,
+    events,
+    projectEvents,
+    commands,
+    capabilities: planningCapabilities,
+    registry: planningRegistry,
+    billingConflicts,
+    pathOptions,
+    resolveIdentity,
+  });
+  const planApprovalService = new PlanApprovalService({
+    database,
+    projects,
+    tasks,
+    dependencies,
+    plans,
+    projectEvents,
+    commands,
+    publisher: registry.publisher,
+    onAuditFailure: failProjectRunAudit,
+  });
+  const taskDependencyService = new TaskDependencyService({
+    projects,
+    tasks,
+    attempts,
+    dependencies,
+    projectEvents,
+    commands,
+    publisher: registry.publisher,
+    onAuditFailure: failProjectRunAudit,
+  });
   const attemptService = new AttemptService({
     database,
     projects,
@@ -541,7 +600,11 @@ export const startServer = async (
     projects,
     tasks,
     dependencies,
+    plans,
     taskService,
+    planningExecutionService,
+    planApprovalService,
+    taskDependencyService,
     attemptService,
     developerExecutionService,
     qaExecutionService,

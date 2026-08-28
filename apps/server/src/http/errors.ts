@@ -16,6 +16,15 @@ export type StableErrorCode =
   | 'repository_ambiguous'
   | 'repository_already_imported'
   | 'project_revision_conflict'
+  | 'project_plan_not_found'
+  | 'project_plan_revision_conflict'
+  | 'project_plan_lifecycle_invalid'
+  | 'project_plan_stale'
+  | 'project_plan_proposal_invalid'
+  | 'project_plan_proposal_limit_exceeded'
+  | 'project_plan_unauthorized'
+  | 'project_plan_billing_conflict'
+  | 'project_plan_repair_required'
   | 'project_run_not_found'
   | 'project_run_revision_conflict'
   | 'project_run_invalid'
@@ -26,6 +35,9 @@ export type StableErrorCode =
   | 'project_run_concurrency_exceeded'
   | 'project_run_not_controllable'
   | 'task_revision_conflict'
+  | 'task_dependency_cycle'
+  | 'task_dependency_conflict'
+  | 'task_dependency_invalid'
   | 'task_not_found'
   | 'task_not_ready'
   | 'task_blocked'
@@ -87,6 +99,15 @@ const statusCodes: Record<StableErrorCode, number> = {
   repository_ambiguous: 400,
   repository_already_imported: 409,
   project_revision_conflict: 409,
+  project_plan_not_found: 404,
+  project_plan_revision_conflict: 409,
+  project_plan_lifecycle_invalid: 409,
+  project_plan_stale: 409,
+  project_plan_proposal_invalid: 422,
+  project_plan_proposal_limit_exceeded: 422,
+  project_plan_unauthorized: 403,
+  project_plan_billing_conflict: 409,
+  project_plan_repair_required: 409,
   project_run_not_found: 404,
   project_run_revision_conflict: 409,
   project_run_invalid: 400,
@@ -97,6 +118,9 @@ const statusCodes: Record<StableErrorCode, number> = {
   project_run_concurrency_exceeded: 422,
   project_run_not_controllable: 409,
   task_revision_conflict: 409,
+  task_dependency_cycle: 409,
+  task_dependency_conflict: 409,
+  task_dependency_invalid: 422,
   task_not_found: 404,
   session_already_linked: 409,
   session_repository_mismatch: 409,

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   DeveloperResumeUnavailableError,
   QaAlreadyActiveError,
@@ -48,6 +48,18 @@ import { QaCapabilityRegistry } from '../tasks/qa-capability-registry.js';
 import { QaExecutionService } from '../tasks/qa-execution-service.js';
 import { ProjectRunService } from '../tasks/project-run-service.js';
 import { ReviewAutomationService } from '../tasks/review-automation-service.js';
+import type {
+  PlanApprovalResult,
+  PlanApprovalService,
+} from '../tasks/plan-approval-service.js';
+import type {
+  PlanningExecutionService,
+  PlanningMutationResult,
+} from '../tasks/planning-execution-service.js';
+import type {
+  DependencyMutationResult,
+  TaskDependencyService,
+} from '../tasks/task-dependency-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
 import { toHttpError } from './errors.js';
@@ -217,6 +229,288 @@ describe('executeCommand', () => {
     protocolVersion: 1,
     idempotencyKey,
     command,
+  });
+
+  it('dispatches every planning and dependency command through its service boundary', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const actor = { type: 'human' as const, id: 'planning-operator' };
+    const planningResult = (id: string, sequence: number) =>
+      ({
+        plan: { id },
+        events: [{ sequence }],
+        capability: 'raw-planning-capability',
+      }) as unknown as PlanningMutationResult & { capability: string };
+    const planningExecutionService = {
+      start: vi.fn(async () => planningResult('plan-started', 1)),
+      requestRevision: vi.fn(async () => planningResult('plan-revising', 2)),
+      resume: vi.fn(async () => planningResult('plan-resumed', 3)),
+      retry: vi.fn(async () => planningResult('plan-retried', 4)),
+      cancel: vi.fn(async () => planningResult('plan-cancelled', 5)),
+    } satisfies Pick<
+      PlanningExecutionService,
+      'start' | 'requestRevision' | 'resume' | 'retry' | 'cancel'
+    >;
+    const planApprovalService = {
+      approve: vi.fn(
+        async () =>
+          ({
+            ...planningResult('plan-approved', 6),
+            createdTasks: [{ id: 'created-task' }],
+            dependencies: [],
+            taskMappings: [{ taskKey: 'created', taskId: 'created-task' }],
+          }) as unknown as PlanApprovalResult,
+      ),
+      reject: vi.fn(async () => planningResult('plan-rejected', 7)),
+    } satisfies Pick<PlanApprovalService, 'approve' | 'reject'>;
+    const taskDependencyService = {
+      add: vi.fn(
+        async () =>
+          ({
+            task: { id: 'task-1' },
+            dependencies: [{ prerequisiteTaskId: 'task-2' }],
+            event: { sequence: 8 },
+          }) as unknown as DependencyMutationResult,
+      ),
+      remove: vi.fn(
+        async () =>
+          ({
+            task: { id: 'task-1' },
+            dependencies: [],
+            event: { sequence: 9 },
+          }) as unknown as DependencyMutationResult,
+      ),
+    } satisfies Pick<TaskDependencyService, 'add' | 'remove'>;
+    const dependencies = {
+      ...fixture.dependencies,
+      plans: {
+        getDetails: () => ({ proposals: [{ id: 'proposal-latest' }] }) as never,
+        listSummaries: fixture.repositories.plans.listSummaries.bind(
+          fixture.repositories.plans,
+        ),
+      },
+      tasks: {
+        get: () => ({ id: 'task-1', projectId: 'project-1' }) as never,
+      },
+      planningExecutionService,
+      planApprovalService,
+      taskDependencyService,
+    };
+    const cases = [
+      {
+        id: 'plan-start-command',
+        command: {
+          type: 'project.plan.start',
+          payload: {
+            projectId: 'project-1',
+            expectedProjectRevision: 3,
+            goal: 'Plan milestone seven',
+            constraints: ['Preserve audit order', 'Stay read-only'],
+            nonGoals: ['Do not launch work'],
+            actor,
+          },
+        },
+        spy: planningExecutionService.start,
+        expected: {
+          projectId: 'project-1',
+          goal: 'Plan milestone seven',
+          constraints: 'Preserve audit order\nStay read-only',
+          nonGoals: 'Do not launch work',
+          actor,
+          commandId: 'plan-start-command',
+        },
+      },
+      {
+        id: 'plan-revision-command',
+        command: {
+          type: 'project.plan.request_revision',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 2,
+            feedback: 'Split the delivery task.',
+            actor,
+          },
+        },
+        spy: planningExecutionService.requestRevision,
+        expected: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          proposalId: 'proposal-latest',
+          expectedPlanRevision: 2,
+          feedback: 'Split the delivery task.',
+          actor,
+          commandId: 'plan-revision-command',
+        },
+      },
+      {
+        id: 'plan-approve-command',
+        command: {
+          type: 'project.plan.approve',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            proposalId: 'proposal-latest',
+            expectedPlanRevision: 2,
+            actor,
+          },
+        },
+        spy: planApprovalService.approve,
+        expected: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          proposalId: 'proposal-latest',
+          expectedPlanRevision: 2,
+          actor,
+          commandId: 'plan-approve-command',
+        },
+      },
+      ...(['reject', 'cancel'] as const).map((operation) => ({
+        id: `plan-${operation}-command`,
+        command: {
+          type: `project.plan.${operation}`,
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 2,
+            reason: `${operation} reason`,
+            actor,
+          },
+        },
+        spy:
+          operation === 'reject'
+            ? planApprovalService.reject
+            : planningExecutionService.cancel,
+        expected: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          expectedPlanRevision: 2,
+          reason: `${operation} reason`,
+          actor,
+          commandId: `plan-${operation}-command`,
+        },
+      })),
+      ...(['resume', 'retry'] as const).map((operation) => ({
+        id: `plan-${operation}-command`,
+        command: {
+          type: `project.plan.${operation}`,
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 2,
+            actor,
+          },
+        },
+        spy: planningExecutionService[operation],
+        expected: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          expectedPlanRevision: 2,
+          actor,
+          commandId: `plan-${operation}-command`,
+        },
+      })),
+      ...(['add', 'remove'] as const).map((operation) => ({
+        id: `dependency-${operation}-command`,
+        command: {
+          type: `task.dependency.${operation}`,
+          payload: {
+            taskId: 'task-1',
+            prerequisiteTaskId: 'task-2',
+            expectedRevision: 4,
+            actor,
+          },
+        },
+        spy: taskDependencyService[operation],
+        expected: {
+          projectId: 'project-1',
+          taskId: 'task-1',
+          prerequisiteTaskId: 'task-2',
+          expectedTaskRevision: 4,
+          actor,
+          commandId: `dependency-${operation}-command`,
+        },
+      })),
+    ];
+
+    for (const testCase of cases) {
+      const result = await executeCommand(
+        projectCommand(testCase.id, testCase.command),
+        dependencies,
+      );
+      expect(testCase.spy).toHaveBeenLastCalledWith(testCase.expected);
+      expect(result.commandType).toBe(testCase.command.type);
+      expect(JSON.stringify(result)).not.toContain('raw-planning-capability');
+    }
+  });
+
+  it('rejects a non-human planning actor before invoking a planning service', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const start = vi.fn();
+
+    const error = await executeCommand(
+      projectCommand('plan-agent-command', {
+        type: 'project.plan.start',
+        payload: {
+          projectId: 'project-1',
+          expectedProjectRevision: 1,
+          goal: 'Attempt an unauthorized plan',
+          constraints: [],
+          nonGoals: [],
+          actor: { type: 'agent', id: 'pm-agent' },
+        },
+      }),
+      {
+        ...fixture.dependencies,
+        planningExecutionService: {
+          start,
+          requestRevision: vi.fn(),
+          resume: vi.fn(),
+          retry: vi.fn(),
+          cancel: vi.fn(),
+        } as never,
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(toHttpError(error)).toMatchObject({
+      statusCode: 400,
+      body: { error: { code: 'invalid_command' } },
+    });
+  });
+
+  it('dispatches plan approval without requiring the execution boundary', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const actor = { type: 'human' as const, id: 'planning-operator' };
+    const approve = vi.fn(
+      async () =>
+        ({
+          plan: { id: 'plan-approved' },
+          events: [{ sequence: 12 }],
+          createdTasks: [],
+          dependencies: [],
+          taskMappings: [],
+        }) as unknown as PlanApprovalResult,
+    );
+
+    const result = await executeCommand(
+      projectCommand('approve-without-execution', {
+        type: 'project.plan.approve',
+        payload: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          proposalId: 'proposal-1',
+          expectedPlanRevision: 2,
+          actor,
+        },
+      }),
+      {
+        ...fixture.dependencies,
+        planApprovalService: { approve, reject: vi.fn() } as never,
+      },
+    );
+
+    expect(approve).toHaveBeenCalledOnce();
+    expect(result.commandType).toBe('project.plan.approve');
   });
 
   it('dispatches all project-run controls without owning launch scheduling', async () => {

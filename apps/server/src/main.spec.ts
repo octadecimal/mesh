@@ -8,6 +8,8 @@ import {
   developerCompletionReportSchema,
   developerExecutionCycleSchema,
   idSchema,
+  projectPlanDetailsSchema,
+  projectPlanProposalInputSchema,
   projectSchema,
   qaExecutionCycleSchema,
   sessionSchema,
@@ -27,6 +29,7 @@ import {
 } from './platform/process-runner.js';
 import { resolveRepositoryIdentity } from './projects/repository-identity.js';
 import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
+import { PlanningRepository } from './repositories/planning-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProjectRunRepository } from './repositories/project-run-repository.js';
 import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
@@ -229,10 +232,276 @@ describe('process lifecycle', () => {
 describe('production composition', () => {
   const directories: string[] = [];
 
+  const proposal = projectPlanProposalInputSchema.parse({
+    tasks: [
+      {
+        key: 'foundation',
+        title: 'Build the foundation',
+        description: 'Create the smallest durable planning foundation.',
+        acceptanceCriteria: ['The planning foundation is verified.'],
+        priority: 'normal',
+        labels: ['planning'],
+        rationale: 'The remaining work depends on a durable foundation.',
+        goalMapping: 'Provides the requested planning workflow.',
+      },
+    ],
+    dependencies: [],
+    assumptions: [],
+    risks: [],
+    exclusions: [],
+  });
+
+  const createPlanningFixture = async (suffix: string) => {
+    const directory = mkdtempSync(join(tmpdir(), `mesh-main-pm-${suffix}-`));
+    directories.push(directory);
+    const repositoryPath = join(directory, 'repository');
+    const databasePath = join(directory, 'mesh.sqlite');
+    const trustedGitExecutable = await resolveGitExecutableAtStartup({
+      pathValue: process.env.PATH,
+      workspaceRoot: directory,
+    });
+    if (!trustedGitExecutable) {
+      throw new Error('Expected an approved test Git executable');
+    }
+    execFileSync(trustedGitExecutable.path, ['init', repositoryPath], {
+      cwd: directory,
+      windowsHide: true,
+    });
+    seedRepositoryCommit(trustedGitExecutable.path, repositoryPath, directory);
+    const identity = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: directory },
+      new NodeProcessRunner({ trustedGitExecutable }),
+    );
+    const database = openDatabase(databasePath);
+    migrate(database);
+    const project = new ProjectRepository(database).create(
+      projectSchema.parse({
+        id: `project-pm-${suffix}`,
+        displayName: `PM planning ${suffix}`,
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    database.close();
+    return {
+      databasePath,
+      directory,
+      project,
+      environment: {
+        NODE_ENV: 'test',
+        MESH_PORT: '0',
+        MESH_DATA_DIR: directory,
+        MESH_DATABASE_PATH: 'mesh.sqlite',
+        MESH_WORKSPACE_ROOT: directory,
+        MESH_GIT_EXECUTABLE: trustedGitExecutable.path,
+      },
+    };
+  };
+
+  const startPlanningCommand = (
+    projectId: string,
+    expectedProjectRevision: number,
+    idempotencyKey: string,
+  ) => ({
+    protocolVersion: 1,
+    idempotencyKey,
+    command: {
+      type: 'project.plan.start',
+      payload: {
+        projectId,
+        expectedProjectRevision,
+        goal: 'Plan the milestone.',
+        constraints: ['Use the shared repository.'],
+        nonGoals: ['Do not change billing mode.'],
+        actor: { type: 'human' as const, id: 'operator-pm' },
+      },
+    },
+  });
+
   afterEach(() => {
     for (const directory of directories.splice(0)) {
       rmSync(directory, { force: true, recursive: true });
     }
+  });
+
+  it('shares planning persistence and accepts fake-driver proposals without external traffic', async () => {
+    const fixture = await createPlanningFixture('proposal');
+    const driver = new FakeClaudeSessionDriver({
+      pmSteps: [{ type: 'pm.proposal', proposal }],
+    });
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const started = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'start-pm-proposal',
+        ),
+      });
+      expect(started.statusCode).toBe(200);
+      expect(JSON.stringify(started.json())).not.toContain('capability');
+      expect(driver.createdRequests).toHaveLength(1);
+      expect(driver.createdRequests[0]?.role?.role).toBe('pm');
+      await driver.drainPmSteps();
+
+      const planId = started.json().result.plan.id as string;
+      const details = await running.app.inject({
+        method: 'GET',
+        url: `/api/projects/${fixture.project.id}/plans/${planId}`,
+      });
+      expect(details.statusCode).toBe(200);
+      expect(projectPlanDetailsSchema.parse(details.json())).toMatchObject({
+        plan: { id: planId, status: 'awaiting_review' },
+        proposals: [{ ordinal: 1 }],
+      });
+
+      const observation = openDatabase(fixture.databasePath);
+      try {
+        expect(new PlanningRepository(observation).getDetails(planId)).toMatchObject(
+          {
+            plan: { id: planId, status: 'awaiting_review' },
+            proposals: [{ ordinal: 1 }],
+          },
+        );
+      } finally {
+        observation.close();
+      }
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('invalidates the PM proposal capability when its session stops', async () => {
+    const fixture = await createPlanningFixture('stop');
+    const driver = new FakeClaudeSessionDriver({
+      pmSteps: [{ type: 'pm.wait' }],
+    });
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const started = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'start-pm-stop',
+        ),
+      });
+      expect(started.statusCode).toBe(200);
+      const sessionId = started.json().result.session.id as string;
+      const role = driver.createdRequests[0]?.role;
+      if (!role || role.role !== 'pm') {
+        throw new Error('Expected a PM runtime configuration');
+      }
+      const runtime = driver.createdSessions[0];
+      if (!runtime) throw new Error('Expected a PM runtime');
+      await runtime.close();
+      await expect
+        .poll(async () => {
+          const snapshot = await running.app.inject({
+            method: 'GET',
+            url: '/api/snapshot',
+          });
+          return snapshot
+            .json()
+            .sessions?.find(
+              (session: { id?: string }) => session.id === sessionId,
+            )?.lifecycleState;
+        })
+        .toBe('interrupted');
+      await expect(role.submitProposal(proposal)).rejects.toMatchObject({
+        code: 'planning_capability_invalid',
+      });
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('refuses planning when a pay-per-token billing override is present', async () => {
+    const fixture = await createPlanningFixture('billing');
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: {
+        ...fixture.environment,
+        ANTHROPIC_API_KEY: 'must-not-be-used',
+      },
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const response = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision,
+          'start-pm-billing-conflict',
+        ),
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: { code: 'project_plan_billing_conflict' },
+      });
+      expect(driver.createdRequests).toEqual([]);
+    } finally {
+      await running.close();
+    }
+  });
+
+  it('routes planning audit failures through the central runtime barrier', async () => {
+    const fixture = await createPlanningFixture('audit');
+    const database = openDatabase(fixture.databasePath);
+    database.exec(`
+      CREATE TRIGGER fail_planning_event
+      BEFORE INSERT ON project_events
+      WHEN NEW.project_id = '${fixture.project.id}'
+        AND NEW.type = 'project.plan_changed'
+      BEGIN
+        SELECT RAISE(FAIL, 'planning audit insert failed');
+      END;
+    `);
+    database.close();
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    let closeError: unknown;
+    const previousExitCode = process.exitCode;
+    try {
+      const command = startPlanningCommand(
+        fixture.project.id,
+        fixture.project.revision,
+        'start-pm-audit',
+      );
+      const failed = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: command,
+      });
+      const rejected = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: { ...command, idempotencyKey: 'rejected-after-pm-audit' },
+      });
+      expect(failed.statusCode).toBe(500);
+      expect(rejected.statusCode).toBe(503);
+      expect(driver.createdRequests).toEqual([]);
+    } finally {
+      closeError = await running.close().catch((error: unknown) => error);
+      process.exitCode = previousExitCode;
+    }
+    expect(closeError).toMatchObject({ message: 'planning audit insert failed' });
   });
 
   it('retries one QA launch key after approved Git is restored', async () => {
