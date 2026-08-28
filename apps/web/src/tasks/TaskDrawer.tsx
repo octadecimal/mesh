@@ -63,6 +63,15 @@ type LaunchPending = {
   commandSettled: boolean;
 };
 
+type DependencyPending = {
+  id: number;
+  contextKey: string;
+  operation: 'add' | 'remove';
+  prerequisiteTaskId: string;
+  taskRevision: number;
+  commandSettled: boolean;
+};
+
 const operator = taskActorSchema.parse({
   type: 'human',
   id: 'operator',
@@ -247,9 +256,12 @@ export function TaskDrawer({
   );
   const [sessionId, setSessionId] = useState<Session['id'] | ''>('');
   const [prerequisiteTaskId, setPrerequisiteTaskId] = useState('');
-  const [dependencyPending, setDependencyPending] = useState<
-    'add' | 'remove'
-  >();
+  const [dependencyPending, setDependencyPending] =
+    useState<DependencyPending>();
+  const dependencyRequestId = useRef(0);
+  const dependencyContextKey = `${project.id}:${task?.id ?? ''}`;
+  const activeDependencyContextKey = useRef(dependencyContextKey);
+  activeDependencyContextKey.current = dependencyContextKey;
   const [dependencyError, setDependencyError] = useState<string>();
   const readOnly = Boolean(project.archivedAt);
   const missingReadiness = readinessProblems(draft);
@@ -365,9 +377,10 @@ export function TaskDrawer({
     setConfirmed(false);
     setError(undefined);
     setPrerequisiteTaskId('');
+    dependencyRequestId.current += 1;
     setDependencyPending(undefined);
     setDependencyError(undefined);
-  }, [task?.id]);
+  }, [project.id, task?.id]);
 
   useEffect(() => {
     setWorkspace(workspaceFor(project));
@@ -400,6 +413,33 @@ export function TaskDrawer({
       current?.id === launchPending.id ? undefined : current,
     );
   }, [attemptProjection, launchPending, task]);
+
+  useEffect(() => {
+    if (
+      !dependencyPending ||
+      !dependencyPending.commandSettled ||
+      !task ||
+      dependencyPending.contextKey !== dependencyContextKey ||
+      task.revision <= dependencyPending.taskRevision
+    )
+      return;
+
+    const edgeExists = prerequisiteTaskIds.includes(
+      dependencyPending.prerequisiteTaskId,
+    );
+    const edgeApplied =
+      dependencyPending.operation === 'add' ? edgeExists : !edgeExists;
+    setDependencyPending((current) =>
+      current?.id === dependencyPending.id ? undefined : current,
+    );
+    if (edgeApplied) {
+      if (dependencyPending.operation === 'add') setPrerequisiteTaskId('');
+      return;
+    }
+    setDependencyError(
+      'Dependency conflict: The task changed without applying the requested dependency.',
+    );
+  }, [dependencyPending, prerequisiteTaskIds, task]);
 
   const handleCommandFailure = (caught: unknown, operation: CommandType) => {
     const failure = failureDetails(caught);
@@ -546,7 +586,16 @@ export function TaskDrawer({
   ) => {
     if (!task || !selectedPrerequisiteTaskId || dependencyControlsDisabled)
       return;
-    setDependencyPending(operation);
+    const id = ++dependencyRequestId.current;
+    const contextKey = dependencyContextKey;
+    setDependencyPending({
+      id,
+      contextKey,
+      operation,
+      prerequisiteTaskId: selectedPrerequisiteTaskId,
+      taskRevision: task.revision,
+      commandSettled: false,
+    });
     setDependencyError(undefined);
     try {
       await Promise.resolve(
@@ -560,11 +609,24 @@ export function TaskDrawer({
           },
         }),
       );
-      if (operation === 'add') setPrerequisiteTaskId('');
+      if (
+        dependencyRequestId.current !== id ||
+        activeDependencyContextKey.current !== contextKey
+      )
+        return;
+      setDependencyPending((current) =>
+        current?.id === id ? { ...current, commandSettled: true } : current,
+      );
     } catch (caught) {
+      if (
+        dependencyRequestId.current !== id ||
+        activeDependencyContextKey.current !== contextKey
+      )
+        return;
+      setDependencyPending((current) =>
+        current?.id === id ? undefined : current,
+      );
       setDependencyError(dependencyFailureMessage(caught));
-    } finally {
-      setDependencyPending(undefined);
     }
   };
 
@@ -898,13 +960,21 @@ export function TaskDrawer({
                                 <button
                                   className="button button-ghost task-dependency-remove"
                                   type="button"
-                                  aria-label={`Remove ${prerequisite?.title ?? id} prerequisite`}
+                                  aria-label={
+                                    dependencyPending?.operation === 'remove' &&
+                                    dependencyPending.prerequisiteTaskId === id
+                                      ? `Removing ${prerequisite?.title ?? id} prerequisite…`
+                                      : `Remove ${prerequisite?.title ?? id} prerequisite`
+                                  }
                                   disabled={dependencyControlsDisabled}
                                   onClick={() =>
                                     void executeDependency('remove', id)
                                   }
                                 >
-                                  Remove
+                                  {dependencyPending?.operation === 'remove' &&
+                                  dependencyPending.prerequisiteTaskId === id
+                                    ? 'Removing…'
+                                    : 'Remove'}
                                 </button>
                               </li>
                             ),
@@ -973,7 +1043,7 @@ export function TaskDrawer({
                         void executeDependency('add', prerequisiteTaskId)
                       }
                     >
-                      {dependencyPending === 'add'
+                      {dependencyPending?.operation === 'add'
                         ? 'Adding prerequisite…'
                         : 'Add prerequisite'}
                     </button>

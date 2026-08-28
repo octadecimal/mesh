@@ -92,6 +92,122 @@ describe('TaskBoard', () => {
     expect(screen.getByRole('dialog', { name: 'Ready task' })).toBeVisible();
   });
 
+  it('disables only dependency-blocked forward lifecycle options and guards select changes', async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    renderBoard({
+      dependencies: [
+        dependency('second', 'progress'),
+        dependency('ready', 'progress'),
+      ],
+      onCommand,
+    });
+
+    const backlogSelect = screen.getByRole('combobox', {
+      name: 'Move Second task to',
+    });
+    expect(
+      within(backlogSelect).getByRole('option', { name: 'Ready' }),
+    ).toBeDisabled();
+    expect(
+      within(backlogSelect).getByRole('option', { name: 'Backlog' }),
+    ).toBeEnabled();
+    fireEvent.change(backlogSelect, { target: { value: 'ready' } });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    const readySelect = screen.getByRole('combobox', {
+      name: 'Move Ready task to',
+    });
+    expect(
+      within(readySelect).getByRole('option', { name: 'In progress' }),
+    ).toBeDisabled();
+    expect(
+      within(readySelect).getByRole('option', { name: 'Backlog' }),
+    ).toBeEnabled();
+    fireEvent.change(readySelect, { target: { value: 'in_progress' } });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    await user.selectOptions(readySelect, 'backlog');
+    expect(onCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'task.transition',
+        payload: expect.objectContaining({
+          taskId: 'ready',
+          nextState: 'backlog',
+        }),
+      }),
+    );
+  });
+
+  it('guards dependency-blocked forward drops while preserving reorder and backward drops', () => {
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    renderBoard({
+      dependencies: [
+        dependency('second', 'progress'),
+        dependency('ready', 'progress'),
+      ],
+      onCommand,
+    });
+
+    let transfer = dataTransfer();
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Second task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(screen.getByRole('region', { name: 'Ready tasks' }), {
+      dataTransfer: transfer,
+    });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    transfer = dataTransfer();
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Ready task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(screen.getByRole('region', { name: 'In progress tasks' }), {
+      dataTransfer: transfer,
+    });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    transfer = dataTransfer();
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Second task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(
+      screen.getByRole('article', { name: 'First task task card' }),
+      { dataTransfer: transfer },
+    );
+    expect(onCommand).toHaveBeenNthCalledWith(1, {
+      type: 'task.reorder',
+      payload: {
+        taskId: 'second',
+        expectedRevision: 1,
+        rank: 'a',
+        actor: expect.objectContaining({ type: 'human', id: 'operator' }),
+      },
+    });
+
+    transfer = dataTransfer();
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Ready task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(screen.getByRole('region', { name: 'Backlog tasks' }), {
+      dataTransfer: transfer,
+    });
+    expect(onCommand).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        type: 'task.transition',
+        payload: expect.objectContaining({
+          taskId: 'ready',
+          nextState: 'backlog',
+        }),
+      }),
+    );
+  });
+
   it('shows completed and cancelled tasks only in their filtered views', async () => {
     const user = userEvent.setup();
     renderBoard();

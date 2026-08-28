@@ -270,7 +270,7 @@ describe('TaskDrawer', () => {
     expect(onSelectTask).toHaveBeenCalledWith(reopened.id);
   });
 
-  it('adds and removes prerequisites with filtered candidates, exact revisions, and local pending state', async () => {
+  it('keeps dependency commands pending until the authoritative edge projection advances', async () => {
     const user = userEvent.setup();
     const existing = dependencyTask({
       id: 'existing-prerequisite',
@@ -295,7 +295,7 @@ describe('TaskDrawer', () => {
       .fn()
       .mockReturnValueOnce(pendingAdd.promise)
       .mockResolvedValueOnce(undefined);
-    renderDrawer({
+    const rendered = renderDrawer({
       attemptRows: [],
       taskRows: [task, existing, candidate, cancelled, otherProjectTask],
       prerequisiteTaskIds: [existing.id],
@@ -337,6 +337,25 @@ describe('TaskDrawer', () => {
     expect(screen.getByRole('button', { name: 'Save task' })).toBeEnabled();
 
     await act(async () => pendingAdd.resolve(undefined));
+    expect(
+      screen.getByRole('button', { name: 'Adding prerequisite…' }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByText('Candidate prerequisite', { selector: 'li *' }),
+    ).toBeNull();
+
+    const afterAdd = dependencyTask({ revision: 2 });
+    rendered.rerender(
+      drawerElement({
+        task: afterAdd,
+        attemptRows: [],
+        taskRows: [afterAdd, existing, candidate, cancelled, otherProjectTask],
+        prerequisiteTaskIds: [existing.id, candidate.id],
+        unmetPrerequisiteTaskIds: [existing.id, candidate.id],
+        onCommand,
+      }),
+    );
+    expect(screen.getByText('Candidate prerequisite')).toBeVisible();
     await user.click(
       screen.getByRole('button', {
         name: 'Remove Existing prerequisite prerequisite',
@@ -347,10 +366,184 @@ describe('TaskDrawer', () => {
       payload: {
         taskId: task.id,
         prerequisiteTaskId: existing.id,
-        expectedRevision: task.revision,
+        expectedRevision: 2,
         actor,
       },
     });
+    expect(
+      screen.getByRole('button', {
+        name: 'Removing Existing prerequisite prerequisite…',
+      }),
+    ).toBeDisabled();
+
+    const afterRemove = dependencyTask({ revision: 3 });
+    rendered.rerender(
+      drawerElement({
+        task: afterRemove,
+        attemptRows: [],
+        taskRows: [
+          afterRemove,
+          existing,
+          candidate,
+          cancelled,
+          otherProjectTask,
+        ],
+        prerequisiteTaskIds: [candidate.id],
+        unmetPrerequisiteTaskIds: [candidate.id],
+        onCommand,
+      }),
+    );
+    expect(
+      screen.queryByRole('button', {
+        name: 'Remove Existing prerequisite prerequisite',
+      }),
+    ).toBeNull();
+    expect(screen.getByLabelText('Add prerequisite')).toBeEnabled();
+  });
+
+  it('reports an authoritative dependency mismatch and re-enables editing', async () => {
+    const user = userEvent.setup();
+    const candidate = dependencyTask({
+      id: 'candidate-prerequisite',
+      title: 'Candidate prerequisite',
+    });
+    const pendingAdd = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(pendingAdd.promise);
+    const rendered = renderDrawer({
+      attemptRows: [],
+      taskRows: [task, candidate],
+      onCommand,
+    });
+
+    await user.selectOptions(
+      screen.getByLabelText('Add prerequisite'),
+      candidate.id,
+    );
+    await user.click(screen.getByRole('button', { name: 'Add prerequisite' }));
+    await act(async () => pendingAdd.resolve(undefined));
+
+    const resyncedTask = dependencyTask({ revision: 2 });
+    rendered.rerender(
+      drawerElement({
+        task: resyncedTask,
+        attemptRows: [],
+        taskRows: [resyncedTask, candidate],
+        onCommand,
+      }),
+    );
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Dependency conflict: The task changed without applying the requested dependency.',
+    );
+    expect(screen.getByLabelText('Add prerequisite')).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Add prerequisite' }),
+    ).toBeEnabled();
+  });
+
+  it('discards dependency request state when the project changes with the same task id', async () => {
+    const user = userEvent.setup();
+    const firstCandidate = dependencyTask({
+      id: 'first-candidate',
+      title: 'First candidate',
+    });
+    const pendingAdd = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(pendingAdd.promise);
+    const rendered = renderDrawer({
+      attemptRows: [],
+      taskRows: [task, firstCandidate],
+      onCommand,
+    });
+
+    await user.selectOptions(
+      screen.getByLabelText('Add prerequisite'),
+      firstCandidate.id,
+    );
+    await user.click(screen.getByRole('button', { name: 'Add prerequisite' }));
+
+    const nextProject = projectSchema.parse({
+      ...project,
+      id: 'project-2',
+      displayName: 'Second project',
+      repositoryIdentity: 'second-project',
+    });
+    const nextTask = dependencyTask({ projectId: nextProject.id, revision: 4 });
+    const nextCandidate = dependencyTask({
+      id: 'next-candidate',
+      projectId: nextProject.id,
+      title: 'Next candidate',
+    });
+    rendered.rerender(
+      drawerElement({
+        project: nextProject,
+        task: nextTask,
+        attemptRows: [],
+        taskRows: [nextTask, nextCandidate],
+        onCommand,
+      }),
+    );
+
+    expect(screen.getByLabelText('Add prerequisite')).toBeEnabled();
+    await user.selectOptions(
+      screen.getByLabelText('Add prerequisite'),
+      nextCandidate.id,
+    );
+    expect(
+      screen.getByRole('button', { name: 'Add prerequisite' }),
+    ).toBeEnabled();
+
+    await act(async () => pendingAdd.resolve(undefined));
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Add prerequisite' }),
+    ).toBeEnabled();
+  });
+
+  it('does not reconcile a settled dependency command against a new project context', async () => {
+    const user = userEvent.setup();
+    const firstCandidate = dependencyTask({
+      id: 'first-candidate',
+      title: 'First candidate',
+    });
+    const pendingAdd = deferred<unknown>();
+    const onCommand = vi.fn().mockReturnValue(pendingAdd.promise);
+    const rendered = renderDrawer({
+      attemptRows: [],
+      taskRows: [task, firstCandidate],
+      onCommand,
+    });
+
+    await user.selectOptions(
+      screen.getByLabelText('Add prerequisite'),
+      firstCandidate.id,
+    );
+    await user.click(screen.getByRole('button', { name: 'Add prerequisite' }));
+    await act(async () => pendingAdd.resolve(undefined));
+
+    const nextProject = projectSchema.parse({
+      ...project,
+      id: 'project-2',
+      displayName: 'Second project',
+      repositoryIdentity: 'second-project',
+    });
+    const nextTask = dependencyTask({ projectId: nextProject.id, revision: 4 });
+    const nextCandidate = dependencyTask({
+      id: 'next-candidate',
+      projectId: nextProject.id,
+      title: 'Next candidate',
+    });
+    rendered.rerender(
+      drawerElement({
+        project: nextProject,
+        task: nextTask,
+        attemptRows: [],
+        taskRows: [nextTask, nextCandidate],
+        onCommand,
+      }),
+    );
+
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByLabelText('Add prerequisite')).toBeEnabled();
   });
 
   it('shows dependency cycle and conflict failures without optimistic changes', async () => {

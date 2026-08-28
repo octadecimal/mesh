@@ -22,7 +22,7 @@ import {
 } from '../state/selectors';
 import { ProjectRunPanel } from './ProjectRunPanel';
 import { ProjectPlanningPanel } from './ProjectPlanningPanel';
-import { TaskCard } from './TaskCard';
+import { isDependencyBlockedForwardTransition, TaskCard } from './TaskCard';
 import { TaskDrawer } from './TaskDrawer';
 
 type TaskBoardProps = {
@@ -311,6 +311,14 @@ export function TaskBoard({
     nextState: TaskLifecycleState,
     targetRank?: string,
   ) => {
+    if (
+      isDependencyBlockedForwardTransition(
+        task.lifecycleState,
+        nextState,
+        selectUnmetPrerequisiteIds(projection, task.id).length,
+      )
+    )
+      return;
     if (nextState === task.lifecycleState) {
       if (!targetRank || targetRank === task.rank) return;
       submitMove(

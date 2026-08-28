@@ -43,6 +43,15 @@ const priorityLabels: Record<Task['priority'], string> = {
   urgent: 'Urgent',
 };
 
+export const isDependencyBlockedForwardTransition = (
+  currentState: TaskLifecycleState,
+  nextState: TaskLifecycleState,
+  unmetPrerequisiteCount: number,
+) =>
+  unmetPrerequisiteCount > 0 &&
+  ((currentState === 'backlog' && nextState === 'ready') ||
+    (currentState === 'ready' && nextState === 'in_progress'));
+
 export function TaskCard({
   task,
   attempts,
@@ -139,7 +148,15 @@ export function TaskCard({
           >
             {(Object.keys(statusLabels) as TaskLifecycleState[]).map(
               (state) => (
-                <option key={state} value={state}>
+                <option
+                  key={state}
+                  value={state}
+                  disabled={isDependencyBlockedForwardTransition(
+                    task.lifecycleState,
+                    state,
+                    unmetPrerequisiteCount,
+                  )}
+                >
                   {statusLabels[state]}
                 </option>
               ),
