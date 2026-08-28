@@ -4,8 +4,9 @@
 
 **Date:** 2026-08-27
 
-**Audience:** The operator manually coordinating multiple coding-agent sessions
-before Mesh V2 can perform this coordination itself.
+**Audience:** The operator coordinating multiple coding-agent sessions manually
+or through Codex task orchestration before Mesh V2 can perform this coordination
+itself.
 
 ## Purpose
 
@@ -23,6 +24,22 @@ workflow into a safe manual process:
 The canonical architecture is
 [Mesh V2 Architecture](../specs/2026-08-27-mesh-v2-architecture-design.md).
 This runbook does not replace it.
+
+## Choose an Operating Mode
+
+This runbook supports two modes with the same task contracts and safety gates:
+
+- **Codex overnight mode:** one visible Codex task receives upfront authority
+  for an approved wave and creates and manages other visible Codex tasks for
+  workers, reviewers, rework, and local integration without interactive gates.
+- **Manual harness-agnostic mode:** the operator creates each Codex, Claude Code,
+  or other harness session and routes the generated prompts and handoffs.
+
+Use Codex overnight mode when every top-level session can run as a Codex task,
+the coordinator has task-management tools, and the milestone design and plan
+are already approved and merged. Use manual mode for planning, mixed harnesses,
+or whenever task tools are unavailable. Overnight mode must stop cleanly rather
+than replacing visible tasks with opaque internal subagents.
 
 ## Operating Rules
 
@@ -50,7 +67,9 @@ Follow these rules for every milestone and wave:
 - A worker's success report is not acceptance. Review, evidence, integration,
   and the relevant test gate determine acceptance.
 - Do not launch `dispatching-parallel-agents` inside worker sessions. The
-  operator is the top-level dispatcher until Mesh owns that responsibility.
+  operator in manual mode, or the explicitly authorized Codex orchestrator in
+  automated mode, is the top-level dispatcher until Mesh owns that
+  responsibility.
 
 ## Which Skills to Use Manually
 
@@ -72,20 +91,238 @@ session must report that fact rather than pretend to invoke it. It follows the
 equivalent explicit runbook contract unless the frozen execution packet marks
 the skill as required, in which case it stops before work begins.
 
+## Codex Automated Overnight Mode
+
+### What it automates
+
+The Codex orchestrator may, without further interactive approval:
+
+- create and title visible Codex tasks for approved worker, reviewer, and
+  integrator assignments;
+- send frozen task packets and structured rework to those tasks;
+- wait for task progress and read task handoffs;
+- maintain the task-to-session status map;
+- apply the runbook's deterministic review, rework, and local integration
+  routing;
+- queue work when the authorized wave exceeds available concurrency.
+
+The overnight authorization is intentionally broad for local, reversible work
+inside the frozen milestone plan. It does not authorize changing frozen scope,
+creating or merging pull requests, pushing branches, deleting worktrees,
+resolving semantic conflicts, enabling paid API billing, handling credentials,
+or substituting another harness. These are hard stops rather than interactive
+approval prompts.
+
+### Start the orchestrator
+
+Prerequisites:
+
+1. The architecture, this runbook, approved milestone design, and approved
+   implementation plan are available on `origin/master`.
+2. The implementation plan defines at least one dependency-ready parallel wave.
+3. You are using a Codex environment with visible task-management capabilities.
+
+Start one new Codex task in the Mesh repository. Name it, for example,
+`M1 Codex Orchestrator`. Paste the following prompt, replacing only the
+milestone number and title:
+
+```text
+You are the unattended Codex task orchestrator for Mesh V2 Milestone
+{{MILESTONE_NUMBER}}: {{MILESTONE_TITLE}}.
+
+I explicitly authorize you to run one dependency-ready milestone wave
+unattended. Use the available Codex task-management tools to create, title,
+inspect, wait on, and message visible Codex tasks for workers, reviewers,
+rework, and local integration. In the Codex UI these may be called tasks; tool
+names may call them threads.
+
+Do not pause for ordinary implementation choices, task creation, review routing,
+rework, or local integration within the approved plan. Make the smallest
+reversible choice consistent with the frozen requirements and record every
+assumption in the final report.
+
+This authorization covers local task orchestration, code and documentation
+edits within assigned surfaces, tests using fake or temporary resources, local
+commits, review, rework, and a local integration branch. It does not authorize
+pull request creation, pushing, merging, destructive cleanup, paid API billing,
+credential access or modification, scope expansion, or other external side
+effects.
+
+Canonical inputs:
+- AGENTS.md
+- docs/superpowers/specs/2026-08-27-mesh-v2-architecture-design.md
+- docs/superpowers/runbooks/2026-08-27-mesh-v2-manual-parallel-development.md
+- the approved milestone design and implementation plan named by their current
+  paths in the architecture roadmap or repository documentation
+
+Operating model:
+1. You are the coordinator for this overnight wave. Do not implement product
+   code or review your own integration.
+2. Use visible, independently manageable Codex tasks for every top-level worker,
+   reviewer, and integrator. Do not substitute internal subagents for those
+   roles. A task may use a bounded native subagent only when its frozen packet
+   explicitly permits that assistance; the parent retains all ownership.
+3. Discover the available task-management capabilities before scheduling. Look
+   for semantic equivalents of create task, title task, inspect/read task, wait
+   for tasks, and send a message to a task. Current tool names may include
+   create_thread, set_thread_title, read_thread, wait_threads, and
+   send_message_to_thread. Do not create a test task merely to probe support.
+4. If visible task creation or monitoring is unavailable, stop and tell me to
+   continue with the runbook's manual mode. Do not pretend a task was created.
+5. Treat each created task as user-owned and visible. Track its milestone, wave,
+   task ID, Codex task ID, branch, base commit, latest commit, lifecycle,
+   review verdict, and attention state.
+6. Respect both the execution packet's concurrency limit and the environment's
+   available capacity. Queue excess ready tasks rather than exceeding either.
+7. Use bounded waits for active tasks and avoid busy polling. Surface only
+   meaningful progress, completion, failure, or requests for attention.
+8. If I send a new instruction while tasks are running, determine whether it
+   changes scope or adds information. Do not silently invalidate frozen work.
+
+Preflight:
+1. Read all canonical inputs and inspect the relevant repository architecture
+   and recent history using repository-prescribed navigation tools.
+2. Fetch `origin/master` and verify that it contains the architecture, this
+   runbook, the approved milestone design, and the approved implementation plan.
+   If design or plan approval cannot be established from durable repository
+   state, stop before creating tasks and tell me to complete Phases 1 and 2
+   manually.
+3. Identify the first dependency-ready wave that is not already implemented.
+   Validate its task contracts, file and interface ownership, acceptance
+   criteria, verification commands, integration order, and concurrency limit.
+4. Freeze the current `origin/master` commit and generate the Manual Execution
+   Packet internally. Do not ask me to approve it; the merged plan and this
+   prompt are the authorization.
+5. If the wave has no safe parallel work, run its single ready task through the
+   same worker, review, rework, and integration process rather than inventing
+   parallelism.
+
+Wave orchestration:
+1. Create one visible Codex task per dependency-ready worker assignment, up to
+   the allowed concurrency. Use the completely filled worker prompt contract in
+   Phase 3 of the runbook. Give every task its exact base commit, owned and
+   prohibited surfaces, acceptance criteria, verification, and handoff schema.
+2. Title tasks with milestone, wave, task ID, and role. Record every returned
+   task identifier before creating more work.
+3. Do not create later-wave tasks. Do not give two workers overlapping ownership
+   unless the approved plan explicitly serializes their changes.
+4. Wait for worker progress. For an ordinary reversible implementation choice,
+   choose the smallest option consistent with the frozen plan, send it to the
+   worker, and record the assumption. If a decision would change scope,
+   authority, a shared contract, or a safety invariant, mark only the affected
+   task blocked and continue unrelated tasks.
+5. When a worker returns a TASK HANDOFF, verify that it identifies the frozen
+   base, branch, exact commit, changed surfaces, acceptance evidence, test
+   results, and unverified items. A handoff is not acceptance.
+6. For every review-ready worker commit, create a separate visible reviewer task
+   using the filled Phase 5 reviewer prompt. The reviewer must inspect the exact
+   commit in an isolated checkout and must not edit it.
+7. If review returns rework, send the structured findings to the original worker
+   task using the Phase 6 prompt. Reuse that task and worktree when trustworthy.
+   Create a replacement worker task only when the original cannot continue, and
+   preserve the same task identity, frozen scope, and history.
+8. Send every rework commit through a new reviewer task. Do not let a reviewer
+   fix its own findings.
+9. After every task is accepted, revalidate the frozen base and task set. Create
+   one visible integrator task using the filled Phase 7 prompt. The integrator
+   combines only the reviewed commits in deterministic order and returns an
+   INTEGRATION HANDOFF.
+10. Inspect the integration handoff and supporting repository evidence. If the
+    integration gate passes, preserve the local integration branch and stop
+    before push or pull-request creation.
+11. Do not start a dependent later wave from the unmerged integration branch.
+    One overnight authorization covers one frozen wave. A later wave begins only
+    after this wave is reviewed by me and merged to `origin/master`.
+
+Failure and fallback rules:
+- If a Codex task tool is missing or fails, preserve known task IDs and state,
+  record the failure, continue work that does not need that capability, and give
+  me the exact manual prompt needed to resume.
+- If a task is interrupted, inspect its durable messages and repository state
+  before resuming or replacing it.
+- If origin/master differs from the frozen base before integration, mark
+  integration blocked; do not silently rebase. Continue gathering evidence from
+  already-running tasks where safe.
+- If tasks overlap unexpectedly or require a shared interface change, pause the
+  affected tasks and return to planning.
+- If a task reports success without its required structured handoff and
+  evidence, request the missing report; do not mark it accepted.
+- Never delete a task, branch, process, or worktree whose ownership or state is
+  ambiguous.
+- You cannot create or control Claude Code or other non-Codex sessions. Do not
+  assign external-harness work during an unattended Codex-only wave.
+
+Hard-stop conditions for an affected task or integration:
+- ambiguous user-owned or dirty work;
+- a required change outside assigned surfaces or approved scope;
+- a schema, protocol, lifecycle, permission, billing, credential, or workspace
+  safety decision not settled by the frozen plan;
+- missing required skill or harness capability;
+- semantic merge conflict or base drift;
+- verification that would invoke real external-agent traffic or another paid
+  API;
+- destructive cleanup or any external write.
+
+When a hard stop affects one task, block that task and continue independent
+tasks. When it invalidates the frozen base, shared contract, or whole wave, stop
+creating new tasks, allow safe read-only verification to finish, and preserve
+all state for morning review.
+
+Communication:
+- Keep a concise durable orchestration ledger mapping task IDs to Codex tasks,
+  branches, commits, reviews, rework, and integration state.
+- Do not wake or interrupt me for ordinary status. Continue until the wave is
+  locally integrated or no safe progress remains.
+- At completion, return a MORNING HANDOFF containing the frozen base, every task
+  and Codex task ID, commits, review verdicts, rework history, integration branch
+  and head, verification commands and results, assumptions, blocked items,
+  unverified risks, and the exact next operator action.
+- Do not claim the wave complete merely because tasks exited. Completion
+  requires the integration handoff and wave-level evidence.
+
+Begin now with capability discovery and preflight. If preflight passes, run the
+first dependency-ready wave unattended through local integration. Do not create
+a pull request or merge.
+```
+
+### What you still do as the operator
+
+Before starting the overnight task, you still:
+
+- complete and merge the milestone design and implementation plan;
+- ensure the next wave is acceptable for unattended local execution;
+- leave the repository and relevant worktrees in an unambiguous state.
+
+In the morning, you review the `MORNING HANDOFF`, resolve blocked decisions,
+perform hands-on testing when appropriate, and explicitly authorize any push,
+pull request, merge, or cleanup. You may open any created task in the sidebar,
+but routine coordination should flow through the orchestrator so its ledger
+remains coherent.
+
+### Overnight-mode fallback
+
+If preflight finds that visible task tools, the approved plan, or a safe frozen
+wave are unavailable, overnight execution does not begin. Continue at Phase 1
+below or use the recorded manual prompts. If automation fails after tasks have
+started, do not recreate them blindly. Give the orchestrator's task ledger to a
+manual coordinator and follow the recovery procedures in this document.
+
 ## Session Roles
 
 ### Operator
 
-You are the operator. You create sessions, paste prompts, answer product
-questions, decide whether a design is approved, route worker reports, authorize
-pull requests, perform hands-on testing, and approve merges.
+You are the operator. In manual mode you create sessions, paste prompts, and
+route worker reports. In overnight mode the Codex orchestrator performs those
+mechanical steps for one preauthorized wave. You approve and merge the design
+and plan before launch, then review the morning evidence before authorizing any
+external write, pull request, merge, or cleanup.
 
 ### Coordinator
 
-The coordinator is the manual PM and scheduler. It owns the milestone design,
-implementation plan, dependency graph, task contracts, wave authorization,
-prompt generation, and disposition of reports. It does not implement product
-code.
+The coordinator is the PM and scheduler, operated through a human-driven session
+or a Codex orchestrator. It owns the milestone design, implementation plan,
+dependency graph, task contracts, wave authorization, prompt generation, and
+disposition of reports. It does not implement product code.
 
 Keep one coordinator session alive for the entire milestone. If it is lost,
 start a replacement from the approved design, plan, frozen base commit, and the
