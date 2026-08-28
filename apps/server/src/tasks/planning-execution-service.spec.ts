@@ -251,6 +251,7 @@ const start = (
 ) =>
   service.start({
     projectId: 'project-1',
+    expectedProjectRevision: 1,
     goal: 'Plan dependency-aware delivery.',
     constraints: 'Preserve current task authority.\nUse durable state.',
     nonGoals: 'Do not schedule continuously.',
@@ -350,6 +351,52 @@ describe('PlanningExecutionService', () => {
     );
   });
 
+  it('rejects a project revision changed during identity resolution before planning side effects', async () => {
+    const identityStarted = deferred();
+    const releaseIdentity = deferred();
+    const { project, registry, repositories: repos, service } = arrange({
+      resolveIdentity: async () => {
+        identityStarted.resolve();
+        await releaseIdentity.promise;
+        return resolvedIdentity;
+      },
+    });
+    const published = vi.spyOn(registry.publisher, 'publishProject');
+
+    const starting = start(service, {
+      expectedProjectRevision: project.revision,
+    });
+    await identityStarted.promise;
+    const updated = repos.projects.update(
+      {
+        ...project,
+        displayName: 'Project changed while identity resolved',
+        updatedAt: '2026-08-27T12:01:00.000Z',
+      },
+      project.revision,
+    );
+    if (!updated) throw new Error('Expected the project update to commit');
+    releaseIdentity.resolve();
+
+    await expect(starting).rejects.toMatchObject({
+      code: 'project_revision_conflict',
+      details: { project: { id: project.id, revision: updated.revision } },
+    });
+    expect(repos.plans.getActiveByProject(project.id)).toBeUndefined();
+    expect(repos.sessions.listByProject(project.id)).toEqual([]);
+    expect(repos.workspaces.listByProject(project.id)).toEqual([]);
+    expect(repos.projectEvents.after(project.id, 0)).toEqual([]);
+    expect(registry.create).not.toHaveBeenCalled();
+    expect(published).not.toHaveBeenCalled();
+    expect(
+      repos.database
+        .prepare(
+          'SELECT state FROM processed_commands WHERE idempotency_key = ?',
+        )
+        .get('plan-start-1'),
+    ).toEqual({ state: 'failed' });
+  });
+
   it('approves a fresh base whose board rank order is inverse to task ID order', async () => {
     const { registry, repositories, service } = arrange();
     repositories.database.exec(`
@@ -392,7 +439,7 @@ describe('PlanningExecutionService', () => {
     const { registry, service } = arrange();
 
     const first = await start(service);
-    const duplicate = await start(service);
+    const duplicate = await start(service, { expectedProjectRevision: 999 });
 
     expect(duplicate).toEqual(first);
     expect(registry.create).toHaveBeenCalledTimes(1);

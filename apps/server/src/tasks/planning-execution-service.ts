@@ -60,6 +60,7 @@ import {
 
 export type StartPlanningInput = {
   projectId: string;
+  expectedProjectRevision: number;
   goal: string;
   constraints: string;
   nonGoals: string;
@@ -219,6 +220,13 @@ export class PlanningExecutionService {
     const execution = this.executeCommand(commandId, () => {
       this.assertBillingSafe();
       const project = this.requireActiveProject(candidate.id);
+      if (project.revision !== input.expectedProjectRevision) {
+        throw new PlanningExecutionError(
+          'project_revision_conflict',
+          `Project '${project.id}' has changed`,
+          { project },
+        );
+      }
       this.assertIdentityCurrent(project, candidate, identity);
       if (this.dependencies.plans.getActiveByProject(project.id)) {
         throw new PlanningExecutionError(

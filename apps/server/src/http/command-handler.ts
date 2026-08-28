@@ -333,6 +333,7 @@ const executePlanningCommand = async (
   if (command.type === 'project.plan.start') {
     const result = await requirePlanningExecutionService(dependencies).start({
       projectId: command.payload.projectId,
+      expectedProjectRevision: command.payload.expectedProjectRevision,
       goal: command.payload.goal,
       constraints: command.payload.constraints.join('\n'),
       nonGoals: command.payload.nonGoals.join('\n'),
@@ -343,7 +344,10 @@ const executePlanningCommand = async (
   }
   if (command.type === 'project.plan.request_revision') {
     const details = dependencies.plans.getDetails(command.payload.planId);
-    if (!details) {
+    if (
+      !details ||
+      details.plan.projectId !== command.payload.projectId
+    ) {
       throw new CommandError(
         'project_plan_not_found',
         `Project plan '${command.payload.planId}' was not found`,

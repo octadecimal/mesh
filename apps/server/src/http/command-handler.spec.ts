@@ -283,7 +283,11 @@ describe('executeCommand', () => {
     const dependencies = {
       ...fixture.dependencies,
       plans: {
-        getDetails: () => ({ proposals: [{ id: 'proposal-latest' }] }) as never,
+        getDetails: () =>
+          ({
+            plan: { projectId: 'project-1' },
+            proposals: [{ id: 'proposal-latest' }],
+          }) as never,
         listSummaries: fixture.repositories.plans.listSummaries.bind(
           fixture.repositories.plans,
         ),
@@ -312,6 +316,7 @@ describe('executeCommand', () => {
         spy: planningExecutionService.start,
         expected: {
           projectId: 'project-1',
+          expectedProjectRevision: 3,
           goal: 'Plan milestone seven',
           constraints: 'Preserve audit order\nStay read-only',
           nonGoals: 'Do not launch work',
@@ -511,6 +516,50 @@ describe('executeCommand', () => {
 
     expect(approve).toHaveBeenCalledOnce();
     expect(result.commandType).toBe('project.plan.approve');
+  });
+
+  it('hides revision proposals until plan ownership is verified', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const requestRevision = vi.fn();
+
+    const error = await executeCommand(
+      projectCommand('wrong-owner-revision', {
+        type: 'project.plan.request_revision',
+        payload: {
+          projectId: 'project-1',
+          planId: 'plan-owned-by-project-2',
+          expectedPlanRevision: 2,
+          feedback: 'Revise this plan.',
+          actor: { type: 'human', id: 'planning-operator' },
+        },
+      }),
+      {
+        ...fixture.dependencies,
+        plans: {
+          getDetails: () =>
+            ({
+              plan: { projectId: 'project-2' },
+              proposals: [],
+            }) as never,
+          listSummaries: fixture.repositories.plans.listSummaries.bind(
+            fixture.repositories.plans,
+          ),
+        },
+        planningExecutionService: {
+          start: vi.fn(),
+          requestRevision,
+          resume: vi.fn(),
+          retry: vi.fn(),
+          cancel: vi.fn(),
+        } as never,
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(requestRevision).not.toHaveBeenCalled();
+    expect(toHttpError(error)).toMatchObject({
+      statusCode: 404,
+      body: { error: { code: 'project_plan_not_found' } },
+    });
   });
 
   it('dispatches all project-run controls without owning launch scheduling', async () => {

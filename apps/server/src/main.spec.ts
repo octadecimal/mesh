@@ -458,6 +458,56 @@ describe('production composition', () => {
     }
   });
 
+  it('refuses a stale project revision before planning runtime or driver effects', async () => {
+    const fixture = await createPlanningFixture('stale');
+    const driver = new FakeClaudeSessionDriver();
+    const running = await startServer({
+      environment: fixture.environment,
+      test: { driver, webRoot: fixture.directory },
+    });
+    try {
+      const response = await running.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: startPlanningCommand(
+          fixture.project.id,
+          fixture.project.revision + 1,
+          'start-pm-stale-project',
+        ),
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: {
+          code: 'project_revision_conflict',
+          details: {
+            project: {
+              id: fixture.project.id,
+              revision: fixture.project.revision,
+            },
+          },
+        },
+      });
+      expect(driver.createdRequests).toEqual([]);
+      expect(driver.createdSessions).toEqual([]);
+
+      const observation = openDatabase(fixture.databasePath);
+      try {
+        expect(
+          observation
+            .prepare('SELECT COUNT(*) AS count FROM project_plans')
+            .get(),
+        ).toEqual({ count: 0 });
+        expect(
+          observation.prepare('SELECT COUNT(*) AS count FROM sessions').get(),
+        ).toEqual({ count: 0 });
+      } finally {
+        observation.close();
+      }
+    } finally {
+      await running.close();
+    }
+  });
+
   it('routes planning audit failures through the central runtime barrier', async () => {
     const fixture = await createPlanningFixture('audit');
     const database = openDatabase(fixture.databasePath);
