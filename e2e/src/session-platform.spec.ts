@@ -475,14 +475,10 @@ const reviewCurrentProposal = async (page: Page) => {
   return panel;
 };
 
-const pmRuntimeCounts = (harness: FakeClaudeHarness) => ({
-  create: harness.driver.createdRequests.filter(
-    (request) => request.role?.role === 'pm',
-  ).length,
-  resume: harness.driver.resumedRequests.filter(
-    (request) => request.role?.role === 'pm',
-  ).length,
-  configuration: harness.pmRuntimeConfigurations().length,
+const fakeDriverRequestCounts = (harness: FakeClaudeHarness) => ({
+  createRequests: harness.driver.createdRequests.length,
+  resumeRequests: harness.driver.resumedRequests.length,
+  pmConfigurations: harness.pmRuntimeConfigurations().length,
 });
 
 test('keeps the empty cockpit usable at a narrow viewport', async ({
@@ -2299,7 +2295,7 @@ test('pm planning awaiting review survives restart without a live pm', async ({
   );
   const sessionId = beforeRestart.activePlan?.currentSessionId;
   if (!sessionId) throw new Error('Expected the PM planning session');
-  const runtimeCountsBeforeRestart = pmRuntimeCounts(harness);
+  const driverCountsBeforeRestart = fakeDriverRequestCounts(harness);
 
   await harness.restart({ recoverSessionId: sessionId });
   await page.goto(harness.origin);
@@ -2313,7 +2309,7 @@ test('pm planning awaiting review survives restart without a live pm', async ({
   await expect(
     page.getByRole('region', { name: 'Project planning' }),
   ).toContainText('Proposal ready for review');
-  expect(pmRuntimeCounts(harness)).toEqual(runtimeCountsBeforeRestart);
+  expect(fakeDriverRequestCounts(harness)).toEqual(driverCountsBeforeRestart);
 });
 
 test('pm planning marks a formerly live runtime for attention', async ({
