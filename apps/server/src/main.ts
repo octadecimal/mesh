@@ -34,12 +34,14 @@ import { DiagnosticRepository } from './repositories/diagnostic-repository.js';
 import { DeveloperExecutionRepository } from './repositories/developer-execution-repository.js';
 import { EventRepository } from './repositories/event-repository.js';
 import { LayoutRepository } from './repositories/layout-repository.js';
+import { PlanningRepository } from './repositories/planning-repository.js';
 import { ProjectEventRepository } from './repositories/project-event-repository.js';
 import { ProjectRepository } from './repositories/project-repository.js';
 import { ProjectRunRepository } from './repositories/project-run-repository.js';
 import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
 import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
+import { TaskDependencyRepository } from './repositories/task-dependency-repository.js';
 import { TaskRepository } from './repositories/task-repository.js';
 import { TaskTransitionRepository } from './repositories/task-transition-repository.js';
 import { WorkspaceRepository } from './repositories/workspace-repository.js';
@@ -49,12 +51,16 @@ import { AttemptService } from './tasks/attempt-service.js';
 import { DeveloperCapabilityRegistry } from './tasks/developer-capability-registry.js';
 import { DeveloperExecutionService } from './tasks/developer-execution-service.js';
 import { DeveloperReworkService } from './tasks/developer-rework-service.js';
+import { PlanApprovalService } from './tasks/plan-approval-service.js';
+import { PlanningCapabilityRegistry } from './tasks/planning-capability-registry.js';
+import { PlanningExecutionService } from './tasks/planning-execution-service.js';
 import { QaCapabilityRegistry } from './tasks/qa-capability-registry.js';
 import { QaExecutionService } from './tasks/qa-execution-service.js';
 import {
   reconcileTaskAttemptLaunchReservations,
   reconcileTaskAttempts,
 } from './tasks/reconcile-attempts.js';
+import { reconcileProjectPlans } from './tasks/reconcile-project-plans.js';
 import { ReviewAutomationService } from './tasks/review-automation-service.js';
 import { ProjectRunService } from './tasks/project-run-service.js';
 import { createProjectRunPreflight } from './tasks/project-run-preflight.js';
@@ -64,6 +70,7 @@ import {
 } from './tasks/project-run-workspace.js';
 import { reconcileProjectRuns } from './tasks/reconcile-project-runs.js';
 import { TaskService } from './tasks/task-service.js';
+import { TaskDependencyService } from './tasks/task-dependency-service.js';
 
 class BillingBlockedDriver implements ClaudeSessionDriver {
   constructor(private readonly conflicts: readonly BillingConflict[]) {}
@@ -193,6 +200,7 @@ export const startServer = async (
   const projects = new ProjectRepository(database);
   const projectRuns = new ProjectRunRepository(database);
   const tasks = new TaskRepository(database);
+  const dependencies = new TaskDependencyRepository(database);
   const attempts = new TaskAttemptRepository(database);
   const transitions = new TaskTransitionRepository(database);
   const projectEvents = new ProjectEventRepository(database);
@@ -204,11 +212,13 @@ export const startServer = async (
   const events = new EventRepository(database, diagnostics);
   const layouts = new LayoutRepository(database);
   const commands = new CommandRepository(database);
+  const plans = new PlanningRepository(database);
   const originPolicy = createOriginPolicy(config.developmentOrigin);
   const taskService = new TaskService({
     database,
     projects,
     tasks,
+    dependencies,
     transitions,
     projectEvents,
     commands,
@@ -221,13 +231,16 @@ export const startServer = async (
   );
   const capabilities = new DeveloperCapabilityRegistry();
   const qaCapabilities = new QaCapabilityRegistry();
+  const planningCapabilities = new PlanningCapabilityRegistry();
   const roleServices: {
     reviewAutomation?: ReviewAutomationService;
     projectRuns?: ProjectRunService;
   } = {};
   const runDrains = new Map<string, Promise<void>>();
   const rerunRunDrains = new Set<string>();
-  let pendingStoppedRuntimeReconciliation: SessionRegistry | undefined;
+  let pendingStoppedRuntimeReconciliation:
+    | { registry: SessionRegistry; sessionIds: Set<string> }
+    | undefined;
   let runDrainFailure: unknown;
   const requireReviewAutomation = (): ReviewAutomationService => {
     if (!roleServices.reviewAutomation) {
@@ -286,10 +299,12 @@ export const startServer = async (
           runDrains.delete(runId);
           if (rerunRunDrains.delete(runId)) scheduleRunDrains([runId]);
           if (runDrains.size === 0 && pendingStoppedRuntimeReconciliation) {
-            const activeRegistry = pendingStoppedRuntimeReconciliation;
+            const pending = pendingStoppedRuntimeReconciliation;
             pendingStoppedRuntimeReconciliation = undefined;
             try {
-              reconcileStoppedRuntime(activeRegistry);
+              reconcileStoppedRuntime(pending.registry, [
+                ...pending.sessionIds,
+              ]);
             } catch {
               // The reconciliation path already tripped the central audit barrier.
             }
@@ -304,13 +319,22 @@ export const startServer = async (
     }
     if (runDrainFailure) throw runDrainFailure;
   };
-  function reconcileStoppedRuntime(activeRegistry: SessionRegistry): void {
+  function reconcileStoppedRuntime(
+    activeRegistry: SessionRegistry,
+    stoppedSessionIds: readonly string[] = [],
+  ): void {
     if (runDrains.size > 0) {
-      pendingStoppedRuntimeReconciliation = activeRegistry;
+      pendingStoppedRuntimeReconciliation ??= {
+        registry: activeRegistry,
+        sessionIds: new Set(),
+      };
+      for (const sessionId of stoppedSessionIds) {
+        pendingStoppedRuntimeReconciliation.sessionIds.add(sessionId);
+      }
       return;
     }
-    const cursors = projectCursors();
     try {
+      const cursors = projectCursors();
       const result = reconcileTaskAttempts({
         database,
         projects,
@@ -326,6 +350,17 @@ export const startServer = async (
       });
       runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
       reconcileTaskAttemptLaunchReservations(database);
+      for (const stoppedSessionId of stoppedSessionIds) {
+        reconcileProjectPlans({
+          database,
+          projects,
+          plans,
+          sessions,
+          projectEvents,
+          capabilities: planningCapabilities,
+          stoppedSessionId,
+        });
+      }
       publishRecoveredEvents(cursors, activeRegistry);
       for (const taskId of new Set(
         result.repairs.map((repair) => repair.taskId),
@@ -351,7 +386,11 @@ export const startServer = async (
       qaCapabilities.invalidateSession(sessionId);
       qaExecutionService.cancelRuntime(sessionId);
     },
-    onRuntimeStopped: () => reconcileStoppedRuntime(registry),
+    invalidatePlanningCapability: (sessionId) => {
+      planningCapabilities.invalidateSession(sessionId);
+    },
+    onRuntimeStopped: (sessionId) =>
+      reconcileStoppedRuntime(registry, [sessionId]),
   });
   const developerExecutionService = new DeveloperExecutionService({
     projects,
@@ -401,11 +440,61 @@ export const startServer = async (
       processRunner,
     );
   const git = new GitAdapter(processRunner, pathOptions);
+  const planningRegistry = {
+    get auditStatus() {
+      return registry.auditStatus;
+    },
+    create: registry.create.bind(registry),
+    resume: registry.resume.bind(registry),
+    interrupt: registry.interrupt.bind(registry),
+    reportAuditFailure: failProjectRunAudit,
+    publisher: registry.publisher,
+  };
+  const planningExecutionService = new PlanningExecutionService({
+    database,
+    projects,
+    tasks,
+    dependencies,
+    plans,
+    sessions,
+    workspaces,
+    diagnostics,
+    events,
+    projectEvents,
+    commands,
+    capabilities: planningCapabilities,
+    registry: planningRegistry,
+    billingConflicts,
+    pathOptions,
+    resolveIdentity,
+  });
+  const planApprovalService = new PlanApprovalService({
+    database,
+    projects,
+    tasks,
+    dependencies,
+    plans,
+    projectEvents,
+    commands,
+    publisher: registry.publisher,
+    onAuditFailure: failProjectRunAudit,
+  });
+  const taskDependencyService = new TaskDependencyService({
+    projects,
+    tasks,
+    attempts,
+    dependencies,
+    projectEvents,
+    commands,
+    publisher: registry.publisher,
+    onAuditFailure: failProjectRunAudit,
+  });
   const attemptService = new AttemptService({
     database,
     projects,
     projectRuns,
     tasks,
+    dependencies,
     attempts,
     sessions,
     workspaces,
@@ -427,6 +516,7 @@ export const startServer = async (
     database,
     projects,
     tasks,
+    dependencies,
     attempts,
     developerExecutions,
     projectRuns,
@@ -530,12 +620,30 @@ export const startServer = async (
     projectRuns,
     billingConflicts,
   });
+  try {
+    reconcileProjectPlans({
+      database,
+      projects,
+      plans,
+      sessions,
+      projectEvents,
+      capabilities: planningCapabilities,
+    });
+  } catch (error) {
+    failProjectRunAudit(error);
+    throw error;
+  }
   publishRecoveredEvents(recoveryCursors, registry);
   const app = buildApp({
     database,
     projects,
     tasks,
+    dependencies,
+    plans,
     taskService,
+    planningExecutionService,
+    planApprovalService,
+    taskDependencyService,
     attemptService,
     developerExecutionService,
     qaExecutionService,

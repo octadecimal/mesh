@@ -1,6 +1,7 @@
 import type {
   DeveloperBlockerReportInput,
   DeveloperCompletionReportInput,
+  ProjectPlanProposalInput,
   QaReportInput,
 } from '@mesh-session-platform/contracts';
 
@@ -11,6 +12,7 @@ import type {
   DiscoveredClaudeSession,
   DriverEvent,
   DriverSession,
+  PmRuntimeConfiguration,
   RoleRuntimeConfiguration,
   ResumeClaudeSessionRequest,
   StartClaudeSessionRequest,
@@ -115,6 +117,11 @@ export type FakeQaStep =
   | { type: 'qa.wait' }
   | { type: 'qa.startup_failure'; message: string };
 
+export type FakePmStep =
+  | { type: 'pm.proposal'; proposal: ProjectPlanProposalInput }
+  | { type: 'pm.wait' }
+  | { type: 'pm.startup_failure'; message: string };
+
 export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
   readonly createdRequests: StartClaudeSessionRequest[] = [];
   readonly createdSessions: FakeDriverSession[] = [];
@@ -124,6 +131,8 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
   > = [];
   private readonly qaSteps: FakeQaStep[];
   private readonly qaActions: Promise<void>[] = [];
+  private readonly pmSteps: FakePmStep[];
+  private readonly pmActions: Promise<void>[] = [];
   private createdCount = 0;
 
   constructor(
@@ -131,9 +140,11 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
       discovered?: DiscoveredClaudeSession[];
       subscriptionLimit?: number;
       qaSteps?: readonly FakeQaStep[];
+      pmSteps?: readonly FakePmStep[];
     } = {},
   ) {
     this.qaSteps = [...(options.qaSteps ?? [])];
+    this.pmSteps = [...(options.pmSteps ?? [])];
   }
 
   async discover(
@@ -150,12 +161,15 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
       throw new FakeSubscriptionLimitError();
     }
     this.createdCount += 1;
-    const qaStart = this.prepareQaStart(request.role);
+    const roleStart =
+      request.role?.role === 'qa'
+        ? this.prepareQaStart(request.role)
+        : this.preparePmStart(request.role);
     this.createdRequests.push({ ...request });
     this.developerConfigurations.push(request.developer);
     const session = new FakeDriverSession(
       `fake-resume-${this.createdCount}`,
-      qaStart,
+      roleStart,
     );
     if (request.developer) {
       await session.sendPrompt(request.developer.initialPrompt);
@@ -173,7 +187,9 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
     this.developerConfigurations.push(request.developer);
     const session = new FakeDriverSession(
       request.claudeResumeId,
-      this.prepareQaStart(request.role),
+      request.role?.role === 'qa'
+        ? this.prepareQaStart(request.role)
+        : this.preparePmStart(request.role),
     );
     if (request.developer) {
       await session.sendPrompt(request.developer.initialPrompt);
@@ -199,6 +215,10 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
 
   async drainQaSteps(): Promise<void> {
     await Promise.all(this.qaActions);
+  }
+
+  async drainPmSteps(): Promise<void> {
+    await Promise.all(this.pmActions);
   }
 
   private developerConfiguration(index: number): DeveloperRuntimeConfiguration {
@@ -242,6 +262,38 @@ export class FakeClaudeSessionDriver implements ClaudeSessionDriver {
         if (result.isError) {
           throw new Error('Scripted QA verdict control failed');
         }
+        resolveAction();
+      } catch (error) {
+        rejectAction(error);
+        throw error;
+      }
+    };
+  }
+
+  private preparePmStart(
+    configuration: PmRuntimeConfiguration | undefined,
+  ): (() => Promise<void>) | undefined {
+    if (!configuration) return undefined;
+    const step = this.pmSteps.shift();
+    if (!step) return undefined;
+    if (step.type === 'pm.startup_failure') {
+      throw new Error(step.message);
+    }
+    if (step.type === 'pm.wait') {
+      this.pmActions.push(Promise.resolve());
+      return undefined;
+    }
+
+    let resolveAction!: () => void;
+    let rejectAction!: (error: unknown) => void;
+    const action = new Promise<void>((resolve, reject) => {
+      resolveAction = resolve;
+      rejectAction = reject;
+    });
+    this.pmActions.push(action);
+    return async () => {
+      try {
+        await configuration.submitProposal(step.proposal);
         resolveAction();
       } catch (error) {
         rejectAction(error);

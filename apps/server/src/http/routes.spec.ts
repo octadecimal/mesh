@@ -5,6 +5,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   QaCapabilityInvalidError,
   idSchema,
+  projectPlanBaseSchema,
+  projectPlanDetailsSchema,
+  projectPlanHistoryPageSchema,
+  projectPlanSchema,
   projectSchema,
   taskAttemptSchema,
   taskSchema,
@@ -17,6 +21,9 @@ import { QaVerificationExecutableUnavailableError } from '../platform/qa-verific
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
 import type { QaExecutionService } from '../tasks/qa-execution-service.js';
+import type { PlanApprovalService } from '../tasks/plan-approval-service.js';
+import type { PlanningExecutionService } from '../tasks/planning-execution-service.js';
+import type { TaskDependencyService } from '../tasks/task-dependency-service.js';
 import {
   ProjectRunServiceError,
   type ProjectRunService,
@@ -50,6 +57,12 @@ const setup = (options?: {
     QaExecutionService,
     'launch' | 'submitVerdict' | 'repairInterrupted'
   >;
+  planningExecutionService?: Pick<
+    PlanningExecutionService,
+    'start' | 'requestRevision' | 'resume' | 'retry' | 'cancel'
+  >;
+  planApprovalService?: Pick<PlanApprovalService, 'approve' | 'reject'>;
+  taskDependencyService?: Pick<TaskDependencyService, 'add' | 'remove'>;
 }) => {
   const repositories = createTestRepositories();
   const workspacePath = options?.useDatabaseDirectoryAsWorkspace
@@ -1394,6 +1407,251 @@ describe('HTTP command routes', () => {
     expect(invalidCursor.json()).toMatchObject({
       error: { code: 'invalid_command' },
     });
+  });
+
+  it('returns stable status codes for planning and dependency failures', async () => {
+    let currentCode: StableTaskErrorCode = 'project_plan_not_found';
+    const fail = () => {
+      throw Object.assign(new Error(`Command failed with ${currentCode}`), {
+        code: currentCode,
+        details: { currentCode },
+      });
+    };
+    const fixture = setup({
+      planningExecutionService: {
+        start: fail,
+        requestRevision: fail,
+        resume: fail,
+        retry: fail,
+        cancel: fail,
+      },
+      planApprovalService: { approve: fail, reject: fail },
+      taskDependencyService: { add: fail, remove: fail },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+    fixture.repositories.tasks.create(
+      taskSchema.parse({
+        id: 'dependency-task',
+        projectId: 'p1',
+        title: 'Dependency task',
+        description: '',
+        acceptanceCriteria: [],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'backlog',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const cases = [
+      ['project_plan_not_found', 404],
+      ['project_plan_revision_conflict', 409],
+      ['project_plan_lifecycle_invalid', 409],
+      ['project_plan_stale', 409],
+      ['project_plan_proposal_invalid', 422],
+      ['project_plan_proposal_limit_exceeded', 422],
+      ['project_plan_unauthorized', 403],
+      ['project_plan_billing_conflict', 409],
+      ['project_plan_repair_required', 409],
+      ['task_dependency_cycle', 409],
+      ['task_dependency_conflict', 409],
+      ['task_dependency_invalid', 422],
+    ] as const satisfies ReadonlyArray<readonly [StableTaskErrorCode, number]>;
+
+    for (const [code, statusCode] of cases) {
+      currentCode = code;
+      const dependencyFailure = code.startsWith('task_dependency_');
+      const response = await fixture.app.inject({
+        method: 'POST',
+        url: '/api/commands',
+        payload: {
+          protocolVersion: 1,
+          idempotencyKey: `command-${code}`,
+          command: dependencyFailure
+            ? {
+                type: 'task.dependency.add',
+                payload: {
+                  taskId: 'dependency-task',
+                  prerequisiteTaskId: 'dependency-prerequisite',
+                  expectedRevision: 1,
+                  actor: { type: 'human', id: 'operator' },
+                },
+              }
+            : {
+                type: 'project.plan.resume',
+                payload: {
+                  projectId: 'p1',
+                  planId: 'plan-1',
+                  expectedPlanRevision: 1,
+                  actor: { type: 'human', id: 'operator' },
+                },
+              },
+        },
+      });
+
+      expect(response.statusCode).toBe(statusCode);
+      expect(response.json()).toEqual({
+        error: {
+          code,
+          message: `Command failed with ${code}`,
+          details: { currentCode: code },
+        },
+      });
+    }
+  });
+
+  it('returns a stable 20-plan page and owned plan details for archived projects', async () => {
+    const fixture = setup();
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+    const project = fixture.repositories.projects.get('p1');
+    const firstSession = fixture.repositories.sessions.get('s1');
+    if (!project || !firstSession) throw new Error('Expected seeded project');
+    const actor = { type: 'human' as const, id: 'operator' };
+
+    for (let ordinal = 1; ordinal <= 21; ordinal += 1) {
+      const suffix = String(ordinal).padStart(2, '0');
+      const planId = `plan-${suffix}`;
+      const sessionId =
+        ordinal === 1
+          ? firstSession.id
+          : idSchema.parse(`plan-session-${suffix}`);
+      const occurredAt = new Date(
+        Date.UTC(2026, 7, ordinal, 12, 0, 0),
+      ).toISOString();
+      if (ordinal !== 1) {
+        fixture.repositories.sessions.create({
+          ...firstSession,
+          id: sessionId,
+          title: `Planning session ${suffix}`,
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        });
+      }
+      fixture.repositories.plans.create({
+        plan: projectPlanSchema.parse({
+          id: planId,
+          projectId: project.id,
+          goal: `Plan goal ${suffix}`,
+          constraints: [],
+          nonGoals: [],
+          policyVersion: 'pm-readonly-v1',
+          status: 'cancelled',
+          revision: 1,
+          currentBaseId: `plan-base-${suffix}`,
+          currentSessionId: sessionId,
+          latestProposalOrdinal: 0,
+          feedback: [],
+          attention: null,
+          createdBy: actor,
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+          terminalAt: occurredAt,
+          terminalBy: actor,
+          terminalReason: 'Historical test plan',
+        }),
+        base: projectPlanBaseSchema.parse({
+          id: `plan-base-${suffix}`,
+          planId,
+          ordinal: 1,
+          repositoryIdentity: project.repositoryIdentity,
+          tasks: [],
+          dependencies: [],
+          projectArchivedAt: null,
+          projectRevision: project.revision,
+          policyRevision: project.qaConfiguration.revision,
+          createdAt: occurredAt,
+        }),
+        sessionId,
+      });
+    }
+    const archived = fixture.repositories.projects.update(
+      { ...project, archivedAt: now, updatedAt: now },
+      project.revision,
+    );
+    if (!archived) throw new Error('Expected project archive');
+
+    const firstPageResponse = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/p1/plans',
+    });
+    const firstPage = projectPlanHistoryPageSchema.parse(
+      firstPageResponse.json(),
+    );
+    expect(firstPageResponse.statusCode).toBe(200);
+    expect(firstPage.plans).toHaveLength(20);
+    expect(firstPage.plans.map(({ id: planId }) => planId)).toEqual(
+      Array.from(
+        { length: 20 },
+        (_, index) => `plan-${String(21 - index).padStart(2, '0')}`,
+      ),
+    );
+    expect(firstPage.nextAfter).toBe('plan-02');
+
+    const secondPageResponse = await fixture.app.inject({
+      method: 'GET',
+      url: `/api/projects/p1/plans?before=${firstPage.nextAfter}`,
+    });
+    const secondPage = projectPlanHistoryPageSchema.parse(
+      secondPageResponse.json(),
+    );
+    expect(secondPage.plans.map(({ id: planId }) => planId)).toEqual([
+      'plan-01',
+    ]);
+    expect(secondPage.nextAfter).toBeUndefined();
+
+    const detailsResponse = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/p1/plans/plan-21',
+    });
+    expect(detailsResponse.statusCode).toBe(200);
+    expect(projectPlanDetailsSchema.parse(detailsResponse.json()).plan.id).toBe(
+      'plan-21',
+    );
+
+    const missingProject = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/missing/plans',
+    });
+    const missingPlan = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/p1/plans/missing-plan',
+    });
+    fixture.repositories.projects.create(
+      projectSchema.parse({
+        id: 'p2',
+        displayName: 'Other project',
+        repositoryPath: 'C:/code/other',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    const wrongOwner = await fixture.app.inject({
+      method: 'GET',
+      url: '/api/projects/p2/plans/plan-21',
+    });
+
+    expect(missingProject.statusCode).toBe(404);
+    expect(missingProject.json()).toMatchObject({
+      error: { code: 'project_not_found' },
+    });
+    for (const response of [missingPlan, wrongOwner]) {
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toMatchObject({
+        error: { code: 'project_plan_not_found' },
+      });
+    }
   });
 
   it('publishes a project event only after the task mutation is committed', async () => {

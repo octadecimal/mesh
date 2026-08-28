@@ -14,11 +14,13 @@ import {
   sessionSchema,
   taskActorSchema,
   taskAttemptSchema,
+  taskDependencySchema,
   taskSchema,
   type MutatingCommand,
   type ProjectSnapshot,
   type ProjectRun,
   type Task,
+  type TaskDependency,
 } from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
 
@@ -50,6 +52,258 @@ describe('TaskBoard', () => {
     expect(within(card).getByText('2 attempts')).toBeDefined();
     expect(within(card).getByText('Blocked')).toBeDefined();
     expect(within(card).getByText('Waiting for design')).toBeDefined();
+  });
+
+  it('shows only unmet prerequisite counts and preserves task selection through dependency links', async () => {
+    const user = userEvent.setup();
+    const onSelectTask = vi.fn();
+    const dependencies = [
+      dependency('second', 'ready'),
+      dependency('second', 'done'),
+      dependency('progress', 'second'),
+    ];
+    renderBoard({ dependencies, onSelectTask });
+
+    const card = screen.getByRole('article', {
+      name: 'Second task task card',
+    });
+    expect(within(card).getByText('1 unmet prerequisite')).toBeVisible();
+    expect(within(card).queryByText('2 unmet prerequisites')).toBeNull();
+
+    await user.click(
+      within(card).getByRole('button', { name: 'Open Second task' }),
+    );
+
+    const evidence = screen.getByRole('region', { name: 'Task dependencies' });
+    const prerequisites = within(evidence).getByRole('list', {
+      name: 'Prerequisites',
+    });
+    expect(within(prerequisites).getByText('Ready task')).toBeVisible();
+    expect(within(prerequisites).getByText('Finished task')).toBeVisible();
+    const dependents = within(evidence).getByRole('list', {
+      name: 'Dependents',
+    });
+    expect(within(dependents).getByText('Progress task')).toBeVisible();
+
+    await user.click(
+      within(prerequisites).getByRole('button', { name: 'Open Ready task' }),
+    );
+    expect(onSelectTask).toHaveBeenLastCalledWith('ready');
+    expect(screen.getByRole('dialog', { name: 'Ready task' })).toBeVisible();
+  });
+
+  it('disables only dependency-blocked forward lifecycle options and guards select changes', async () => {
+    const user = userEvent.setup();
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    renderBoard({
+      dependencies: [
+        dependency('second', 'progress'),
+        dependency('ready', 'progress'),
+        dependency('review', 'progress'),
+      ],
+      onCommand,
+    });
+
+    const backlogSelect = screen.getByRole('combobox', {
+      name: 'Move Second task to',
+    });
+    expect(
+      within(backlogSelect).getByRole('option', { name: 'Ready' }),
+    ).toBeDisabled();
+    expect(
+      within(backlogSelect).getByRole('option', { name: 'Backlog' }),
+    ).toBeEnabled();
+    fireEvent.change(backlogSelect, { target: { value: 'ready' } });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    const readySelect = screen.getByRole('combobox', {
+      name: 'Move Ready task to',
+    });
+    expect(
+      within(readySelect).getByRole('option', { name: 'In progress' }),
+    ).toBeDisabled();
+    expect(
+      within(readySelect).getByRole('option', { name: 'Backlog' }),
+    ).toBeEnabled();
+    fireEvent.change(readySelect, { target: { value: 'in_progress' } });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    const reviewSelect = screen.getByRole('combobox', {
+      name: 'Move Review task to',
+    });
+    expect(
+      within(reviewSelect).getByRole('option', { name: 'In progress' }),
+    ).toBeDisabled();
+    fireEvent.change(reviewSelect, { target: { value: 'in_progress' } });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    await user.selectOptions(readySelect, 'backlog');
+    expect(onCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'task.transition',
+        payload: expect.objectContaining({
+          taskId: 'ready',
+          nextState: 'backlog',
+        }),
+      }),
+    );
+  });
+
+  it('guards dependency-blocked forward drops while preserving reorder and backward drops', () => {
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    renderBoard({
+      dependencies: [
+        dependency('second', 'progress'),
+        dependency('ready', 'progress'),
+      ],
+      onCommand,
+    });
+
+    let transfer = dataTransfer();
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Second task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(screen.getByRole('region', { name: 'Ready tasks' }), {
+      dataTransfer: transfer,
+    });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    transfer = dataTransfer();
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Ready task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(screen.getByRole('region', { name: 'In progress tasks' }), {
+      dataTransfer: transfer,
+    });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    transfer = dataTransfer();
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Second task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(
+      screen.getByRole('article', { name: 'First task task card' }),
+      { dataTransfer: transfer },
+    );
+    expect(onCommand).toHaveBeenNthCalledWith(1, {
+      type: 'task.reorder',
+      payload: {
+        taskId: 'second',
+        expectedRevision: 1,
+        rank: 'a',
+        actor: expect.objectContaining({ type: 'human', id: 'operator' }),
+      },
+    });
+
+    transfer = dataTransfer();
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Ready task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(screen.getByRole('region', { name: 'Backlog tasks' }), {
+      dataTransfer: transfer,
+    });
+    expect(onCommand).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        type: 'task.transition',
+        payload: expect.objectContaining({
+          taskId: 'ready',
+          nextState: 'backlog',
+        }),
+      }),
+    );
+  });
+
+  it('allows keyboard reordering within in progress when prerequisites are unmet', async () => {
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderBoard({
+      taskOverrides: [
+        task({
+          id: 'progress',
+          title: 'Progress task',
+          rank: 'a',
+          lifecycleState: 'in_progress',
+          blocked: null,
+        }),
+        task({
+          id: 'later-progress',
+          title: 'Later progress task',
+          rank: 'b',
+          lifecycleState: 'in_progress',
+          blocked: null,
+        }),
+      ],
+      dependencies: [dependency('progress', 'ready')],
+      onCommand,
+    });
+
+    const card = screen.getByRole('article', {
+      name: 'Progress task task card',
+    });
+    expect(within(card).getByText('1 unmet prerequisite')).toBeVisible();
+
+    await user.click(
+      within(card).getByRole('button', { name: 'Move Progress task down' }),
+    );
+
+    expect(onCommand).toHaveBeenCalledWith({
+      type: 'task.reorder',
+      payload: {
+        taskId: 'progress',
+        expectedRevision: 1,
+        rank: 'b',
+        actor: expect.objectContaining({ type: 'human', id: 'operator' }),
+      },
+    });
+  });
+
+  it('allows drag reordering within in progress when prerequisites are unmet', () => {
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    renderBoard({
+      taskOverrides: [
+        task({
+          id: 'progress',
+          title: 'Progress task',
+          rank: 'a',
+          lifecycleState: 'in_progress',
+          blocked: null,
+        }),
+        task({
+          id: 'later-progress',
+          title: 'Later progress task',
+          rank: 'b',
+          lifecycleState: 'in_progress',
+          blocked: null,
+        }),
+      ],
+      dependencies: [dependency('progress', 'ready')],
+      onCommand,
+    });
+    const transfer = dataTransfer();
+
+    fireEvent.dragStart(
+      screen.getByRole('article', { name: 'Progress task task card' }),
+      { dataTransfer: transfer },
+    );
+    fireEvent.drop(
+      screen.getByRole('article', { name: 'Later progress task task card' }),
+      { dataTransfer: transfer },
+    );
+
+    expect(onCommand).toHaveBeenCalledWith({
+      type: 'task.reorder',
+      payload: {
+        taskId: 'progress',
+        expectedRevision: 1,
+        rank: 'b',
+        actor: expect.objectContaining({ type: 'human', id: 'operator' }),
+      },
+    });
   });
 
   it('shows completed and cancelled tasks only in their filtered views', async () => {
@@ -145,6 +399,22 @@ describe('TaskBoard', () => {
     );
     expect(onSelectTask).toHaveBeenCalledWith('ready');
     expect(screen.getByRole('dialog', { name: 'Ready task' })).toBeVisible();
+  });
+
+  it('mounts project planning above orchestration and the task board', () => {
+    renderBoard();
+
+    const planning = screen.getByRole('region', { name: 'Project planning' });
+    const orchestration = screen.getByRole('region', { name: 'Project run' });
+    const board = screen.getByRole('region', { name: 'Backlog tasks' });
+    expect(
+      planning.compareDocumentPosition(orchestration) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      orchestration.compareDocumentPosition(board) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it('opens lightweight backlog creation from the board toolbar', async () => {
@@ -615,6 +885,18 @@ const task = (overrides: Record<string, unknown> = {}) =>
     ...overrides,
   });
 
+const dependency = (
+  taskId: string,
+  prerequisiteTaskId: string,
+): TaskDependency =>
+  taskDependencySchema.parse({
+    projectId: project.id,
+    taskId,
+    prerequisiteTaskId,
+    createdBy: actor,
+    createdAt: timestamp,
+  });
+
 const baseTasks = [
   task(),
   task({ id: 'second', title: 'Second task', rank: 'b', blocked: null }),
@@ -653,6 +935,7 @@ const baseTasks = [
 const boardProjection = (
   taskOverrides: Task[] = [],
   runs: ProjectRun[] = [],
+  dependencies: TaskDependency[] = [],
 ) => {
   const byTaskId = new Map(
     baseTasks.map((candidate) => [candidate.id, candidate]),
@@ -701,6 +984,7 @@ const boardProjection = (
     transitions: [],
     repairs: [],
     runs,
+    dependencies,
     projectRunLimits: { maxConcurrency: 4 },
     cursor: 1,
   };
@@ -724,16 +1008,20 @@ const renderBoard = ({
   onCommand = vi.fn().mockResolvedValue(undefined),
   onSelectTask,
   runs = [],
+  dependencies = [],
+  taskOverrides = [],
 }: {
   archived?: boolean;
   onCommand?: (command: MutatingCommand) => Promise<unknown> | void;
   onSelectTask?: (taskId: string) => void;
   runs?: ProjectRun[];
+  dependencies?: TaskDependency[];
+  taskOverrides?: Task[];
 } = {}) =>
   render(
     <TaskBoard
       project={archived ? { ...project, archivedAt: timestamp } : project}
-      projection={boardProjection([], runs)}
+      projection={boardProjection(taskOverrides, runs, dependencies)}
       onCommand={onCommand}
       onSelectTask={onSelectTask}
     />,

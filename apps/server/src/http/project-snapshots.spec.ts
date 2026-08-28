@@ -6,17 +6,21 @@ import {
   developerExecutionCycleSchema,
   developerReviewFeedbackSchema,
   idSchema,
+  projectPlanBaseSchema,
+  projectPlanSchema,
   projectSchema,
   qaExecutionCycleSchema,
   qaReportSchema,
   reviewAutomationActionSchema,
   sessionSchema,
   taskAttemptSchema,
+  taskDependencySchema,
   taskSchema,
   workspaceSchema,
 } from '@mesh-session-platform/contracts';
 
 import { openDatabase } from '../db/database.js';
+import { PlanningRepository } from '../repositories/planning-repository.js';
 import { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import {
@@ -74,7 +78,14 @@ const seed = () => {
   const writerDatabase = openDatabase(repositories.path);
   const writerEvents = new ProjectEventRepository(writerDatabase);
   cleanups.push(() => writerDatabase.close());
-  return { repositories, project, task, writerEvents, append };
+  return {
+    repositories,
+    project,
+    task,
+    writerDatabase,
+    writerEvents,
+    append,
+  };
 };
 
 const boundProxy = <Target extends object>(
@@ -99,7 +110,125 @@ const boundProxy = <Target extends object>(
   });
 };
 
+const createPlan = (
+  fixture: ReturnType<typeof seed>,
+  id: string,
+  options: {
+    status?: 'planning' | 'approved' | 'rejected' | 'cancelled';
+    minute?: number;
+  } = {},
+) => {
+  const status = options.status ?? 'planning';
+  const minute = options.minute ?? 0;
+  const occurredAt = new Date(
+    Date.UTC(2026, 7, 24, 1, minute, 0),
+  ).toISOString();
+  const sessionId = `${id}-session`;
+  const workspaceId = `${id}-workspace`;
+  fixture.repositories.workspaces.create(
+    workspaceSchema.parse({
+      id: workspaceId,
+      projectId: fixture.project.id,
+      type: 'worktree',
+      path: `C:/code/${workspaceId}`,
+      gitBranch: `mesh/${id}`,
+    }),
+  );
+  const session = sessionSchema.parse({
+    id: sessionId,
+    projectId: fixture.project.id,
+    workspaceId,
+    title: `Plan ${id}`,
+    permissionMode: 'interactive',
+    lifecycleState: 'completed',
+    createdAt: occurredAt,
+    updatedAt: occurredAt,
+  });
+  fixture.repositories.sessions.create(session);
+  const created = fixture.repositories.plans.create({
+    plan: projectPlanSchema.parse({
+      id,
+      projectId: fixture.project.id,
+      goal: `Goal for ${id}`,
+      constraints: [],
+      nonGoals: [],
+      policyVersion: 'pm-v1',
+      status: 'planning',
+      revision: 1,
+      currentBaseId: `${id}-base`,
+      currentSessionId: session.id,
+      latestProposalOrdinal: 0,
+      feedback: [],
+      attention: null,
+      createdBy: { type: 'human', id: 'operator' },
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+      terminalAt: null,
+      terminalBy: null,
+      terminalReason: null,
+    }),
+    base: projectPlanBaseSchema.parse({
+      id: `${id}-base`,
+      planId: id,
+      ordinal: 1,
+      repositoryIdentity: fixture.project.repositoryIdentity,
+      tasks: [],
+      dependencies: [],
+      projectArchivedAt: null,
+      projectRevision: fixture.project.revision,
+      policyRevision: fixture.project.qaConfiguration.revision,
+      createdAt: occurredAt,
+    }),
+    sessionId: session.id,
+  });
+  if (status === 'planning') return created;
+  const terminal = fixture.repositories.plans.update(created.id, 1, {
+    status,
+    attention: null,
+    updatedAt: occurredAt,
+    terminalAt: occurredAt,
+    terminalBy: created.createdBy,
+    terminalReason: status === 'approved' ? null : `Plan ${status}`,
+  });
+  if (!terminal) throw new Error(`Expected ${id} to become terminal`);
+  return terminal;
+};
+
 describe('project snapshot read consistency', () => {
+  it('projects one active plan and only the 20 most recent terminal summaries', () => {
+    const fixture = seed();
+    const terminalPlans = Array.from({ length: 21 }, (_, index) =>
+      createPlan(fixture, `plan-terminal-${String(index).padStart(2, '0')}`, {
+        status: index % 2 === 0 ? 'approved' : 'rejected',
+        minute: index,
+      }),
+    );
+    const active = createPlan(fixture, 'plan-active', { minute: 21 });
+
+    const snapshot = buildProjectSnapshot(
+      fixture.repositories,
+      fixture.project.id,
+    );
+
+    expect(snapshot.activePlan).toEqual(active);
+    expect(snapshot.terminalPlanSummaries).toHaveLength(20);
+    expect(snapshot.terminalPlanSummaries.map(({ id }) => id)).toEqual(
+      terminalPlans
+        .slice(1)
+        .reverse()
+        .map(({ id }) => id),
+    );
+    expect(snapshot.terminalPlanSummaries[0]).not.toHaveProperty('constraints');
+    expect(snapshot).not.toHaveProperty('proposalHistory');
+    expect(snapshot).not.toHaveProperty('proposals');
+
+    const older = fixture.repositories.plans.listSummaries(fixture.project.id, {
+      before: snapshot.terminalPlanSummaries.at(-1)?.id,
+      limit: 20,
+    });
+    expect(older.map(({ id }) => id)).toEqual([terminalPlans[0]?.id]);
+  });
+
   it('projects the current developer instructions through the project contract', () => {
     const fixture = seed();
     const updated = fixture.repositories.projects.updateDeveloperInstructions(
@@ -167,6 +296,31 @@ describe('project snapshot read consistency', () => {
       revision: 2,
       updatedBy: { type: 'human', id: 'qa-operator' },
     });
+  });
+
+  it('projects the current task dependency edges', () => {
+    const fixture = seed();
+    const prerequisite = fixture.repositories.tasks.create(
+      taskSchema.parse({
+        ...fixture.task,
+        id: 'prerequisite',
+        title: 'Prerequisite',
+        rank: '0',
+      }),
+    );
+    const dependency = taskDependencySchema.parse({
+      projectId: fixture.project.id,
+      taskId: fixture.task.id,
+      prerequisiteTaskId: prerequisite.id,
+      createdBy: { type: 'human', id: 'operator' },
+      createdAt: now,
+    });
+    fixture.repositories.dependencies.create(dependency);
+
+    expect(
+      buildProjectSnapshot(fixture.repositories, fixture.project.id)
+        .dependencies,
+    ).toEqual([dependency]);
   });
 
   it('projects complete ordered project-run history with configured limits and project isolation', () => {
@@ -697,6 +851,44 @@ describe('project snapshot read consistency', () => {
       fixture.project.id,
     );
 
+    expect(snapshot.cursor).toBe(1);
+    expect(fixture.writerEvents.latestSequence(fixture.project.id)).toBe(2);
+  });
+
+  it('keeps active planning state and its event cursor in one SQLite read view', () => {
+    const fixture = seed();
+    const active = createPlan(fixture, 'plan-active');
+    const writerPlans = new PlanningRepository(fixture.writerDatabase);
+    const tasks = boundProxy(
+      fixture.repositories.tasks,
+      'listByProject',
+      () => {
+        const updated = writerPlans.update(active.id, active.revision, {
+          status: 'revising',
+          attention: null,
+          updatedAt: '2026-08-24T02:00:00.000Z',
+          terminalAt: null,
+          terminalBy: null,
+          terminalReason: null,
+        });
+        if (!updated) throw new Error('Expected writer plan update');
+        fixture.writerEvents.append(fixture.project.id, {
+          protocolVersion: 1,
+          id: 'event-plan-2',
+          projectId: fixture.project.id,
+          occurredAt: updated.updatedAt,
+          type: 'project.plan_changed',
+          payload: { plan: updated },
+        });
+      },
+    );
+
+    const snapshot = buildProjectSnapshot(
+      { ...fixture.repositories, tasks },
+      fixture.project.id,
+    );
+
+    expect(snapshot.activePlan).toEqual(active);
     expect(snapshot.cursor).toBe(1);
     expect(fixture.writerEvents.latestSequence(fixture.project.id)).toBe(2);
   });

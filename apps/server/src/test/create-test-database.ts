@@ -17,6 +17,8 @@ import { ProjectEventRepository } from '../repositories/project-event-repository
 import { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
 import { TaskRepository } from '../repositories/task-repository.js';
 import { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
+import { PlanningRepository } from '../repositories/planning-repository.js';
+import { TaskDependencyRepository } from '../repositories/task-dependency-repository.js';
 import { WorkspaceRepository } from '../repositories/workspace-repository.js';
 
 export const createTestRepositories = (options?: {
@@ -89,6 +91,8 @@ export const createTestRepositories = (options?: {
     events: new EventRepository(database),
     layouts: new LayoutRepository(database),
     commands: new CommandRepository(database),
+    plans: new PlanningRepository(database),
+    dependencies: new TaskDependencyRepository(database),
     dispose: () => {
       database.close();
       rmSync(directory, { force: true, recursive: true });

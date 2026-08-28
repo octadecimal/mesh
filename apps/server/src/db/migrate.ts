@@ -112,6 +112,13 @@ const projectRunAutomationStatusMigration = {
     'utf8',
   ),
 };
+const pmPlanningMigration = {
+  id: '017-pm-planning',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '017-pm-planning.sql'),
+    'utf8',
+  ),
+};
 
 const migrations = [
   initialMigration,
@@ -130,6 +137,7 @@ const migrations = [
   projectRunPrelaunchAttentionMigration,
   projectRunPauseReasonMigration,
   projectRunAutomationStatusMigration,
+  pmPlanningMigration,
 ];
 
 export const migrate = (database: Database): void => {

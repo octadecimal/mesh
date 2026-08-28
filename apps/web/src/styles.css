@@ -138,13 +138,13 @@ textarea:focus-visible {
 }
 
 .project-board-header,
-.project-board-boundary > .project-run-panel,
 .project-board-boundary > .task-board {
   grid-column: 1 / -1;
 }
 
+.project-board-boundary > .project-planning-panel,
 .project-board-boundary > .project-run-panel {
-  max-height: min(28rem, 42vh);
+  max-height: min(12rem, 24vh);
   overflow: auto;
 }
 
@@ -403,6 +403,272 @@ textarea:focus-visible {
   padding-left: 1rem;
   list-style: disc;
 }
+.project-planning-panel {
+  display: grid;
+  gap: 1rem;
+  border-top: 1px solid var(--border);
+  padding: 1rem;
+  background:
+    radial-gradient(circle at 88% 0%, #312e8160, transparent 35%),
+    linear-gradient(145deg, #111827, #0c1420 58%, #0a1018);
+}
+.project-planning-panel h3,
+.project-planning-panel h4,
+.project-planning-panel h5,
+.project-planning-panel p {
+  margin: 0;
+}
+.planning-heading,
+.planning-detail-heading,
+.planning-history-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+}
+.planning-revision,
+.planning-history-heading > span,
+.planning-detail-heading > span,
+.planning-history-row small,
+.planning-proposal-task-heading small,
+.planning-list-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+.planning-revision,
+.planning-list-label {
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.planning-disclosure {
+  border-left: 3px solid #818cf8;
+  padding: 0.65rem 0.8rem;
+  color: #dbeafe;
+  background: #1e1b4b66;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.planning-start-form,
+.planning-active,
+.planning-review,
+.planning-details,
+.planning-history,
+.planning-active-summary,
+.planning-review-actions,
+.planning-terminal-control,
+.planning-stale-evidence,
+.planning-stale-evidence > div {
+  display: grid;
+  gap: 0.8rem;
+}
+.planning-start-form label,
+.planning-review-actions label,
+.planning-terminal-control label {
+  display: grid;
+  gap: 0.35rem;
+  color: #cbd5e1;
+  font-size: 0.76rem;
+  font-weight: 750;
+}
+.planning-start-form textarea,
+.planning-review-actions textarea,
+.planning-terminal-control textarea {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--strong);
+  border-radius: 0.5rem;
+  padding: 0.65rem 0.7rem;
+  color: var(--text);
+  background: #080d14;
+  font: inherit;
+  line-height: 1.45;
+}
+.planning-form-columns,
+.planning-brief-grid,
+.planning-dependency-columns,
+.planning-history-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+.planning-evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+.planning-brief-grid > div,
+.planning-evidence-grid > div,
+.planning-history-grid > div,
+.planning-dependency-columns > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.65rem;
+  background: #080e16aa;
+}
+.planning-brief-grid ul,
+.planning-evidence-grid ul,
+.planning-history-grid ol,
+.planning-history-grid ul,
+.planning-dependency-columns ul,
+.planning-stale-evidence ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  color: #c4cfdd;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.planning-subscription-confirmation {
+  display: flex !important;
+  align-items: flex-start;
+  gap: 0.55rem !important;
+  color: #dbeafe !important;
+  font-weight: 600 !important;
+  line-height: 1.45;
+}
+.planning-subscription-confirmation input {
+  margin-top: 0.18rem;
+}
+.planning-active-summary > div:first-child {
+  display: grid;
+  gap: 0.5rem;
+}
+.planning-active-summary h4 {
+  font-size: 1.05rem;
+}
+.planning-active-summary p,
+.planning-empty,
+.planning-loading {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.planning-status {
+  width: fit-content;
+}
+.planning-status-planning,
+.planning-status-revising {
+  color: #bfdbfe;
+  border-color: #1d4ed8;
+  background: #172554;
+}
+.planning-status-awaiting_review {
+  color: #ddd6fe;
+  border-color: #6d28d9;
+  background: #2e1065;
+}
+.planning-status-attention_required,
+.planning-status-cancelled,
+.planning-status-rejected {
+  color: #fde68a;
+  border-color: #854d0e;
+  background: #422006;
+}
+.planning-status-approved {
+  color: #a7f3d0;
+  border-color: #065f46;
+  background: #022c22;
+}
+.planning-review {
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+.planning-detail-actions,
+.planning-recovery-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+.planning-proposal-tasks,
+.planning-history > ol {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.planning-proposal-task {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+  background: #090f18;
+}
+.planning-proposal-task-heading,
+.planning-history-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border: 0;
+  padding: 0.75rem;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+.planning-proposal-task-heading:hover,
+.planning-history-row:hover {
+  background: #172033;
+}
+.planning-proposal-task-heading > span:first-child,
+.planning-history-row > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+}
+.planning-dependency-columns {
+  padding: 0 0.75rem 0.75rem;
+}
+.planning-proposal-task-details {
+  display: grid;
+  gap: 0.6rem;
+  border-top: 1px solid var(--border);
+  padding: 0.75rem;
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.planning-proposal-task-details ol {
+  margin: 0.35rem 0 0;
+  padding-left: 1.2rem;
+}
+.planning-terminal-control {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  border-top: 1px solid var(--border);
+  padding-top: 0.8rem;
+}
+.planning-history {
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+.planning-history-row {
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  background: #080e16aa;
+}
+.planning-history > ol > li {
+  display: grid;
+  gap: 0.55rem;
+}
+.planning-stale-evidence > div {
+  gap: 0.2rem;
+}
+@media (max-width: 760px) {
+  .planning-form-columns,
+  .planning-brief-grid,
+  .planning-dependency-columns,
+  .planning-history-grid,
+  .planning-evidence-grid,
+  .planning-terminal-control {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 .task-board-toolbar {
   display: flex;
   align-items: center;
@@ -593,6 +859,13 @@ textarea:focus-visible {
   color: var(--muted);
   font-size: 0.65rem;
 }
+.task-dependency-count {
+  margin: 0;
+  border-left: 3px solid var(--warning);
+  padding-left: 0.55rem;
+  color: #fde68a;
+  font-size: 0.67rem;
+}
 .task-blocked {
   display: grid;
   gap: 0.18rem;
@@ -781,8 +1054,69 @@ textarea:focus-visible {
   background: #17243b;
 }
 .task-readiness,
+.task-dependency-warning,
 .attempt-repair {
   margin: 0;
+}
+.task-dependency-lists {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+.task-dependency-lists h4 {
+  margin: 0 0 0.45rem;
+  font-size: 0.75rem;
+}
+.task-dependency-lists ul {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.task-dependency-lists li {
+  display: grid;
+  gap: 0.35rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  padding: 0.55rem;
+  background: #111923;
+}
+.task-dependency-lists li > p {
+  margin: 0;
+  color: #fde68a;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+.task-dependency-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.task-dependency-link {
+  border: 0;
+  padding: 0;
+  color: #bfdbfe;
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+.task-dependency-link:hover,
+.task-dependency-link:focus-visible {
+  color: #fff;
+  text-decoration: underline;
+}
+.task-dependency-remove {
+  justify-self: start;
+}
+.task-dependency-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.6rem;
 }
 .attempt-repair {
   display: flex;
@@ -1809,7 +2143,7 @@ textarea:focus-visible {
 @media (max-width: 760px) {
   .project-board-boundary {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
   }
 
   .project-board-mobile-scroller {
@@ -1818,11 +2152,13 @@ textarea:focus-visible {
   }
 
   .project-board-header,
+  .project-board-boundary > .project-planning-panel,
   .project-board-boundary > .project-run-panel,
   .project-board-boundary > .task-board {
     grid-column: 1;
   }
 
+  .project-board-boundary > .project-planning-panel,
   .project-board-boundary > .project-run-panel {
     max-height: none;
     overflow: visible;
@@ -1985,6 +2321,8 @@ textarea:focus-visible {
     padding-inline: 0.8rem;
   }
   .task-edit-row,
+  .task-dependency-lists,
+  .task-dependency-add,
   .task-link-controls {
     grid-template-columns: 1fr;
   }

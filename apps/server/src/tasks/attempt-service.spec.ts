@@ -14,6 +14,7 @@ import {
   reviewAutomationActionSchema,
   sessionSchema,
   taskActorSchema,
+  taskDependencySchema,
   taskSchema,
   workspaceSchema,
   type Task,
@@ -463,6 +464,39 @@ describe('AttemptService', () => {
         .after('project-1', 0)
         .map((event) => event.type),
     ).toEqual(['task.attempt_changed', 'task.transitioned']);
+  });
+
+  it('rejects incomplete prerequisites before allocating manual or Developer attempt runtimes', async () => {
+    const { directory, driver, repositories, service } = setup();
+    const dependent = seedTask(repositories);
+    const prerequisite = seedTask(repositories, {
+      id: idSchema.parse('prerequisite'),
+      rank: 'a',
+      lifecycleState: 'backlog',
+    });
+    repositories.dependencies.create(
+      taskDependencySchema.parse({
+        projectId: 'project-1',
+        taskId: dependent.id,
+        prerequisiteTaskId: prerequisite.id,
+        createdBy: actor,
+        createdAt: now,
+      }),
+    );
+
+    await expect(service.launch(launchInput(directory))).rejects.toMatchObject({
+      code: 'task_not_ready',
+      problems: [{ type: 'dependency_incomplete', taskId: prerequisite.id }],
+    });
+    await expect(
+      service.launchDeveloper(developerLaunchInput(directory)),
+    ).rejects.toMatchObject({
+      code: 'task_not_ready',
+      problems: [{ type: 'dependency_incomplete', taskId: prerequisite.id }],
+    });
+    expect(repositories.attempts.listByTask(dependent.id)).toEqual([]);
+    expect(repositories.projectEvents.after('project-1', 0)).toEqual([]);
+    expect((driver as FakeClaudeSessionDriver).createdRequests).toEqual([]);
   });
 
   it('binds a project-run launch to an internally derived system actor and durable source', async () => {

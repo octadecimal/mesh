@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { realpathSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import {
   createSdkMcpServer,
@@ -14,9 +16,24 @@ import {
 import {
   developerBlockerReportInputSchema,
   developerCompletionReportInputSchema,
+  projectPlanProposalInputSchema,
 } from '@mesh-session-platform/contracts';
+import { z } from 'zod';
 
-import type { DeveloperRuntimeControls, RoleControlServer } from './driver.js';
+import type {
+  DeveloperRuntimeControls,
+  PmRuntimeConfiguration,
+  RoleControlServer,
+} from './driver.js';
+import {
+  PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
+  PM_DISALLOWED_TOOLS,
+} from '../domain/planning-policy.js';
+import {
+  QaWorkspaceReader,
+  workspaceObjectIdentity,
+} from '../platform/qa-workspace-reader.js';
 import {
   UnsupportedSdkCapabilityError,
   type SdkFacade,
@@ -180,6 +197,236 @@ const createRoleMcpServer = (server: RoleControlServer) =>
     ),
   });
 
+const safePmControlErrorCodes = new Set([
+  'planning_capability_invalid',
+  'planning_capability_mismatch',
+  'planning_capability_expired',
+  'planning_capability_in_use',
+  'planning_proposal_invalid',
+  'planning_submission_failed',
+]);
+
+type PmControlProblem = {
+  code: string;
+  path: Array<string | number>;
+  message: string;
+};
+
+const pmControlFailure = (
+  error: unknown,
+  problems?: readonly PmControlProblem[],
+) => {
+  const record = asRecord(error);
+  const candidate =
+    typeof record?.code === 'string'
+      ? record.code
+      : typeof error === 'string'
+        ? error
+        : undefined;
+  const code =
+    candidate && safePmControlErrorCodes.has(candidate)
+      ? candidate
+      : 'planning_submission_failed';
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({
+          status: 'error',
+          code,
+          ...(problems && problems.length > 0 ? { problems } : {}),
+        }),
+      },
+    ],
+    isError: true,
+  };
+};
+
+const pmWorkspaceReadSchema = z.object({
+  path: z.string().trim().min(1).max(1_024),
+});
+
+const pmWorkspaceGlobSchema = z.object({
+  pattern: z.string().trim().min(1).max(1_024),
+  path: z.string().trim().min(1).max(1_024).default('.'),
+});
+
+const pmWorkspaceSearchSchema = z.object({
+  query: z.string().trim().min(1).max(1_024),
+  path: z.string().trim().min(1).max(1_024).default('.'),
+});
+
+type PmWorkspaceContext = {
+  reader: QaWorkspaceReader;
+  root: string;
+  signal: AbortSignal;
+};
+
+const pmWorkspaceContext = (
+  cwd: string | undefined,
+  signal: AbortSignal,
+): PmWorkspaceContext => {
+  if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+    throw new Error(
+      'PM runtime requires an explicit repository working directory.',
+    );
+  }
+  const lexicalRoot = resolve(cwd);
+  const root = realpathSync(lexicalRoot);
+  const rootStat = statSync(root);
+  if (!rootStat.isDirectory()) {
+    throw new Error('PM runtime working directory must be a directory.');
+  }
+  return {
+    reader: new QaWorkspaceReader(
+      {},
+      {
+        lexicalRoot,
+        root,
+        rootObjectIdentity: workspaceObjectIdentity(rootStat),
+      },
+    ),
+    root: lexicalRoot,
+    signal,
+  };
+};
+
+const pmWorkspaceFailure = (error: unknown) => {
+  const record = asRecord(error);
+  const candidate =
+    typeof record?.code === 'string'
+      ? record.code
+      : typeof error === 'string'
+        ? error
+        : undefined;
+  const code =
+    candidate === 'qa_workspace_operation_cancelled'
+      ? 'pm_workspace_operation_cancelled'
+      : candidate === 'qa_workspace_path_rejected'
+        ? 'pm_workspace_path_rejected'
+        : candidate === 'invalid_input'
+          ? candidate
+          : 'pm_workspace_access_failed';
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({ status: 'error', code }),
+      },
+    ],
+    isError: true,
+  };
+};
+
+const pmWorkspaceSuccess = (result: unknown) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+});
+
+const createPmMcpServer = (
+  configuration: PmRuntimeConfiguration,
+  workspace: PmWorkspaceContext,
+) =>
+  createSdkMcpServer({
+    name: 'mesh_pm',
+    version: '1',
+    alwaysLoad: true,
+    tools: [
+      tool(
+        'read_workspace_file',
+        'Read one bounded text file inside the assigned PM repository.',
+        pmWorkspaceReadSchema.shape,
+        async (input) => {
+          const parsed = pmWorkspaceReadSchema.safeParse(input);
+          if (!parsed.success) return pmWorkspaceFailure('invalid_input');
+          try {
+            return pmWorkspaceSuccess(
+              await workspace.reader.read(workspace.root, parsed.data.path, {
+                signal: workspace.signal,
+              }),
+            );
+          } catch (error) {
+            return pmWorkspaceFailure(error);
+          }
+        },
+      ),
+      tool(
+        'glob_workspace_files',
+        'Match bounded file paths inside the assigned PM repository.',
+        pmWorkspaceGlobSchema.shape,
+        async (input) => {
+          const parsed = pmWorkspaceGlobSchema.safeParse(input);
+          if (!parsed.success) return pmWorkspaceFailure('invalid_input');
+          try {
+            return pmWorkspaceSuccess(
+              await workspace.reader.glob(
+                workspace.root,
+                parsed.data.path,
+                parsed.data.pattern,
+                { signal: workspace.signal },
+              ),
+            );
+          } catch (error) {
+            return pmWorkspaceFailure(error);
+          }
+        },
+      ),
+      tool(
+        'search_workspace_text',
+        'Search bounded text content inside the assigned PM repository.',
+        pmWorkspaceSearchSchema.shape,
+        async (input) => {
+          const parsed = pmWorkspaceSearchSchema.safeParse(input);
+          if (!parsed.success) return pmWorkspaceFailure('invalid_input');
+          try {
+            return pmWorkspaceSuccess(
+              await workspace.reader.search(
+                workspace.root,
+                parsed.data.path,
+                parsed.data.query,
+                { signal: workspace.signal },
+              ),
+            );
+          } catch (error) {
+            return pmWorkspaceFailure(error);
+          }
+        },
+      ),
+      tool(
+        'submit_project_plan',
+        'Submit one complete structured project-plan proposal.',
+        projectPlanProposalInputSchema.shape,
+        async (input) => {
+          const parsed = projectPlanProposalInputSchema.safeParse(input);
+          if (!parsed.success)
+            return pmControlFailure(
+              'planning_proposal_invalid',
+              parsed.error.issues.map((issue) => ({
+                code: issue.code,
+                path: issue.path.filter(
+                  (entry): entry is string | number =>
+                    typeof entry === 'string' || typeof entry === 'number',
+                ),
+                message: issue.message,
+              })),
+            );
+          try {
+            await configuration.submitProposal(parsed.data);
+            return {
+              content: [
+                {
+                  type: 'text' as const,
+                  text: JSON.stringify({ status: 'submitted' }),
+                },
+              ],
+            };
+          } catch (error) {
+            return pmControlFailure(error);
+          }
+        },
+      ),
+    ],
+  });
+
 const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
   if (message.type === 'system' && message.subtype === 'init') {
     return [
@@ -313,6 +560,7 @@ class ClaudeSdkQuery implements SdkQuery {
     readonly sessionId: string,
     private readonly sdkQuery: Query,
     private readonly prompts: AsyncPromptQueue,
+    private readonly revoke?: () => void,
   ) {}
 
   async *events(): AsyncIterable<SdkStreamEvent> {
@@ -331,14 +579,23 @@ class ClaudeSdkQuery implements SdkQuery {
     if (typeof this.sdkQuery.interrupt !== 'function') {
       throw new UnsupportedSdkCapabilityError('interrupt');
     }
+    this.revoke?.();
     await this.sdkQuery.interrupt();
   }
 
   close(): void {
+    this.revoke?.();
     this.prompts.close();
     this.sdkQuery.close();
   }
 }
+
+const sameTools = (
+  actual: readonly string[],
+  expected: readonly string[],
+): boolean =>
+  actual.length === expected.length &&
+  actual.every((toolName, index) => toolName === expected[index]);
 
 export const createClaudeSdkFacade = (): SdkFacade => ({
   listSessions: async ({ cwd }) =>
@@ -347,6 +604,18 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
       title: session.customTitle ?? session.summary,
     })),
   startQuery: (options: SdkQueryOptions) => {
+    if (
+      options.role?.role === 'pm' &&
+      (!sameTools(options.role.availableTools, PM_BUILTIN_TOOLS) ||
+        !sameTools(options.role.allowedTools, PM_AVAILABLE_TOOLS))
+    ) {
+      throw new Error('PM runtime tools do not match the read-only policy.');
+    }
+    const pmAbortController =
+      options.role?.role === 'pm' ? new AbortController() : undefined;
+    const pmWorkspace = pmAbortController
+      ? pmWorkspaceContext(options.cwd, pmAbortController.signal)
+      : undefined;
     const prompts = new AsyncPromptQueue();
     const sessionId = options.resume ?? randomUUID();
     const onPermission = options.onPermission;
@@ -377,7 +646,11 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
               settingSources: [],
               strictMcpConfig: true,
               allowedTools: [...options.role.allowedTools],
-              disallowedTools: [...options.role.disallowedTools],
+              ...(options.role.role === 'qa'
+                ? { disallowedTools: [...options.role.disallowedTools] }
+                : options.role.role === 'pm'
+                  ? { disallowedTools: [...PM_DISALLOWED_TOOLS] }
+                  : {}),
             }
           : {}),
         ...(canUseTool ? { canUseTool } : {}),
@@ -390,12 +663,19 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
               },
             }
           : {}),
-        ...(options.role
+        ...(options.role?.role === 'qa'
           ? {
               mcpServers: {
                 [options.role.controlServer.name]: createRoleMcpServer(
                   options.role.controlServer,
                 ),
+              },
+            }
+          : {}),
+        ...(options.role?.role === 'pm' && pmWorkspace
+          ? {
+              mcpServers: {
+                mesh_pm: createPmMcpServer(options.role, pmWorkspace),
               },
             }
           : {}),
@@ -405,9 +685,15 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
       typeof sdkQuery.interrupt !== 'function' ||
       typeof sdkQuery.close !== 'function'
     ) {
+      pmAbortController?.abort();
       sdkQuery.close?.();
       throw new UnsupportedSdkCapabilityError('streaming_control');
     }
-    return new ClaudeSdkQuery(sessionId, sdkQuery, prompts);
+    return new ClaudeSdkQuery(
+      sessionId,
+      sdkQuery,
+      prompts,
+      pmAbortController ? () => pmAbortController.abort() : undefined,
+    );
   },
 });

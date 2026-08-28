@@ -25,6 +25,7 @@ import {
 
 import type { DeveloperRuntimeConfiguration } from '../claude/driver.js';
 import { DEVELOPER_POLICY_VERSION } from '../domain/developer-policy.js';
+import { incompletePrerequisiteIds } from '../domain/task-dependencies.js';
 import { authorizeTaskTransition } from '../domain/task-lifecycle.js';
 import type { GitAdapter } from '../platform/git.js';
 import { ProcessTrustedExecutableUnavailableError } from '../platform/process-runner.js';
@@ -45,6 +46,7 @@ import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import type { SessionRepository } from '../repositories/session-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
+import type { TaskDependencyRepository } from '../repositories/task-dependency-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { WorkspaceRepository } from '../repositories/workspace-repository.js';
 import { assertWorkspaceAvailable } from '../repositories/workspace-occupancy.js';
@@ -159,6 +161,7 @@ type AttemptServiceDependencies = {
   projects: ProjectRepository;
   projectRuns: ProjectRunRepository;
   tasks: TaskRepository;
+  dependencies: TaskDependencyRepository;
   attempts: TaskAttemptRepository;
   sessions: SessionRepository;
   workspaces: WorkspaceRepository;
@@ -872,11 +875,17 @@ export class AttemptService {
     projectRunLaunch = false,
   ): Task {
     const task = this.requireTask(taskId, expectedRevision);
+    const tasks = this.dependencies.tasks.listByProject(task.projectId);
     authorizeTaskTransition({
       task,
       nextState: 'in_progress',
       actor,
       ...(projectRunLaunch ? { operation: 'project_run_launch' as const } : {}),
+      incompletePrerequisiteIds: incompletePrerequisiteIds(
+        task.id,
+        tasks,
+        this.dependencies.dependencies.listByProject(task.projectId),
+      ),
     });
     return task;
   }

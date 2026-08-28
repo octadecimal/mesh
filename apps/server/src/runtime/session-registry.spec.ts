@@ -11,6 +11,7 @@ import type {
   ClaudeSessionDriver,
   DeveloperRuntimeConfiguration,
   DriverSession,
+  PmRuntimeConfiguration,
   RoleRuntimeConfiguration,
 } from '../claude/driver.js';
 import {
@@ -18,6 +19,10 @@ import {
   FakeDriverSession,
 } from '../claude/fake-driver.js';
 import { createTestRepositories } from '../test/create-test-database.js';
+import {
+  PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
+} from '../domain/planning-policy.js';
 import { SessionRegistry } from './session-registry.js';
 
 const now = '2026-08-25T12:00:00.000Z';
@@ -703,14 +708,48 @@ describe('SessionRegistry Developer attachment', () => {
     ]);
   });
 
-  it('invalidates session capabilities on interruption and shutdown', async () => {
+  it('passes PM role configuration without populating Developer controls', async () => {
     const repositories = createTestRepositories();
     const driver = new FakeClaudeSessionDriver();
-    const invalidated: string[] = [];
     const registry = new SessionRegistry({
       ...repositories,
       driver,
-      invalidateDeveloperCapability: (sessionId) => invalidated.push(sessionId),
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'create-pm');
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    const configuration: PmRuntimeConfiguration = {
+      role: 'pm',
+      initialPrompt: 'Plan the approved project goal.',
+      availableTools: PM_BUILTIN_TOOLS,
+      allowedTools: PM_AVAILABLE_TOOLS,
+      submitProposal: async () => undefined,
+    };
+
+    await registry.create('create-pm', configuration);
+
+    expect(driver.createdRequests[0]?.role).toBe(configuration);
+    expect(driver.createdRequests[0]?.developer).toBeUndefined();
+    expect(driver.createdSessions[0]?.prompts).toEqual([
+      'Plan the approved project goal.',
+    ]);
+  });
+
+  it('invalidates Developer and PM session capabilities on interruption and shutdown', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const invalidatedDeveloper: string[] = [];
+    const invalidatedPlanning: string[] = [];
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      invalidateDeveloperCapability: (sessionId) =>
+        invalidatedDeveloper.push(sessionId),
+      invalidatePlanningCapability: (sessionId) =>
+        invalidatedPlanning.push(sessionId),
       closeDatabase: () => undefined,
     });
     seed(repositories, 'interrupted-session');
@@ -722,8 +761,42 @@ describe('SessionRegistry Developer attachment', () => {
     await registry.interrupt('interrupted-session');
     await registry.shutdown();
 
-    expect(invalidated).toContain('interrupted-session');
-    expect(invalidated).toContain('shutdown-session');
+    expect(invalidatedDeveloper).toContain('interrupted-session');
+    expect(invalidatedDeveloper).toContain('shutdown-session');
+    expect(invalidatedPlanning).toContain('interrupted-session');
+    expect(invalidatedPlanning).toContain('shutdown-session');
+  });
+
+  it('invalidates planning authority before reconciling a stopped runtime', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const order: string[] = [];
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      invalidatePlanningCapability: (sessionId) =>
+        order.push(`invalidate:${sessionId}`),
+      onRuntimeStopped: (sessionId) => order.push(`reconcile:${sessionId}`),
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'stopped-pm');
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    await registry.create('stopped-pm', {
+      role: 'pm',
+      initialPrompt: 'Plan the project.',
+      availableTools: PM_BUILTIN_TOOLS,
+      allowedTools: PM_AVAILABLE_TOOLS,
+      submitProposal: async () => undefined,
+    });
+
+    driver.createdSessions[0]?.crash(new Error('PM runtime stopped'));
+
+    await vi.waitFor(() =>
+      expect(order).toEqual(['invalidate:stopped-pm', 'reconcile:stopped-pm']),
+    );
   });
 
   it('notifies reconciliation when a runtime stops after an unexpected crash', async () => {

@@ -13,6 +13,7 @@ import {
   type DeveloperBlockerReportInput,
   type DeveloperCompletionReportInput,
   type MutatingCommand,
+  type ProjectPlanProposalInput,
   type QaReportInput,
   type SessionSnapshot,
 } from '@mesh-session-platform/contracts';
@@ -30,19 +31,59 @@ const require = createRequire(__filename);
 const builtMain = resolve('dist/apps/server/main.js');
 
 type FakeDriverSessionControl = {
+  claudeResumeId?: string;
   interrupted: boolean;
   permissionDecisions: Array<{
     requestId: string;
     decision: 'approve' | 'deny';
   }>;
   enqueue(event: unknown): void;
+  interrupt(): Promise<void>;
+  close(): Promise<void>;
+};
+
+type PmRuntimeConfigurationControl = {
+  role: 'pm';
+  availableTools: readonly string[];
+  allowedTools: readonly string[];
+  submitProposal(input: ProjectPlanProposalInput): Promise<unknown>;
+};
+
+type RecordedPmRuntime = {
+  source: 'create' | 'resume';
+  configuration: PmRuntimeConfigurationControl;
+  request:
+    | {
+        title: string;
+        workspacePath?: string;
+        permissionMode?: string;
+      }
+    | {
+        claudeResumeId: string;
+        workspacePath?: string;
+        permissionMode?: string;
+      };
+  session: FakeDriverSessionControl;
+};
+
+type RecordedPmRuntimeConfiguration = {
+  source: 'create' | 'resume';
+  role: 'pm';
+  availableTools: string[];
+  allowedTools: string[];
+  request: RecordedPmRuntime['request'];
+};
+
+type SubmissionProbeResult = {
+  accepted: boolean;
+  code?: string;
 };
 
 type FakeClaudeSessionDriverControl = {
   createdRequests: Array<{
     title: string;
     developer?: unknown;
-    role?: { role: 'qa' };
+    role?: { role: 'qa' } | PmRuntimeConfigurationControl;
   }>;
   createdSessions: FakeDriverSessionControl[];
   resumedRequests: Array<{
@@ -50,7 +91,7 @@ type FakeClaudeSessionDriverControl = {
     workspacePath?: string;
     permissionMode?: string;
     developer?: unknown;
-    role?: { role: 'qa' };
+    role?: { role: 'qa' } | PmRuntimeConfigurationControl;
   }>;
   submitForReview(
     index: number,
@@ -172,6 +213,8 @@ class ScriptedFakeClaudeSessionDriver extends FakeClaudeSessionDriver {
   private readonly gates = new Map<string, OutcomeGate>();
   private readonly taskActions: Promise<void>[] = [];
   private readonly taskActionsByTitle = new Map<string, Promise<void>>();
+  private readonly pmRuntimes: RecordedPmRuntime[] = [];
+  private submittedPmRuntimeCount = 0;
 
   constructor(private readonly databasePath: string) {
     super({
@@ -221,6 +264,18 @@ class ScriptedFakeClaudeSessionDriver extends FakeClaudeSessionDriver {
     request: Parameters<FakeClaudeSessionDriver['create']>[0],
   ) {
     const session = await super.create(request);
+    if (request.role?.role === 'pm') {
+      this.pmRuntimes.push({
+        source: 'create',
+        configuration: request.role,
+        request: {
+          title: request.title,
+          workspacePath: request.workspacePath,
+          permissionMode: request.permissionMode,
+        },
+        session,
+      });
+    }
     const outcome = request.developer
       ? this.taskOutcomes.get(request.title)
       : undefined;
@@ -235,6 +290,122 @@ class ScriptedFakeClaudeSessionDriver extends FakeClaudeSessionDriver {
       void action.catch(() => undefined);
     }
     return session;
+  }
+
+  override async resume(
+    request: Parameters<FakeClaudeSessionDriver['resume']>[0],
+  ) {
+    const session = await super.resume(request);
+    if (request.role?.role === 'pm') {
+      this.pmRuntimes.push({
+        source: 'resume',
+        configuration: request.role,
+        request: {
+          claudeResumeId: request.claudeResumeId,
+          workspacePath: request.workspacePath,
+          permissionMode: request.permissionMode,
+        },
+        session,
+      });
+    }
+    return session;
+  }
+
+  recordedPmRuntimeConfigurations(): RecordedPmRuntimeConfiguration[] {
+    return this.pmRuntimes.map(({ source, configuration, request }) => ({
+      source,
+      role: configuration.role,
+      availableTools: [...configuration.availableTools],
+      allowedTools: [...configuration.allowedTools],
+      request: { ...request },
+    }));
+  }
+
+  async submitProjectPlan(proposal: ProjectPlanProposalInput): Promise<void> {
+    await waitUntil(
+      () => this.pmRuntimes.length > this.submittedPmRuntimeCount,
+    );
+    const runtime = this.pmRuntimes[this.submittedPmRuntimeCount];
+    if (!runtime) throw new Error('No PM runtime is available for submission');
+    await this.waitForSessionLifecycle(
+      runtime.session.claudeResumeId,
+      'running',
+    );
+    await runtime.configuration.submitProposal(proposal);
+    const submissionNumber = this.submittedPmRuntimeCount + 1;
+    runtime.session.enqueue({
+      kind: 'status',
+      from: 'running',
+      to: 'completed',
+      reason: `Deterministic PM proposal ${submissionNumber} submitted.`,
+    });
+    await this.waitForSessionLifecycle(
+      runtime.session.claudeResumeId,
+      'completed',
+    );
+    await runtime.session.close();
+    this.submittedPmRuntimeCount += 1;
+  }
+
+  submitProjectPlanOnInterrupt(
+    proposal: ProjectPlanProposalInput,
+  ): Promise<SubmissionProbeResult> {
+    const runtime = this.pmRuntimes.at(-1);
+    if (!runtime)
+      throw new Error('No PM runtime is available for interruption');
+    const originalInterrupt = runtime.session.interrupt.bind(runtime.session);
+    let resolveProbe!: (result: SubmissionProbeResult) => void;
+    const probe = new Promise<SubmissionProbeResult>((resolveProbePromise) => {
+      resolveProbe = resolveProbePromise;
+    });
+    runtime.session.interrupt = async () => {
+      let result: SubmissionProbeResult;
+      try {
+        await runtime.configuration.submitProposal(proposal);
+        result = { accepted: true };
+      } catch (error) {
+        result = {
+          accepted: false,
+          code:
+            typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            typeof error.code === 'string'
+              ? error.code
+              : undefined,
+        };
+      }
+      resolveProbe(result);
+      await originalInterrupt();
+    };
+    return probe;
+  }
+
+  latestPmSessionInterrupted(): boolean {
+    return this.pmRuntimes.at(-1)?.session.interrupted ?? false;
+  }
+
+  private async waitForSessionLifecycle(
+    claudeResumeId: string | undefined,
+    lifecycleState: string,
+  ): Promise<void> {
+    if (!claudeResumeId) throw new Error('The PM runtime has no resume ID');
+    await waitUntil(() => {
+      const database = new BetterSqlite3(this.databasePath, {
+        readonly: true,
+        fileMustExist: true,
+      });
+      try {
+        const row = database
+          .prepare(
+            'SELECT lifecycle_state FROM sessions WHERE claude_resume_id = ?',
+          )
+          .get(claudeResumeId) as { lifecycle_state: string } | undefined;
+        return row?.lifecycle_state === lifecycleState;
+      } finally {
+        database.close();
+      }
+    });
   }
 
   private async runTaskOutcome(
@@ -336,6 +507,12 @@ export type FakeClaudeHarness = {
   startedTaskTitles(): string[];
   drainTaskOutcomes(): Promise<void>;
   waitForTaskOutcome(taskTitle: string): Promise<void>;
+  pmRuntimeConfigurations(): RecordedPmRuntimeConfiguration[];
+  submitProjectPlan(proposal: ProjectPlanProposalInput): Promise<void>;
+  submitProjectPlanOnInterrupt(
+    proposal: ProjectPlanProposalInput,
+  ): Promise<SubmissionProbeResult>;
+  latestPmSessionInterrupted(): boolean;
   apiBillingEnvironmentValues(): Array<string | undefined>;
   restart(options?: {
     billingConflict?: boolean;
@@ -496,6 +673,11 @@ const launchHarness = async (): Promise<{
     startedTaskTitles: () => driver.startedTaskTitles(),
     drainTaskOutcomes: () => driver.drainTaskOutcomes(),
     waitForTaskOutcome: (taskTitle) => driver.waitForTaskOutcome(taskTitle),
+    pmRuntimeConfigurations: () => driver.recordedPmRuntimeConfigurations(),
+    submitProjectPlan: (proposal) => driver.submitProjectPlan(proposal),
+    submitProjectPlanOnInterrupt: (proposal) =>
+      driver.submitProjectPlanOnInterrupt(proposal),
+    latestPmSessionInterrupted: () => driver.latestPmSessionInterrupted(),
     apiBillingEnvironmentValues: () => [...billingEnvironmentValues],
     restart: async ({ billingConflict = false, recoverSessionId } = {}) => {
       await server.close();

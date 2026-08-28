@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   DeveloperResumeUnavailableError,
   QaAlreadyActiveError,
@@ -15,6 +15,8 @@ import {
   UnsafeQaWorkspaceError,
   developerExecutionCycleSchema,
   idSchema,
+  projectPlanBaseSchema,
+  projectPlanSchema,
   projectSchema,
   projectRunSchema,
   qaExecutionCycleSchema,
@@ -48,6 +50,19 @@ import { QaCapabilityRegistry } from '../tasks/qa-capability-registry.js';
 import { QaExecutionService } from '../tasks/qa-execution-service.js';
 import { ProjectRunService } from '../tasks/project-run-service.js';
 import { ReviewAutomationService } from '../tasks/review-automation-service.js';
+import type {
+  PlanApprovalResult,
+  PlanApprovalService,
+} from '../tasks/plan-approval-service.js';
+import { PlanningCapabilityRegistry } from '../tasks/planning-capability-registry.js';
+import {
+  PlanningExecutionService,
+  PlanningMutationResult,
+} from '../tasks/planning-execution-service.js';
+import type {
+  DependencyMutationResult,
+  TaskDependencyService,
+} from '../tasks/task-dependency-service.js';
 import { createTestRepositories } from '../test/create-test-database.js';
 import { executeCommand } from './command-handler.js';
 import { toHttpError } from './errors.js';
@@ -217,6 +232,344 @@ describe('executeCommand', () => {
     protocolVersion: 1,
     idempotencyKey,
     command,
+  });
+
+  it('dispatches every planning and dependency command through its service boundary', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const actor = { type: 'human' as const, id: 'planning-operator' };
+    const planningResult = (id: string, sequence: number) =>
+      ({
+        plan: { id },
+        events: [{ sequence }],
+        capability: 'raw-planning-capability',
+      }) as unknown as PlanningMutationResult & { capability: string };
+    const planningExecutionService = {
+      start: vi.fn(async () => planningResult('plan-started', 1)),
+      requestRevision: vi.fn(async () => planningResult('plan-revising', 2)),
+      resume: vi.fn(async () => planningResult('plan-resumed', 3)),
+      retry: vi.fn(async () => planningResult('plan-retried', 4)),
+      cancel: vi.fn(async () => planningResult('plan-cancelled', 5)),
+    } satisfies Pick<
+      PlanningExecutionService,
+      'start' | 'requestRevision' | 'resume' | 'retry' | 'cancel'
+    >;
+    const planApprovalService = {
+      approve: vi.fn(
+        async () =>
+          ({
+            ...planningResult('plan-approved', 6),
+            createdTasks: [{ id: 'created-task' }],
+            dependencies: [],
+            taskMappings: [{ taskKey: 'created', taskId: 'created-task' }],
+          }) as unknown as PlanApprovalResult,
+      ),
+      reject: vi.fn(async () => planningResult('plan-rejected', 7)),
+    } satisfies Pick<PlanApprovalService, 'approve' | 'reject'>;
+    const taskDependencyService = {
+      add: vi.fn(
+        async () =>
+          ({
+            task: { id: 'task-1' },
+            dependencies: [{ prerequisiteTaskId: 'task-2' }],
+            event: { sequence: 8 },
+          }) as unknown as DependencyMutationResult,
+      ),
+      remove: vi.fn(
+        async () =>
+          ({
+            task: { id: 'task-1' },
+            dependencies: [],
+            event: { sequence: 9 },
+          }) as unknown as DependencyMutationResult,
+      ),
+    } satisfies Pick<TaskDependencyService, 'add' | 'remove'>;
+    const dependencies = {
+      ...fixture.dependencies,
+      plans: {
+        getDetails: () =>
+          ({
+            plan: { projectId: 'project-1' },
+            proposals: [{ id: 'proposal-latest' }],
+          }) as never,
+        listSummaries: fixture.repositories.plans.listSummaries.bind(
+          fixture.repositories.plans,
+        ),
+        getActiveByProject: fixture.repositories.plans.getActiveByProject.bind(
+          fixture.repositories.plans,
+        ),
+      },
+      tasks: {
+        get: () => ({ id: 'task-1', projectId: 'project-1' }) as never,
+      },
+      planningExecutionService,
+      planApprovalService,
+      taskDependencyService,
+    };
+    const cases = [
+      {
+        id: 'plan-start-command',
+        command: {
+          type: 'project.plan.start',
+          payload: {
+            projectId: 'project-1',
+            expectedProjectRevision: 3,
+            goal: 'Plan milestone seven',
+            constraints: ['Preserve audit order', 'Stay read-only'],
+            nonGoals: ['Do not launch work'],
+            actor,
+          },
+        },
+        spy: planningExecutionService.start,
+        expected: {
+          projectId: 'project-1',
+          expectedProjectRevision: 3,
+          goal: 'Plan milestone seven',
+          constraints: 'Preserve audit order\nStay read-only',
+          nonGoals: 'Do not launch work',
+          actor,
+          commandId: 'plan-start-command',
+        },
+      },
+      {
+        id: 'plan-revision-command',
+        command: {
+          type: 'project.plan.request_revision',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 2,
+            feedback: 'Split the delivery task.',
+            actor,
+          },
+        },
+        spy: planningExecutionService.requestRevision,
+        expected: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          proposalId: 'proposal-latest',
+          expectedPlanRevision: 2,
+          feedback: 'Split the delivery task.',
+          actor,
+          commandId: 'plan-revision-command',
+        },
+      },
+      {
+        id: 'plan-approve-command',
+        command: {
+          type: 'project.plan.approve',
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            proposalId: 'proposal-latest',
+            expectedPlanRevision: 2,
+            actor,
+          },
+        },
+        spy: planApprovalService.approve,
+        expected: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          proposalId: 'proposal-latest',
+          expectedPlanRevision: 2,
+          actor,
+          commandId: 'plan-approve-command',
+        },
+      },
+      ...(['reject', 'cancel'] as const).map((operation) => ({
+        id: `plan-${operation}-command`,
+        command: {
+          type: `project.plan.${operation}`,
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 2,
+            reason: `${operation} reason`,
+            actor,
+          },
+        },
+        spy:
+          operation === 'reject'
+            ? planApprovalService.reject
+            : planningExecutionService.cancel,
+        expected: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          expectedPlanRevision: 2,
+          reason: `${operation} reason`,
+          actor,
+          commandId: `plan-${operation}-command`,
+        },
+      })),
+      ...(['resume', 'retry'] as const).map((operation) => ({
+        id: `plan-${operation}-command`,
+        command: {
+          type: `project.plan.${operation}`,
+          payload: {
+            projectId: 'project-1',
+            planId: 'plan-1',
+            expectedPlanRevision: 2,
+            actor,
+          },
+        },
+        spy: planningExecutionService[operation],
+        expected: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          expectedPlanRevision: 2,
+          actor,
+          commandId: `plan-${operation}-command`,
+        },
+      })),
+      ...(['add', 'remove'] as const).map((operation) => ({
+        id: `dependency-${operation}-command`,
+        command: {
+          type: `task.dependency.${operation}`,
+          payload: {
+            taskId: 'task-1',
+            prerequisiteTaskId: 'task-2',
+            expectedRevision: 4,
+            actor,
+          },
+        },
+        spy: taskDependencyService[operation],
+        expected: {
+          projectId: 'project-1',
+          taskId: 'task-1',
+          prerequisiteTaskId: 'task-2',
+          expectedTaskRevision: 4,
+          actor,
+          commandId: `dependency-${operation}-command`,
+        },
+      })),
+    ];
+
+    for (const testCase of cases) {
+      const result = await executeCommand(
+        projectCommand(testCase.id, testCase.command),
+        dependencies,
+      );
+      expect(testCase.spy).toHaveBeenLastCalledWith(testCase.expected);
+      expect(result.commandType).toBe(testCase.command.type);
+      expect(JSON.stringify(result)).not.toContain('raw-planning-capability');
+    }
+  });
+
+  it('rejects a non-human planning actor before invoking a planning service', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const start = vi.fn();
+
+    const error = await executeCommand(
+      projectCommand('plan-agent-command', {
+        type: 'project.plan.start',
+        payload: {
+          projectId: 'project-1',
+          expectedProjectRevision: 1,
+          goal: 'Attempt an unauthorized plan',
+          constraints: [],
+          nonGoals: [],
+          actor: { type: 'agent', id: 'pm-agent' },
+        },
+      }),
+      {
+        ...fixture.dependencies,
+        planningExecutionService: {
+          start,
+          requestRevision: vi.fn(),
+          resume: vi.fn(),
+          retry: vi.fn(),
+          cancel: vi.fn(),
+        } as never,
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(start).not.toHaveBeenCalled();
+    expect(toHttpError(error)).toMatchObject({
+      statusCode: 400,
+      body: { error: { code: 'invalid_command' } },
+    });
+  });
+
+  it('dispatches plan approval without requiring the execution boundary', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const actor = { type: 'human' as const, id: 'planning-operator' };
+    const approve = vi.fn(
+      async () =>
+        ({
+          plan: { id: 'plan-approved' },
+          events: [{ sequence: 12 }],
+          createdTasks: [],
+          dependencies: [],
+          taskMappings: [],
+        }) as unknown as PlanApprovalResult,
+    );
+
+    const result = await executeCommand(
+      projectCommand('approve-without-execution', {
+        type: 'project.plan.approve',
+        payload: {
+          projectId: 'project-1',
+          planId: 'plan-1',
+          proposalId: 'proposal-1',
+          expectedPlanRevision: 2,
+          actor,
+        },
+      }),
+      {
+        ...fixture.dependencies,
+        planApprovalService: { approve, reject: vi.fn() } as never,
+      },
+    );
+
+    expect(approve).toHaveBeenCalledOnce();
+    expect(result.commandType).toBe('project.plan.approve');
+  });
+
+  it('hides revision proposals until plan ownership is verified', async () => {
+    const fixture = commandDependencies(tmpdir());
+    const requestRevision = vi.fn();
+
+    const error = await executeCommand(
+      projectCommand('wrong-owner-revision', {
+        type: 'project.plan.request_revision',
+        payload: {
+          projectId: 'project-1',
+          planId: 'plan-owned-by-project-2',
+          expectedPlanRevision: 2,
+          feedback: 'Revise this plan.',
+          actor: { type: 'human', id: 'planning-operator' },
+        },
+      }),
+      {
+        ...fixture.dependencies,
+        plans: {
+          getDetails: () =>
+            ({
+              plan: { projectId: 'project-2' },
+              proposals: [],
+            }) as never,
+          listSummaries: fixture.repositories.plans.listSummaries.bind(
+            fixture.repositories.plans,
+          ),
+          getActiveByProject:
+            fixture.repositories.plans.getActiveByProject.bind(
+              fixture.repositories.plans,
+            ),
+        },
+        planningExecutionService: {
+          start: vi.fn(),
+          requestRevision,
+          resume: vi.fn(),
+          retry: vi.fn(),
+          cancel: vi.fn(),
+        } as never,
+      },
+    ).catch((caught: unknown) => caught);
+
+    expect(requestRevision).not.toHaveBeenCalled();
+    expect(toHttpError(error)).toMatchObject({
+      statusCode: 404,
+      body: { error: { code: 'project_plan_not_found' } },
+    });
   });
 
   it('dispatches all project-run controls without owning launch scheduling', async () => {
@@ -1780,6 +2133,168 @@ describe('executeCommand', () => {
       ),
     ).rejects.toMatchObject({ code: 'project_has_running_attempt' });
     expect(repositories.projects.get('p1')?.archivedAt).toBeNull();
+  });
+
+  it('rejects project archive with a stable conflict while a plan is nonterminal', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'planning-workspace',
+        projectId: project.id,
+        type: 'shared',
+        path: directory,
+      }),
+    );
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'planning-session',
+        projectId: project.id,
+        workspaceId: 'planning-workspace',
+        title: 'Planning',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const plan = projectPlanSchema.parse({
+      id: 'active-plan',
+      projectId: project.id,
+      goal: 'Keep the plan reviewable.',
+      constraints: [],
+      nonGoals: [],
+      policyVersion: 'pm-v1',
+      status: 'awaiting_review',
+      revision: 1,
+      currentBaseId: 'active-base',
+      currentSessionId: 'planning-session',
+      latestProposalOrdinal: 0,
+      feedback: [],
+      attention: null,
+      createdBy: { type: 'human', id: 'operator' },
+      createdAt: now,
+      updatedAt: now,
+      terminalAt: null,
+      terminalBy: null,
+      terminalReason: null,
+    });
+    repositories.plans.create({
+      plan,
+      base: projectPlanBaseSchema.parse({
+        id: 'active-base',
+        planId: plan.id,
+        ordinal: 1,
+        repositoryIdentity: project.repositoryIdentity,
+        tasks: [],
+        dependencies: [],
+        projectArchivedAt: null,
+        projectRevision: project.revision,
+        policyRevision: project.qaConfiguration.revision,
+        createdAt: now,
+      }),
+      sessionId: 'planning-session',
+    });
+
+    const error = await executeCommand(
+      projectCommand('archive-active-plan', {
+        type: 'project.archive',
+        payload: {
+          projectId: project.id,
+          expectedRevision: project.revision,
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'project_plan_lifecycle_invalid',
+      details: { plan: expect.objectContaining({ id: plan.id }) },
+    });
+    expect(toHttpError(error)).toMatchObject({ statusCode: 409 });
+    expect(repositories.projects.get(project.id)?.archivedAt).toBeNull();
+  });
+
+  it('serializes archive against a planning start that is still resolving repository identity', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    const identity = await resolveIdentity(repositoryPath, {
+      baseDirectory: directory,
+    });
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'planning-race-project',
+        displayName: 'Planning race',
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    let enterResolve!: () => void;
+    const resolving = new Promise<void>((resolve) => {
+      enterResolve = resolve;
+    });
+    let releaseResolve!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseResolve = resolve;
+    });
+    let nextId = 0;
+    const planning = new PlanningExecutionService({
+      ...repositories,
+      registry: dependencies.registry,
+      capabilities: new PlanningCapabilityRegistry(),
+      billingConflicts: [],
+      pathOptions: { baseDirectory: directory },
+      resolveIdentity: async () => {
+        enterResolve();
+        await release;
+        return identity;
+      },
+      now: () => now,
+      createId: () => `planning-race-${++nextId}`,
+    });
+    const starting = planning.start({
+      projectId: project.id,
+      expectedProjectRevision: project.revision,
+      goal: 'Plan without racing archive.',
+      constraints: '',
+      nonGoals: '',
+      actor: { type: 'human', id: idSchema.parse('operator') },
+      commandId: 'planning-race-start',
+    });
+    await resolving;
+
+    const archived = await executeCommand(
+      projectCommand('planning-race-archive', {
+        type: 'project.archive',
+        payload: {
+          projectId: project.id,
+          expectedRevision: project.revision,
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    );
+    releaseResolve();
+
+    expect(archived.result).toMatchObject({
+      id: project.id,
+      archivedAt: now,
+    });
+    await expect(starting).rejects.toMatchObject({ code: 'project_archived' });
+    expect(repositories.plans.getActiveByProject(project.id)).toBeUndefined();
   });
 
   it('blocks archive and deletion through QA cycle session ownership', async () => {

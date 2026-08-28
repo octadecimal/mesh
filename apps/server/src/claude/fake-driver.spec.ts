@@ -2,12 +2,17 @@ import {
   developerBlockerReportSchema,
   developerCompletionReportSchema,
   idSchema,
+  projectPlanProposalInputSchema,
   qaReportInputSchema,
 } from '@mesh-session-platform/contracts';
 import { describe, expect, it, vi } from 'vitest';
 
 import { FakeClaudeSessionDriver } from './fake-driver.js';
-import type { RoleControlResponse } from './driver.js';
+import type { PmRuntimeConfiguration, RoleControlResponse } from './driver.js';
+import {
+  PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
+} from '../domain/planning-policy.js';
 
 const completionReport = developerCompletionReportSchema.parse({
   id: 'report-complete',
@@ -198,6 +203,40 @@ describe('FakeClaudeSessionDriver', () => {
     await expect(
       failingDriver.create({ title: 'QA failure', role: qaRole(execute) }),
     ).rejects.toThrow('QA could not start');
+  });
+
+  it('emits one deterministic PM proposal only through the structured callback', async () => {
+    const proposal = projectPlanProposalInputSchema.parse({
+      tasks: [],
+      dependencies: [],
+      assumptions: ['Keep the scope narrow.'],
+      risks: [],
+      exclusions: [],
+    });
+    const submitProposal = vi.fn(async () => undefined);
+    const pm: PmRuntimeConfiguration = {
+      role: 'pm',
+      initialPrompt: 'Plan the approved project goal.',
+      availableTools: PM_BUILTIN_TOOLS,
+      allowedTools: PM_AVAILABLE_TOOLS,
+      submitProposal,
+    };
+    const driver = new FakeClaudeSessionDriver({
+      pmSteps: [{ type: 'pm.proposal', proposal }],
+    });
+    const session = await driver.create({ title: 'PM', role: pm });
+
+    expect(session.prompts).toEqual(['Plan the approved project goal.']);
+    expect(submitProposal).not.toHaveBeenCalled();
+    const consuming = consume(session.events());
+    await driver.drainPmSteps();
+    await session.close();
+    await consuming;
+
+    expect(submitProposal).toHaveBeenCalledOnce();
+    expect(submitProposal).toHaveBeenCalledWith(proposal);
+    expect(driver.createdRequests[0]?.developer).toBeUndefined();
+    expect(driver.createdRequests[0]?.role).toBe(pm);
   });
 });
 
