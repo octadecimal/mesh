@@ -7,6 +7,15 @@ import {
   type DeveloperCompletionReport,
   type DeveloperCompletionReportInput,
 } from '@mesh-session-platform/contracts';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type ToolDefinition = {
@@ -18,6 +27,7 @@ type ToolDefinition = {
 
 type QueryInput = {
   options: {
+    cwd?: string;
     tools?: string[];
     allowedTools?: string[];
     disallowedTools?: string[];
@@ -25,6 +35,18 @@ type QueryInput = {
     mcpServers?: Record<string, unknown>;
     settingSources?: string[];
     strictMcpConfig?: boolean;
+    hooks?: {
+      PreToolUse?: Array<{
+        matcher?: string;
+        hooks: Array<
+          (input: {
+            hook_event_name: string;
+            tool_name: string;
+            tool_input: unknown;
+          }) => Promise<unknown>
+        >;
+      }>;
+    };
   };
 };
 
@@ -84,6 +106,7 @@ describe('createClaudeSdkFacade', () => {
     createClaudeSdkFacade().startQuery({ title: 'Ordinary' });
 
     expect(query.mock.calls[0]?.[0].options).not.toHaveProperty('mcpServers');
+    expect(query.mock.calls[0]?.[0].options).not.toHaveProperty('hooks');
     expect(createSdkMcpServer).not.toHaveBeenCalled();
   });
 
@@ -123,6 +146,7 @@ describe('createClaudeSdkFacade', () => {
     expect(query.mock.calls[0]?.[0].options).not.toHaveProperty(
       'strictMcpConfig',
     );
+    expect(query.mock.calls[0]?.[0].options).not.toHaveProperty('hooks');
   });
 
   it('installs one generic QA control server without Developer or source-authoring tools', async () => {
@@ -193,6 +217,7 @@ describe('createClaudeSdkFacade', () => {
     expect(
       Object.keys(query.mock.calls.at(-1)?.[0].options.mcpServers ?? {}),
     ).toEqual(['mesh_qa']);
+    expect(query.mock.calls.at(-1)?.[0].options).not.toHaveProperty('hooks');
 
     await serverOptions.tools[0]?.handler({ disposition: 'verified' });
     expect(execute).toHaveBeenCalledWith({ disposition: 'verified' });
@@ -210,6 +235,7 @@ describe('createClaudeSdkFacade', () => {
 
     createClaudeSdkFacade().startQuery({
       title: 'PM',
+      cwd: process.cwd(),
       role: {
         role: 'pm',
         initialPrompt: 'Plan the approved project goal.',
@@ -270,6 +296,110 @@ describe('createClaudeSdkFacade', () => {
     });
   });
 
+  it('requires an explicit repository cwd for the PM runtime boundary', () => {
+    expect(() =>
+      createClaudeSdkFacade().startQuery({
+        role: {
+          role: 'pm',
+          initialPrompt: 'Plan.',
+          availableTools: PM_AVAILABLE_TOOLS,
+          allowedTools: PM_AVAILABLE_TOOLS,
+          submitProposal: async () => undefined,
+        },
+      }),
+    ).toThrow('PM runtime requires an explicit repository working directory');
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('confines every PM repository read to the canonical cwd before tool execution', async () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'mesh-pm-read-boundary-'));
+    const repository = join(fixture, 'repository');
+    const source = join(repository, 'src');
+    const outside = join(fixture, 'outside');
+    mkdirSync(source, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const insideFile = join(source, 'inside.ts');
+    const outsideFile = join(outside, 'secret.txt');
+    writeFileSync(insideFile, 'export const inside = true;');
+    writeFileSync(outsideFile, 'secret');
+    symlinkSync(
+      outside,
+      join(repository, 'escape'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    try {
+      createClaudeSdkFacade().startQuery({
+        cwd: repository,
+        role: {
+          role: 'pm',
+          initialPrompt: 'Plan.',
+          availableTools: PM_AVAILABLE_TOOLS,
+          allowedTools: PM_AVAILABLE_TOOLS,
+          submitProposal: async () => undefined,
+        },
+      });
+      const options = query.mock.calls.at(-1)?.[0].options;
+      const hook = options.hooks?.PreToolUse?.[0]?.hooks[0];
+      expect(options.hooks?.PreToolUse?.[0]?.matcher).toBe('Read|Glob|Grep');
+      expect(hook).toBeTypeOf('function');
+
+      const invoke = async (tool_name: string, tool_input: unknown) =>
+        hook?.({ hook_event_name: 'PreToolUse', tool_name, tool_input });
+      const allowed = {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'defer',
+        },
+      };
+      const denied = {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason:
+            'PM repository reads are confined to the session working directory.',
+        },
+      };
+
+      await expect(invoke('Read', { file_path: insideFile })).resolves.toEqual(
+        allowed,
+      );
+      await expect(invoke('Glob', { pattern: '**/*.ts' })).resolves.toEqual(
+        allowed,
+      );
+      await expect(
+        invoke('Glob', { pattern: '**/*.ts', path: 'src' }),
+      ).resolves.toEqual(allowed);
+      await expect(invoke('Grep', { pattern: 'inside' })).resolves.toEqual(
+        allowed,
+      );
+      await expect(
+        invoke('Grep', { pattern: 'inside', path: 'src' }),
+      ).resolves.toEqual(allowed);
+
+      for (const [toolName, input] of [
+        ['Read', { path: insideFile }],
+        ['Read', { file_path: 42 }],
+        ['Read', { file_path: outsideFile }],
+        ['Read', { file_path: join('..', 'outside', 'secret.txt') }],
+        ['Read', { file_path: join(repository, 'escape', 'secret.txt') }],
+        ['Glob', { pattern: '**/*', path: outside }],
+        ['Glob', { pattern: '../outside/**/*' }],
+        ['Glob', { pattern: '**/*', path: join('..', 'outside') }],
+        ['Glob', { pattern: '**/*', path: join(repository, 'escape') }],
+        ['Glob', { pattern: '**/*', path: 42 }],
+        ['Grep', { pattern: 'secret', path: outside }],
+        ['Grep', { pattern: 'secret', path: join('..', 'outside') }],
+        ['Grep', { pattern: 'secret', path: join(repository, 'escape') }],
+        ['Grep', { pattern: 'secret', path: null }],
+      ] as const) {
+        await expect(invoke(toolName, input)).resolves.toEqual(denied);
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   it('rejects PM tool configuration that expands or reorders the fixed policy', () => {
     expect(() =>
       createClaudeSdkFacade().startQuery({
@@ -295,6 +425,7 @@ describe('createClaudeSdkFacade', () => {
       throw error;
     });
     createClaudeSdkFacade().startQuery({
+      cwd: process.cwd(),
       role: {
         role: 'pm',
         initialPrompt: 'Plan.',

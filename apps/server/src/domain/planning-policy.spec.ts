@@ -63,6 +63,7 @@ describe('PM planning policy', () => {
     const prompt = buildPmPrompt({
       planId: 'plan-1',
       planRevision: 4,
+      sessionId: 'session-pm-1',
       goal: 'Ship a dependable planning workflow.',
       constraints: ['Preserve subscription-backed operation.'],
       nonGoals: ['Do not implement the proposal.'],
@@ -76,6 +77,7 @@ describe('PM planning policy', () => {
     expect(prompt).toContain('Do not implement the proposal.');
     expect(prompt).toContain('Plan ID: plan-1');
     expect(prompt).toContain('Plan revision: 4');
+    expect(prompt).toContain('Session ID: session-pm-1');
     expect(prompt).toContain('Base ID: base-3');
     expect(prompt).toContain('Base revision: 3');
     expect(prompt).toContain('Capability generation: 6');
@@ -101,6 +103,7 @@ describe('PM planning policy', () => {
       buildPmPrompt({
         planId: 'different-plan',
         planRevision: 4,
+        sessionId: 'session-pm-1',
         goal: 'Plan the goal.',
         constraints: [],
         nonGoals: [],

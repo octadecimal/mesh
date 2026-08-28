@@ -74,10 +74,7 @@ export class PlanningCapabilityRegistry {
     string,
     Set<PlanningCapabilityToken>
   >();
-  private readonly tokenByGeneration = new Map<
-    string,
-    PlanningCapabilityToken
-  >();
+  private readonly issuedGenerationTombstones = new Set<string>();
   private readonly now: () => Date;
 
   constructor(options: { now?: () => Date } = {}) {
@@ -89,10 +86,17 @@ export class PlanningCapabilityRegistry {
     if (!Number.isFinite(expiresAt)) {
       throw new Error('Planning capability expiry must be an ISO timestamp.');
     }
+    if (expiresAt <= this.now().getTime()) {
+      throw new PlanningCapabilityError(
+        'planning_capability_expired',
+        'Planning capability expiry must be in the future.',
+      );
+    }
+
+    this.cleanupExpired();
 
     const generationKey = this.generationKey(binding);
-    const prior = this.tokenByGeneration.get(generationKey);
-    if (prior) {
+    if (this.issuedGenerationTombstones.has(generationKey)) {
       throw new PlanningCapabilityError(
         'planning_capability_in_use',
         'Planning capability generation has already been issued.',
@@ -107,7 +111,7 @@ export class PlanningCapabilityRegistry {
     this.entries.set(token, { binding: { ...binding }, accepting: false });
     this.addIndex(this.tokensByPlan, binding.planId, token);
     this.addIndex(this.tokensBySession, binding.sessionId, token);
-    this.tokenByGeneration.set(generationKey, token);
+    this.issuedGenerationTombstones.add(generationKey);
     return token;
   }
 
@@ -180,7 +184,7 @@ export class PlanningCapabilityRegistry {
     this.entries.clear();
     this.tokensByPlan.clear();
     this.tokensBySession.clear();
-    this.tokenByGeneration.clear();
+    this.issuedGenerationTombstones.clear();
   }
 
   private assertContext(
@@ -204,6 +208,13 @@ export class PlanningCapabilityRegistry {
 
   private generationKey(binding: PlanningCapabilityContext): string {
     return JSON.stringify([binding.planId, binding.generation]);
+  }
+
+  private cleanupExpired(): void {
+    const now = this.now().getTime();
+    for (const [token, entry] of this.entries) {
+      if (Date.parse(entry.binding.expiresAt) <= now) this.remove(token);
+    }
   }
 
   private addIndex(
@@ -234,10 +245,6 @@ export class PlanningCapabilityRegistry {
     this.entries.delete(token);
     this.removeFromIndex(this.tokensByPlan, entry.binding.planId, token);
     this.removeFromIndex(this.tokensBySession, entry.binding.sessionId, token);
-    const generationKey = this.generationKey(entry.binding);
-    if (this.tokenByGeneration.get(generationKey) === token) {
-      this.tokenByGeneration.delete(generationKey);
-    }
   }
 
   private removeFromIndex(

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { realpathSync, statSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep, win32 } from 'node:path';
 
 import {
   createSdkMcpServer,
@@ -6,6 +8,7 @@ import {
   query,
   tool,
   type CanUseTool,
+  type HookCallback,
   type PermissionResult,
   type Query,
   type SDKMessage,
@@ -31,6 +34,109 @@ import {
   type SdkQueryOptions,
   type SdkStreamEvent,
 } from './sdk-driver.js';
+
+const pmReadDenied = {
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse' as const,
+    permissionDecision: 'deny' as const,
+    permissionDecisionReason:
+      'PM repository reads are confined to the session working directory.',
+  },
+};
+
+const pmReadDeferred = {
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse' as const,
+    permissionDecision: 'defer' as const,
+  },
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const hasParentTraversal = (value: string): boolean =>
+  value.split(/[\\/]+/u).includes('..');
+
+const isContainedExistingPath = (root: string, inputPath: unknown): boolean => {
+  if (
+    typeof inputPath !== 'string' ||
+    inputPath.trim().length === 0 ||
+    hasParentTraversal(inputPath)
+  ) {
+    return false;
+  }
+
+  try {
+    const canonicalTarget = realpathSync(resolve(root, inputPath));
+    const fromRoot = relative(root, canonicalTarget);
+    return (
+      fromRoot === '' ||
+      (!isAbsolute(fromRoot) &&
+        !win32.isAbsolute(fromRoot) &&
+        fromRoot !== '..' &&
+        !fromRoot.startsWith(`..${sep}`))
+    );
+  } catch {
+    return false;
+  }
+};
+
+const isSafeGlobPattern = (pattern: unknown): pattern is string =>
+  typeof pattern === 'string' &&
+  pattern.trim().length > 0 &&
+  !isAbsolute(pattern) &&
+  !win32.isAbsolute(pattern) &&
+  !hasParentTraversal(pattern);
+
+const isSafePmRead = (
+  root: string,
+  toolName: string,
+  input: unknown,
+): boolean => {
+  if (!isRecord(input)) return false;
+  if (toolName === 'Read') {
+    return isContainedExistingPath(root, input.file_path);
+  }
+  if (toolName === 'Glob') {
+    return (
+      isSafeGlobPattern(input.pattern) &&
+      (input.path === undefined || isContainedExistingPath(root, input.path))
+    );
+  }
+  if (toolName === 'Grep') {
+    return (
+      typeof input.pattern === 'string' &&
+      input.pattern.length > 0 &&
+      (input.path === undefined || isContainedExistingPath(root, input.path))
+    );
+  }
+  return false;
+};
+
+const createPmReadBoundary = (cwd: string): HookCallback => {
+  const root = realpathSync(cwd);
+  if (!statSync(root).isDirectory()) {
+    throw new Error('PM runtime working directory must be a directory.');
+  }
+  return async (input) =>
+    input.hook_event_name === 'PreToolUse' &&
+    isSafePmRead(root, input.tool_name, input.tool_input)
+      ? pmReadDeferred
+      : pmReadDenied;
+};
+
+const pmReadBoundaryFor = (
+  options: SdkQueryOptions,
+): HookCallback | undefined => {
+  if (options.role?.role !== 'pm') return undefined;
+  const cwd = options.cwd;
+  if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+    throw new Error(
+      'PM runtime requires an explicit repository working directory.',
+    );
+  }
+  return createPmReadBoundary(cwd);
+};
 
 class AsyncPromptQueue implements AsyncIterable<SDKUserMessage> {
   private readonly values: SDKUserMessage[] = [];
@@ -454,6 +560,7 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
     ) {
       throw new Error('PM runtime tools do not match the read-only policy.');
     }
+    const pmReadBoundary = pmReadBoundaryFor(options);
     const prompts = new AsyncPromptQueue();
     const sessionId = options.resume ?? randomUUID();
     const onPermission = options.onPermission;
@@ -490,6 +597,18 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
             }
           : {}),
         ...(canUseTool ? { canUseTool } : {}),
+        ...(pmReadBoundary
+          ? {
+              hooks: {
+                PreToolUse: [
+                  {
+                    matcher: 'Read|Glob|Grep',
+                    hooks: [pmReadBoundary],
+                  },
+                ],
+              },
+            }
+          : {}),
         ...(options.developer
           ? {
               mcpServers: {

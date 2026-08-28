@@ -71,7 +71,7 @@ describe('PlanningCapabilityRegistry', () => {
     },
   );
 
-  it('rejects an invalid payload without consuming the generation', async () => {
+  it('rejects an invalid payload without consuming the active token or allowing another token', async () => {
     const capabilities = registry();
     const token = capabilities.issue(binding);
     const accept = vi.fn(async () => 'accepted');
@@ -83,6 +83,9 @@ describe('PlanningCapabilityRegistry', () => {
       problems: expect.any(Array),
     });
     expect(accept).not.toHaveBeenCalled();
+    expect(() => capabilities.issue({ ...binding })).toThrow(
+      'Planning capability generation has already been issued',
+    );
 
     await expect(
       capabilities.submit({ token, context, proposal, accept }),
@@ -90,12 +93,29 @@ describe('PlanningCapabilityRegistry', () => {
     expect(accept).toHaveBeenCalledOnce();
   });
 
-  it('expires and removes a capability before submission', async () => {
+  it('rejects already-expired issuance without reserving the generation', () => {
     const capabilities = new PlanningCapabilityRegistry({
       now: () => new Date('2026-08-27T12:10:00.000Z'),
     });
+
+    expect(() => capabilities.issue(binding)).toThrowError(
+      expect.objectContaining({ code: 'planning_capability_expired' }),
+    );
+    expect(() =>
+      capabilities.issue({
+        ...binding,
+        expiresAt: '2026-08-27T12:20:00.000Z',
+      }),
+    ).not.toThrow();
+  });
+
+  it('expires and removes a capability before submission without reopening its generation', async () => {
+    let now = new Date('2026-08-27T12:00:00.000Z');
+    const capabilities = new PlanningCapabilityRegistry({ now: () => now });
     const token = capabilities.issue(binding);
     const accept = vi.fn(async () => undefined);
+
+    now = new Date('2026-08-27T12:10:00.000Z');
 
     await expect(
       capabilities.submit({ token, context, proposal, accept }),
@@ -103,7 +123,52 @@ describe('PlanningCapabilityRegistry', () => {
     await expect(
       capabilities.submit({ token, context, proposal, accept }),
     ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+    expect(() =>
+      capabilities.issue({
+        ...binding,
+        expiresAt: '2026-08-27T12:20:00.000Z',
+      }),
+    ).toThrow('Planning capability generation has already been issued');
     expect(accept).not.toHaveBeenCalled();
+  });
+
+  it('cleans expired active material on later issuance without clearing generation tombstones', async () => {
+    let now = new Date('2026-08-27T12:00:00.000Z');
+    const capabilities = new PlanningCapabilityRegistry({ now: () => now });
+    const expiredToken = capabilities.issue(binding);
+    const liveBinding = {
+      ...binding,
+      generation: 7,
+      expiresAt: '2026-08-27T12:20:00.000Z',
+    };
+    const liveToken = capabilities.issue(liveBinding);
+    const accept = vi.fn(async () => 'accepted');
+
+    now = new Date('2026-08-27T12:10:00.000Z');
+    capabilities.issue({
+      ...binding,
+      generation: 8,
+      expiresAt: '2026-08-27T12:20:00.000Z',
+    });
+
+    await expect(
+      capabilities.submit({ token: expiredToken, context, proposal, accept }),
+    ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+    expect(() =>
+      capabilities.issue({
+        ...binding,
+        expiresAt: '2026-08-27T12:20:00.000Z',
+      }),
+    ).toThrow('Planning capability generation has already been issued');
+    await expect(
+      capabilities.submit({
+        token: liveToken,
+        context: { ...context, generation: 7 },
+        proposal,
+        accept,
+      }),
+    ).resolves.toBe('accepted');
+    expect(accept).toHaveBeenCalledOnce();
   });
 
   it('loses capabilities across registry restart and explicit session invalidation', async () => {
@@ -158,6 +223,9 @@ describe('PlanningCapabilityRegistry', () => {
     await expect(
       capabilities.submit({ token, context, proposal, accept }),
     ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+    expect(() => capabilities.issue({ ...binding })).toThrow(
+      'Planning capability generation has already been issued',
+    );
     expect(accept).toHaveBeenCalledOnce();
   });
 
@@ -172,7 +240,80 @@ describe('PlanningCapabilityRegistry', () => {
     await expect(
       capabilities.submit({ token, context, proposal, accept }),
     ).resolves.toBe('accepted');
+    expect(() => capabilities.issue({ ...binding })).toThrow(
+      'Planning capability generation has already been issued',
+    );
     expect(accept).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      'token',
+      (capabilities: PlanningCapabilityRegistry, token: string) =>
+        capabilities.invalidate(token),
+    ],
+    [
+      'plan',
+      (capabilities: PlanningCapabilityRegistry) =>
+        capabilities.invalidatePlan(binding.planId),
+    ],
+    [
+      'session',
+      (capabilities: PlanningCapabilityRegistry) =>
+        capabilities.invalidateSession(binding.sessionId),
+    ],
+  ] as const)(
+    'keeps the generation tombstone after %s invalidation',
+    async (_scope, invalidate) => {
+      const capabilities = registry();
+      const token = capabilities.issue(binding);
+      const accept = vi.fn(async () => undefined);
+
+      invalidate(capabilities, token);
+
+      await expect(
+        capabilities.submit({ token, context, proposal, accept }),
+      ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+      expect(() => capabilities.issue({ ...binding })).toThrow(
+        'Planning capability generation has already been issued',
+      );
+      expect(accept).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the generation tombstone when invalidated during an in-flight callback', async () => {
+    const capabilities = registry();
+    const token = capabilities.issue(binding);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const accept = vi.fn(async () => {
+      await blocked;
+      return 'accepted';
+    });
+
+    const first = capabilities.submit({ token, context, proposal, accept });
+    capabilities.invalidate(token);
+
+    expect(() => capabilities.issue({ ...binding })).toThrow(
+      'Planning capability generation has already been issued',
+    );
+    await expect(
+      capabilities.submit({ token, context, proposal, accept }),
+    ).rejects.toMatchObject({ code: 'planning_capability_invalid' });
+    release();
+    await expect(first).resolves.toBe('accepted');
+    expect(accept).toHaveBeenCalledOnce();
+  });
+
+  it('clears generation tombstones only with process-lifetime state', () => {
+    const capabilities = registry();
+    capabilities.issue(binding);
+
+    capabilities.clear();
+
+    expect(() => capabilities.issue({ ...binding })).not.toThrow();
   });
 
   it('restores a generation when the submission callback rejects', async () => {
@@ -189,6 +330,9 @@ describe('PlanningCapabilityRegistry', () => {
     await expect(
       capabilities.submit({ token, context, proposal, accept }),
     ).rejects.toBe(rejected);
+    expect(() => capabilities.issue({ ...binding })).toThrow(
+      'Planning capability generation has already been issued',
+    );
     await expect(
       capabilities.submit({ token, context, proposal, accept }),
     ).resolves.toBe('accepted');

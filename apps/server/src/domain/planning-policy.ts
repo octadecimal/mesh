@@ -12,6 +12,7 @@ export const PM_AVAILABLE_TOOLS = [
 export type PmPromptInput = {
   planId: string;
   planRevision: number;
+  sessionId: string;
   goal: string;
   constraints: readonly string[];
   nonGoals: readonly string[];
@@ -43,6 +44,7 @@ ${bullets(input.nonGoals)}
 Frozen planning identity
 - Plan ID: ${input.planId}
 - Plan revision: ${input.planRevision}
+- Session ID: ${input.sessionId}
 - Base ID: ${input.base.id}
 - Base revision: ${input.base.ordinal}
 - Repository identity: ${input.base.repositoryIdentity}
