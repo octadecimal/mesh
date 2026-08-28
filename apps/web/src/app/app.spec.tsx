@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   projectPlanSchema,
+  projectPlanSummarySchema,
   taskActorSchema,
   taskAttemptSchema,
   taskSchema,
@@ -9,6 +10,7 @@ import {
 } from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
 
+import { MeshApi } from '../api/client';
 import { createMeshStore } from '../state/store';
 import App from './app';
 
@@ -177,10 +179,9 @@ describe('App', () => {
     ).toBeDefined();
   });
 
-  it('wires on-demand planning details through the project board', async () => {
+  it('keeps the MeshApi receiver for planning reads', async () => {
     const user = userEvent.setup();
     const store = createMeshStore(snapshot);
-    const api = createApi();
     const activePlan = projectPlanSchema.parse({
       id: 'plan-app',
       projectId: project.id,
@@ -202,7 +203,25 @@ describe('App', () => {
       terminalBy: null,
       terminalReason: null,
     });
-    api.projectSnapshot.mockResolvedValueOnce({
+    const summaries = Array.from({ length: 20 }, (_, index) =>
+      projectPlanSummarySchema.parse({
+        id: `plan-history-${index}`,
+        projectId: project.id,
+        goal: `Plan history ${index}`,
+        status: 'approved',
+        revision: 2,
+        latestProposalOrdinal: 1,
+        createdAt: '2026-08-27T00:00:00.000Z',
+        updatedAt: '2026-08-27T01:00:00.000Z',
+        terminalAt: `2026-08-27T${String(index).padStart(2, '0')}:00:00.000Z`,
+      }),
+    );
+    const olderSummary = projectPlanSummarySchema.parse({
+      ...summaries.at(-1),
+      id: 'plan-history-20',
+      goal: 'Plan history 20',
+    });
+    const projectSnapshot = {
       protocolVersion: 1,
       project,
       tasks: [],
@@ -210,18 +229,47 @@ describe('App', () => {
       transitions: [],
       repairs: [],
       activePlan,
-      terminalPlanSummaries: [],
+      terminalPlanSummaries: summaries,
       dependencies: [],
       runs: [],
       projectRunLimits: { maxConcurrency: 4 },
       cursor: 1,
+    };
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const payload = url.endsWith('/snapshot')
+        ? projectSnapshot
+        : url.endsWith('/plans/plan-app')
+          ? { plan: activePlan, bases: [], proposals: [], feedback: [] }
+          : url.endsWith('/plans?before=plan-history-19')
+            ? { plans: [olderSummary] }
+            : url.endsWith('/api/commands')
+              ? {
+                  protocolVersion: 1,
+                  commandType: 'layout.save',
+                  result: {},
+                  warnings: [],
+                }
+              : undefined;
+      if (!payload) throw new Error(`Unexpected planning read: ${url}`);
+      return {
+        ok: true,
+        json: () => Promise.resolve(payload),
+      } as Response;
     });
+    const api = new MeshApi({ baseUrl: 'http://mesh.test', fetch: fetcher });
     render(<App store={store} api={api} />);
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
     await user.click(screen.getByRole('button', { name: 'Review proposal' }));
+    expect(
+      await screen.findByText('No proposal revisions were recorded.'),
+    ).toBeVisible();
 
-    expect(api.projectPlanDetails).toHaveBeenCalledWith('p1', 'plan-app');
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 20' }),
+    ).toBeVisible();
   });
 
   it('renders the loaded task board, sends task commands, and forwards selection', async () => {

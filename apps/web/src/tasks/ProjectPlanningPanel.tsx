@@ -78,6 +78,15 @@ const planDate = (value: string) =>
 const displayPriority = (priority: ProjectPlanProposalTask['priority']) =>
   priority.charAt(0).toUpperCase() + priority.slice(1);
 
+const appendUniquePlans = (
+  current: ProjectPlanSummary[],
+  incoming: readonly ProjectPlanSummary[],
+) => {
+  const ids = new Set(current.map(({ id }) => id));
+  const additions = incoming.filter(({ id }) => !ids.has(id));
+  return additions.length > 0 ? [...current, ...additions] : current;
+};
+
 type PendingAction = {
   label: string;
   baseline: string;
@@ -263,9 +272,11 @@ const revisionDifference = (
 function PlanDetailsView({
   details,
   projection,
+  onOpenSession,
 }: {
   details: ProjectPlanDetails;
   projection: MeshProjection;
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const proposals = [...details.proposals].sort(
     (left, right) => left.ordinal - right.ordinal,
@@ -275,6 +286,9 @@ function PlanDetailsView({
     return (
       <p className="planning-empty">No proposal revisions were recorded.</p>
     );
+  const proposalSession = projection.sessions.find(
+    ({ id }) => id === proposal.sessionId,
+  );
 
   return (
     <div className="planning-details">
@@ -283,7 +297,23 @@ function PlanDetailsView({
           <span className="eyebrow">Latest structured proposal</span>
           <h4>Revision {proposal.ordinal}</h4>
         </div>
-        <span>{proposal.tasks.length} proposed tasks</span>
+        <div className="planning-detail-actions">
+          <span>{proposal.tasks.length} proposed tasks</span>
+          {onOpenSession ? (
+            <button
+              type="button"
+              className="button button-ghost"
+              title={proposalSession?.title ?? proposal.sessionId}
+              onClick={() => onOpenSession(proposal.sessionId)}
+            >
+              Open proposal session
+            </button>
+          ) : (
+            <span>
+              Proposal session: {proposalSession?.title ?? proposal.sessionId}
+            </span>
+          )}
+        </div>
       </div>
       <ol className="planning-proposal-tasks" aria-label="Proposed tasks">
         {proposal.tasks.map((task) => (
@@ -422,8 +452,10 @@ export function ProjectPlanningPanel({
   const [detailStates, setDetailStates] = useState<Record<string, DetailState>>(
     {},
   );
-  const [olderPlans, setOlderPlans] = useState<ProjectPlanSummary[]>([]);
-  const [nextBefore, setNextBefore] = useState<string | null>(null);
+  const [accumulatedPlans, setAccumulatedPlans] = useState<
+    ProjectPlanSummary[]
+  >([]);
+  const [nextBefore, setNextBefore] = useState<string | null>();
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string>();
   const currentProjectId = useRef(project.id);
@@ -443,8 +475,8 @@ export function ProjectPlanningPanel({
     setCancellationReason('');
     setExpandedPlanIds(new Set());
     setDetailStates({});
-    setOlderPlans([]);
-    setNextBefore(null);
+    setAccumulatedPlans([]);
+    setNextBefore(undefined);
     setHistoryLoading(false);
     setHistoryError(undefined);
   }, [project.id]);
@@ -455,9 +487,13 @@ export function ProjectPlanningPanel({
   }, [fingerprint, pendingAction]);
 
   useEffect(() => {
-    if (olderPlans.length > 0 || nextBefore !== null) return;
-    if (recentPlans.length >= 20) setNextBefore(recentPlans.at(-1)?.id ?? null);
-  }, [nextBefore, olderPlans.length, recentPlans]);
+    setAccumulatedPlans((current) => appendUniquePlans(current, recentPlans));
+  }, [recentPlans]);
+
+  useEffect(() => {
+    if (nextBefore !== undefined) return;
+    setNextBefore(recentPlans.length >= 20 ? recentPlans.at(-1)?.id : null);
+  }, [nextBefore, recentPlans]);
 
   const execute = async (
     label: string,
@@ -529,10 +565,9 @@ export function ProjectPlanningPanel({
     try {
       const page = await loadHistory(project.id, nextBefore);
       if (currentProjectId.current !== requestProjectId) return;
-      setOlderPlans((current) => {
-        const ids = new Set([...recentPlans, ...current].map(({ id }) => id));
-        return [...current, ...page.plans.filter(({ id }) => !ids.has(id))];
-      });
+      setAccumulatedPlans((current) =>
+        appendUniquePlans(current, [...recentPlans, ...page.plans]),
+      );
       setNextBefore(page.nextAfter ?? null);
     } catch (caught) {
       if (currentProjectId.current !== requestProjectId) return;
@@ -594,12 +629,12 @@ export function ProjectPlanningPanel({
     .at(-1);
   const history = useMemo(() => {
     const seen = new Set<string>();
-    return [...recentPlans, ...olderPlans].filter(({ id }) => {
+    return [...recentPlans, ...accumulatedPlans].filter(({ id }) => {
       if (seen.has(id)) return false;
       seen.add(id);
       return true;
     });
-  }, [olderPlans, recentPlans]);
+  }, [accumulatedPlans, recentPlans]);
 
   const renderDetailState = (planId: string) => {
     const state = detailStates[planId];
@@ -631,7 +666,11 @@ export function ProjectPlanningPanel({
             Refresh proposal
           </button>
         </div>
-        <PlanDetailsView details={state.details} projection={projection} />
+        <PlanDetailsView
+          details={state.details}
+          projection={projection}
+          onOpenSession={onOpenSession}
+        />
       </>
     );
   };

@@ -362,8 +362,8 @@ function ConnectedApp({
       });
     }
   };
-  const projectPlanDetails = api?.projectPlanDetails;
-  const projectPlanHistory = api?.projectPlanHistory;
+  const projectPlanDetails = api?.projectPlanDetails?.bind(api);
+  const projectPlanHistory = api?.projectPlanHistory?.bind(api);
 
   return (
     <div className="app-shell">

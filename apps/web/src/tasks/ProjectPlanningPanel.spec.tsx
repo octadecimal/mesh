@@ -385,6 +385,57 @@ describe('ProjectPlanningPanel', () => {
     ).toHaveLength(22);
   });
 
+  it('retains the displaced 20th summary across an authoritative window refresh', async () => {
+    const user = userEvent.setup();
+    const initialSummaries = Array.from({ length: 20 }, (_, index) =>
+      summary(`history-${index}`, index),
+    );
+    const refreshedSummaries = [
+      summary('history-new', 23),
+      ...initialSummaries.slice(0, 19),
+    ];
+    const loadHistory = vi
+      .fn<(_: string, __?: string) => Promise<ProjectPlanHistoryPage>>()
+      .mockResolvedValue({ plans: [summary('history-20', 20)] });
+    const rendered = renderPanel({
+      summaries: initialSummaries,
+      loadHistory,
+    });
+
+    rendered.rerender(panel({ summaries: refreshedSummaries, loadHistory }));
+
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 19' }),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenCalledWith(project.id, 'history-19');
+    expect(
+      await screen.findByRole('button', { name: 'View Plan history 20' }),
+    ).toBeVisible();
+    expect(
+      screen.getAllByRole('button', { name: /View Plan history/i }),
+    ).toHaveLength(22);
+  });
+
+  it('opens the proposal session from historical plan details', async () => {
+    const user = userEvent.setup();
+    const onOpenSession = vi.fn();
+    renderPanel({
+      summaries: [summary('history-1', 1)],
+      loadDetails: vi.fn().mockResolvedValue(details),
+      onOpenSession,
+    });
+
+    await user.click(
+      screen.getByRole('button', { name: 'View Plan history 1' }),
+    );
+    await user.click(
+      await screen.findByRole('button', { name: 'Open proposal session' }),
+    );
+
+    expect(onOpenSession).toHaveBeenCalledWith(pmSession.id);
+  });
+
   it('shows an explicit empty history state', () => {
     renderPanel();
     expect(screen.getByText('No completed plans yet.')).toBeVisible();
