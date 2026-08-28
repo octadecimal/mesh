@@ -69,6 +69,22 @@ const appendRuntime = (fixture: V2TestDatabase, adapterCursor: number) =>
     ),
   );
 
+const runtimePersistenceState = (fixture: V2TestDatabase) => ({
+  diagnostics: fixture.database
+    .prepare('SELECT COUNT(*) AS count FROM raw_diagnostics')
+    .get(),
+  events: fixture.database
+    .prepare('SELECT COUNT(*) AS count FROM runtime_events')
+    .get(),
+  stream: fixture.events.cursors(fixture.project.id),
+  execution: fixture.database
+    .prepare(
+      `SELECT last_adapter_cursor, last_runtime_sequence
+       FROM worker_executions WHERE id = ?`,
+    )
+    .get(fixture.execution.id),
+});
+
 describe('V2CommandRepository', () => {
   it('stores one canonical result for repeated use of the same request', () => {
     const fixture = setup();
@@ -173,6 +189,35 @@ describe('V2EventStore', () => {
       last_runtime_sequence: event.sequence,
     });
   });
+
+  it('rejects a gap in the execution adapter cursor without writes', () => {
+    const fixture = setup();
+    const before = runtimePersistenceState(fixture);
+
+    expect(() => appendRuntime(fixture, 2)).toThrowError(
+      /next adapter cursor/i,
+    );
+
+    expect(runtimePersistenceState(fixture)).toEqual(before);
+  });
+
+  it.each([
+    ['duplicate', 1],
+    ['stale', 0],
+  ])(
+    'rejects a %s execution adapter cursor without writes',
+    (_case, adapterCursor) => {
+      const fixture = setup();
+      appendRuntime(fixture, 1);
+      const before = runtimePersistenceState(fixture);
+
+      expect(() => appendRuntime(fixture, adapterCursor)).toThrowError(
+        /next adapter cursor/i,
+      );
+
+      expect(runtimePersistenceState(fixture)).toEqual(before);
+    },
+  );
 
   it('rejects a runtime event whose execution belongs to another project without writes', () => {
     const fixture = setup();
@@ -459,7 +504,9 @@ describe('createV2TestDatabase', () => {
     ).toThrowError('fixture construction failed');
 
     expect(openedDatabase?.open).toBe(false);
-    if (!createdDirectory) throw new Error('Fixture directory was not observed');
+    if (!createdDirectory) {
+      throw new Error('Fixture directory was not observed');
+    }
     expect(existsSync(createdDirectory)).toBe(false);
   });
 });

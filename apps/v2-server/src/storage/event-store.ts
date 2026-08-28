@@ -217,9 +217,9 @@ export class V2EventStore {
     if (execution.adapter_id !== parsedDiagnostic.adapterId) {
       throw new Error('Runtime execution adapter must match the diagnostic');
     }
-    if (parsedDraft.adapterCursor <= execution.last_adapter_cursor) {
+    if (parsedDraft.adapterCursor !== execution.last_adapter_cursor + 1) {
       throw new Error(
-        'Runtime adapter cursor must advance the execution cursor',
+        'Runtime adapter cursor must be the next adapter cursor for the execution',
       );
     }
 

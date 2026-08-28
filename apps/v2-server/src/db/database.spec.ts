@@ -211,6 +211,36 @@ describe('V2 database identity and migration', () => {
     },
   );
 
+  it('rejects duplicate known migration ledger rows before mutation', () => {
+    const path = join(temporaryDirectory(), 'duplicate-ledger.sqlite');
+    const database = new BetterSqlite3(path);
+    database.pragma(`application_id = ${V2_APPLICATION_ID}`);
+    database.exec(`
+      CREATE TABLE v2_schema_migrations (
+        version INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+      INSERT INTO v2_schema_migrations (version, name, applied_at)
+      VALUES
+        (1, '001_foundation', '2026-08-28T00:00:00.000Z'),
+        (1, '001_foundation', '2026-08-28T00:00:01.000Z');
+    `);
+    database.close();
+    const before = fileHash(path);
+
+    const direct = new BetterSqlite3(path);
+    try {
+      expect(() => migrateV2Database(direct)).toThrowError(
+        expect.objectContaining({ code: 'migration_ledger_mismatch' }),
+      );
+    } finally {
+      direct.close();
+    }
+
+    expect(fileHash(path)).toBe(before);
+  });
+
   it('rolls back every earlier migration statement when migration 001 fails', () => {
     const path = join(temporaryDirectory(), 'broken-forward.sqlite');
     const before = new BetterSqlite3(path);

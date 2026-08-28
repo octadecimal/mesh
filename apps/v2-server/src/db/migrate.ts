@@ -38,14 +38,16 @@ const validateMigrationLedger = (database: V2Database): void => {
     .get();
   if (!hasLedger) return;
 
-  const knownByVersion = new Map(
-    migrations.map((migration) => [migration.version, migration.name]),
-  );
   const rows = database
     .prepare('SELECT version, name FROM v2_schema_migrations ORDER BY version')
     .all() as MigrationLedgerRow[];
-  for (const row of rows) {
-    if (knownByVersion.get(row.version) !== row.name) {
+  for (const [index, row] of rows.entries()) {
+    const expected = migrations[index];
+    if (
+      !expected ||
+      row.version !== expected.version ||
+      row.name !== expected.name
+    ) {
       throw new V2MigrationLedgerError(row.version, row.name);
     }
   }
