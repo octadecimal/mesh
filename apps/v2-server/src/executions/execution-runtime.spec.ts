@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
+  HarnessSession,
   InterruptExecutionEnvelope,
   ResolvedWorkerProfileSnapshot,
   StartExecutionEnvelope,
 } from '@mesh/v2-contracts';
 
+import { hashV2Command } from '../storage/command-repository.js';
 import {
   createV2TestDatabase,
   type V2TestDatabase,
@@ -356,6 +358,74 @@ describe('ExecutionRuntime', () => {
     expect(context.executions.get(running.id)?.lifecycle).toBe('interrupted');
   });
 
+  it('lets one of two runtime instances reserve interrupt after both miss the fast lookup', async () => {
+    const context = createRuntime();
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const profile = running.profileSnapshot;
+    const second = new ExecutionRuntime({
+      database: context.fixture.database,
+      commands: context.fixture.commands,
+      events: context.fixture.events,
+      projects: { get: () => context.fixture.project },
+      profiles: { resolveApproved: () => profile },
+      executions: context.executions,
+      operations: context.operations,
+      adapter: context.fake,
+      publisher: { domain: () => undefined, runtime: () => undefined },
+      barrier: context.barrier,
+      now: () => '2026-08-28T01:00:00.000Z',
+    });
+    const interrupt: InterruptExecutionEnvelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.interrupt',
+        projectId: running.projectId,
+        executionId: running.id,
+        expectedRevision: running.revision,
+      },
+    };
+    const requestHash = hashV2Command(interrupt.command);
+    const lookupTransactions: boolean[] = [];
+    const originalFind = context.fixture.commands.find.bind(
+      context.fixture.commands,
+    );
+    vi.spyOn(context.fixture.commands, 'find').mockImplementation(
+      (idempotencyKey, expectedRequestHash) => {
+        if (
+          idempotencyKey === interrupt.idempotencyKey &&
+          expectedRequestHash === requestHash
+        ) {
+          lookupTransactions.push(context.fixture.database.inTransaction);
+        }
+        return originalFind(idempotencyKey, expectedRequestHash);
+      },
+    );
+    const [first, replay] = await Promise.all([
+      context.runtime.interrupt(interrupt),
+      second.interrupt(interrupt),
+    ]);
+    expect(replay).toEqual(first);
+    expect(lookupTransactions.filter((inside) => !inside)).toHaveLength(2);
+    expect(lookupTransactions.filter(Boolean)).toHaveLength(2);
+    expect(
+      context.operations
+        .listForExecution(running.id)
+        .filter((operation) => operation.kind === 'interrupt'),
+    ).toHaveLength(1);
+    expect(context.fake.interruptCalls).toHaveLength(1);
+    expect(
+      context.fixture.commands.find(interrupt.idempotencyKey)?.result,
+    ).toEqual(first);
+  });
+
   it.each([
     ['raw_insert', 'BEFORE INSERT ON raw_diagnostics'],
     ['runtime_insert', 'BEFORE INSERT ON runtime_events'],
@@ -551,5 +621,80 @@ describe('ExecutionRuntime', () => {
     expect(context.executions.get(execution.id)?.lifecycle).toBe('running');
     expect(resumed.consumedAdapterCursors).toEqual([2]);
     expect(resumed.closeCount).toBe(1);
+  });
+
+  it('contains an interrupt proof transaction failure and preserves the accepted receipt', async () => {
+    const context = createRuntime();
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    let releaseIterator: (() => void) | undefined;
+    const iteratorReleased = new Promise<void>((resolve) => {
+      releaseIterator = resolve;
+    });
+    let closed = false;
+    let closeCount = 0;
+    const ownedSession: HarnessSession = {
+      nativeHandle: required(running.nativeHandle, 'Expected a native handle'),
+      events() {
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                await iteratorReleased;
+                return { done: true, value: undefined };
+              },
+            };
+          },
+        };
+      },
+      async close() {
+        if (closed) return;
+        closed = true;
+        closeCount += 1;
+        releaseIterator?.();
+      },
+    };
+    context.runtime.attach(running.id, ownedSession);
+    context.fixture.database.exec(`
+      CREATE TRIGGER fail_interrupt_proof BEFORE UPDATE ON worker_executions
+      WHEN NEW.lifecycle IN ('interrupted', 'attention_required')
+      BEGIN SELECT RAISE(ABORT, 'fail interrupt proof'); END
+    `);
+    const interrupt: InterruptExecutionEnvelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.interrupt',
+        projectId: running.projectId,
+        executionId: running.id,
+        expectedRevision: running.revision,
+      },
+    };
+    const publishedBefore = context.published.domain.length;
+    const result = await context.runtime.interrupt(interrupt);
+    await context.runtime.drain();
+    expect(result).toMatchObject({
+      ok: true,
+      execution: { lifecycle: 'interrupting' },
+    });
+    expect(
+      context.fixture.commands.find(interrupt.idempotencyKey)?.result,
+    ).toEqual(result);
+    expect(context.barrier.status).toBe('tripped');
+    expect(closeCount).toBe(1);
+    expect(context.fake.interruptCalls).toHaveLength(2);
+    expect(context.published.domain).toHaveLength(publishedBefore + 1);
+    expect(context.executions.get(running.id)?.lifecycle).toBe('interrupting');
+    expect(
+      context.operations
+        .listForExecution(running.id)
+        .find((operation) => operation.kind === 'interrupt')?.state,
+    ).toBe('pending');
   });
 });

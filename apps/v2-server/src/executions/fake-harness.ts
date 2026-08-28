@@ -5,6 +5,7 @@ import {
   harnessEventEnvelopeSchema,
   harnessResumeRequestSchema,
   harnessStartRequestSchema,
+  workerExecutionIdSchema,
   type HarnessAdapter,
   type HarnessEventEnvelope,
   type HarnessOperationResult,
@@ -64,7 +65,11 @@ const decodeHandle = (
     };
   }
   const encodedPayload = parts[2];
-  if (encodedPayload === undefined || encodedPayload.length === 0) {
+  if (
+    encodedPayload === undefined ||
+    encodedPayload.length === 0 ||
+    !/^[A-Za-z0-9_-]+$/.test(encodedPayload)
+  ) {
     return {
       ok: false,
       status: 'missing',
@@ -72,7 +77,15 @@ const decodeHandle = (
     };
   }
   try {
-    const decoded = Buffer.from(encodedPayload, 'base64url').toString('utf8');
+    const decodedBytes = Buffer.from(encodedPayload, 'base64url');
+    if (decodedBytes.toString('base64url') !== encodedPayload) {
+      return {
+        ok: false,
+        status: 'missing',
+        reason: 'Fake handle encoding is noncanonical',
+      };
+    }
+    const decoded = decodedBytes.toString('utf8');
     if (Buffer.byteLength(decoded, 'utf8') > MAX_HANDLE_BYTES) {
       return {
         ok: false,
@@ -80,14 +93,27 @@ const decodeHandle = (
         reason: 'Fake handle payload is oversized',
       };
     }
-    const value = JSON.parse(decoded) as Partial<FakeHandle>;
+    const value = JSON.parse(decoded) as unknown;
     if (
-      typeof value.executionId !== 'string' ||
-      value.executionId.length === 0 ||
-      value.scenario !== SCENARIO ||
-      !Number.isInteger(value.checkpointCursor) ||
-      (value.checkpointCursor as number) < 0 ||
-      (value.checkpointCursor as number) > 6 ||
+      typeof value !== 'object' ||
+      value === null ||
+      Array.isArray(value) ||
+      Object.keys(value).sort().join(',') !==
+        'checkpointCursor,executionId,scenario'
+    ) {
+      return {
+        ok: false,
+        status: 'missing',
+        reason: 'Fake handle payload has an invalid shape',
+      };
+    }
+    const candidate = value as Partial<FakeHandle>;
+    if (
+      !workerExecutionIdSchema.safeParse(candidate.executionId).success ||
+      candidate.scenario !== SCENARIO ||
+      !Number.isInteger(candidate.checkpointCursor) ||
+      (candidate.checkpointCursor as number) < 0 ||
+      (candidate.checkpointCursor as number) > 6 ||
       canonicalJson(value) !== decoded
     ) {
       return {
@@ -96,7 +122,7 @@ const decodeHandle = (
         reason: 'Fake handle payload is invalid',
       };
     }
-    return { ok: true, value: value as FakeHandle };
+    return { ok: true, value: candidate as FakeHandle };
   } catch {
     return {
       ok: false,

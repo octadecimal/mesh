@@ -1,7 +1,9 @@
 import {
   projectSchema,
+  rawDiagnosticSchema,
   workerExecutionSchema,
   type Project,
+  type RawDiagnostic,
   type ExecutionFailure,
   type WorkerExecution,
   type WorkerExecutionLifecycle,
@@ -35,6 +37,21 @@ type ExecutionRow = {
   updated_at: string;
   ended_at: string | null;
 };
+
+type RawDiagnosticRow = {
+  id: string;
+  project_id: string;
+  execution_id: string | null;
+  adapter_id: string;
+  adapter_cursor: number | null;
+  received_at: string;
+  payload_json: string;
+};
+
+export type ExecutionAttentionDetail = Readonly<{
+  execution: WorkerExecution;
+  evidence: readonly RawDiagnostic[];
+}>;
 
 const toExecution = (row: ExecutionRow): WorkerExecution =>
   workerExecutionSchema.parse({
@@ -141,6 +158,58 @@ export class ExecutionRepository {
         )
         .all() as ExecutionRow[]
     ).map(toExecution);
+  }
+
+  listAttentionDetails(
+    projectId?: string,
+  ): readonly ExecutionAttentionDetail[] {
+    const rows = (
+      projectId === undefined
+        ? this.database
+            .prepare(
+              `SELECT * FROM worker_executions
+             WHERE lifecycle = 'attention_required'
+             ORDER BY created_at, id`,
+            )
+            .all()
+        : this.database
+            .prepare(
+              `SELECT * FROM worker_executions
+             WHERE lifecycle = 'attention_required' AND project_id = ?
+             ORDER BY created_at, id`,
+            )
+            .all(projectId)
+    ) as ExecutionRow[];
+    return Object.freeze(
+      rows.map((row) => {
+        const execution = Object.freeze(toExecution(row));
+        const evidenceRows = this.database
+          .prepare(
+            `SELECT * FROM raw_diagnostics
+             WHERE execution_id = ? AND adapter_cursor IS NULL
+             ORDER BY received_at,
+               COALESCE(json_extract(payload_json, '$.operationOrder'), -1),
+               id`,
+          )
+          .all(execution.id) as RawDiagnosticRow[];
+        const evidence = Object.freeze(
+          evidenceRows.map((diagnostic) =>
+            Object.freeze(
+              rawDiagnosticSchema.parse({
+                id: diagnostic.id,
+                projectId: diagnostic.project_id,
+                executionId: diagnostic.execution_id,
+                adapterId: diagnostic.adapter_id,
+                adapterCursor: diagnostic.adapter_cursor,
+                receivedAt: diagnostic.received_at,
+                payload: JSON.parse(diagnostic.payload_json),
+              }),
+            ),
+          ),
+        );
+        return Object.freeze({ execution, evidence });
+      }),
+    );
   }
 
   insertInTransaction(input: WorkerExecution): WorkerExecution {

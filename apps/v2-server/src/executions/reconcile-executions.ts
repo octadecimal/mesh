@@ -2,6 +2,7 @@ import type {
   HarnessAdapter,
   HarnessOperationResult,
   HarnessProbeResult,
+  HarnessSession,
   WorkerExecution,
   WorkerExecutionLifecycle,
 } from '@mesh/v2-contracts';
@@ -26,6 +27,7 @@ type Dependencies = {
   adapter: HarnessAdapter;
   events: V2EventStore;
   barrier: AuditBarrier;
+  attach(executionId: string, session: HarnessSession): void | Promise<void>;
 };
 
 const terminal = new Set<WorkerExecutionLifecycle>([
@@ -121,8 +123,45 @@ export const reconcileExecutions = async (
     const executionPending = pending.filter(
       (operation) => operation.executionId === execution.id,
     );
-    if (execution.lifecycle === 'created' && executionPending.length === 0)
+    if (execution.lifecycle === 'created' && executionPending.length === 0) {
+      const occurredAt = new Date().toISOString();
+      try {
+        dependencies.executions.transaction(() => {
+          dependencies.events.appendRawDiagnosticInTransaction({
+            projectId: execution.projectId,
+            executionId: execution.id,
+            adapterId: execution.adapterId,
+            adapterCursor: null,
+            receivedAt: occurredAt,
+            payload: {
+              kind: 'mesh.v2.reconciliation-probe/v1',
+              reason: 'Execution was never reserved for adapter start',
+            },
+          });
+          const failed = dependencies.executions.transitionInTransaction(
+            execution.id,
+            execution.revision,
+            'failed',
+            occurredAt,
+            {
+              failure: {
+                code: 'startup_interrupted_before_start',
+                message: 'Startup ended before adapter start was reserved',
+              },
+            },
+          );
+          dependencies.events.appendDomainInTransaction(
+            execution.projectId,
+            lifecycleDraft(failed, occurredAt),
+          );
+        });
+      } catch (error) {
+        dependencies.barrier.trip(error, occurredAt);
+        throw error;
+      }
+      summary.terminalized.push(execution.id);
       continue;
+    }
     let probe: HarnessProbeResult;
     try {
       probe = execution.nativeHandle
@@ -151,10 +190,15 @@ export const reconcileExecutions = async (
     }
 
     let desired: WorkerExecutionLifecycle | undefined;
+    let recoveredSession: HarnessSession | undefined;
+    let recoveryError: string | undefined;
     const interruptProof = observations.find(
       ({ operation, observation }) =>
         operation.kind === 'interrupt' &&
         observation.lifecycle === 'interrupted',
+    );
+    const hasPendingInterrupt = observations.some(
+      ({ operation }) => operation.kind === 'interrupt',
     );
     if (!terminal.has(execution.lifecycle)) {
       if (execution.lifecycle === 'attention_required') {
@@ -164,6 +208,8 @@ export const reconcileExecutions = async (
           execution.lifecycle === 'interrupting'
             ? 'interrupted'
             : 'attention_required';
+      } else if (hasPendingInterrupt) {
+        desired = 'attention_required';
       } else if (probe.status === 'terminal') {
         if (
           probe.outcome === 'completed' &&
@@ -191,7 +237,29 @@ export const reconcileExecutions = async (
           ({ observation }) => observation.state === 'succeeded',
         )
       ) {
-        summary.resumed.push(execution.id);
+        const project = dependencies.executions.getProject(execution.projectId);
+        if (!project || !execution.nativeHandle) {
+          desired = 'attention_required';
+          recoveryError = !project
+            ? 'Execution project was not found during recovery'
+            : 'Execution native handle was not found during recovery';
+        } else {
+          try {
+            recoveredSession = await dependencies.adapter.resume({
+              executionId: execution.id,
+              project,
+              assignment: execution.assignment,
+              profile: execution.profileSnapshot,
+              resolvedSkills: execution.resolvedSkills,
+              nativeHandle: execution.nativeHandle,
+              afterAdapterCursor: execution.lastAdapterCursor,
+            });
+          } catch (error) {
+            desired = 'attention_required';
+            recoveryError =
+              error instanceof Error ? error.message : String(error);
+          }
+        }
       } else {
         desired = 'attention_required';
       }
@@ -210,10 +278,14 @@ export const reconcileExecutions = async (
             payload: {
               kind: 'mesh.v2.reconciliation-probe/v1',
               probe,
+              ...(recoveryError === undefined ? {} : { recoveryError }),
             },
           });
         }
-        for (const { operation, observation } of observations) {
+        for (const [
+          operationOrder,
+          { operation, observation },
+        ] of observations.entries()) {
           dependencies.events.appendRawDiagnosticInTransaction({
             projectId: execution.projectId,
             executionId: execution.id,
@@ -223,8 +295,10 @@ export const reconcileExecutions = async (
             payload: {
               kind: 'mesh.v2.reconciliation-probe/v1',
               operationId: operation.id,
+              operationOrder,
               probe,
               observation: observation.result,
+              ...(recoveryError === undefined ? {} : { recoveryError }),
             },
           });
           dependencies.operations.finishInTransaction(
@@ -265,8 +339,51 @@ export const reconcileExecutions = async (
         );
       });
     } catch (error) {
+      if (recoveredSession) await recoveredSession.close();
       dependencies.barrier.trip(error, occurredAt);
       throw error;
+    }
+    if (recoveredSession) {
+      try {
+        await dependencies.attach(execution.id, recoveredSession);
+        summary.resumed.push(execution.id);
+      } catch (error) {
+        await recoveredSession.close();
+        const attachmentFailedAt = new Date().toISOString();
+        try {
+          dependencies.executions.transaction(() => {
+            dependencies.events.appendRawDiagnosticInTransaction({
+              projectId: execution.projectId,
+              executionId: execution.id,
+              adapterId: execution.adapterId,
+              adapterCursor: null,
+              receivedAt: attachmentFailedAt,
+              payload: {
+                kind: 'mesh.v2.reconciliation-attach-failed/v1',
+                reason: error instanceof Error ? error.message : String(error),
+              },
+            });
+            const current = dependencies.executions.get(execution.id);
+            if (!current) {
+              throw new Error('Recovered execution disappeared before attach');
+            }
+            const attention = dependencies.executions.transitionInTransaction(
+              current.id,
+              current.revision,
+              'attention_required',
+              attachmentFailedAt,
+            );
+            dependencies.events.appendDomainInTransaction(
+              current.projectId,
+              lifecycleDraft(attention, attachmentFailedAt),
+            );
+          });
+        } catch (auditError) {
+          dependencies.barrier.trip(auditError, attachmentFailedAt);
+          throw auditError;
+        }
+        summary.attentionRequired.push(execution.id);
+      }
     }
     if (desired && terminal.has(desired))
       summary.terminalized.push(execution.id);

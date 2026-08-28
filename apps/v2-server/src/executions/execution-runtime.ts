@@ -372,6 +372,7 @@ export class ExecutionRuntime {
       requestHash,
     );
     if (replay) return replay.result;
+    await Promise.resolve();
     const occurredAt = this.dependencies.now();
     let operationId: string | undefined;
     let nativeHandle: string | null = null;
@@ -470,9 +471,9 @@ export class ExecutionRuntime {
       proof = { error: error instanceof Error ? error.message : String(error) };
     }
     const completedAt = this.dependencies.now();
-    const proofEvent = inImmediateTransaction(
-      this.dependencies.database,
-      () => {
+    let proofEvent: DomainEvent;
+    try {
+      proofEvent = inImmediateTransaction(this.dependencies.database, () => {
         const current = requireExecution(
           this.dependencies.executions,
           envelope.command.executionId,
@@ -493,8 +494,16 @@ export class ExecutionRuntime {
           current.projectId,
           lifecycleDraft(finished, completedAt),
         );
-      },
-    );
+      });
+    } catch (error) {
+      const owned = this.active.get(envelope.command.executionId);
+      if (owned) {
+        await this.contain(envelope.command.executionId, owned.session, error);
+      } else {
+        this.dependencies.barrier.trip(error, completedAt);
+      }
+      return acceptance;
+    }
     this.dependencies.publisher.domain(proofEvent);
     return acceptance;
   }

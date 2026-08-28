@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 
 import { describe, expect, it } from 'vitest';
 
@@ -44,6 +45,9 @@ const collect = async <T>(events: AsyncIterable<T>): Promise<T[]> => {
   for await (const event of events) collected.push(event);
   return collected;
 };
+
+const rawHandle = (payload: unknown, encoding: BufferEncoding = 'base64url') =>
+  `fake:v1:${Buffer.from(JSON.stringify(payload)).toString(encoding)}`;
 
 describe('FakeHarnessAdapter', () => {
   it.each([
@@ -172,6 +176,58 @@ describe('FakeHarnessAdapter', () => {
         afterAdapterCursor: 1,
       };
       await expect(fake.resume(resumeRequest)).rejects.toThrow('execution');
+    });
+  });
+
+  it.each([
+    [
+      'extra field',
+      rawHandle({
+        checkpointCursor: 2,
+        executionId: randomUUID(),
+        extra: true,
+        scenario: 'todo-foundation-v1',
+      }),
+    ],
+    [
+      'invalid execution ID',
+      rawHandle({
+        checkpointCursor: 2,
+        executionId: 'not-an-execution-id',
+        scenario: 'todo-foundation-v1',
+      }),
+    ],
+    [
+      'missing checkpoint',
+      rawHandle({
+        executionId: randomUUID(),
+        scenario: 'todo-foundation-v1',
+      }),
+    ],
+    [
+      'noncanonical field order',
+      rawHandle({
+        executionId: randomUUID(),
+        scenario: 'todo-foundation-v1',
+        checkpointCursor: 2,
+      }),
+    ],
+    [
+      'noncanonical base64 encoding',
+      rawHandle(
+        {
+          checkpointCursor: 2,
+          executionId: randomUUID(),
+          scenario: 'todo-foundation-v1',
+        },
+        'base64',
+      ),
+    ],
+  ])('rejects %s in a fake handle', async (_case, nativeHandle) => {
+    await expect(
+      new FakeHarnessAdapter().probe(nativeHandle),
+    ).resolves.toMatchObject({
+      status: 'missing',
     });
   });
 
