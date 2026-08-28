@@ -4,7 +4,7 @@ import {
   opendir as fsOpendir,
   realpath as fsRealpath,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, win32 } from 'node:path';
 
 const maxReadBytes = 32_000;
 const maxSearchFileBytes = 128_000;
@@ -14,7 +14,7 @@ const maxSearchDirectories = 128;
 const maxSearchEntries = 1_000;
 const maxSearchPending = 256;
 
-type FileSystemStat = {
+export type FileSystemStat = {
   dev: bigint | number;
   ino: bigint | number;
   mode: bigint | number;
@@ -58,6 +58,13 @@ export type QaWorkspaceFileSystem = {
 type RootSnapshot = {
   lexicalRoot: string;
   root: string;
+  rootIdentity: string;
+};
+
+export type WorkspaceRootBinding = {
+  lexicalRoot: string;
+  root: string;
+  rootObjectIdentity: string;
 };
 
 type BoundSnapshot = RootSnapshot & {
@@ -118,10 +125,101 @@ const relativeInput = (candidate: string) => {
   return normalized;
 };
 
-const identity = (stat: FileSystemStat) =>
+const hasParentTraversal = (candidate: string) =>
+  candidate.split('/').some((segment) => segment === '..');
+
+const safeBraceAlternative = /^[A-Za-z0-9_-]+$/u;
+
+const hasOnlySafeBraceAlternatives = (pattern: string): boolean => {
+  let openBrace = -1;
+  for (let index = 0; index < pattern.length; index += 1) {
+    if (pattern[index] === '{') {
+      if (openBrace !== -1) return false;
+      openBrace = index;
+      continue;
+    }
+    if (pattern[index] !== '}') continue;
+    if (openBrace === -1) return false;
+    const alternatives = pattern.slice(openBrace + 1, index).split(',');
+    if (
+      alternatives.length < 2 ||
+      alternatives.some(
+        (alternative) => !safeBraceAlternative.test(alternative),
+      )
+    ) {
+      return false;
+    }
+    openBrace = -1;
+  }
+  return openBrace === -1;
+};
+
+const safeGlobPattern = (pattern: string): string => {
+  if (
+    pattern.trim().length === 0 ||
+    isAbsolute(pattern) ||
+    win32.isAbsolute(pattern) ||
+    hasParentTraversal(pattern) ||
+    pattern.includes(':') ||
+    pattern.includes('\\') ||
+    pattern.includes('[') ||
+    pattern.includes(']') ||
+    /[?*+@!]\(/u.test(pattern) ||
+    !hasOnlySafeBraceAlternatives(pattern)
+  ) {
+    throw new QaWorkspacePathRejectedError();
+  }
+  return pattern;
+};
+
+const regexSpecial = /[\\^$.*+?()[\]{}|]/u;
+
+const globExpression = (pattern: string): RegExp => {
+  let source = '^';
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index];
+    if (character === '*' && pattern[index + 1] === '*') {
+      if (pattern[index + 2] === '/') {
+        source += '(?:.*/)?';
+        index += 2;
+      } else {
+        source += '.*';
+        index += 1;
+      }
+      continue;
+    }
+    if (character === '*') {
+      source += '[^/]*';
+      continue;
+    }
+    if (character === '?') {
+      source += '[^/]';
+      continue;
+    }
+    if (character === '{') {
+      const close = pattern.indexOf('}', index + 1);
+      const alternatives = pattern.slice(index + 1, close).split(',');
+      source += `(?:${alternatives.join('|')})`;
+      index = close;
+      continue;
+    }
+    source += regexSpecial.test(character ?? '') ? `\\${character}` : character;
+  }
+  return new RegExp(`${source}$`, 'u');
+};
+
+const compareCodeUnits = (left: string, right: string): number =>
+  left < right ? -1 : left > right ? 1 : 0;
+
+export const workspaceStatIdentity = (stat: FileSystemStat) =>
   [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs].join(
     ':',
   );
+
+const identity = workspaceStatIdentity;
+
+export const workspaceObjectIdentity = (stat: FileSystemStat) =>
+  [stat.dev, stat.ino, stat.mode].join(':');
 
 const readBounded = async (handle: FileHandle, limit: number) => {
   const output = Buffer.alloc(limit + 1);
@@ -135,7 +233,10 @@ const readBounded = async (handle: FileHandle, limit: number) => {
 export class QaWorkspaceReader {
   private readonly fileSystem: QaWorkspaceFileSystem;
 
-  constructor(fileSystem: Partial<QaWorkspaceFileSystem> = {}) {
+  constructor(
+    fileSystem: Partial<QaWorkspaceFileSystem> = {},
+    private readonly rootBinding?: WorkspaceRootBinding,
+  ) {
     this.fileSystem = { ...defaultFileSystem, ...fileSystem };
   }
 
@@ -144,7 +245,17 @@ export class QaWorkspaceReader {
     const root = await this.fileSystem.realpath(lexicalRoot);
     const rootStat = await this.fileSystem.lstat(root);
     if (!rootStat.isDirectory()) throw new QaWorkspacePathRejectedError();
-    return { lexicalRoot, root };
+    const rootIdentity = identity(rootStat);
+    if (
+      this.rootBinding &&
+      (!samePath(this.rootBinding.lexicalRoot, lexicalRoot) ||
+        !samePath(this.rootBinding.root, root) ||
+        this.rootBinding.rootObjectIdentity !==
+          workspaceObjectIdentity(rootStat))
+    ) {
+      throw new QaWorkspacePathRejectedError();
+    }
+    return { lexicalRoot, root, rootIdentity };
   }
 
   private async captureBound(
@@ -211,11 +322,14 @@ export class QaWorkspaceReader {
     ) {
       throw new QaWorkspacePathRejectedError();
     }
-    const [stat, parentStat] = await Promise.all([
+    const [rootStat, stat, parentStat] = await Promise.all([
+      this.fileSystem.lstat(root),
       this.fileSystem.lstat(path),
       this.fileSystem.lstat(parentPath),
     ]);
     if (
+      !rootStat.isDirectory() ||
+      identity(rootStat) !== snapshot.rootIdentity ||
       identity(stat) !== snapshot.identity ||
       identity(parentStat) !== snapshot.parentIdentity
     ) {
@@ -299,11 +413,89 @@ export class QaWorkspaceReader {
     return { entries, truncated: !exhausted && entries.length >= limit };
   }
 
-  async read(workspacePath: string, inputPath: string) {
+  private async walk(
+    workspacePath: string,
+    inputPath: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    files: BoundSnapshot[];
+    root: RootSnapshot;
+    start: BoundSnapshot;
+    truncated: boolean;
+  }> {
+    throwIfSearchAborted(signal);
+    const start = await this.resolveBound(workspacePath, inputPath);
+    const root: RootSnapshot = {
+      lexicalRoot: start.lexicalRoot,
+      root: start.root,
+      rootIdentity: start.rootIdentity,
+    };
+    const pending = [start.path];
+    const files: BoundSnapshot[] = [];
+    let directories = 0;
+    let entriesVisited = 0;
+    let traversalTruncated = false;
+    while (
+      pending.length > 0 &&
+      files.length < maxSearchFiles &&
+      directories < maxSearchDirectories &&
+      entriesVisited < maxSearchEntries
+    ) {
+      throwIfSearchAborted(signal);
+      const current = pending.pop();
+      if (!current) break;
+      const snapshot = await this.captureBound(root, current);
+      throwIfSearchAborted(signal);
+      if (snapshot.stat.isFile()) {
+        files.push(snapshot);
+        continue;
+      }
+      if (!snapshot.stat.isDirectory()) continue;
+      directories += 1;
+      const remainingEntries = maxSearchEntries - entriesVisited;
+      const remainingPending = maxSearchPending - pending.length;
+      const entryBudget = Math.min(remainingEntries, remainingPending);
+      if (entryBudget <= 0) {
+        traversalTruncated = true;
+        break;
+      }
+      const streamed = await this.readDirectoryStream(
+        snapshot,
+        entryBudget,
+        signal,
+      );
+      entriesVisited += streamed.entries.length;
+      if (streamed.truncated) traversalTruncated = true;
+      for (const entry of streamed.entries.reverse()) {
+        throwIfSearchAborted(signal);
+        if (entry.isSymbolicLink()) continue;
+        if (pending.length >= maxSearchPending) {
+          traversalTruncated = true;
+          break;
+        }
+        pending.push(resolve(snapshot.path, entry.name));
+      }
+    }
+    if (pending.length > 0) traversalTruncated = true;
+    return {
+      files,
+      root,
+      start,
+      truncated: traversalTruncated || files.length >= maxSearchFiles,
+    };
+  }
+
+  async read(
+    workspacePath: string,
+    inputPath: string,
+    options: { signal?: AbortSignal } = {},
+  ) {
+    throwIfSearchAborted(options.signal);
     const snapshot = await this.resolveBound(workspacePath, inputPath);
+    throwIfSearchAborted(options.signal);
     return {
       path: relative(snapshot.root, snapshot.path),
-      ...(await this.readSnapshot(snapshot, maxReadBytes)),
+      ...(await this.readSnapshot(snapshot, maxReadBytes, options.signal)),
     };
   }
 
@@ -343,59 +535,11 @@ export class QaWorkspaceReader {
     query: string,
     options: { signal?: AbortSignal } = {},
   ) {
-    throwIfSearchAborted(options.signal);
-    const start = await this.resolveBound(workspacePath, inputPath);
-    const root: RootSnapshot = {
-      lexicalRoot: start.lexicalRoot,
-      root: start.root,
-    };
-    const pending = [start.path];
-    const files: BoundSnapshot[] = [];
-    let directories = 0;
-    let entriesVisited = 0;
-    let traversalTruncated = false;
-    while (
-      pending.length > 0 &&
-      files.length < maxSearchFiles &&
-      directories < maxSearchDirectories &&
-      entriesVisited < maxSearchEntries
-    ) {
-      throwIfSearchAborted(options.signal);
-      const current = pending.pop();
-      if (!current) break;
-      const snapshot = await this.captureBound(root, current);
-      throwIfSearchAborted(options.signal);
-      if (snapshot.stat.isFile()) {
-        files.push(snapshot);
-        continue;
-      }
-      if (!snapshot.stat.isDirectory()) continue;
-      directories += 1;
-      const remainingEntries = maxSearchEntries - entriesVisited;
-      const remainingPending = maxSearchPending - pending.length;
-      const entryBudget = Math.min(remainingEntries, remainingPending);
-      if (entryBudget <= 0) {
-        traversalTruncated = true;
-        break;
-      }
-      const streamed = await this.readDirectoryStream(
-        snapshot,
-        entryBudget,
-        options.signal,
-      );
-      entriesVisited += streamed.entries.length;
-      if (streamed.truncated) traversalTruncated = true;
-      for (const entry of streamed.entries.reverse()) {
-        throwIfSearchAborted(options.signal);
-        if (entry.isSymbolicLink()) continue;
-        if (pending.length >= maxSearchPending) {
-          traversalTruncated = true;
-          break;
-        }
-        pending.push(resolve(snapshot.path, entry.name));
-      }
-    }
-    if (pending.length > 0) traversalTruncated = true;
+    const { files, root, start, truncated } = await this.walk(
+      workspacePath,
+      inputPath,
+      options.signal,
+    );
 
     const matches: Array<{ path: string; line: number; text: string }> = [];
     for (const file of files) {
@@ -421,10 +565,36 @@ export class QaWorkspaceReader {
     return {
       path: relative(root.root, start.path) || '.',
       matches,
-      truncated:
-        traversalTruncated ||
-        files.length >= maxSearchFiles ||
-        matches.length >= maxSearchMatches,
+      truncated: truncated || matches.length >= maxSearchMatches,
+    };
+  }
+
+  async glob(
+    workspacePath: string,
+    inputPath: string,
+    pattern: string,
+    options: { signal?: AbortSignal } = {},
+  ) {
+    const expression = globExpression(safeGlobPattern(pattern));
+    const { files, root, start, truncated } = await this.walk(
+      workspacePath,
+      inputPath,
+      options.signal,
+    );
+    const matches = files
+      .map((file) => relative(start.path, file.path))
+      .filter((path) => expression.test(path.replace(/\\/gu, '/')))
+      .sort(compareCodeUnits)
+      .map(
+        (path) =>
+          relative(root.root, resolve(start.path, path)) ||
+          relative(root.root, start.path),
+      );
+    throwIfSearchAborted(options.signal);
+    return {
+      path: relative(root.root, start.path) || '.',
+      files: matches,
+      truncated,
     };
   }
 }

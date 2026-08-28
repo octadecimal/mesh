@@ -1,13 +1,15 @@
 import {
+  compareCodeUnits,
+  projectPlanStaleDetailsSchema,
   taskActorSchema,
   type MutatingCommand,
   type Project,
   type ProjectPlan,
-  type ProjectPlanAttention,
   type ProjectPlanDetails,
   type ProjectPlanHistoryPage,
   type ProjectPlanProposal,
   type ProjectPlanProposalTask,
+  type ProjectPlanStaleDetails,
   type ProjectPlanSummary,
   type TaskActor,
 } from '@mesh-session-platform/contracts';
@@ -64,6 +66,21 @@ const failureMessage = (caught: unknown, fallback: string) => {
   return fallback;
 };
 
+const staleFailureDetails = (
+  caught: unknown,
+): ProjectPlanStaleDetails | undefined => {
+  if (
+    typeof caught !== 'object' ||
+    caught === null ||
+    !('code' in caught) ||
+    caught.code !== 'project_plan_stale' ||
+    !('details' in caught)
+  )
+    return undefined;
+  const parsed = projectPlanStaleDetailsSchema.safeParse(caught.details);
+  return parsed.success ? parsed.data : undefined;
+};
+
 const planFingerprint = (plan: ProjectPlan | undefined) =>
   plan
     ? `${plan.id}:${plan.revision}:${plan.status}:${plan.latestProposalOrdinal}`
@@ -91,8 +108,8 @@ const appendUniquePlans = (
   return additions.length > 0
     ? [...current, ...additions].sort(
         (left, right) =>
-          right.terminalAt.localeCompare(left.terminalAt) ||
-          right.id.localeCompare(left.id),
+          compareCodeUnits(right.terminalAt, left.terminalAt) ||
+          compareCodeUnits(right.id, left.id),
       )
     : current;
 };
@@ -131,28 +148,25 @@ function EvidenceList({
   );
 }
 
-function StaleEvidence({ attention }: { attention: ProjectPlanAttention }) {
-  if (attention.type !== 'stale_board')
-    return <p className="notice notice-error">{attention.message}</p>;
-
+function StaleEvidence({ evidence }: { evidence: ProjectPlanStaleDetails }) {
   const groups = [
     {
       label: 'Added',
-      ids: attention.addedTaskIds,
-      total: attention.addedTaskTotal,
-      truncated: attention.addedTaskIdsTruncated,
+      ids: evidence.addedTaskIds,
+      total: evidence.addedTaskTotal,
+      truncated: evidence.addedTaskIdsTruncated,
     },
     {
       label: 'Removed',
-      ids: attention.removedTaskIds,
-      total: attention.removedTaskTotal,
-      truncated: attention.removedTaskIdsTruncated,
+      ids: evidence.removedTaskIds,
+      total: evidence.removedTaskTotal,
+      truncated: evidence.removedTaskIdsTruncated,
     },
     {
       label: 'Changed',
-      ids: attention.changedTaskIds,
-      total: attention.changedTaskTotal,
-      truncated: attention.changedTaskIdsTruncated,
+      ids: evidence.changedTaskIds,
+      total: evidence.changedTaskTotal,
+      truncated: evidence.changedTaskIdsTruncated,
     },
   ];
   return (
@@ -169,8 +183,8 @@ function StaleEvidence({ attention }: { attention: ProjectPlanAttention }) {
           ) : null}
         </div>
       ))}
-      {attention.dependenciesChanged ? <p>Dependencies changed.</p> : null}
-      {attention.policyChanged ? <p>Project policy changed.</p> : null}
+      {evidence.dependenciesChanged ? <p>Dependencies changed.</p> : null}
+      {evidence.policyChanged ? <p>Project policy changed.</p> : null}
     </div>
   );
 }
@@ -458,6 +472,7 @@ export function ProjectPlanningPanel({
   const [subscriptionConfirmed, setSubscriptionConfirmed] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>();
   const [error, setError] = useState<string>();
+  const [staleEvidence, setStaleEvidence] = useState<ProjectPlanStaleDetails>();
   const [revisionFeedback, setRevisionFeedback] = useState('');
   const [rejectionReason, setRejectionReason] = useState('');
   const [cancellationReason, setCancellationReason] = useState('');
@@ -487,6 +502,7 @@ export function ProjectPlanningPanel({
     setSubscriptionConfirmed(false);
     setPendingAction(undefined);
     setError(undefined);
+    setStaleEvidence(undefined);
     setRevisionFeedback('');
     setRejectionReason('');
     setCancellationReason('');
@@ -540,6 +556,7 @@ export function ProjectPlanningPanel({
     const commandProjectId = project.id;
     setPendingAction({ label, baseline: fingerprint, settled: false });
     setError(undefined);
+    setStaleEvidence(undefined);
     try {
       await Promise.resolve(onCommand(command));
       if (currentProjectId.current !== commandProjectId) return;
@@ -549,6 +566,7 @@ export function ProjectPlanningPanel({
     } catch (caught) {
       if (currentProjectId.current !== commandProjectId) return;
       setError(failureMessage(caught, fallback));
+      setStaleEvidence(staleFailureDetails(caught));
       setPendingAction(undefined);
     }
   };
@@ -708,6 +726,19 @@ export function ProjectPlanningPanel({
     activeDetailState?.status === 'loaded'
       ? activeDetailState.details
       : undefined;
+  const activeDetailFingerprint = activeDetailState
+    ? JSON.stringify(activeDetailState)
+    : 'no-active-detail';
+  useEffect(() => {
+    setStaleEvidence(undefined);
+  }, [
+    activeDetailFingerprint,
+    fingerprint,
+    project.archivedAt,
+    project.repositoryIdentity,
+    project.revision,
+    project.updatedAt,
+  ]);
   const latestProposal = activeDetails?.proposals
     .filter(({ ordinal }) => ordinal === activePlan?.latestProposalOrdinal)
     .at(-1);
@@ -860,8 +891,14 @@ export function ProjectPlanningPanel({
             projection={projection}
             onOpenSession={onOpenSession}
           />
-          {activePlan.attention ? (
-            <StaleEvidence attention={activePlan.attention} />
+          {staleEvidence ? (
+            <StaleEvidence evidence={staleEvidence} />
+          ) : activePlan.attention?.type === 'stale_board' ? (
+            <StaleEvidence evidence={activePlan.attention} />
+          ) : activePlan.attention ? (
+            <p className="notice notice-error">
+              {activePlan.attention.message}
+            </p>
           ) : null}
 
           {activePlan.status === 'awaiting_review' ? (

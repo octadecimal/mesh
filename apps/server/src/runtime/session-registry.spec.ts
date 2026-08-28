@@ -19,7 +19,10 @@ import {
   FakeDriverSession,
 } from '../claude/fake-driver.js';
 import { createTestRepositories } from '../test/create-test-database.js';
-import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
+import {
+  PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
+} from '../domain/planning-policy.js';
 import { SessionRegistry } from './session-registry.js';
 
 const now = '2026-08-25T12:00:00.000Z';
@@ -721,7 +724,7 @@ describe('SessionRegistry Developer attachment', () => {
     const configuration: PmRuntimeConfiguration = {
       role: 'pm',
       initialPrompt: 'Plan the approved project goal.',
-      availableTools: PM_AVAILABLE_TOOLS,
+      availableTools: PM_BUILTIN_TOOLS,
       allowedTools: PM_AVAILABLE_TOOLS,
       submitProposal: async () => undefined,
     };
@@ -784,7 +787,7 @@ describe('SessionRegistry Developer attachment', () => {
     await registry.create('stopped-pm', {
       role: 'pm',
       initialPrompt: 'Plan the project.',
-      availableTools: PM_AVAILABLE_TOOLS,
+      availableTools: PM_BUILTIN_TOOLS,
       allowedTools: PM_AVAILABLE_TOOLS,
       submitProposal: async () => undefined,
     });

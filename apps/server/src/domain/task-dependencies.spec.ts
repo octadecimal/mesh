@@ -127,15 +127,13 @@ describe('task dependency policy', () => {
     ).toMatchObject({ code: 'task_dependency_cycle' });
   });
 
-  it('rejects a currently cancelled prerequisite at proposal time', () => {
-    expect(
-      capturedError(() =>
-        validateDependencyGraph({
-          tasks: [task('a', 'cancelled'), task('b')],
-          dependencies: [edge('b', 'a')],
-        }),
-      ),
-    ).toMatchObject({ code: 'task_dependency_invalid' });
+  it('keeps a canonical edge structurally valid after its prerequisite is cancelled', () => {
+    expect(() =>
+      validateDependencyGraph({
+        tasks: [task('a', 'cancelled'), task('b')],
+        dependencies: [edge('b', 'a')],
+      }),
+    ).not.toThrow();
   });
 
   it('returns every incomplete direct prerequisite in code-unit ID order', () => {

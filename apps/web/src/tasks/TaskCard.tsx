@@ -50,7 +50,7 @@ export const isDependencyBlockedForwardTransition = (
 ) =>
   unmetPrerequisiteCount > 0 &&
   ((currentState === 'backlog' && nextState === 'ready') ||
-    (currentState === 'ready' && nextState === 'in_progress'));
+    nextState === 'in_progress');
 
 export function TaskCard({
   task,

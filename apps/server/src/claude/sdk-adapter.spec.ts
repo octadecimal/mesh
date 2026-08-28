@@ -84,7 +84,10 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 }));
 
 import { createClaudeSdkFacade } from './sdk-adapter.js';
-import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
+import {
+  PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
+} from '../domain/planning-policy.js';
 
 describe('createClaudeSdkFacade', () => {
   beforeEach(() => {
@@ -239,7 +242,7 @@ describe('createClaudeSdkFacade', () => {
       role: {
         role: 'pm',
         initialPrompt: 'Plan the approved project goal.',
-        availableTools: PM_AVAILABLE_TOOLS,
+        availableTools: PM_BUILTIN_TOOLS,
         allowedTools: PM_AVAILABLE_TOOLS,
         submitProposal,
       },
@@ -257,17 +260,29 @@ describe('createClaudeSdkFacade', () => {
       alwaysLoad: true,
     });
     expect(serverOptions.tools.map(({ name }) => name)).toEqual([
+      'read_workspace_file',
+      'glob_workspace_files',
+      'search_workspace_text',
       'submit_project_plan',
     ]);
     expect(query.mock.calls.at(-1)?.[0].options).toMatchObject({
-      tools: ['Read', 'Glob', 'Grep', 'mcp__mesh_pm__submit_project_plan'],
+      tools: [],
       settingSources: [],
       strictMcpConfig: true,
       allowedTools: [
+        'mcp__mesh_pm__read_workspace_file',
+        'mcp__mesh_pm__glob_workspace_files',
+        'mcp__mesh_pm__search_workspace_text',
+        'mcp__mesh_pm__submit_project_plan',
+      ],
+      disallowedTools: [
+        'Bash',
         'Read',
         'Glob',
         'Grep',
-        'mcp__mesh_pm__submit_project_plan',
+        'Write',
+        'Edit',
+        'NotebookEdit',
       ],
     });
     const options = query.mock.calls.at(-1)?.[0].options;
@@ -286,9 +301,9 @@ describe('createClaudeSdkFacade', () => {
         'mcp__mesh_qa__submit_qa_verdict',
       ]),
     );
-    expect(options.allowedTools).toEqual(options.tools);
+    expect(options).not.toHaveProperty('hooks');
 
-    const result = await serverOptions.tools[0]?.handler(proposal);
+    const result = await pmTools().submit_project_plan?.handler(proposal);
     expect(submitProposal).toHaveBeenCalledOnce();
     expect(submitProposal).toHaveBeenCalledWith(proposal);
     expect(result).toEqual({
@@ -302,7 +317,7 @@ describe('createClaudeSdkFacade', () => {
         role: {
           role: 'pm',
           initialPrompt: 'Plan.',
-          availableTools: PM_AVAILABLE_TOOLS,
+          availableTools: PM_BUILTIN_TOOLS,
           allowedTools: PM_AVAILABLE_TOOLS,
           submitProposal: async () => undefined,
         },
@@ -311,7 +326,7 @@ describe('createClaudeSdkFacade', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
-  it('confines every PM repository read to the canonical cwd before tool execution', async () => {
+  it('confines Mesh-owned PM reads, globs, and searches to the canonical cwd', async () => {
     const fixture = mkdtempSync(join(tmpdir(), 'mesh-pm-read-boundary-'));
     const repository = join(fixture, 'repository');
     const source = join(repository, 'src');
@@ -334,66 +349,45 @@ describe('createClaudeSdkFacade', () => {
         role: {
           role: 'pm',
           initialPrompt: 'Plan.',
-          availableTools: PM_AVAILABLE_TOOLS,
+          availableTools: PM_BUILTIN_TOOLS,
           allowedTools: PM_AVAILABLE_TOOLS,
           submitProposal: async () => undefined,
         },
       });
       const options = query.mock.calls.at(-1)?.[0].options;
-      const hook = options.hooks?.PreToolUse?.[0]?.hooks[0];
-      expect(options.hooks?.PreToolUse?.[0]?.matcher).toBe('Read|Glob|Grep');
-      expect(hook).toBeTypeOf('function');
+      expect(options).not.toHaveProperty('hooks');
+      const tools = pmTools();
 
-      const invoke = async (tool_name: string, tool_input: unknown) =>
-        hook?.({ hook_event_name: 'PreToolUse', tool_name, tool_input });
-      const allowed = {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'defer',
-        },
-      };
-      const denied = {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason:
-            'PM repository reads are confined to the session working directory.',
-        },
-      };
-
-      await expect(invoke('Read', { file_path: insideFile })).resolves.toEqual(
-        allowed,
-      );
-      await expect(invoke('Glob', { pattern: '**/*.ts' })).resolves.toEqual(
-        allowed,
-      );
       await expect(
-        invoke('Glob', { pattern: '**/*.ts', path: 'src' }),
-      ).resolves.toEqual(allowed);
-      await expect(invoke('Grep', { pattern: 'inside' })).resolves.toEqual(
-        allowed,
-      );
+        tools.read_workspace_file?.handler({ path: 'src/inside.ts' }),
+      ).resolves.toMatchObject({
+        content: [{ text: expect.stringContaining('inside = true') }],
+      });
       await expect(
-        invoke('Grep', { pattern: 'inside', path: 'src' }),
-      ).resolves.toEqual(allowed);
+        tools.glob_workspace_files?.handler({ pattern: '**/*.ts' }),
+      ).resolves.toMatchObject({
+        content: [{ text: expect.stringContaining('src\\\\inside.ts') }],
+      });
+      await expect(
+        tools.search_workspace_text?.handler({ path: 'src', query: 'inside' }),
+      ).resolves.toMatchObject({
+        content: [{ text: expect.stringContaining('inside = true') }],
+      });
 
       for (const [toolName, input] of [
-        ['Read', { path: insideFile }],
-        ['Read', { file_path: 42 }],
-        ['Read', { file_path: outsideFile }],
-        ['Read', { file_path: join('..', 'outside', 'secret.txt') }],
-        ['Read', { file_path: join(repository, 'escape', 'secret.txt') }],
-        ['Glob', { pattern: '**/*', path: outside }],
-        ['Glob', { pattern: '../outside/**/*' }],
-        ['Glob', { pattern: '**/*', path: join('..', 'outside') }],
-        ['Glob', { pattern: '**/*', path: join(repository, 'escape') }],
-        ['Glob', { pattern: '**/*', path: 42 }],
-        ['Grep', { pattern: 'secret', path: outside }],
-        ['Grep', { pattern: 'secret', path: join('..', 'outside') }],
-        ['Grep', { pattern: 'secret', path: join(repository, 'escape') }],
-        ['Grep', { pattern: 'secret', path: null }],
+        ['read_workspace_file', { path: outsideFile }],
+        ['read_workspace_file', { path: join('..', 'outside', 'secret.txt') }],
+        ['read_workspace_file', { path: join('escape', 'secret.txt') }],
+        ['glob_workspace_files', { pattern: '../outside/**/*' }],
+        ['glob_workspace_files', { pattern: '**/*', path: outside }],
+        ['glob_workspace_files', { pattern: '**/*', path: 'escape' }],
+        ['search_workspace_text', { query: 'secret', path: outside }],
+        ['search_workspace_text', { query: 'secret', path: '../outside' }],
+        ['search_workspace_text', { query: 'secret', path: 'escape' }],
       ] as const) {
-        await expect(invoke(toolName, input)).resolves.toEqual(denied);
+        await expect(tools[toolName]?.handler(input)).resolves.toMatchObject({
+          isError: true,
+        });
       }
     } finally {
       rmSync(fixture, { recursive: true, force: true });
@@ -408,40 +402,22 @@ describe('createClaudeSdkFacade', () => {
         role: {
           role: 'pm',
           initialPrompt: 'Plan.',
-          availableTools: PM_AVAILABLE_TOOLS,
+          availableTools: PM_BUILTIN_TOOLS,
           allowedTools: PM_AVAILABLE_TOOLS,
           submitProposal: async () => undefined,
         },
       });
-      const hook =
-        query.mock.calls.at(-1)?.[0].options.hooks?.PreToolUse?.[0]?.hooks[0];
-      const invoke = async (pattern: string) =>
-        hook?.({
-          hook_event_name: 'PreToolUse',
-          tool_name: 'Glob',
-          tool_input: { pattern },
-        });
-      const allowed = {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'defer',
-        },
-      };
-      const denied = {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason:
-            'PM repository reads are confined to the session working directory.',
-        },
-      };
+      const glob = pmTools().glob_workspace_files;
+      const invoke = async (pattern: string) => glob?.handler({ pattern });
 
       for (const pattern of [
         '**/*.ts',
         'src/**/*.{ts,tsx}',
         'src/{feature-one,feature_two}/**/*.ts',
       ]) {
-        await expect(invoke(pattern)).resolves.toEqual(allowed);
+        await expect(invoke(pattern)).resolves.not.toMatchObject({
+          isError: true,
+        });
       }
 
       for (const pattern of [
@@ -462,8 +438,36 @@ describe('createClaudeSdkFacade', () => {
         'src/ts,tsx}/**/*',
         'src/{ts,,tsx}/**/*',
       ]) {
-        await expect(invoke(pattern)).resolves.toEqual(denied);
+        await expect(invoke(pattern)).resolves.toMatchObject({ isError: true });
       }
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+    }
+  });
+
+  it('revokes PM workspace controls when the owning SDK query is interrupted', async () => {
+    const repository = mkdtempSync(join(tmpdir(), 'mesh-pm-read-revoked-'));
+    try {
+      writeFileSync(join(repository, 'readme.md'), '# Planning');
+      const sdkQuery = createClaudeSdkFacade().startQuery({
+        cwd: repository,
+        role: {
+          role: 'pm',
+          initialPrompt: 'Plan.',
+          availableTools: PM_BUILTIN_TOOLS,
+          allowedTools: PM_AVAILABLE_TOOLS,
+          submitProposal: async () => undefined,
+        },
+      });
+      const read = pmTools().read_workspace_file;
+
+      await sdkQuery.interrupt();
+
+      const result = await read?.handler({ path: 'readme.md' });
+      expect(result).toMatchObject({ isError: true });
+      expect(JSON.stringify(result)).toContain(
+        'pm_workspace_operation_cancelled',
+      );
     } finally {
       rmSync(repository, { recursive: true, force: true });
     }
@@ -475,7 +479,7 @@ describe('createClaudeSdkFacade', () => {
         role: {
           role: 'pm',
           initialPrompt: 'Plan.',
-          availableTools: [...PM_AVAILABLE_TOOLS, 'Bash'],
+          availableTools: [...PM_BUILTIN_TOOLS, 'Bash'],
           allowedTools: [...PM_AVAILABLE_TOOLS].reverse(),
           submitProposal: async () => undefined,
         },
@@ -498,7 +502,7 @@ describe('createClaudeSdkFacade', () => {
       role: {
         role: 'pm',
         initialPrompt: 'Plan.',
-        availableTools: PM_AVAILABLE_TOOLS,
+        availableTools: PM_BUILTIN_TOOLS,
         allowedTools: PM_AVAILABLE_TOOLS,
         submitProposal,
       },

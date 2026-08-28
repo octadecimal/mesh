@@ -99,6 +99,7 @@ describe('TaskBoard', () => {
       dependencies: [
         dependency('second', 'progress'),
         dependency('ready', 'progress'),
+        dependency('review', 'progress'),
       ],
       onCommand,
     });
@@ -125,6 +126,15 @@ describe('TaskBoard', () => {
       within(readySelect).getByRole('option', { name: 'Backlog' }),
     ).toBeEnabled();
     fireEvent.change(readySelect, { target: { value: 'in_progress' } });
+    expect(onCommand).not.toHaveBeenCalled();
+
+    const reviewSelect = screen.getByRole('combobox', {
+      name: 'Move Review task to',
+    });
+    expect(
+      within(reviewSelect).getByRole('option', { name: 'In progress' }),
+    ).toBeDisabled();
+    fireEvent.change(reviewSelect, { target: { value: 'in_progress' } });
     expect(onCommand).not.toHaveBeenCalled();
 
     await user.selectOptions(readySelect, 'backlog');

@@ -198,7 +198,7 @@ export class TaskDependencyService {
     if (!prerequisite) throw new TaskNotFoundError(prerequisiteTaskId);
     if (
       prerequisite.projectId !== project.id ||
-      prerequisite.lifecycleState === 'cancelled'
+      (operation === 'add' && prerequisite.lifecycleState === 'cancelled')
     ) {
       throw new TaskDependencyServiceError(
         'task_dependency_invalid',

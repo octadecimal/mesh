@@ -225,11 +225,16 @@ Planning uses a dedicated shared-folder session rooted at the project's
 canonical repository. It does not create a worktree because it has no source
 write authority.
 
-The PM policy permits repository inspection through the existing constrained
-read surfaces and explicitly denies source-authoring tools, mutating shell
-operations, network expansion, and Mesh lifecycle commands. Low-level path
-containment and command classification may reuse existing read-only QA safety
-mechanics, but PM authority remains a separate policy.
+The PM receives no Claude SDK built-in filesystem tools or inherited filesystem
+MCP configuration. Repository inspection is exposed only through Mesh-owned
+bounded read, glob, and text-search controls. These controls reject absolute
+paths, traversal, unsafe glob grammar, and symlink or junction escapes; retain
+opened-handle identity; and revalidate the canonical root, parent, and target
+before and after access so a concurrent path swap fails closed. Bounds,
+cancellation, and session-scoped revocation also fail closed. The policy
+explicitly denies source-authoring tools, mutating shell operations, network
+expansion, and Mesh lifecycle commands. It may reuse the bounded QA workspace
+reader implementation, but PM authority and tool disclosure remain separate.
 
 Before starting or resuming Claude, `PlanningExecutionService` persists the
 planning state, session association, policy version, base snapshot, and an audit

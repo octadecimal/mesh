@@ -16,6 +16,7 @@ import {
 } from '@mesh-session-platform/contracts';
 import { vi } from 'vitest';
 
+import { MeshApiError } from '../api/client';
 import { createProjection, type MeshProjection } from '../state/reducer';
 import { ProjectPlanningPanel } from './ProjectPlanningPanel';
 
@@ -159,6 +160,184 @@ describe('ProjectPlanningPanel', () => {
       screen.getByRole('button', { name: 'Cancel planning' }),
     ).toBeVisible();
   });
+
+  it('renders bounded stale approval details transiently and clears them on authoritative changes and new commands', async () => {
+    const user = userEvent.setup();
+    const stale = new MeshApiError(
+      'project_plan_stale',
+      'The project changed while the plan was reviewed.',
+      {
+        addedTaskIds: ['added-β', 'added-a'],
+        addedTaskTotal: 4,
+        addedTaskIdsTruncated: true,
+        removedTaskIds: ['removed-1'],
+        removedTaskTotal: 1,
+        removedTaskIdsTruncated: false,
+        changedTaskIds: ['changed-1'],
+        changedTaskTotal: 2,
+        changedTaskIdsTruncated: true,
+        dependenciesChanged: true,
+        policyChanged: true,
+      },
+    );
+    const pending = deferred<unknown>();
+    const refreshedDetails = projectPlanDetailsSchema.parse({
+      ...details,
+      feedback: [
+        ...details.feedback,
+        {
+          id: 'feedback-authoritative-refresh',
+          planId: 'plan-1',
+          proposalId: 'proposal-2',
+          content: 'The authoritative details were refreshed.',
+          actor,
+          createdAt: later,
+        },
+      ],
+    });
+    const loadDetails = vi
+      .fn()
+      .mockResolvedValueOnce(details)
+      .mockResolvedValueOnce(refreshedDetails);
+    const onCommand = vi
+      .fn()
+      .mockRejectedValueOnce(stale)
+      .mockRejectedValueOnce(stale)
+      .mockRejectedValueOnce(stale)
+      .mockRejectedValueOnce(stale)
+      .mockReturnValueOnce(pending.promise);
+    const rendered = renderPanel({
+      activePlan: plan({ status: 'awaiting_review' }),
+      loadDetails,
+      onCommand,
+    });
+    await user.click(screen.getByRole('button', { name: 'Review proposal' }));
+    await screen.findByRole('heading', { name: 'Revision 2' });
+
+    await user.click(screen.getByRole('button', { name: 'Approve plan' }));
+
+    expect(
+      await screen.findByText(
+        'The task board changed after this plan was prepared.',
+      ),
+    ).toBeVisible();
+    expect(screen.getByText('Added tasks: 4 total; showing 2.')).toBeVisible();
+    expect(screen.getByText('Removed tasks: 1 total.')).toBeVisible();
+    expect(
+      screen.getByText('Changed tasks: 2 total; showing 1.'),
+    ).toBeVisible();
+    expect(
+      within(screen.getByRole('list', { name: 'Added task IDs' })).getAllByRole(
+        'listitem',
+      ),
+    ).toHaveLength(2);
+    expect(screen.getByText('added-β')).toBeVisible();
+    expect(screen.getByText('Dependencies changed.')).toBeVisible();
+    expect(screen.getByText('Project policy changed.')).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Refresh proposal' }));
+    await waitFor(() => expect(loadDetails).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        screen.queryByText(
+          'The task board changed after this plan was prepared.',
+        ),
+      ).toBeNull(),
+    );
+    await user.click(screen.getByRole('button', { name: 'Approve plan' }));
+    expect(
+      await screen.findByText(
+        'The task board changed after this plan was prepared.',
+      ),
+    ).toBeVisible();
+
+    rendered.rerender(
+      panel({
+        activePlan: plan({ status: 'awaiting_review', revision: 5 }),
+        loadDetails,
+        onCommand,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText(
+          'The task board changed after this plan was prepared.',
+        ),
+      ).toBeNull(),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Approve plan' }));
+    expect(
+      await screen.findByText(
+        'The task board changed after this plan was prepared.',
+      ),
+    ).toBeVisible();
+    rendered.rerender(
+      panel({
+        projectValue: { ...project, revision: project.revision + 1 },
+        activePlan: plan({ status: 'awaiting_review', revision: 5 }),
+        loadDetails,
+        onCommand,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText(
+          'The task board changed after this plan was prepared.',
+        ),
+      ).toBeNull(),
+    );
+    await user.click(screen.getByRole('button', { name: 'Approve plan' }));
+    expect(
+      await screen.findByText(
+        'The task board changed after this plan was prepared.',
+      ),
+    ).toBeVisible();
+    await user.type(
+      screen.getByLabelText('Revision feedback'),
+      'Rebase on current truth.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Request changes' }));
+    expect(
+      screen.queryByText(
+        'The task board changed after this plan was prepared.',
+      ),
+    ).toBeNull();
+    pending.resolve(undefined);
+  });
+
+  it.each([
+    [
+      'malformed stale details',
+      new MeshApiError('project_plan_stale', 'Review base changed.', {
+        addedTaskIds: ['task-1'],
+        addedTaskTotal: 2,
+        addedTaskIdsTruncated: false,
+      }),
+      'Review base changed.',
+    ],
+    ['a generic failure', new Error('Approval refused.'), 'Approval refused.'],
+  ])(
+    'falls back to the command message for %s',
+    async (_, failure, message) => {
+      const user = userEvent.setup();
+      renderPanel({
+        activePlan: plan({ status: 'awaiting_review' }),
+        onCommand: vi.fn().mockRejectedValue(failure),
+      });
+      await user.click(screen.getByRole('button', { name: 'Review proposal' }));
+      await screen.findByRole('heading', { name: 'Revision 2' });
+
+      await user.click(screen.getByRole('button', { name: 'Approve plan' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(message);
+      expect(
+        screen.queryByText(
+          'The task board changed after this plan was prepared.',
+        ),
+      ).toBeNull();
+    },
+  );
 
   it('loads proposal details on demand and renders ordered contracts and accessible dependency evidence', async () => {
     const user = userEvent.setup();
@@ -383,6 +562,39 @@ describe('ProjectPlanningPanel', () => {
     expect(
       screen.getAllByRole('button', { name: /View plan history/i }),
     ).toHaveLength(22);
+  });
+
+  it('keeps SQLite binary history order and advances its arbitrary-id cursor', async () => {
+    const user = userEvent.setup();
+    const summaries = Array.from({ length: 20 }, (_, index) =>
+      summary(`recent-${index}`, index),
+    );
+    const terminalAt = '2026-08-26T00:00:00.000Z';
+    const tiedIds = ['plan-Ω', 'plan-é', 'plan-ä', 'plan-z', 'plan-A'];
+    const tiedPlans = tiedIds.map((id) =>
+      projectPlanSummarySchema.parse({
+        ...summary(id, 20),
+        goal: `Tie ${id}`,
+        updatedAt: terminalAt,
+        terminalAt,
+      }),
+    );
+    const loadHistory = vi
+      .fn<(_: string, __?: string) => Promise<ProjectPlanHistoryPage>>()
+      .mockResolvedValueOnce({ plans: tiedPlans, nextAfter: tiedIds.at(-1) })
+      .mockResolvedValueOnce({ plans: [] });
+    renderPanel({ summaries, loadHistory });
+
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+
+    expect(
+      screen
+        .getAllByRole('button', { name: /^View Tie plan-/ })
+        .map((button) => button.getAttribute('aria-label')),
+    ).toEqual(tiedIds.map((id) => `View Tie ${id}`));
+
+    await user.click(screen.getByRole('button', { name: 'Load older plans' }));
+    expect(loadHistory).toHaveBeenNthCalledWith(2, project.id, 'plan-A');
   });
 
   it('retains the displaced 20th summary across an authoritative window refresh', async () => {

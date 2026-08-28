@@ -4,6 +4,7 @@ import {
   projectSchema,
   sessionSchema,
   taskActorSchema,
+  taskDependencySchema,
   taskSchema,
   workspaceSchema,
   type Task,
@@ -322,6 +323,64 @@ describe('TaskDependencyService', () => {
     expect(repositories.dependencies.listByProject('project-1')).toEqual([]);
     expect(repositories.projectEvents.after('project-1', 0)).toHaveLength(2);
     expect(publisher.publishProject).toHaveBeenCalledTimes(2);
+  });
+
+  it('removes a retained edge after its prerequisite is cancelled', async () => {
+    const { repositories, service } = setup();
+    seedProject(repositories);
+    const prerequisite = seedTask(repositories, 'prerequisite', {
+      lifecycleState: 'cancelled',
+    });
+    const dependent = seedTask(repositories, 'dependent');
+    repositories.dependencies.create(
+      taskDependencySchema.parse({
+        projectId: 'project-1',
+        taskId: dependent.id,
+        prerequisiteTaskId: prerequisite.id,
+        createdBy: human,
+        createdAt: now,
+      }),
+    );
+
+    const removed = await service.remove({
+      ...addInput(),
+      commandId: 'remove-cancelled-prerequisite',
+    });
+
+    expect(removed.dependencies).toEqual([]);
+    expect(repositories.dependencies.listByProject('project-1')).toEqual([]);
+  });
+
+  it('adds and removes an unrelated edge while retaining a cancelled prerequisite', async () => {
+    const { repositories, service } = setup();
+    seedProject(repositories);
+    const cancelled = seedTask(repositories, 'cancelled', {
+      lifecycleState: 'cancelled',
+    });
+    const retainedDependent = seedTask(repositories, 'retained-dependent');
+    seedTask(repositories, 'prerequisite');
+    seedTask(repositories, 'dependent');
+    const retained = repositories.dependencies.create(
+      taskDependencySchema.parse({
+        projectId: 'project-1',
+        taskId: retainedDependent.id,
+        prerequisiteTaskId: cancelled.id,
+        createdBy: human,
+        createdAt: now,
+      }),
+    );
+
+    const added = await service.add(addInput({ commandId: 'unrelated-add' }));
+    const removed = await service.remove({
+      ...addInput(),
+      expectedTaskRevision: added.task.revision,
+      commandId: 'unrelated-remove',
+    });
+
+    expect(removed.dependencies).toEqual([]);
+    expect(repositories.dependencies.listByProject('project-1')).toEqual([
+      retained,
+    ]);
   });
 
   it('emits each authoritative revision when sequential mutations share a millisecond', async () => {

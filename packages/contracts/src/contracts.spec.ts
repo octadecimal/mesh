@@ -18,6 +18,7 @@ import {
   projectPlanHistoryPageSchema,
   projectPlanProposalSchema,
   projectPlanSchema,
+  projectPlanStaleDetailsSchema,
   projectPlanSummarySchema,
   projectSchema,
   projectSnapshotSchema,
@@ -1900,6 +1901,36 @@ describe('session platform contracts', () => {
     });
 
     it('preserves bounded stale evidence and stable planning error codes', () => {
+      expect(
+        projectPlanStaleDetailsSchema.parse({
+          addedTaskIds: ['task-added-1'],
+          addedTaskTotal: 2,
+          addedTaskIdsTruncated: true,
+          removedTaskIds: [],
+          removedTaskTotal: 0,
+          removedTaskIdsTruncated: false,
+          changedTaskIds: ['task-changed-1'],
+          changedTaskTotal: 1,
+          changedTaskIdsTruncated: false,
+          dependenciesChanged: true,
+          policyChanged: false,
+        }),
+      ).toMatchObject({ addedTaskTotal: 2, dependenciesChanged: true });
+      expect(() =>
+        projectPlanStaleDetailsSchema.parse({
+          addedTaskIds: ['task-added-1'],
+          addedTaskTotal: 2,
+          addedTaskIdsTruncated: false,
+          removedTaskIds: [],
+          removedTaskTotal: 0,
+          removedTaskIdsTruncated: false,
+          changedTaskIds: [],
+          changedTaskTotal: 0,
+          changedTaskIdsTruncated: false,
+          dependenciesChanged: false,
+          policyChanged: false,
+        }),
+      ).toThrow();
       expect(() =>
         projectPlanSchema.parse({
           id: 'plan-1',

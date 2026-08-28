@@ -59,6 +59,15 @@ boundary that atomically materializes proposal tasks and dependencies into the
 canonical board. Task dependencies then belong to the task domain, independent
 of the plan that proposed them.
 
+The PM SDK query receives no built-in filesystem tools or inherited filesystem
+MCP servers. Mesh exposes only session-scoped bounded read, glob, and text-search
+controls plus proposal submission. The read controls reject absolute paths,
+traversal, unsafe glob grammar, and symlink or junction escapes. They retain
+opened-handle identity and revalidate the canonical root, parent, and target
+before and after reads or directory enumeration, so a concurrent path or
+ancestor swap fails closed. Traversal limits, cancellation, and runtime close
+revoke access without granting writes.
+
 Launching a task attempt composes the existing workspace and session boundaries:
 the server validates a ready, unblocked task; resolves or creates the workspace;
 persists the session, attempt, and project audit event; starts the session

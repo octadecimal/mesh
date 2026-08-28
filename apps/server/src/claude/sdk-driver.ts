@@ -321,7 +321,7 @@ export class SdkClaudeSessionDriver implements ClaudeSessionDriver {
   ): Promise<SdkDriverSession> {
     if (request.developer && request.role) {
       throw new Error(
-        'A session cannot combine Developer and QA runtime controls',
+        'A session cannot combine Developer runtime controls with role-specific QA or PM runtime controls',
       );
     }
     const mode = request.permissionMode ?? 'interactive';

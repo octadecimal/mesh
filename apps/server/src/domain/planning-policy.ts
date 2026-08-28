@@ -1,12 +1,24 @@
 import type { ProjectPlanBase } from '@mesh-session-platform/contracts';
 
-export const PM_POLICY_VERSION = 'pm-read-only-v1';
+export const PM_POLICY_VERSION = 'pm-mesh-read-only-v2';
+
+export const PM_BUILTIN_TOOLS = [] as const;
 
 export const PM_AVAILABLE_TOOLS = [
+  'mcp__mesh_pm__read_workspace_file',
+  'mcp__mesh_pm__glob_workspace_files',
+  'mcp__mesh_pm__search_workspace_text',
+  'mcp__mesh_pm__submit_project_plan',
+] as const;
+
+export const PM_DISALLOWED_TOOLS = [
+  'Bash',
   'Read',
   'Glob',
   'Grep',
-  'mcp__mesh_pm__submit_project_plan',
+  'Write',
+  'Edit',
+  'NotebookEdit',
 ] as const;
 
 export type PmPromptInput = {
@@ -64,7 +76,7 @@ Proposal limits
 - Dependencies must use proposal-local task keys or existing task IDs and must be unique and acyclic.
 
 Authority
-- You may inspect this repository only with Read, Glob, and Grep.
+- You may inspect this repository only with Mesh-owned bounded read, glob, and text-search controls.
 - You cannot modify repository files or create commits, branches, or worktrees.
 - You cannot run shell commands or any source-authoring tool.
 - You cannot access the network or expand the available tool set.

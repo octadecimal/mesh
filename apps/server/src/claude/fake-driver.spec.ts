@@ -9,7 +9,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { FakeClaudeSessionDriver } from './fake-driver.js';
 import type { PmRuntimeConfiguration, RoleControlResponse } from './driver.js';
-import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
+import {
+  PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
+} from '../domain/planning-policy.js';
 
 const completionReport = developerCompletionReportSchema.parse({
   id: 'report-complete',
@@ -214,7 +217,7 @@ describe('FakeClaudeSessionDriver', () => {
     const pm: PmRuntimeConfiguration = {
       role: 'pm',
       initialPrompt: 'Plan the approved project goal.',
-      availableTools: PM_AVAILABLE_TOOLS,
+      availableTools: PM_BUILTIN_TOOLS,
       allowedTools: PM_AVAILABLE_TOOLS,
       submitProposal,
     };

@@ -105,7 +105,10 @@ export interface CommandDependencies {
   diagnostics: DiagnosticRepository;
   layouts: LayoutRepository;
   commands: CommandRepository;
-  plans: Pick<PlanningRepository, 'getDetails' | 'listSummaries'>;
+  plans: Pick<
+    PlanningRepository,
+    'getActiveByProject' | 'getDetails' | 'listSummaries'
+  >;
   taskService: TaskService;
   tasks: Pick<TaskRepository, 'get'>;
   qaExecutions: Pick<
@@ -934,6 +937,11 @@ type QaConfigurationUpdateCommand = Extract<
   { type: 'project.qa_configuration.update' }
 >;
 
+type ProjectArchiveCommand = Extract<
+  Extract<Command, { idempotencyKey: string }>['command'],
+  { type: 'project.archive' }
+>;
+
 const executeQaConfigurationUpdate = (
   command: QaConfigurationUpdateCommand,
   idempotencyKey: string,
@@ -1011,6 +1019,69 @@ const hasRunningTaskAttempt = (
         (isLive(session) &&
           dependencies.attempts.getCurrentBySession(session.id)),
     );
+
+const executeProjectArchive = (
+  command: ProjectArchiveCommand,
+  idempotencyKey: string,
+  dependencies: CommandDependencies,
+): CommandResponse => {
+  assertMilestoneTwoHumanActor(command);
+  const existing =
+    dependencies.commands.getExisting<CommandResponse>(idempotencyKey);
+  if (existing.found) return existing.response;
+
+  let event: ProjectEvent | undefined;
+  const commandResponse =
+    dependencies.commands.executeOnceInImmediateTransaction(
+      idempotencyKey,
+      () => {
+        const project = requireActiveProject(
+          dependencies,
+          command.payload.projectId,
+        );
+        if (hasRunningTaskAttempt(dependencies, project.id)) {
+          throw new CommandError(
+            'project_has_running_attempt',
+            'A project with a running task attempt cannot be archived',
+            { project },
+          );
+        }
+        const plan = dependencies.plans.getActiveByProject(project.id);
+        if (plan) {
+          throw new CommandError(
+            'project_plan_lifecycle_invalid',
+            'A project with a nonterminal plan cannot be archived',
+            { project, plan },
+          );
+        }
+        const occurredAt = (
+          dependencies.now ?? (() => new Date().toISOString())
+        )();
+        const updated = dependencies.projects.update(
+          { ...project, archivedAt: occurredAt, updatedAt: occurredAt },
+          command.payload.expectedRevision,
+        );
+        if (!updated) {
+          throw new CommandError(
+            'project_revision_conflict',
+            `Project '${project.id}' has changed`,
+            { project: dependencies.projects.get(project.id) },
+          );
+        }
+        event = dependencies.projectEvents.appendInTransaction(project.id, {
+          protocolVersion: 1,
+          id: (dependencies.createId ?? randomUUID)(),
+          projectId: project.id,
+          occurredAt,
+          type: 'project.changed',
+          payload: { project: updated },
+        });
+        return response(command.type, updated);
+      },
+    );
+  if (event) dependencies.registry.publisher.publishProject(event);
+  return commandResponse;
+};
 
 const reconcileLegacyProjectIdentities = async (
   dependencies: CommandDependencies,
@@ -1222,6 +1293,14 @@ const executeMutation = async (
           'project_has_running_attempt',
           'A project with a running task attempt cannot be archived',
           { project },
+        );
+      }
+      const plan = dependencies.plans.getActiveByProject(project.id);
+      if (plan) {
+        throw new CommandError(
+          'project_plan_lifecycle_invalid',
+          'A project with a nonterminal plan cannot be archived',
+          { project, plan },
         );
       }
       const now = (dependencies.now ?? (() => new Date().toISOString()))();
@@ -1583,6 +1662,13 @@ export const executeCommand = async (
     }
     if (command.command.type === 'project.qa_configuration.update') {
       return executeQaConfigurationUpdate(
+        command.command,
+        command.idempotencyKey,
+        dependencies,
+      );
+    }
+    if (command.command.type === 'project.archive') {
+      return executeProjectArchive(
         command.command,
         command.idempotencyKey,
         dependencies,

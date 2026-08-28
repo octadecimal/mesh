@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
-import { isAbsolute, relative, resolve, sep, win32 } from 'node:path';
+import { resolve } from 'node:path';
 
 import {
   createSdkMcpServer,
@@ -8,7 +8,6 @@ import {
   query,
   tool,
   type CanUseTool,
-  type HookCallback,
   type PermissionResult,
   type Query,
   type SDKMessage,
@@ -19,13 +18,22 @@ import {
   developerCompletionReportInputSchema,
   projectPlanProposalInputSchema,
 } from '@mesh-session-platform/contracts';
+import { z } from 'zod';
 
 import type {
   DeveloperRuntimeControls,
   PmRuntimeConfiguration,
   RoleControlServer,
 } from './driver.js';
-import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
+import {
+  PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
+  PM_DISALLOWED_TOOLS,
+} from '../domain/planning-policy.js';
+import {
+  QaWorkspaceReader,
+  workspaceObjectIdentity,
+} from '../platform/qa-workspace-reader.js';
 import {
   UnsupportedSdkCapabilityError,
   type SdkFacade,
@@ -34,141 +42,6 @@ import {
   type SdkQueryOptions,
   type SdkStreamEvent,
 } from './sdk-driver.js';
-
-const pmReadDenied = {
-  hookSpecificOutput: {
-    hookEventName: 'PreToolUse' as const,
-    permissionDecision: 'deny' as const,
-    permissionDecisionReason:
-      'PM repository reads are confined to the session working directory.',
-  },
-};
-
-const pmReadDeferred = {
-  hookSpecificOutput: {
-    hookEventName: 'PreToolUse' as const,
-    permissionDecision: 'defer' as const,
-  },
-};
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
-const hasParentTraversal = (value: string): boolean =>
-  value.split(/[\\/]+/u).includes('..');
-
-const isContainedExistingPath = (root: string, inputPath: unknown): boolean => {
-  if (
-    typeof inputPath !== 'string' ||
-    inputPath.trim().length === 0 ||
-    hasParentTraversal(inputPath)
-  ) {
-    return false;
-  }
-
-  try {
-    const canonicalTarget = realpathSync(resolve(root, inputPath));
-    const fromRoot = relative(root, canonicalTarget);
-    return (
-      fromRoot === '' ||
-      (!isAbsolute(fromRoot) &&
-        !win32.isAbsolute(fromRoot) &&
-        fromRoot !== '..' &&
-        !fromRoot.startsWith(`..${sep}`))
-    );
-  } catch {
-    return false;
-  }
-};
-
-const safeBraceAlternative = /^[A-Za-z0-9_-]+$/u;
-
-const hasOnlySafeBraceAlternatives = (pattern: string): boolean => {
-  let openBrace = -1;
-  for (let index = 0; index < pattern.length; index += 1) {
-    if (pattern[index] === '{') {
-      if (openBrace !== -1) return false;
-      openBrace = index;
-      continue;
-    }
-    if (pattern[index] !== '}') continue;
-    if (openBrace === -1) return false;
-    const alternatives = pattern.slice(openBrace + 1, index).split(',');
-    if (
-      alternatives.length < 2 ||
-      alternatives.some(
-        (alternative) => !safeBraceAlternative.test(alternative),
-      )
-    ) {
-      return false;
-    }
-    openBrace = -1;
-  }
-  return openBrace === -1;
-};
-
-const isSafeGlobPattern = (pattern: unknown): pattern is string =>
-  typeof pattern === 'string' &&
-  pattern.trim().length > 0 &&
-  !isAbsolute(pattern) &&
-  !win32.isAbsolute(pattern) &&
-  !hasParentTraversal(pattern) &&
-  !pattern.includes(':') &&
-  !pattern.includes('\\') &&
-  !pattern.includes('[') &&
-  !pattern.includes(']') &&
-  !/[?*+@!]\(/u.test(pattern) &&
-  hasOnlySafeBraceAlternatives(pattern);
-
-const isSafePmRead = (
-  root: string,
-  toolName: string,
-  input: unknown,
-): boolean => {
-  if (!isRecord(input)) return false;
-  if (toolName === 'Read') {
-    return isContainedExistingPath(root, input.file_path);
-  }
-  if (toolName === 'Glob') {
-    return (
-      isSafeGlobPattern(input.pattern) &&
-      (input.path === undefined || isContainedExistingPath(root, input.path))
-    );
-  }
-  if (toolName === 'Grep') {
-    return (
-      typeof input.pattern === 'string' &&
-      input.pattern.length > 0 &&
-      (input.path === undefined || isContainedExistingPath(root, input.path))
-    );
-  }
-  return false;
-};
-
-const createPmReadBoundary = (cwd: string): HookCallback => {
-  const root = realpathSync(cwd);
-  if (!statSync(root).isDirectory()) {
-    throw new Error('PM runtime working directory must be a directory.');
-  }
-  return async (input) =>
-    input.hook_event_name === 'PreToolUse' &&
-    isSafePmRead(root, input.tool_name, input.tool_input)
-      ? pmReadDeferred
-      : pmReadDenied;
-};
-
-const pmReadBoundaryFor = (
-  options: SdkQueryOptions,
-): HookCallback | undefined => {
-  if (options.role?.role !== 'pm') return undefined;
-  const cwd = options.cwd;
-  if (typeof cwd !== 'string' || cwd.trim().length === 0) {
-    throw new Error(
-      'PM runtime requires an explicit repository working directory.',
-    );
-  }
-  return createPmReadBoundary(cwd);
-};
 
 class AsyncPromptQueue implements AsyncIterable<SDKUserMessage> {
   private readonly values: SDKUserMessage[] = [];
@@ -369,12 +242,155 @@ const pmControlFailure = (
   };
 };
 
-const createPmMcpServer = (configuration: PmRuntimeConfiguration) =>
+const pmWorkspaceReadSchema = z.object({
+  path: z.string().trim().min(1).max(1_024),
+});
+
+const pmWorkspaceGlobSchema = z.object({
+  pattern: z.string().trim().min(1).max(1_024),
+  path: z.string().trim().min(1).max(1_024).default('.'),
+});
+
+const pmWorkspaceSearchSchema = z.object({
+  query: z.string().trim().min(1).max(1_024),
+  path: z.string().trim().min(1).max(1_024).default('.'),
+});
+
+type PmWorkspaceContext = {
+  reader: QaWorkspaceReader;
+  root: string;
+  signal: AbortSignal;
+};
+
+const pmWorkspaceContext = (
+  cwd: string | undefined,
+  signal: AbortSignal,
+): PmWorkspaceContext => {
+  if (typeof cwd !== 'string' || cwd.trim().length === 0) {
+    throw new Error(
+      'PM runtime requires an explicit repository working directory.',
+    );
+  }
+  const lexicalRoot = resolve(cwd);
+  const root = realpathSync(lexicalRoot);
+  const rootStat = statSync(root);
+  if (!rootStat.isDirectory()) {
+    throw new Error('PM runtime working directory must be a directory.');
+  }
+  return {
+    reader: new QaWorkspaceReader(
+      {},
+      {
+        lexicalRoot,
+        root,
+        rootObjectIdentity: workspaceObjectIdentity(rootStat),
+      },
+    ),
+    root: lexicalRoot,
+    signal,
+  };
+};
+
+const pmWorkspaceFailure = (error: unknown) => {
+  const record = asRecord(error);
+  const candidate =
+    typeof record?.code === 'string'
+      ? record.code
+      : typeof error === 'string'
+        ? error
+        : undefined;
+  const code =
+    candidate === 'qa_workspace_operation_cancelled'
+      ? 'pm_workspace_operation_cancelled'
+      : candidate === 'qa_workspace_path_rejected'
+        ? 'pm_workspace_path_rejected'
+        : candidate === 'invalid_input'
+          ? candidate
+          : 'pm_workspace_access_failed';
+  return {
+    content: [
+      {
+        type: 'text' as const,
+        text: JSON.stringify({ status: 'error', code }),
+      },
+    ],
+    isError: true,
+  };
+};
+
+const pmWorkspaceSuccess = (result: unknown) => ({
+  content: [{ type: 'text' as const, text: JSON.stringify(result) }],
+});
+
+const createPmMcpServer = (
+  configuration: PmRuntimeConfiguration,
+  workspace: PmWorkspaceContext,
+) =>
   createSdkMcpServer({
     name: 'mesh_pm',
     version: '1',
     alwaysLoad: true,
     tools: [
+      tool(
+        'read_workspace_file',
+        'Read one bounded text file inside the assigned PM repository.',
+        pmWorkspaceReadSchema.shape,
+        async (input) => {
+          const parsed = pmWorkspaceReadSchema.safeParse(input);
+          if (!parsed.success) return pmWorkspaceFailure('invalid_input');
+          try {
+            return pmWorkspaceSuccess(
+              await workspace.reader.read(workspace.root, parsed.data.path, {
+                signal: workspace.signal,
+              }),
+            );
+          } catch (error) {
+            return pmWorkspaceFailure(error);
+          }
+        },
+      ),
+      tool(
+        'glob_workspace_files',
+        'Match bounded file paths inside the assigned PM repository.',
+        pmWorkspaceGlobSchema.shape,
+        async (input) => {
+          const parsed = pmWorkspaceGlobSchema.safeParse(input);
+          if (!parsed.success) return pmWorkspaceFailure('invalid_input');
+          try {
+            return pmWorkspaceSuccess(
+              await workspace.reader.glob(
+                workspace.root,
+                parsed.data.path,
+                parsed.data.pattern,
+                { signal: workspace.signal },
+              ),
+            );
+          } catch (error) {
+            return pmWorkspaceFailure(error);
+          }
+        },
+      ),
+      tool(
+        'search_workspace_text',
+        'Search bounded text content inside the assigned PM repository.',
+        pmWorkspaceSearchSchema.shape,
+        async (input) => {
+          const parsed = pmWorkspaceSearchSchema.safeParse(input);
+          if (!parsed.success) return pmWorkspaceFailure('invalid_input');
+          try {
+            return pmWorkspaceSuccess(
+              await workspace.reader.search(
+                workspace.root,
+                parsed.data.path,
+                parsed.data.query,
+                { signal: workspace.signal },
+              ),
+            );
+          } catch (error) {
+            return pmWorkspaceFailure(error);
+          }
+        },
+      ),
       tool(
         'submit_project_plan',
         'Submit one complete structured project-plan proposal.',
@@ -544,6 +560,7 @@ class ClaudeSdkQuery implements SdkQuery {
     readonly sessionId: string,
     private readonly sdkQuery: Query,
     private readonly prompts: AsyncPromptQueue,
+    private readonly revoke?: () => void,
   ) {}
 
   async *events(): AsyncIterable<SdkStreamEvent> {
@@ -562,10 +579,12 @@ class ClaudeSdkQuery implements SdkQuery {
     if (typeof this.sdkQuery.interrupt !== 'function') {
       throw new UnsupportedSdkCapabilityError('interrupt');
     }
+    this.revoke?.();
     await this.sdkQuery.interrupt();
   }
 
   close(): void {
+    this.revoke?.();
     this.prompts.close();
     this.sdkQuery.close();
   }
@@ -587,12 +606,16 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
   startQuery: (options: SdkQueryOptions) => {
     if (
       options.role?.role === 'pm' &&
-      (!sameTools(options.role.availableTools, PM_AVAILABLE_TOOLS) ||
+      (!sameTools(options.role.availableTools, PM_BUILTIN_TOOLS) ||
         !sameTools(options.role.allowedTools, PM_AVAILABLE_TOOLS))
     ) {
       throw new Error('PM runtime tools do not match the read-only policy.');
     }
-    const pmReadBoundary = pmReadBoundaryFor(options);
+    const pmAbortController =
+      options.role?.role === 'pm' ? new AbortController() : undefined;
+    const pmWorkspace = pmAbortController
+      ? pmWorkspaceContext(options.cwd, pmAbortController.signal)
+      : undefined;
     const prompts = new AsyncPromptQueue();
     const sessionId = options.resume ?? randomUUID();
     const onPermission = options.onPermission;
@@ -625,22 +648,12 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
               allowedTools: [...options.role.allowedTools],
               ...(options.role.role === 'qa'
                 ? { disallowedTools: [...options.role.disallowedTools] }
-                : {}),
+                : options.role.role === 'pm'
+                  ? { disallowedTools: [...PM_DISALLOWED_TOOLS] }
+                  : {}),
             }
           : {}),
         ...(canUseTool ? { canUseTool } : {}),
-        ...(pmReadBoundary
-          ? {
-              hooks: {
-                PreToolUse: [
-                  {
-                    matcher: 'Read|Glob|Grep',
-                    hooks: [pmReadBoundary],
-                  },
-                ],
-              },
-            }
-          : {}),
         ...(options.developer
           ? {
               mcpServers: {
@@ -659,10 +672,10 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
               },
             }
           : {}),
-        ...(options.role?.role === 'pm'
+        ...(options.role?.role === 'pm' && pmWorkspace
           ? {
               mcpServers: {
-                mesh_pm: createPmMcpServer(options.role),
+                mesh_pm: createPmMcpServer(options.role, pmWorkspace),
               },
             }
           : {}),
@@ -672,9 +685,15 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
       typeof sdkQuery.interrupt !== 'function' ||
       typeof sdkQuery.close !== 'function'
     ) {
+      pmAbortController?.abort();
       sdkQuery.close?.();
       throw new UnsupportedSdkCapabilityError('streaming_control');
     }
-    return new ClaudeSdkQuery(sessionId, sdkQuery, prompts);
+    return new ClaudeSdkQuery(
+      sessionId,
+      sdkQuery,
+      prompts,
+      pmAbortController ? () => pmAbortController.abort() : undefined,
+    );
   },
 });

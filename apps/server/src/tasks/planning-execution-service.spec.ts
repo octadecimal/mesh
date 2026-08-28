@@ -339,10 +339,11 @@ describe('PlanningExecutionService', () => {
     expect(started.events[0]?.type).toBe('project.plan_changed');
     expect(runtimeConfiguration(registry)).toMatchObject({
       role: 'pm',
+      availableTools: [],
       allowedTools: [
-        'Read',
-        'Glob',
-        'Grep',
+        'mcp__mesh_pm__read_workspace_file',
+        'mcp__mesh_pm__glob_workspace_files',
+        'mcp__mesh_pm__search_workspace_text',
         'mcp__mesh_pm__submit_project_plan',
       ],
     });
@@ -623,6 +624,54 @@ describe('PlanningExecutionService', () => {
               prerequisite: {
                 type: 'existing_task',
                 taskId: 'other-task',
+              },
+            },
+          ],
+        }),
+      }),
+    ).rejects.toMatchObject({ code: 'project_plan_proposal_invalid' });
+
+    await expect(
+      service.submitProposal({
+        capability: configuration.capability,
+        proposal: proposal(),
+      }),
+    ).resolves.toMatchObject({ plan: { status: 'awaiting_review' } });
+  });
+
+  it('rejects a newly proposed cancelled existing prerequisite without consuming the capability', async () => {
+    const { registry, repositories: repos, service } = arrange();
+    repos.tasks.create(
+      taskSchema.parse({
+        id: 'cancelled-prerequisite',
+        projectId: 'project-1',
+        title: 'Cancelled prerequisite',
+        description: '',
+        acceptanceCriteria: ['It remains cancelled.'],
+        priority: 'normal',
+        rank: 'c',
+        lifecycleState: 'cancelled',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    await start(service);
+    const configuration = runtimeConfiguration(registry);
+
+    await expect(
+      service.submitProposal({
+        capability: configuration.capability,
+        proposal: proposal({
+          dependencies: [
+            {
+              dependentTaskKey: 'persistence',
+              prerequisite: {
+                type: 'existing_task',
+                taskId: 'cancelled-prerequisite',
               },
             },
           ],

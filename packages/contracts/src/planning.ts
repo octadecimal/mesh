@@ -213,11 +213,14 @@ const staleTaskChangeSchema = z
     }
   });
 
+export const projectPlanStaleDetailsSchema = staleTaskChangeSchema.extend({
+  dependenciesChanged: z.boolean(),
+  policyChanged: z.boolean(),
+});
+
 export const projectPlanAttentionSchema = z.union([
-  staleTaskChangeSchema.extend({
+  projectPlanStaleDetailsSchema.extend({
     type: z.literal('stale_board'),
-    dependenciesChanged: z.boolean(),
-    policyChanged: z.boolean(),
   }),
   z.object({
     type: z.enum(['runtime_failure', 'session_unavailable', 'repair_required']),
@@ -285,6 +288,9 @@ export type ProjectPlanProposalInput = z.infer<
 export type ProjectPlanProposal = z.infer<typeof projectPlanProposalSchema>;
 export type ProjectPlanBase = z.infer<typeof projectPlanBaseSchema>;
 export type ProjectPlanFeedback = z.infer<typeof projectPlanFeedbackSchema>;
+export type ProjectPlanStaleDetails = z.infer<
+  typeof projectPlanStaleDetailsSchema
+>;
 export type ProjectPlanAttention = z.infer<typeof projectPlanAttentionSchema>;
 export type ProjectPlan = z.infer<typeof projectPlanSchema>;
 export type ProjectPlanSummary = z.infer<typeof projectPlanSummarySchema>;

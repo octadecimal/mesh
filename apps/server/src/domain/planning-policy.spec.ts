@@ -38,9 +38,9 @@ const base = projectPlanBaseSchema.parse({
 describe('PM planning policy', () => {
   it('exposes only repository reads and one structured proposal control', () => {
     expect(PM_AVAILABLE_TOOLS).toEqual([
-      'Read',
-      'Glob',
-      'Grep',
+      'mcp__mesh_pm__read_workspace_file',
+      'mcp__mesh_pm__glob_workspace_files',
+      'mcp__mesh_pm__search_workspace_text',
       'mcp__mesh_pm__submit_project_plan',
     ]);
     expect(PM_AVAILABLE_TOOLS).not.toEqual(
@@ -87,6 +87,7 @@ describe('PM planning policy', () => {
     expect(prompt).toContain('at most 50 tasks');
     expect(prompt).toContain('at most 200 dependency edges');
     expect(prompt).toContain('You cannot modify repository files');
+    expect(prompt).toContain('Mesh-owned bounded read, glob, and text-search');
     expect(prompt).toContain('You cannot run shell commands');
     expect(prompt).toContain('You cannot access the network');
     expect(prompt).toContain('You cannot create or edit canonical tasks');

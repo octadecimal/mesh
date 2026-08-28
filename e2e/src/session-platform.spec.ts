@@ -2060,16 +2060,11 @@ test('plans and approves dependency-aware work with fake pm planning', async ({
     {
       source: 'create',
       role: 'pm',
-      availableTools: [
-        'Read',
-        'Glob',
-        'Grep',
-        'mcp__mesh_pm__submit_project_plan',
-      ],
+      availableTools: [],
       allowedTools: [
-        'Read',
-        'Glob',
-        'Grep',
+        'mcp__mesh_pm__read_workspace_file',
+        'mcp__mesh_pm__glob_workspace_files',
+        'mcp__mesh_pm__search_workspace_text',
         'mcp__mesh_pm__submit_project_plan',
       ],
       request: {
@@ -2103,13 +2098,13 @@ test('plans and approves dependency-aware work with fake pm planning', async ({
   expect(revisedRuntime).toEqual({
     source: 'resume',
     role: 'pm',
-    availableTools: [
-      'Read',
-      'Glob',
-      'Grep',
+    availableTools: [],
+    allowedTools: [
+      'mcp__mesh_pm__read_workspace_file',
+      'mcp__mesh_pm__glob_workspace_files',
+      'mcp__mesh_pm__search_workspace_text',
       'mcp__mesh_pm__submit_project_plan',
     ],
-    allowedTools: ['Read', 'Glob', 'Grep', 'mcp__mesh_pm__submit_project_plan'],
     request: {
       claudeResumeId: 'fake-resume-1',
       workspacePath: harness.repositoryPath,
@@ -2258,19 +2253,30 @@ test('pm planning rejects stale approval without proposal rows', async ({
   const createDialog = page.getByRole('dialog', { name: 'Create task' });
   await createDialog.getByLabel('Task title').fill('Canonical board edit');
   await createDialog.getByRole('button', { name: 'Create task' }).click();
-  await waitForProjectSnapshot(
+  const edited = await waitForProjectSnapshot(
     harness,
     projectId,
     (snapshot) =>
       snapshot.tasks.some(({ title }) => title === 'Canonical board edit'),
     'The canonical board edit was not persisted',
   );
+  const addedTaskId = edited.tasks.find(
+    ({ title }) => title === 'Canonical board edit',
+  )?.id;
+  if (!addedTaskId) throw new Error('The canonical board task ID was missing');
 
   const planning = await reviewCurrentProposal(page);
   await planning.getByRole('button', { name: 'Approve plan' }).click();
-  await expect(planning.getByRole('alert')).toContainText(
-    /task or policy base changed/i,
-  );
+  await expect(
+    planning
+      .getByRole('alert')
+      .filter({ hasText: /task or policy base changed/i }),
+  ).toBeVisible();
+  const evidence = planning
+    .getByRole('alert')
+    .filter({ hasText: /task board changed after this plan was prepared/i });
+  await expect(evidence).toContainText('Added tasks: 1 total.');
+  await expect(evidence).toContainText(addedTaskId);
   const stale = await readProjectSnapshot(harness, projectId);
   expect(stale.activePlan?.status).toBe('awaiting_review');
   expect(stale.tasks.map(({ title }) => title)).toEqual([

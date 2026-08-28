@@ -12,6 +12,7 @@ import {
   type ProjectPlan,
   type ProjectPlanBase,
   type ProjectPlanProposal,
+  type ProjectPlanStaleDetails,
   type Task,
   type TaskActor,
   type TaskDependency,
@@ -48,7 +49,7 @@ export type RejectProjectPlanInput = Omit<
 export type PlanApprovalResult = PlanningMutationResult & {
   createdTasks: Task[];
   dependencies: TaskDependency[];
-  taskMappings: Array<{ taskKey: string; taskId: string }>;
+  taskMappings: Array<{ taskKey: string; taskId: Task['id'] }>;
 };
 
 type PlanApprovalDependencies = {
@@ -70,20 +71,6 @@ type CommandExecution<Result> = {
   result: Result;
 };
 
-type StalePlanDetails = {
-  addedTaskIds: string[];
-  addedTaskTotal: number;
-  addedTaskIdsTruncated: boolean;
-  removedTaskIds: string[];
-  removedTaskTotal: number;
-  removedTaskIdsTruncated: boolean;
-  changedTaskIds: string[];
-  changedTaskTotal: number;
-  changedTaskIdsTruncated: boolean;
-  dependenciesChanged: boolean;
-  policyChanged: boolean;
-};
-
 const compareText = (left: string, right: string): number =>
   left < right ? -1 : left > right ? 1 : 0;
 
@@ -103,7 +90,7 @@ const sortedDependencies = (
       compareText(left.prerequisiteTaskId, right.prerequisiteTaskId),
   );
 
-const boundedIds = (ids: string[]) => ({
+const boundedIds = <IdValue extends string>(ids: readonly IdValue[]) => ({
   ids: ids.slice(0, 50),
   total: ids.length,
   truncated: ids.length > 50,
@@ -219,6 +206,7 @@ export class PlanApprovalService {
       project,
       proposal,
       taskMappings,
+      currentTasks,
       actor,
       occurredAt,
     );
@@ -310,7 +298,7 @@ export class PlanApprovalService {
     occurredAt: string,
   ): {
     createdTasks: Task[];
-    taskMappings: Array<{ taskKey: string; taskId: string }>;
+    taskMappings: Array<{ taskKey: string; taskId: Task['id'] }>;
   } {
     let rank = currentTasks
       .filter(({ lifecycleState }) => lifecycleState === 'backlog')
@@ -319,12 +307,11 @@ export class PlanApprovalService {
           compareText(left.rank, right.rank) || compareText(left.id, right.id),
       )
       .at(-1)?.rank;
-    const taskMappings: Array<{ taskKey: string; taskId: string }> = [];
+    const taskMappings: Array<{ taskKey: string; taskId: Task['id'] }> = [];
     const createdTasks = proposal.tasks.map((proposed) => {
       rank = rank ? `${rank}m` : 'm';
       const taskId = this.createId();
-      taskMappings.push({ taskKey: proposed.key, taskId });
-      return taskSchema.parse({
+      const task = taskSchema.parse({
         id: taskId,
         projectId: project.id,
         title: proposed.title,
@@ -340,6 +327,8 @@ export class PlanApprovalService {
         createdAt: occurredAt,
         updatedAt: occurredAt,
       });
+      taskMappings.push({ taskKey: proposed.key, taskId: task.id });
+      return task;
     });
     return { createdTasks, taskMappings };
   }
@@ -347,12 +336,16 @@ export class PlanApprovalService {
   private buildDependencies(
     project: Project,
     proposal: ProjectPlanProposal,
-    taskMappings: readonly { taskKey: string; taskId: string }[],
+    taskMappings: readonly { taskKey: string; taskId: Task['id'] }[],
+    currentTasks: readonly Task[],
     actor: TaskActor & { type: 'human' },
     occurredAt: string,
   ): TaskDependency[] {
     const taskIds = new Map(
       taskMappings.map(({ taskKey, taskId }) => [taskKey, taskId]),
+    );
+    const currentTasksById = new Map(
+      currentTasks.map((task) => [task.id, task]),
     );
     return proposal.dependencies.map((proposed) => {
       const taskId = taskIds.get(proposed.dependentTaskKey);
@@ -365,6 +358,19 @@ export class PlanApprovalService {
           'project_plan_proposal_invalid',
           'The approved proposal contains an unresolved task reference',
         );
+      }
+      if (proposed.prerequisite.type === 'existing_task') {
+        const prerequisite = currentTasksById.get(prerequisiteTaskId);
+        if (
+          !prerequisite ||
+          prerequisite.projectId !== project.id ||
+          prerequisite.lifecycleState === 'cancelled'
+        ) {
+          throw new PlanningExecutionError(
+            'task_dependency_invalid',
+            'A newly proposed existing prerequisite must be a non-cancelled task in the project',
+          );
+        }
       }
       return taskDependencySchema.parse({
         projectId: project.id,
@@ -443,7 +449,7 @@ export class PlanApprovalService {
   private staleDetails(
     project: Project,
     base: ProjectPlanBase,
-  ): StalePlanDetails {
+  ): ProjectPlanStaleDetails {
     const currentTasks = this.dependencies.tasks
       .listByProject(project.id)
       .map(comparableTask);

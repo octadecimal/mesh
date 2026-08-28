@@ -15,6 +15,8 @@ import {
   UnsafeQaWorkspaceError,
   developerExecutionCycleSchema,
   idSchema,
+  projectPlanBaseSchema,
+  projectPlanSchema,
   projectSchema,
   projectRunSchema,
   qaExecutionCycleSchema,
@@ -52,7 +54,8 @@ import type {
   PlanApprovalResult,
   PlanApprovalService,
 } from '../tasks/plan-approval-service.js';
-import type {
+import { PlanningCapabilityRegistry } from '../tasks/planning-capability-registry.js';
+import {
   PlanningExecutionService,
   PlanningMutationResult,
 } from '../tasks/planning-execution-service.js';
@@ -289,6 +292,9 @@ describe('executeCommand', () => {
             proposals: [{ id: 'proposal-latest' }],
           }) as never,
         listSummaries: fixture.repositories.plans.listSummaries.bind(
+          fixture.repositories.plans,
+        ),
+        getActiveByProject: fixture.repositories.plans.getActiveByProject.bind(
           fixture.repositories.plans,
         ),
       },
@@ -544,6 +550,10 @@ describe('executeCommand', () => {
           listSummaries: fixture.repositories.plans.listSummaries.bind(
             fixture.repositories.plans,
           ),
+          getActiveByProject:
+            fixture.repositories.plans.getActiveByProject.bind(
+              fixture.repositories.plans,
+            ),
         },
         planningExecutionService: {
           start: vi.fn(),
@@ -2123,6 +2133,168 @@ describe('executeCommand', () => {
       ),
     ).rejects.toMatchObject({ code: 'project_has_running_attempt' });
     expect(repositories.projects.get('p1')?.archivedAt).toBeNull();
+  });
+
+  it('rejects project archive with a stable conflict while a plan is nonterminal', async () => {
+    const { directory } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'p1',
+        displayName: 'Project',
+        repositoryPath: directory,
+        repositoryIdentity: 'repository-p1',
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'planning-workspace',
+        projectId: project.id,
+        type: 'shared',
+        path: directory,
+      }),
+    );
+    repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'planning-session',
+        projectId: project.id,
+        workspaceId: 'planning-workspace',
+        title: 'Planning',
+        permissionMode: 'safe_auto',
+        lifecycleState: 'completed',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const plan = projectPlanSchema.parse({
+      id: 'active-plan',
+      projectId: project.id,
+      goal: 'Keep the plan reviewable.',
+      constraints: [],
+      nonGoals: [],
+      policyVersion: 'pm-v1',
+      status: 'awaiting_review',
+      revision: 1,
+      currentBaseId: 'active-base',
+      currentSessionId: 'planning-session',
+      latestProposalOrdinal: 0,
+      feedback: [],
+      attention: null,
+      createdBy: { type: 'human', id: 'operator' },
+      createdAt: now,
+      updatedAt: now,
+      terminalAt: null,
+      terminalBy: null,
+      terminalReason: null,
+    });
+    repositories.plans.create({
+      plan,
+      base: projectPlanBaseSchema.parse({
+        id: 'active-base',
+        planId: plan.id,
+        ordinal: 1,
+        repositoryIdentity: project.repositoryIdentity,
+        tasks: [],
+        dependencies: [],
+        projectArchivedAt: null,
+        projectRevision: project.revision,
+        policyRevision: project.qaConfiguration.revision,
+        createdAt: now,
+      }),
+      sessionId: 'planning-session',
+    });
+
+    const error = await executeCommand(
+      projectCommand('archive-active-plan', {
+        type: 'project.archive',
+        payload: {
+          projectId: project.id,
+          expectedRevision: project.revision,
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: 'project_plan_lifecycle_invalid',
+      details: { plan: expect.objectContaining({ id: plan.id }) },
+    });
+    expect(toHttpError(error)).toMatchObject({ statusCode: 409 });
+    expect(repositories.projects.get(project.id)?.archivedAt).toBeNull();
+  });
+
+  it('serializes archive against a planning start that is still resolving repository identity', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const { repositories, dependencies } = commandDependencies(directory);
+    const identity = await resolveIdentity(repositoryPath, {
+      baseDirectory: directory,
+    });
+    const project = repositories.projects.create(
+      projectSchema.parse({
+        id: 'planning-race-project',
+        displayName: 'Planning race',
+        repositoryPath: identity.canonicalPath,
+        repositoryIdentity: identity.repositoryIdentity,
+        discoveredAt: now,
+        discoveryMetadata: {},
+      }),
+    );
+    let enterResolve!: () => void;
+    const resolving = new Promise<void>((resolve) => {
+      enterResolve = resolve;
+    });
+    let releaseResolve!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseResolve = resolve;
+    });
+    let nextId = 0;
+    const planning = new PlanningExecutionService({
+      ...repositories,
+      registry: dependencies.registry,
+      capabilities: new PlanningCapabilityRegistry(),
+      billingConflicts: [],
+      pathOptions: { baseDirectory: directory },
+      resolveIdentity: async () => {
+        enterResolve();
+        await release;
+        return identity;
+      },
+      now: () => now,
+      createId: () => `planning-race-${++nextId}`,
+    });
+    const starting = planning.start({
+      projectId: project.id,
+      expectedProjectRevision: project.revision,
+      goal: 'Plan without racing archive.',
+      constraints: '',
+      nonGoals: '',
+      actor: { type: 'human', id: idSchema.parse('operator') },
+      commandId: 'planning-race-start',
+    });
+    await resolving;
+
+    const archived = await executeCommand(
+      projectCommand('planning-race-archive', {
+        type: 'project.archive',
+        payload: {
+          projectId: project.id,
+          expectedRevision: project.revision,
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    );
+    releaseResolve();
+
+    expect(archived.result).toMatchObject({
+      id: project.id,
+      archivedAt: now,
+    });
+    await expect(starting).rejects.toMatchObject({ code: 'project_archived' });
+    expect(repositories.plans.getActiveByProject(project.id)).toBeUndefined();
   });
 
   it('blocks archive and deletion through QA cycle session ownership', async () => {

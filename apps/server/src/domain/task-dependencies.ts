@@ -48,12 +48,11 @@ export const validateDependencyGraph = ({
       !task ||
       !prerequisite ||
       dependency.projectId !== task.projectId ||
-      task.projectId !== prerequisite.projectId ||
-      prerequisite.lifecycleState === 'cancelled'
+      task.projectId !== prerequisite.projectId
     ) {
       throw new TaskDependencyGraphError(
         'task_dependency_invalid',
-        'Task dependencies must reference active tasks in the same project.',
+        'Task dependencies must reference tasks in the same project.',
       );
     }
 

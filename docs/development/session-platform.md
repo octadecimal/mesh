@@ -59,10 +59,15 @@ action.
 Use **Start planning** to ask a PM role for a structured proposal against the
 current imported repository and task/policy base. Confirm the displayed Claude
 subscription-capacity warning before starting. The PM receives read-only
-repository tools plus one scoped `submit_project_plan` control. It cannot write
-files, change canonical tasks or dependencies, approve or reject a proposal, or
-launch Developer work. A transcript or a completed PM process is not a plan
-outcome; only a validated structured submission becomes reviewable.
+repository access plus one scoped `submit_project_plan` control. It receives no
+Claude SDK built-in filesystem tools; Mesh-owned bounded controls provide read,
+glob, and text search while rejecting absolute paths, traversal, unsafe glob
+grammar, and symlink or junction escapes. Mesh revalidates opened-handle and
+root/parent/target identity around each access, and cancellation or session end
+revokes the controls. The PM cannot write files, change canonical tasks or
+dependencies, approve or reject a proposal, or launch Developer work. A
+transcript or a completed PM process is not a plan outcome; only a validated
+structured submission becomes reviewable.
 
 Review the proposed tasks, prerequisite graph, assumptions, risks, exclusions,
 and revision history. **Request changes** records operator feedback, captures a

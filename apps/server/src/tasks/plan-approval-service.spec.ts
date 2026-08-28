@@ -73,6 +73,7 @@ const proposal = (
 type TestRepositories = ReturnType<typeof createTestRepositories>;
 
 type ArrangeOptions = {
+  existingDependencies?: Array<ReturnType<typeof taskDependencySchema.parse>>;
   existingTasks?: Task[];
   proposalInput?: ProjectPlanProposalInput;
   repositoryOptions?: Parameters<typeof createTestRepositories>[0];
@@ -244,6 +245,9 @@ const arrange = (options: ArrangeOptions = {}) => {
   );
   for (const task of options.existingTasks ?? [defaultExistingTask]) {
     repositories.tasks.create(task);
+  }
+  for (const dependency of options.existingDependencies ?? []) {
+    repositories.dependencies.create(dependency);
   }
   const planning = createPlan(repositories, project, session.id, [
     options.proposalInput ?? proposal(),
@@ -999,6 +1003,34 @@ describe('PlanApprovalService approval', () => {
       }),
     ).rejects.toMatchObject({ code: 'task_dependency_cycle' });
     expect(activeCounts(cyclicRepositories).mappings).toBe(0);
+  });
+
+  it('approves an unrelated proposal while retaining a cancelled prerequisite edge', async () => {
+    const prerequisite = storedTask('project-1', 'cancelled-prerequisite', {
+      lifecycleState: 'cancelled',
+    });
+    const dependent = storedTask('project-1', 'retained-dependent', {
+      lifecycleState: 'backlog',
+    });
+    const retained = taskDependencySchema.parse({
+      projectId: 'project-1',
+      taskId: dependent.id,
+      prerequisiteTaskId: prerequisite.id,
+      createdBy: human,
+      createdAt: now,
+    });
+    const context = arrange({
+      existingTasks: [defaultExistingTask, prerequisite, dependent],
+      existingDependencies: [retained],
+      proposalInput: proposal({ dependencies: [] }),
+    });
+
+    const approved = await context.service.approve(context.approveInput);
+
+    expect(approved.plan.status).toBe('approved');
+    expect(
+      context.repositories.dependencies.listByProject(context.project.id),
+    ).toContainEqual(retained);
   });
 
   it('revalidates stored task contracts and proposal size limits', async () => {

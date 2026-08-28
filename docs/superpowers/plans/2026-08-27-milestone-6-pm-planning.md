@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Never set, accept, or fall back to `ANTHROPIC_API_KEY` or another pay-per-token billing override.
-- PM repository access is read-only: allow `Read`, `Glob`, `Grep`, and the plan-submission MCP tool; do not grant source-write, mutating shell, network-expansion, task, run, Developer, or QA tools.
+- PM repository access is read-only: grant no Claude SDK built-in filesystem tools. Allow only Mesh-owned bounded read, glob, and text-search MCP tools plus the plan-submission MCP tool; do not grant source-write, mutating shell, network-expansion, task, run, Developer, or QA tools.
 - Persist planning, proposal, feedback, capability-generation, task, dependency, command, and project-event truth before publication or runtime action.
 - Planning start captures an immutable base revision; every revision request captures a new immutable base before resuming Claude.
 - Approval is additive: create new `backlog` tasks; never edit existing tasks or make an existing task depend on proposed work.
@@ -608,11 +608,13 @@ git commit -m "feat(server): gate work on dependencies"
 - Modify: `apps/server/src/claude/sdk-driver.contract.spec.ts`
 - Modify: `apps/server/src/claude/fake-driver.ts`
 - Modify: `apps/server/src/claude/fake-driver.spec.ts`
+- Reuse/modify: `apps/server/src/platform/qa-workspace-reader.ts`
+- Modify: `apps/server/src/platform/qa-workspace-reader.spec.ts`
 
 **Interfaces:**
 
 - Consumes: planning proposal input schema from Task 1.
-- Produces: `PM_POLICY_VERSION`, `buildPmPrompt`, `PlanningCapabilityRegistry`, `PmRuntimeConfiguration`, and the `mcp__mesh_pm__submit_project_plan` transport callback.
+- Produces: `PM_POLICY_VERSION`, `buildPmPrompt`, `PlanningCapabilityRegistry`, `PmRuntimeConfiguration`, Mesh-owned bounded read/glob/search controls, and the `mcp__mesh_pm__submit_project_plan` transport callback.
 
 - [ ] **Step 1: Write failing policy and capability tests**
 
@@ -620,23 +622,24 @@ Prove the prompt includes goal, constraints, non-goals, exact base identity, cur
 
 ```ts
 expect(PM_AVAILABLE_TOOLS).toEqual([
-  'Read',
-  'Glob',
-  'Grep',
+  'mcp__mesh_pm__read_workspace_file',
+  'mcp__mesh_pm__glob_workspace_files',
+  'mcp__mesh_pm__search_workspace_text',
   'mcp__mesh_pm__submit_project_plan',
 ]);
+expect(PM_BUILTIN_TOOLS).toEqual([]);
 expect(buildPmPrompt(input)).toContain('You cannot modify repository files');
 ```
 
 - [ ] **Step 2: Write failing SDK and fake-driver contract tests**
 
-Add a `role: 'pm'` runtime configuration. Assert only the exact four tools above are available and allowed, plan submission reaches the registered callback, unlisted shell/write/network tools are unavailable, and the fake driver can emit a deterministic proposal submission.
+Add a `role: 'pm'` runtime configuration. Assert the SDK built-in tool list is empty and only the exact four Mesh-owned tools above are allowed, plan submission reaches the registered callback, unlisted shell/write/network tools are unavailable, and the fake driver can emit a deterministic proposal submission. Prove bounded traversal and glob grammar, symlink/junction and ancestor-swap rejection, root/parent/target identity revalidation, cancellation and session revocation, and read-only behavior.
 
 ```ts
 const pm: PmRuntimeConfiguration = {
   role: 'pm',
   initialPrompt: 'Plan the approved project goal.',
-  availableTools: PM_AVAILABLE_TOOLS,
+  availableTools: PM_BUILTIN_TOOLS,
   allowedTools: PM_AVAILABLE_TOOLS,
   submitProposal: vi.fn(),
 };

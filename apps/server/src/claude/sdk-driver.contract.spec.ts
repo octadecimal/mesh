@@ -12,7 +12,10 @@ import {
   type SdkStreamEvent,
 } from './sdk-driver.js';
 import { selectClaudeDriver } from '../main.js';
-import { PM_AVAILABLE_TOOLS } from '../domain/planning-policy.js';
+import {
+  PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
+} from '../domain/planning-policy.js';
 import type { PmRuntimeConfiguration } from './driver.js';
 
 const collect = async <T>(events: AsyncIterable<T>): Promise<T[]> => {
@@ -304,7 +307,7 @@ describe('SdkClaudeSessionDriver contract', () => {
     const pm: PmRuntimeConfiguration = {
       role: 'pm',
       initialPrompt: 'Plan the approved project goal.',
-      availableTools: PM_AVAILABLE_TOOLS,
+      availableTools: PM_BUILTIN_TOOLS,
       allowedTools: PM_AVAILABLE_TOOLS,
       submitProposal: async () => undefined,
     };
@@ -349,13 +352,13 @@ describe('SdkClaudeSessionDriver contract', () => {
     expect(resumeSdk.query.prompts).toEqual([
       'Plan the approved project goal.',
     ]);
-    expect(pm.availableTools).toEqual([
-      'Read',
-      'Glob',
-      'Grep',
+    expect(pm.availableTools).toEqual([]);
+    expect(pm.allowedTools).toEqual([
+      'mcp__mesh_pm__read_workspace_file',
+      'mcp__mesh_pm__glob_workspace_files',
+      'mcp__mesh_pm__search_workspace_text',
       'mcp__mesh_pm__submit_project_plan',
     ]);
-    expect(pm.allowedTools).toEqual(pm.availableTools);
     expect(pm.availableTools).not.toEqual(
       expect.arrayContaining([
         'Bash',
@@ -372,7 +375,7 @@ describe('SdkClaudeSessionDriver contract', () => {
     );
   });
 
-  it('rejects a runtime request that mixes Developer and QA authority', async () => {
+  it('diagnoses mixed Developer and role-specific QA or PM authority', async () => {
     const sdk = new ScriptedFacade([
       { kind: 'started', sessionId: 'resume-mixed', apiKeySource: 'none' },
     ]);
@@ -396,7 +399,9 @@ describe('SdkClaudeSessionDriver contract', () => {
           controlServer: { name: 'mesh_qa', version: '1', tools: [] },
         },
       }),
-    ).rejects.toThrow('cannot combine Developer and QA runtime controls');
+    ).rejects.toThrow(
+      'cannot combine Developer runtime controls with role-specific QA or PM runtime controls',
+    );
     expect(sdk.queryCalls).toEqual([]);
   });
 

@@ -27,6 +27,7 @@ import type { Database } from '../db/database.js';
 import {
   buildPmPrompt,
   PM_AVAILABLE_TOOLS,
+  PM_BUILTIN_TOOLS,
   PM_POLICY_VERSION,
 } from '../domain/planning-policy.js';
 import type { ResolveWorkspacePathOptions } from '../platform/paths.js';
@@ -675,7 +676,7 @@ export class PlanningExecutionService {
       }),
       capability,
       capabilityGeneration: binding.generation,
-      availableTools: PM_AVAILABLE_TOOLS,
+      availableTools: PM_BUILTIN_TOOLS,
       allowedTools: PM_AVAILABLE_TOOLS,
       submitProposal: (proposalInput) =>
         this.submitProposal({ capability, proposal: proposalInput }),
@@ -776,22 +777,27 @@ export class PlanningExecutionService {
     base: ProjectPlanBase,
     proposalInput: ProjectPlanProposalInput,
   ): void {
-    const baseTaskIds = new Set(base.tasks.map((task) => task.id));
-    const currentTaskIds = new Set(
+    const baseTasksById = new Map(base.tasks.map((task) => [task.id, task]));
+    const currentTasksById = new Map(
       this.dependencies.tasks
         .listByProject(plan.projectId)
-        .map((task) => task.id),
+        .map((task) => [task.id, task]),
     );
-    const invalid = proposalInput.dependencies.find(
-      (dependency) =>
-        dependency.prerequisite.type === 'existing_task' &&
-        (!baseTaskIds.has(dependency.prerequisite.taskId) ||
-          !currentTaskIds.has(dependency.prerequisite.taskId)),
-    );
+    const invalid = proposalInput.dependencies.find((dependency) => {
+      if (dependency.prerequisite.type !== 'existing_task') return false;
+      const baseTask = baseTasksById.get(dependency.prerequisite.taskId);
+      const currentTask = currentTasksById.get(dependency.prerequisite.taskId);
+      return (
+        !baseTask ||
+        !currentTask ||
+        baseTask.lifecycleState === 'cancelled' ||
+        currentTask.lifecycleState === 'cancelled'
+      );
+    });
     if (invalid?.prerequisite.type === 'existing_task') {
       throw new PlanningExecutionError(
         'project_plan_proposal_invalid',
-        `Existing prerequisite '${invalid.prerequisite.taskId}' is not in the frozen current project base`,
+        `Existing prerequisite '${invalid.prerequisite.taskId}' must be a non-cancelled task in the frozen current project base`,
       );
     }
   }
