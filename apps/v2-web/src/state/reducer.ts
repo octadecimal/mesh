@@ -36,6 +36,7 @@ export type ProjectProjection = {
   runtimeCursor: number;
   connection: ProjectionConnection;
   transport: 'connecting' | 'subscribed' | 'disconnected';
+  snapshotReady: boolean;
   resyncRequested: boolean;
   local: ProjectionLocalState;
 };
@@ -65,6 +66,7 @@ export const createInitialProjectProjection = (
   runtimeCursor: 0,
   connection: { status: 'loading' },
   transport: 'connecting',
+  snapshotReady: false,
   resyncRequested: false,
   local: { route: '', repositoryDraft: '', selectedTab: 'board' },
 });
@@ -233,7 +235,13 @@ export const reduceProjectProjection = (
         attentionItems: action.snapshot.attentionItems,
         domainCursor: action.snapshot.cursors.domain,
         runtimeCursor: action.snapshot.cursors.runtime,
-        connection: { status: 'ready' },
+        connection:
+          state.transport === 'subscribed'
+            ? { status: 'ready' }
+            : state.transport === 'disconnected'
+              ? { status: 'disconnected' }
+              : { status: 'loading' },
+        snapshotReady: true,
         resyncRequested: false,
       };
     case 'domain.event':
@@ -243,7 +251,15 @@ export const reduceProjectProjection = (
       if (state.resyncRequested) return state;
       return reduceEvent(state, 'runtime', action.event);
     case 'transport.subscribed':
-      return { ...state, transport: 'subscribed' };
+      return {
+        ...state,
+        transport: 'subscribed',
+        connection: state.resyncRequested
+          ? state.connection
+          : state.snapshotReady
+            ? { status: 'ready' }
+            : { status: 'loading' },
+      };
     case 'transport.disconnected':
       return {
         ...state,

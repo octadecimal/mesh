@@ -453,6 +453,43 @@ describe('reduceProjectProjection', () => {
     expect(subscribedAfter.connection).toEqual({ status: 'ready' });
     expect(subscribedAfter.transport).toBe('subscribed');
   });
+
+  it('restores ready on resubscribe only when a snapshot exists', () => {
+    const beforeSnapshot = reduceProjectProjection(
+      reduceProjectProjection(createInitialProjectProjection(projectId), {
+        type: 'transport.disconnected',
+      }),
+      { type: 'transport.subscribed' },
+    );
+    expect(beforeSnapshot.transport).toBe('subscribed');
+    expect(beforeSnapshot.connection).toEqual({ status: 'loading' });
+
+    const afterSnapshot = reduceProjectProjection(
+      reduceProjectProjection(ready(), { type: 'transport.disconnected' }),
+      { type: 'transport.subscribed' },
+    );
+    expect(afterSnapshot.transport).toBe('subscribed');
+    expect(afterSnapshot.connection).toEqual({ status: 'ready' });
+  });
+
+  it('keeps a disconnected snapshot disconnected until subscription succeeds', () => {
+    const disconnected = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      { type: 'transport.disconnected' },
+    );
+    const withSnapshot = reduceProjectProjection(disconnected, {
+      type: 'snapshot.received',
+      snapshot,
+    });
+    expect(withSnapshot.transport).toBe('disconnected');
+    expect(withSnapshot.connection).toEqual({ status: 'disconnected' });
+
+    const subscribed = reduceProjectProjection(withSnapshot, {
+      type: 'transport.subscribed',
+    });
+    expect(subscribed.transport).toBe('subscribed');
+    expect(subscribed.connection).toEqual({ status: 'ready' });
+  });
 });
 
 describe('createV2Store', () => {

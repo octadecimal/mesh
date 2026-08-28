@@ -39,7 +39,6 @@ export const createV2Socket = (options: SocketOptions): V2Socket => {
     options.socketFactory ?? ((url: string) => new WebSocket(url));
   let active: WebSocketLike | undefined;
   let closed = false;
-  let liveCursors = { ...options.cursors };
 
   const connect = () => {
     const socket = socketFactory(options.url);
@@ -51,7 +50,7 @@ export const createV2Socket = (options: SocketOptions): V2Socket => {
         type: 'v2.subscribe',
         protocolVersion: V2_PROTOCOL_VERSION,
         projectId: options.projectId,
-        cursors: options.cursorSource?.getCursors() ?? liveCursors,
+        cursors: options.cursorSource?.getCursors() ?? options.cursors,
       });
       socket.send(JSON.stringify(subscription));
     });
@@ -80,20 +79,12 @@ export const createV2Socket = (options: SocketOptions): V2Socket => {
         case 'v2.subscribed':
           options.dispatch({ type: 'transport.subscribed' });
           break;
-        case 'v2.domain_event': {
+        case 'v2.domain_event':
           options.dispatch({ type: 'domain.event', event: message.event });
-          if (message.event.sequence === liveCursors.domain + 1) {
-            liveCursors = { ...liveCursors, domain: message.event.sequence };
-          }
           break;
-        }
-        case 'v2.runtime_event': {
+        case 'v2.runtime_event':
           options.dispatch({ type: 'runtime.event', event: message.event });
-          if (message.event.sequence === liveCursors.runtime + 1) {
-            liveCursors = { ...liveCursors, runtime: message.event.sequence };
-          }
           break;
-        }
         case 'v2.resync_required':
           options.dispatch({ type: 'resync.required', reason: message.reason });
           break;

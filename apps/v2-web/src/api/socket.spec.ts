@@ -293,4 +293,72 @@ describe('createV2Socket', () => {
     expect(store.getState().activity).toEqual([completion.event]);
     expect(store.getState().executions[0]?.lifecycle).toBe('running');
   });
+
+  it('does not advertise a schema-valid event rejected by the store', () => {
+    const sockets: FakeSocket[] = [];
+    const store = createV2Store(projectId);
+    const socket = createV2Socket({
+      url: 'ws://mesh.test/api/v2/realtime',
+      projectId,
+      cursors: { domain: 0, runtime: 0 },
+      dispatch: store.dispatch,
+      socketFactory: () => {
+        const created = new FakeSocket();
+        sockets.push(created);
+        return created;
+      },
+    });
+    sockets[0]?.open();
+    sockets[0]?.message({
+      type: 'v2.domain_event',
+      protocolVersion: V2_PROTOCOL_VERSION,
+      projectId,
+      event: {
+        id: '00000000-0000-4000-8000-000000000012',
+        projectId,
+        sequence: 1,
+        occurredAt: '2026-08-28T00:00:07.000Z',
+        type: 'worker_profile.revision_approved',
+        payload: {
+          profileRevision: {
+            profileId: '00000000-0000-4000-8000-000000000013',
+            scope: 'project',
+            projectId,
+            name: 'extended-profile',
+            displayName: 'Extended Profile',
+            revision: 1,
+            sourceYaml: 'apiVersion: mesh.dev/v1alpha1',
+            document: {
+              apiVersion: 'mesh.dev/v1alpha1',
+              kind: 'WorkerProfile',
+              metadata: {
+                name: 'extended-profile',
+                displayName: 'Extended Profile',
+                scope: 'project',
+              },
+              extends: { profile: 'global/foundation', revision: 1 },
+              spec: { instructions: 'Project override.' },
+            },
+            baseProfileId: '00000000-0000-4000-8000-000000000014',
+            baseRevision: 1,
+            approvedBy: { kind: 'human' },
+            approvedAt: '2026-08-28T00:00:07.000Z',
+            digest: 'b'.repeat(64),
+          },
+        },
+      },
+    });
+
+    expect(store.getState().domainCursor).toBe(0);
+    expect(store.getState().connection).toEqual({
+      status: 'stale',
+      reason: 'profile_projection_incomplete',
+    });
+
+    socket.reconnect();
+    sockets[1]?.open();
+    expect(JSON.parse(sockets[1]?.sent[0] ?? '{}')).toMatchObject({
+      cursors: { domain: 0, runtime: 0 },
+    });
+  });
 });
