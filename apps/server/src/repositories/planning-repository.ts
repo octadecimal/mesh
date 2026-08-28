@@ -14,7 +14,6 @@ import {
   type ProjectPlanProposal,
   type ProjectPlanStatus,
   type ProjectPlanSummary,
-  type TaskActor,
 } from '@mesh-session-platform/contracts';
 import type { z } from 'zod';
 
@@ -139,6 +138,15 @@ export type PlanTaskMapping = {
   proposalTaskKey: string;
   taskId: string;
   createdAt: string;
+};
+
+export type PlanSessionAssociation = {
+  sessionId: string;
+  planId: string;
+  projectId: string;
+  capabilityGeneration: number;
+  startedAt: string;
+  endedAt: string | null;
 };
 
 const assertExpectedRevision = (value: number): number => {
@@ -332,13 +340,14 @@ export class PlanningRepository {
     planId: string,
     expectedRevision: number,
     sessionId: string,
+    startedAt = new Date().toISOString(),
   ): ProjectPlan {
     const id = idSchema.parse(planId);
     const revision = assertExpectedRevision(expectedRevision);
     const parsedSessionId = idSchema.parse(sessionId);
     const current = this.selectPlan(id);
     if (!current) throw new Error('Plan was not found');
-    const updatedAt = new Date().toISOString();
+    const updatedAt = isoTimestampSchema.parse(startedAt);
     const next = projectPlanSchema.parse({
       ...this.toPlan(current),
       currentSessionId: parsedSessionId,
@@ -373,6 +382,61 @@ export class PlanningRepository {
       updatedAt,
     );
     return next;
+  }
+
+  getSessionAssociation(
+    planId: string,
+    sessionId: string,
+  ): PlanSessionAssociation | undefined {
+    const row = this.database.prepare(`
+      SELECT session_id, plan_id, project_id, capability_generation,
+             started_at, ended_at
+      FROM project_plan_sessions
+      WHERE plan_id = ? AND session_id = ?
+    `).get(idSchema.parse(planId), idSchema.parse(sessionId)) as
+      | {
+          session_id: string;
+          plan_id: string;
+          project_id: string;
+          capability_generation: number;
+          started_at: string;
+          ended_at: string | null;
+        }
+      | undefined;
+    return row
+      ? {
+          sessionId: row.session_id,
+          planId: row.plan_id,
+          projectId: row.project_id,
+          capabilityGeneration: row.capability_generation,
+          startedAt: row.started_at,
+          endedAt: row.ended_at,
+        }
+      : undefined;
+  }
+
+  advanceSessionGeneration(
+    planId: string,
+    sessionId: string,
+    startedAt: string,
+  ): PlanSessionAssociation {
+    const id = idSchema.parse(planId);
+    const parsedSessionId = idSchema.parse(sessionId);
+    const occurredAt = isoTimestampSchema.parse(startedAt);
+    const plan = this.selectPlan(id);
+    if (!plan || plan.current_session_id !== parsedSessionId) {
+      throw new Error('Plan session is not current');
+    }
+    const generation = this.nextCapabilityGeneration(id);
+    const updated = this.database.prepare(`
+      UPDATE project_plan_sessions
+      SET capability_generation = ?, started_at = ?, ended_at = NULL
+      WHERE plan_id = ? AND session_id = ? AND ended_at IS NULL
+    `).run(generation, occurredAt, id, parsedSessionId);
+    if (updated.changes !== 1) throw new Error('Plan session is not active');
+    const association = this.getSessionAssociation(id, parsedSessionId);
+    if (!association) throw new Error('Plan session update disappeared');
+    return association;
   }
 
   appendProposal(input: AppendPlanProposalInput): ProjectPlanProposal {

@@ -33,6 +33,7 @@ interface SessionRegistryDependencies {
   driver: ClaudeSessionDriver;
   publisher?: EventPublisher;
   invalidateDeveloperCapability?: (sessionId: string) => void;
+  invalidatePlanningCapability?: (sessionId: string) => void;
   onRuntimeStopped?: (sessionId: string) => void;
   shutdownTimeoutMs?: number;
   closeDatabase?: () => void;
@@ -580,6 +581,7 @@ export class SessionRegistry {
 
   private invalidateDeveloperCapability(sessionId: string): void {
     this.dependencies.invalidateDeveloperCapability?.(sessionId);
+    this.dependencies.invalidatePlanningCapability?.(sessionId);
   }
 }
 

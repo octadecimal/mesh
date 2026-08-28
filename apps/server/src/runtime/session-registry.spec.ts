@@ -735,14 +735,18 @@ describe('SessionRegistry Developer attachment', () => {
     ]);
   });
 
-  it('invalidates session capabilities on interruption and shutdown', async () => {
+  it('invalidates Developer and PM session capabilities on interruption and shutdown', async () => {
     const repositories = createTestRepositories();
     const driver = new FakeClaudeSessionDriver();
-    const invalidated: string[] = [];
+    const invalidatedDeveloper: string[] = [];
+    const invalidatedPlanning: string[] = [];
     const registry = new SessionRegistry({
       ...repositories,
       driver,
-      invalidateDeveloperCapability: (sessionId) => invalidated.push(sessionId),
+      invalidateDeveloperCapability: (sessionId) =>
+        invalidatedDeveloper.push(sessionId),
+      invalidatePlanningCapability: (sessionId) =>
+        invalidatedPlanning.push(sessionId),
       closeDatabase: () => undefined,
     });
     seed(repositories, 'interrupted-session');
@@ -754,8 +758,10 @@ describe('SessionRegistry Developer attachment', () => {
     await registry.interrupt('interrupted-session');
     await registry.shutdown();
 
-    expect(invalidated).toContain('interrupted-session');
-    expect(invalidated).toContain('shutdown-session');
+    expect(invalidatedDeveloper).toContain('interrupted-session');
+    expect(invalidatedDeveloper).toContain('shutdown-session');
+    expect(invalidatedPlanning).toContain('interrupted-session');
+    expect(invalidatedPlanning).toContain('shutdown-session');
   });
 
   it('notifies reconciliation when a runtime stops after an unexpected crash', async () => {
