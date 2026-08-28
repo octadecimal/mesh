@@ -51,6 +51,13 @@ type RawDiagnosticRow = {
   payload_json: string;
 };
 
+type ExecutionCursorRow = {
+  project_id: string;
+  adapter_id: string;
+  last_adapter_cursor: number;
+  last_runtime_sequence: number;
+};
+
 const toDomainEvent = (row: DomainEventRow): DomainEvent =>
   domainEventSchema.parse({
     id: row.id,
@@ -96,6 +103,8 @@ export class V2EventStore {
   private readonly insertDomain;
   private readonly insertDiagnostic;
   private readonly insertRuntime;
+  private readonly selectExecutionCursor;
+  private readonly updateExecutionCursor;
 
   constructor(private readonly database: V2Database) {
     this.advanceSequence = database.prepare(`
@@ -129,6 +138,22 @@ export class V2EventStore {
         @id, @projectId, @executionId, @diagnosticId, @sequence,
         @adapterCursor, @occurredAt, @type, @payloadJson
       )
+    `);
+    this.selectExecutionCursor = database.prepare(`
+      SELECT project_id, adapter_id, last_adapter_cursor, last_runtime_sequence
+      FROM worker_executions
+      WHERE id = ?
+    `);
+    this.updateExecutionCursor = database.prepare(`
+      UPDATE worker_executions
+      SET last_adapter_cursor = @adapterCursor,
+          last_runtime_sequence = @runtimeSequence,
+          updated_at = @updatedAt
+      WHERE id = @executionId
+        AND project_id = @projectId
+        AND adapter_id = @adapterId
+        AND last_adapter_cursor = @previousAdapterCursor
+        AND last_runtime_sequence = @previousRuntimeSequence
     `);
   }
 
@@ -180,6 +205,23 @@ export class V2EventStore {
     if (parsedDiagnostic.adapterCursor !== parsedDraft.adapterCursor) {
       throw new Error('Runtime diagnostic cursor must match the event');
     }
+    const execution = this.selectExecutionCursor.get(
+      parsedDraft.executionId,
+    ) as ExecutionCursorRow | undefined;
+    if (!execution) throw new Error('Runtime event execution was not found');
+    if (execution.project_id !== parsedProjectId) {
+      throw new Error(
+        'Runtime execution project must match the append project',
+      );
+    }
+    if (execution.adapter_id !== parsedDiagnostic.adapterId) {
+      throw new Error('Runtime execution adapter must match the diagnostic');
+    }
+    if (parsedDraft.adapterCursor <= execution.last_adapter_cursor) {
+      throw new Error(
+        'Runtime adapter cursor must advance the execution cursor',
+      );
+    }
 
     const storedDiagnostic = rawDiagnosticSchema.parse({
       ...parsedDiagnostic,
@@ -213,6 +255,19 @@ export class V2EventStore {
       type: event.type,
       payloadJson: canonicalJson(event.payload),
     });
+    const cursorUpdate = this.updateExecutionCursor.run({
+      executionId: event.executionId,
+      projectId: event.projectId,
+      adapterId: parsedDiagnostic.adapterId,
+      adapterCursor: event.adapterCursor,
+      runtimeSequence: event.sequence,
+      updatedAt: event.occurredAt,
+      previousAdapterCursor: execution.last_adapter_cursor,
+      previousRuntimeSequence: execution.last_runtime_sequence,
+    });
+    if (cursorUpdate.changes !== 1) {
+      throw new Error('Runtime execution cursor update lost coherence');
+    }
     return event;
   }
 
@@ -250,8 +305,13 @@ export class V2EventStore {
       .prepare(
         'SELECT stream_kind, high_water FROM event_streams WHERE project_id = ?',
       )
-      .all(project) as { stream_kind: 'domain' | 'runtime'; high_water: number }[];
-    const byKind = new Map(rows.map((row) => [row.stream_kind, row.high_water]));
+      .all(project) as {
+      stream_kind: 'domain' | 'runtime';
+      high_water: number;
+    }[];
+    const byKind = new Map(
+      rows.map((row) => [row.stream_kind, row.high_water]),
+    );
     return projectEventCursorsSchema.parse({
       domain: byKind.get('domain') ?? 0,
       runtime: byKind.get('runtime') ?? 0,
@@ -270,7 +330,9 @@ export class V2EventStore {
     streamKind: 'domain' | 'runtime',
   ): number {
     return (
-      this.advanceSequence.get({ projectId, streamKind }) as { sequence: number }
+      this.advanceSequence.get({ projectId, streamKind }) as {
+        sequence: number;
+      }
     ).sequence;
   }
 

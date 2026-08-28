@@ -151,9 +151,3 @@ CREATE UNIQUE INDEX worker_profiles_project_name
 CREATE UNIQUE INDEX execution_operations_pending
   ON execution_operations(execution_id, kind)
   WHERE state = 'pending';
-
-CREATE INDEX domain_events_project_sequence
-  ON domain_events(project_id, sequence);
-
-CREATE INDEX runtime_events_project_sequence
-  ON runtime_events(project_id, sequence);

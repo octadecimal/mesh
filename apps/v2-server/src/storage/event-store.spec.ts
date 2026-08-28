@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 import type {
   DomainEventDraft,
@@ -154,6 +156,129 @@ describe('V2CommandRepository', () => {
 });
 
 describe('V2EventStore', () => {
+  it('atomically advances the referenced execution cursors with a runtime event', () => {
+    const fixture = setup();
+
+    const event = appendRuntime(fixture, 1);
+
+    expect(
+      fixture.database
+        .prepare(
+          `SELECT last_adapter_cursor, last_runtime_sequence
+           FROM worker_executions WHERE id = ?`,
+        )
+        .get(fixture.execution.id),
+    ).toEqual({
+      last_adapter_cursor: 1,
+      last_runtime_sequence: event.sequence,
+    });
+  });
+
+  it('rejects a runtime event whose execution belongs to another project without writes', () => {
+    const fixture = setup();
+    const otherProject = insertV2TestProject(fixture.database, {
+      id: randomUUID(),
+      displayName: 'Other',
+      repositoryIdentity: 'cross-project-identity',
+    });
+
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        fixture.events.appendRuntimeWithDiagnosticInTransaction(
+          otherProject.id,
+          {
+            projectId: otherProject.id,
+            executionId: fixture.execution.id,
+            adapterId: 'fake',
+            adapterCursor: 1,
+            receivedAt: '2026-08-28T00:00:00.000Z',
+            payload: { rejected: true },
+          },
+          {
+            ...outputDraft(fixture, 1),
+            projectId: otherProject.id,
+          },
+        ),
+      ),
+    ).toThrowError(/execution project/i);
+    expect(fixture.events.cursors(otherProject.id)).toEqual({
+      domain: 0,
+      runtime: 0,
+    });
+    expect(
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM raw_diagnostics')
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it('rejects a runtime diagnostic from another adapter without writes', () => {
+    const fixture = setup();
+
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        fixture.events.appendRuntimeWithDiagnosticInTransaction(
+          fixture.project.id,
+          {
+            projectId: fixture.project.id,
+            executionId: fixture.execution.id,
+            adapterId: 'other-adapter',
+            adapterCursor: 1,
+            receivedAt: '2026-08-28T00:00:00.000Z',
+            payload: { rejected: true },
+          },
+          outputDraft(fixture, 1),
+        ),
+      ),
+    ).toThrowError(/execution adapter/i);
+    expect(fixture.events.cursors(fixture.project.id)).toEqual({
+      domain: 0,
+      runtime: 0,
+    });
+    expect(
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM raw_diagnostics')
+        .get(),
+    ).toEqual({ count: 0 });
+  });
+
+  it('rolls back diagnostic, event, and sequence when execution cursor update fails', () => {
+    const fixture = setup();
+    fixture.database.exec(`
+      CREATE TRIGGER fail_execution_cursor
+      BEFORE UPDATE OF last_adapter_cursor ON worker_executions
+      BEGIN
+        SELECT RAISE(ABORT, 'cursor update failed');
+      END
+    `);
+
+    expect(() => appendRuntime(fixture, 1)).toThrowError(
+      /cursor update failed/,
+    );
+    expect(fixture.events.cursors(fixture.project.id)).toEqual({
+      domain: 0,
+      runtime: 0,
+    });
+    expect(
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM raw_diagnostics')
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM runtime_events')
+        .get(),
+    ).toEqual({ count: 0 });
+    expect(
+      fixture.database
+        .prepare(
+          `SELECT last_adapter_cursor, last_runtime_sequence
+           FROM worker_executions WHERE id = ?`,
+        )
+        .get(fixture.execution.id),
+    ).toEqual({ last_adapter_cursor: 0, last_runtime_sequence: 0 });
+  });
+
   it('allocates gap-free domain and runtime sequences independently per project', () => {
     const fixture = setup();
     const secondProject = insertV2TestProject(fixture.database, {
@@ -211,7 +336,9 @@ describe('V2EventStore', () => {
     appendRuntime(fixture, 1);
     appendRuntime(fixture, 2);
     fixture.database
-      .prepare('DELETE FROM domain_events WHERE project_id = ? AND sequence = 1')
+      .prepare(
+        'DELETE FROM domain_events WHERE project_id = ? AND sequence = 1',
+      )
       .run(fixture.project.id);
 
     expect(fixture.events.domainAfter(fixture.project.id, 1)).toMatchObject({
@@ -252,10 +379,14 @@ describe('V2EventStore', () => {
       runtime: 0,
     });
     expect(
-      fixture.database.prepare('SELECT COUNT(*) AS count FROM raw_diagnostics').get(),
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM raw_diagnostics')
+        .get(),
     ).toEqual({ count: 0 });
     expect(
-      fixture.database.prepare('SELECT COUNT(*) AS count FROM runtime_events').get(),
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM runtime_events')
+        .get(),
     ).toEqual({ count: 0 });
   });
 
@@ -275,10 +406,14 @@ describe('V2EventStore', () => {
       runtime: 0,
     });
     expect(
-      fixture.database.prepare('SELECT COUNT(*) AS count FROM raw_diagnostics').get(),
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM raw_diagnostics')
+        .get(),
     ).toEqual({ count: 0 });
     expect(
-      fixture.database.prepare('SELECT COUNT(*) AS count FROM runtime_events').get(),
+      fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM runtime_events')
+        .get(),
     ).toEqual({ count: 0 });
   });
 
@@ -305,5 +440,26 @@ describe('V2EventStore', () => {
         outputDraft(fixture, 1),
       ),
     ).toThrowError(/transaction/i);
+  });
+});
+
+describe('createV2TestDatabase', () => {
+  it('closes the database and removes its verified directory when construction fails', () => {
+    let openedDatabase: V2TestDatabase['database'] | undefined;
+    let createdDirectory: string | undefined;
+
+    expect(() =>
+      createV2TestDatabase({
+        afterOpen(database) {
+          openedDatabase = database;
+          createdDirectory = dirname(database.name);
+          throw new Error('fixture construction failed');
+        },
+      }),
+    ).toThrowError('fixture construction failed');
+
+    expect(openedDatabase?.open).toBe(false);
+    if (!createdDirectory) throw new Error('Fixture directory was not observed');
+    expect(existsSync(createdDirectory)).toBe(false);
   });
 });

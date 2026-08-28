@@ -11,6 +11,7 @@ import {
   V2_APPLICATION_ID,
   type V2Database,
 } from './database.js';
+import { migrateV2Database } from './migrate.js';
 
 const openDatabases: V2Database[] = [];
 const directories: string[] = [];
@@ -93,11 +94,13 @@ describe('V2 database identity and migration', () => {
     const reopened = openV2Database(path);
     openDatabases.push(reopened);
 
+    expect(reopened.prepare('SELECT display_name FROM projects').get()).toEqual(
+      { display_name: 'Todo' },
+    );
     expect(
-      reopened.prepare('SELECT display_name FROM projects').get(),
-    ).toEqual({ display_name: 'Todo' });
-    expect(
-      reopened.prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations').get(),
+      reopened
+        .prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations')
+        .get(),
     ).toEqual({ count: 1 });
   });
 
@@ -126,20 +129,87 @@ describe('V2 database identity and migration', () => {
   it.each([
     ['unmarked V1-like', 0],
     ['unknown application', 42],
-  ])('rejects a non-empty %s database without changing its bytes', (_name, id) => {
-    const path = join(temporaryDirectory(), 'foreign.sqlite');
-    const foreign = new BetterSqlite3(path);
-    foreign.exec('CREATE TABLE v1_sessions (id TEXT PRIMARY KEY)');
-    if (id !== 0) foreign.pragma(`application_id = ${id}`);
-    foreign.close();
-    const before = fileHash(path);
+  ])(
+    'rejects a non-empty %s database without changing its bytes',
+    (_name, id) => {
+      const path = join(temporaryDirectory(), 'foreign.sqlite');
+      const foreign = new BetterSqlite3(path);
+      foreign.exec('CREATE TABLE v1_sessions (id TEXT PRIMARY KEY)');
+      if (id !== 0) foreign.pragma(`application_id = ${id}`);
+      foreign.close();
+      const before = fileHash(path);
 
-    expect(() => openV2Database(path)).toThrowError(
-      expect.objectContaining({ code: 'database_identity_mismatch' }),
-    );
+      expect(() => openV2Database(path)).toThrowError(
+        expect.objectContaining({ code: 'database_identity_mismatch' }),
+      );
 
-    expect(fileHash(path)).toBe(before);
-  });
+      expect(fileHash(path)).toBe(before);
+    },
+  );
+
+  it.each([
+    ['unmarked V1-like', 0],
+    ['foreign application', 42],
+  ])(
+    'rejects direct migration of a non-empty %s database without changing its bytes',
+    (_name, id) => {
+      const path = join(temporaryDirectory(), 'direct-foreign.sqlite');
+      const foreign = new BetterSqlite3(path);
+      foreign.exec('CREATE TABLE v1_sessions (id TEXT PRIMARY KEY)');
+      if (id !== 0) foreign.pragma(`application_id = ${id}`);
+      foreign.close();
+      const before = fileHash(path);
+
+      const direct = new BetterSqlite3(path);
+      try {
+        expect(() => migrateV2Database(direct)).toThrowError(
+          expect.objectContaining({ code: 'database_identity_mismatch' }),
+        );
+      } finally {
+        direct.close();
+      }
+
+      expect(fileHash(path)).toBe(before);
+    },
+  );
+
+  it.each([
+    [1, 'renamed_foundation'],
+    [2, '002_future'],
+  ])(
+    'rejects migration ledger entry %s/%s before mutation',
+    (version, name) => {
+      const path = join(temporaryDirectory(), `ledger-${version}.sqlite`);
+      const database = new BetterSqlite3(path);
+      database.pragma(`application_id = ${V2_APPLICATION_ID}`);
+      database.exec(`
+        CREATE TABLE v2_schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE,
+          applied_at TEXT NOT NULL
+        )
+      `);
+      database
+        .prepare(
+          `INSERT INTO v2_schema_migrations (version, name, applied_at)
+           VALUES (?, ?, ?)`,
+        )
+        .run(version, name, '2026-08-28T00:00:00.000Z');
+      database.close();
+      const before = fileHash(path);
+
+      const direct = new BetterSqlite3(path);
+      try {
+        expect(() => migrateV2Database(direct)).toThrowError(
+          expect.objectContaining({ code: 'migration_ledger_mismatch' }),
+        );
+      } finally {
+        direct.close();
+      }
+
+      expect(fileHash(path)).toBe(before);
+    },
+  );
 
   it('rolls back every earlier migration statement when migration 001 fails', () => {
     const path = join(temporaryDirectory(), 'broken-forward.sqlite');
@@ -191,7 +261,7 @@ describe('V2 database identity and migration', () => {
       (
         database
           .prepare(
-            "SELECT name FROM sqlite_schema WHERE type = 'index' AND name IN ('worker_profiles_global_name', 'worker_profiles_project_name', 'execution_operations_pending') ORDER BY name",
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND sql IS NOT NULL ORDER BY name",
           )
           .all() as { name: string }[]
       ).map(({ name }) => name),
@@ -232,11 +302,7 @@ describe('V2 database identity and migration', () => {
           created_at, updated_at
         ) VALUES (?, 'global', NULL, 'json-check', 'JSON check', NULL, ?, ?)`,
       )
-      .run(
-        profileId,
-        '2026-08-28T00:00:00.000Z',
-        '2026-08-28T00:00:00.000Z',
-      );
+      .run(profileId, '2026-08-28T00:00:00.000Z', '2026-08-28T00:00:00.000Z');
     expect(() =>
       database
         .prepare(
@@ -245,11 +311,7 @@ describe('V2 database identity and migration', () => {
             base_profile_id, base_revision, approved_by, approved_at, digest
           ) VALUES (?, 1, 'profile', '{}', NULL, NULL, 'human', ?, ?)`,
         )
-        .run(
-          profileId,
-          '2026-08-28T00:00:00.000Z',
-          'a'.repeat(64),
-        ),
+        .run(profileId, '2026-08-28T00:00:00.000Z', 'a'.repeat(64)),
     ).toThrow();
   });
 
@@ -266,11 +328,7 @@ describe('V2 database identity and migration', () => {
             id, project_id, sequence, occurred_at, type, payload_json
           ) VALUES (?, ?, 1, ?, 'project.registered', '{}')`,
         )
-        .run(
-          randomUUID(),
-          randomUUID(),
-          '2026-08-28T00:00:00.000Z',
-        ),
+        .run(randomUUID(), randomUUID(), '2026-08-28T00:00:00.000Z'),
     ).toThrow();
 
     expect(() =>

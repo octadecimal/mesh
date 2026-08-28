@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { inImmediateTransaction, type V2Database } from './database.js';
 import {
-  inImmediateTransaction,
+  assertV2OrEmptyDatabase,
   V2_APPLICATION_ID,
-  type V2Database,
-} from './database.js';
+} from './database-identity.js';
 
 const foundationMigration = {
   version: 1,
@@ -18,7 +18,42 @@ const foundationMigration = {
 
 const migrations = [foundationMigration] as const;
 
+type MigrationLedgerRow = { version: number; name: string };
+
+export class V2MigrationLedgerError extends Error {
+  readonly code = 'migration_ledger_mismatch' as const;
+
+  constructor(version: number, name: string) {
+    super(`Unknown V2 migration ledger entry ${version}/${name}`);
+    this.name = 'V2MigrationLedgerError';
+  }
+}
+
+const validateMigrationLedger = (database: V2Database): void => {
+  const hasLedger = database
+    .prepare(
+      `SELECT 1 FROM sqlite_schema
+       WHERE type = 'table' AND name = 'v2_schema_migrations'`,
+    )
+    .get();
+  if (!hasLedger) return;
+
+  const knownByVersion = new Map(
+    migrations.map((migration) => [migration.version, migration.name]),
+  );
+  const rows = database
+    .prepare('SELECT version, name FROM v2_schema_migrations ORDER BY version')
+    .all() as MigrationLedgerRow[];
+  for (const row of rows) {
+    if (knownByVersion.get(row.version) !== row.name) {
+      throw new V2MigrationLedgerError(row.version, row.name);
+    }
+  }
+};
+
 export const migrateV2Database = (database: V2Database): void => {
+  assertV2OrEmptyDatabase(database);
+  validateMigrationLedger(database);
   inImmediateTransaction(database, () => {
     database.exec(`
       CREATE TABLE IF NOT EXISTS v2_schema_migrations (
