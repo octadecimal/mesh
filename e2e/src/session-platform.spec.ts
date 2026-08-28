@@ -475,6 +475,16 @@ const reviewCurrentProposal = async (page: Page) => {
   return panel;
 };
 
+const pmRuntimeCounts = (harness: FakeClaudeHarness) => ({
+  create: harness.driver.createdRequests.filter(
+    (request) => request.role?.role === 'pm',
+  ).length,
+  resume: harness.driver.resumedRequests.filter(
+    (request) => request.role?.role === 'pm',
+  ).length,
+  configuration: harness.pmRuntimeConfigurations().length,
+});
+
 test('keeps the empty cockpit usable at a narrow viewport', async ({
   page,
   harness,
@@ -538,6 +548,68 @@ test('gives the project kanban the remaining board height', async ({
   const bottomGap = layout.viewportHeight - layout.columnsBottom;
   expect(bottomGap).toBeGreaterThanOrEqual(0);
   expect(bottomGap).toBeLessThanOrEqual(20);
+});
+
+test('gives every mobile project board section an explicit row without nested planning overflow', async ({
+  page,
+  harness,
+}) => {
+  await page.setViewportSize({ width: 700, height: 900 });
+  await ensureImportedProject(harness, 'repository');
+  await harness.snapshot();
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'Board' }).click();
+
+  const planning = page.getByRole('region', { name: 'Project planning' });
+  const taskBoard = page.locator('.task-board');
+  await expect(planning).toBeVisible();
+  await expect(taskBoard).toBeAttached();
+
+  const layout = await page.evaluate(() => {
+    const boundary = document.querySelector('.project-board-boundary');
+    const planningPanel = document.querySelector('.project-planning-panel');
+    const runPanel = document.querySelector('.project-run-panel');
+    const board = document.querySelector('.task-board');
+    if (!boundary || !planningPanel || !runPanel || !board) {
+      throw new Error('Expected all mobile project board sections');
+    }
+    const flattenRules = (rules: CSSRuleList): CSSRule[] =>
+      [...rules].flatMap((rule) =>
+        'cssRules' in rule && rule.cssRules instanceof CSSRuleList
+          ? [rule, ...flattenRules(rule.cssRules)]
+          : [rule],
+      );
+    const boundaryRule = [...document.styleSheets]
+      .flatMap((sheet) => flattenRules(sheet.cssRules))
+      .filter(
+        (rule): rule is CSSStyleRule =>
+          rule instanceof CSSStyleRule &&
+          rule.selectorText === '.project-board-boundary' &&
+          Boolean(rule.style.gridTemplateRows),
+      )
+      .at(-1);
+    if (!boundaryRule) {
+      throw new Error('Expected the mobile project board grid rule');
+    }
+    const rows =
+      boundaryRule.style.gridTemplateRows.match(/auto|minmax\([^)]*\)/g) ?? [];
+    return {
+      directChildCount: boundary.children.length,
+      explicitRowCount: rows.length,
+      planningClientHeight: planningPanel.clientHeight,
+      planningScrollHeight: planningPanel.scrollHeight,
+      planningOverflow: getComputedStyle(planningPanel).overflow,
+      planningBottom: planningPanel.getBoundingClientRect().bottom,
+      runTop: runPanel.getBoundingClientRect().top,
+      runBottom: runPanel.getBoundingClientRect().bottom,
+      boardTop: board.getBoundingClientRect().top,
+    };
+  });
+  expect(layout.explicitRowCount).toBe(layout.directChildCount);
+  expect(layout.planningOverflow).toBe('visible');
+  expect(layout.planningClientHeight).toBe(layout.planningScrollHeight);
+  expect(layout.runTop).toBeGreaterThanOrEqual(layout.planningBottom);
+  expect(layout.boardTop).toBeGreaterThanOrEqual(layout.runBottom);
 });
 
 test('creates shared and worktree sessions with the production-built server', async ({
@@ -2004,6 +2076,11 @@ test('plans and approves dependency-aware work with fake pm planning', async ({
         'Grep',
         'mcp__mesh_pm__submit_project_plan',
       ],
+      request: {
+        title: 'Planning: Dependency planning',
+        workspacePath: harness.repositoryPath,
+        permissionMode: 'safe_auto',
+      },
     },
   ]);
 
@@ -2026,7 +2103,29 @@ test('plans and approves dependency-aware work with fake pm planning', async ({
   await review.getByRole('button', { name: 'Request changes' }).click();
   await harness.waitForResumed(1);
   await expect.poll(() => harness.pmRuntimeConfigurations().length).toBe(2);
-  expect(harness.pmRuntimeConfigurations().at(-1)?.source).toBe('resume');
+  const revisedRuntime = harness.pmRuntimeConfigurations().at(-1);
+  expect(revisedRuntime).toEqual({
+    source: 'resume',
+    role: 'pm',
+    availableTools: [
+      'Read',
+      'Glob',
+      'Grep',
+      'mcp__mesh_pm__submit_project_plan',
+    ],
+    allowedTools: ['Read', 'Glob', 'Grep', 'mcp__mesh_pm__submit_project_plan'],
+    request: {
+      claudeResumeId: 'fake-resume-1',
+      workspacePath: harness.repositoryPath,
+      permissionMode: 'safe_auto',
+    },
+  });
+  expect(revisedRuntime?.availableTools).not.toEqual(
+    expect.arrayContaining(['Bash', 'Write', 'Edit', 'NotebookEdit']),
+  );
+  expect(revisedRuntime?.allowedTools).not.toEqual(
+    expect.arrayContaining(['Bash', 'Write', 'Edit', 'NotebookEdit']),
+  );
 
   await harness.submitProjectPlan(planningProposal());
   await waitForProjectSnapshot(
@@ -2200,6 +2299,7 @@ test('pm planning awaiting review survives restart without a live pm', async ({
   );
   const sessionId = beforeRestart.activePlan?.currentSessionId;
   if (!sessionId) throw new Error('Expected the PM planning session');
+  const runtimeCountsBeforeRestart = pmRuntimeCounts(harness);
 
   await harness.restart({ recoverSessionId: sessionId });
   await page.goto(harness.origin);
@@ -2213,6 +2313,7 @@ test('pm planning awaiting review survives restart without a live pm', async ({
   await expect(
     page.getByRole('region', { name: 'Project planning' }),
   ).toContainText('Proposal ready for review');
+  expect(pmRuntimeCounts(harness)).toEqual(runtimeCountsBeforeRestart);
 });
 
 test('pm planning marks a formerly live runtime for attention', async ({

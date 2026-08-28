@@ -2143,7 +2143,7 @@ textarea:focus-visible {
 @media (max-width: 760px) {
   .project-board-boundary {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
   }
 
   .project-board-mobile-scroller {
@@ -2152,11 +2152,13 @@ textarea:focus-visible {
   }
 
   .project-board-header,
+  .project-board-boundary > .project-planning-panel,
   .project-board-boundary > .project-run-panel,
   .project-board-boundary > .task-board {
     grid-column: 1;
   }
 
+  .project-board-boundary > .project-planning-panel,
   .project-board-boundary > .project-run-panel {
     max-height: none;
     overflow: visible;

@@ -52,6 +52,17 @@ type PmRuntimeConfigurationControl = {
 type RecordedPmRuntime = {
   source: 'create' | 'resume';
   configuration: PmRuntimeConfigurationControl;
+  request:
+    | {
+        title: string;
+        workspacePath?: string;
+        permissionMode?: string;
+      }
+    | {
+        claudeResumeId: string;
+        workspacePath?: string;
+        permissionMode?: string;
+      };
   session: FakeDriverSessionControl;
 };
 
@@ -60,6 +71,7 @@ type RecordedPmRuntimeConfiguration = {
   role: 'pm';
   availableTools: string[];
   allowedTools: string[];
+  request: RecordedPmRuntime['request'];
 };
 
 type SubmissionProbeResult = {
@@ -256,6 +268,11 @@ class ScriptedFakeClaudeSessionDriver extends FakeClaudeSessionDriver {
       this.pmRuntimes.push({
         source: 'create',
         configuration: request.role,
+        request: {
+          title: request.title,
+          workspacePath: request.workspacePath,
+          permissionMode: request.permissionMode,
+        },
         session,
       });
     }
@@ -283,6 +300,11 @@ class ScriptedFakeClaudeSessionDriver extends FakeClaudeSessionDriver {
       this.pmRuntimes.push({
         source: 'resume',
         configuration: request.role,
+        request: {
+          claudeResumeId: request.claudeResumeId,
+          workspacePath: request.workspacePath,
+          permissionMode: request.permissionMode,
+        },
         session,
       });
     }
@@ -290,11 +312,12 @@ class ScriptedFakeClaudeSessionDriver extends FakeClaudeSessionDriver {
   }
 
   recordedPmRuntimeConfigurations(): RecordedPmRuntimeConfiguration[] {
-    return this.pmRuntimes.map(({ source, configuration }) => ({
+    return this.pmRuntimes.map(({ source, configuration, request }) => ({
       source,
       role: configuration.role,
       availableTools: [...configuration.availableTools],
       allowedTools: [...configuration.allowedTools],
+      request: { ...request },
     }));
   }
 
