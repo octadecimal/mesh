@@ -192,12 +192,48 @@ export const workerProfileRevisionSchema = z
         message: 'Base profile ID and revision must be present together',
       });
     }
+    if (
+      value.scope === 'global' &&
+      (value.baseProfileId !== null || value.document.extends !== undefined)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['baseProfileId'],
+        message:
+          'Global profile revisions cannot have a base or extend another profile',
+      });
+    }
+    if (
+      value.scope === 'project' &&
+      value.document.extends === undefined &&
+      value.baseProfileId !== null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['baseProfileId'],
+        message: 'Independent project profile revisions cannot have a base',
+      });
+    }
+    if (
+      value.scope === 'project' &&
+      value.document.extends !== undefined &&
+      (value.baseProfileId === null ||
+        value.baseRevision !== value.document.extends.revision)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['baseRevision'],
+        message:
+          'Project profile base must match its pinned document extension',
+      });
+    }
   });
 export type WorkerProfileRevision = z.infer<typeof workerProfileRevisionSchema>;
 
 export const resolvedWorkerProfileSnapshotSchema = z
   .strictObject({
     profileId: workerProfileIdSchema,
+    projectId: projectIdSchema.nullable(),
     profileRevision: nonNegativeIntegerSchema,
     baseProfileId: workerProfileIdSchema.nullable(),
     baseRevision: nonNegativeIntegerSchema.nullable(),
@@ -210,6 +246,24 @@ export const resolvedWorkerProfileSnapshotSchema = z
         code: 'custom',
         path: ['baseProfileId'],
         message: 'Base profile ID and revision must be present together',
+      });
+    }
+    const projectScoped = value.document.metadata.scope === 'project';
+    if (projectScoped !== (value.projectId !== null)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['projectId'],
+        message: 'Project ID must match resolved profile scope',
+      });
+    }
+    if (
+      value.document.metadata.scope === 'global' &&
+      value.baseProfileId !== null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['baseProfileId'],
+        message: 'Global resolved profiles cannot have a base',
       });
     }
   });

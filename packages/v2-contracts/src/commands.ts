@@ -85,7 +85,7 @@ export type InterruptExecutionCommand = z.infer<
   typeof interruptExecutionCommandSchema
 >;
 
-export const v2CommandSchema = z.union([
+export const v2CommandSchema = z.discriminatedUnion('type', [
   projectRegisterCommandSchema,
   profileApprovalCommandSchema,
   startExecutionCommandSchema,

@@ -104,11 +104,32 @@ export const skillResolutionSchema = z.discriminatedUnion('kind', [
 ]);
 export type SkillResolution = z.infer<typeof skillResolutionSchema>;
 
-export const resolvedSkillSnapshotSchema = z.strictObject({
-  requested: logicalSkillRequestSchema,
-  mode: z.enum(['preferred', 'required']),
-  resolution: skillResolutionSchema,
-});
+export const resolvedSkillSnapshotSchema = z
+  .strictObject({
+    requested: logicalSkillRequestSchema,
+    mode: z.enum(['preferred', 'required']),
+    resolution: skillResolutionSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.mode === 'preferred' && value.resolution.kind === 'unavailable') {
+      context.addIssue({
+        code: 'custom',
+        path: ['resolution'],
+        message:
+          'Preferred skills must resolve natively or use the Mesh fallback',
+      });
+    }
+    if (
+      value.mode === 'required' &&
+      value.resolution.kind === 'mesh-native-fallback'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['resolution'],
+        message: 'Required skills must resolve natively or be unavailable',
+      });
+    }
+  });
 export type ResolvedSkillSnapshot = z.infer<typeof resolvedSkillSnapshotSchema>;
 
 export const workerExecutionLifecycleSchema = z.enum([
@@ -176,6 +197,16 @@ export const workerExecutionSchema = z
         message: 'Profile snapshot identity must match the execution',
       });
     }
+    if (
+      value.profileSnapshot.projectId !== null &&
+      value.profileSnapshot.projectId !== value.projectId
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['profileSnapshot', 'projectId'],
+        message: 'Project profile snapshot must match the execution project',
+      });
+    }
     if (value.capabilitySnapshot.adapterId !== value.adapterId) {
       context.addIssue({
         code: 'custom',
@@ -186,19 +217,39 @@ export const workerExecutionSchema = z
   });
 export type WorkerExecution = z.infer<typeof workerExecutionSchema>;
 
-export const harnessStartRequestSchema = z.strictObject({
+const harnessStartRequestShape = {
   executionId: workerExecutionIdSchema,
   project: projectSchema,
   assignment: foundationCheckAssignmentSchema,
   profile: resolvedWorkerProfileSnapshotSchema,
   resolvedSkills: z.array(resolvedSkillSnapshotSchema).readonly(),
-});
+};
+
+const requireHarnessProjectCoherence = (
+  value: { project: Project; assignment: FoundationCheckAssignment },
+  context: z.RefinementCtx,
+) => {
+  if (value.project.id !== value.assignment.projectId) {
+    context.addIssue({
+      code: 'custom',
+      path: ['assignment', 'projectId'],
+      message: 'Assignment project must match the harness project',
+    });
+  }
+};
+
+export const harnessStartRequestSchema = z
+  .strictObject(harnessStartRequestShape)
+  .superRefine(requireHarnessProjectCoherence);
 export type HarnessStartRequest = z.infer<typeof harnessStartRequestSchema>;
 
-export const harnessResumeRequestSchema = harnessStartRequestSchema.extend({
-  nativeHandle: z.string().min(1),
-  afterAdapterCursor: nonNegativeIntegerSchema,
-});
+export const harnessResumeRequestSchema = z
+  .strictObject({
+    ...harnessStartRequestShape,
+    nativeHandle: z.string().min(1),
+    afterAdapterCursor: nonNegativeIntegerSchema,
+  })
+  .superRefine(requireHarnessProjectCoherence);
 export type HarnessResumeRequest = z.infer<typeof harnessResumeRequestSchema>;
 
 export const harnessProbeResultSchema = z.discriminatedUnion('status', [

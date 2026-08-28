@@ -34,27 +34,53 @@ const executionLifecycleDraftSchema = z.strictObject({
   payload: z.strictObject({ execution: workerExecutionSchema }),
 });
 
-export const domainEventDraftSchema = z.discriminatedUnion('type', [
-  projectRegisteredDraftSchema,
-  profileApprovedDraftSchema,
-  executionLifecycleDraftSchema,
-]);
+const requireDomainEventProjectCoherence = (
+  value:
+    | z.infer<typeof projectRegisteredDraftSchema>
+    | z.infer<typeof profileApprovedDraftSchema>
+    | z.infer<typeof executionLifecycleDraftSchema>,
+  context: z.RefinementCtx,
+) => {
+  const embeddedProjectId =
+    value.type === 'project.registered'
+      ? value.payload.project.id
+      : value.type === 'worker_profile.revision_approved'
+        ? value.payload.profileRevision.projectId
+        : value.payload.execution.projectId;
+  if (embeddedProjectId !== value.projectId) {
+    context.addIssue({
+      code: 'custom',
+      path: ['payload'],
+      message: 'Embedded record project must match the domain event project',
+    });
+  }
+};
+
+export const domainEventDraftSchema = z
+  .discriminatedUnion('type', [
+    projectRegisteredDraftSchema,
+    profileApprovedDraftSchema,
+    executionLifecycleDraftSchema,
+  ])
+  .superRefine(requireDomainEventProjectCoherence);
 export type DomainEventDraft = z.infer<typeof domainEventDraftSchema>;
 
-export const domainEventSchema = z.discriminatedUnion('type', [
-  projectRegisteredDraftSchema.extend({
-    id: domainEventIdSchema,
-    sequence: nonNegativeIntegerSchema,
-  }),
-  profileApprovedDraftSchema.extend({
-    id: domainEventIdSchema,
-    sequence: nonNegativeIntegerSchema,
-  }),
-  executionLifecycleDraftSchema.extend({
-    id: domainEventIdSchema,
-    sequence: nonNegativeIntegerSchema,
-  }),
-]);
+export const domainEventSchema = z
+  .discriminatedUnion('type', [
+    projectRegisteredDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    profileApprovedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    executionLifecycleDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+  ])
+  .superRefine(requireDomainEventProjectCoherence);
 export type DomainEvent = z.infer<typeof domainEventSchema>;
 
 const runtimeEventBase = {
@@ -141,11 +167,22 @@ export const rawDiagnosticSchema = rawDiagnosticDraftSchema.extend({
 });
 export type RawDiagnostic = z.infer<typeof rawDiagnosticSchema>;
 
-export const harnessEventEnvelopeSchema = z.strictObject({
-  adapterCursor: nonNegativeIntegerSchema,
-  raw: z.unknown(),
-  normalized: runtimeEventDraftSchema,
-});
+export const harnessEventEnvelopeSchema = z
+  .strictObject({
+    adapterCursor: nonNegativeIntegerSchema,
+    raw: z.unknown(),
+    normalized: runtimeEventDraftSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.adapterCursor !== value.normalized.adapterCursor) {
+      context.addIssue({
+        code: 'custom',
+        path: ['normalized', 'adapterCursor'],
+        message:
+          'Normalized event cursor must match the harness envelope cursor',
+      });
+    }
+  });
 export type HarnessEventEnvelope = z.infer<typeof harnessEventEnvelopeSchema>;
 
 export const retainedDomainWindowSchema = z.strictObject({
