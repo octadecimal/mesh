@@ -65,7 +65,8 @@ type AppProps = {
   api?: Pick<
     MeshApi,
     'command' | 'diagnostics' | 'discover' | 'projectSnapshot'
-  >;
+  > &
+    Partial<Pick<MeshApi, 'projectPlanDetails' | 'projectPlanHistory'>>;
 };
 
 const snapshotFor = ({
@@ -361,6 +362,8 @@ function ConnectedApp({
       });
     }
   };
+  const projectPlanDetails = api?.projectPlanDetails;
+  const projectPlanHistory = api?.projectPlanHistory;
 
   return (
     <div className="app-shell">
@@ -593,6 +596,16 @@ function ConnectedApp({
               onCommand={submitProjectCommand}
               onSelectTask={onSelectTask}
               onOpenSession={openSession}
+              loadPlanDetails={
+                projectPlanDetails
+                  ? (projectId, planId) => projectPlanDetails(projectId, planId)
+                  : undefined
+              }
+              loadPlanHistory={
+                projectPlanHistory
+                  ? (projectId, before) => projectPlanHistory(projectId, before)
+                  : undefined
+              }
               connected={
                 projection.connectionHealth === 'connected' && Boolean(api)
               }

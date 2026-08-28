@@ -1,6 +1,7 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  projectPlanSchema,
   taskActorSchema,
   taskAttemptSchema,
   taskSchema,
@@ -176,6 +177,53 @@ describe('App', () => {
     ).toBeDefined();
   });
 
+  it('wires on-demand planning details through the project board', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    const api = createApi();
+    const activePlan = projectPlanSchema.parse({
+      id: 'plan-app',
+      projectId: project.id,
+      goal: 'Plan the next milestone',
+      constraints: [],
+      nonGoals: [],
+      policyVersion: 'pm-v1',
+      status: 'awaiting_review',
+      revision: 2,
+      currentBaseId: 'base-app',
+      currentSessionId: null,
+      latestProposalOrdinal: 0,
+      feedback: [],
+      attention: null,
+      createdBy: taskActorSchema.parse({ type: 'human', id: 'operator' }),
+      createdAt: '2026-08-27T00:00:00.000Z',
+      updatedAt: '2026-08-27T00:00:00.000Z',
+      terminalAt: null,
+      terminalBy: null,
+      terminalReason: null,
+    });
+    api.projectSnapshot.mockResolvedValueOnce({
+      protocolVersion: 1,
+      project,
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      activePlan,
+      terminalPlanSummaries: [],
+      dependencies: [],
+      runs: [],
+      projectRunLimits: { maxConcurrency: 4 },
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Review proposal' }));
+
+    expect(api.projectPlanDetails).toHaveBeenCalledWith('p1', 'plan-app');
+  });
+
   it('renders the loaded task board, sends task commands, and forwards selection', async () => {
     const user = userEvent.setup();
     const store = createMeshStore(snapshot);
@@ -247,7 +295,10 @@ describe('App', () => {
     await user.click(await screen.findByRole('button', { name: 'Start run' }));
     expect(screen.getByLabelText('Concurrency')).toHaveAttribute('max', '2');
     await user.click(
-      screen.getByRole('checkbox', { name: /subscription capacity/i }),
+      within(screen.getByRole('region', { name: 'Project run' })).getByRole(
+        'checkbox',
+        { name: /subscription capacity/i },
+      ),
     );
     await user.click(screen.getByRole('button', { name: 'Authorize run' }));
 
@@ -904,5 +955,7 @@ const createApi = () => ({
     repairs: [],
     cursor: 0,
   }),
+  projectPlanHistory: vi.fn().mockResolvedValue({ plans: [] }),
+  projectPlanDetails: vi.fn().mockReturnValue(new Promise(() => undefined)),
   discover: vi.fn(),
 });

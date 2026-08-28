@@ -3,6 +3,8 @@ import {
   taskSchema,
   type MutatingCommand,
   type Project,
+  type ProjectPlanDetails,
+  type ProjectPlanHistoryPage,
   type Task,
   type TaskLifecycleState,
 } from '@mesh-session-platform/contracts';
@@ -17,6 +19,7 @@ import {
   type BoardColumn,
 } from '../state/selectors';
 import { ProjectRunPanel } from './ProjectRunPanel';
+import { ProjectPlanningPanel } from './ProjectPlanningPanel';
 import { TaskCard } from './TaskCard';
 import { TaskDrawer } from './TaskDrawer';
 
@@ -26,6 +29,14 @@ type TaskBoardProps = {
   onCommand: (command: MutatingCommand) => Promise<unknown> | void;
   onSelectTask?: (taskId: string) => void;
   onOpenSession?: (sessionId: string) => void;
+  loadPlanDetails?: (
+    projectId: string,
+    planId: string,
+  ) => Promise<ProjectPlanDetails>;
+  loadPlanHistory?: (
+    projectId: string,
+    before?: string,
+  ) => Promise<ProjectPlanHistoryPage>;
   connected?: boolean;
 };
 
@@ -65,6 +76,10 @@ const activeColumns: Array<{ id: BoardColumn; label: string }> = [
 ];
 
 const rankAlphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
+
+const unavailablePlanDetails = async (): Promise<ProjectPlanDetails> => {
+  throw new Error('Planning details are unavailable while disconnected.');
+};
 
 const rankBefore = (successor: string): string | undefined => {
   const firstIndex = rankAlphabet.indexOf(successor.charAt(0));
@@ -118,6 +133,8 @@ export function TaskBoard({
   onCommand,
   onSelectTask,
   onOpenSession,
+  loadPlanDetails,
+  loadPlanHistory,
   connected = true,
 }: TaskBoardProps) {
   const [view, setView] = useState<BoardView>('active');
@@ -392,6 +409,16 @@ export function TaskBoard({
 
   return (
     <>
+      <ProjectPlanningPanel
+        key={`${project.id}:planning`}
+        project={project}
+        projection={projection}
+        connected={connected}
+        loadDetails={loadPlanDetails ?? unavailablePlanDetails}
+        loadHistory={loadPlanHistory}
+        onCommand={onCommand}
+        onOpenSession={onOpenSession}
+      />
       <ProjectRunPanel
         key={project.id}
         project={project}

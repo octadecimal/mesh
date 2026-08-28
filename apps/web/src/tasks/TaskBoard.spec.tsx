@@ -147,6 +147,22 @@ describe('TaskBoard', () => {
     expect(screen.getByRole('dialog', { name: 'Ready task' })).toBeVisible();
   });
 
+  it('mounts project planning above orchestration and the task board', () => {
+    renderBoard();
+
+    const planning = screen.getByRole('region', { name: 'Project planning' });
+    const orchestration = screen.getByRole('region', { name: 'Project run' });
+    const board = screen.getByRole('region', { name: 'Backlog tasks' });
+    expect(
+      planning.compareDocumentPosition(orchestration) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      orchestration.compareDocumentPosition(board) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it('opens lightweight backlog creation from the board toolbar', async () => {
     const user = userEvent.setup();
     renderBoard();
