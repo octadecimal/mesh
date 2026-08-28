@@ -1,0 +1,39 @@
+:root {
+  color: #e5edf8;
+  background: #0b1020;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, input { font: inherit; }
+button:focus-visible, input:focus-visible { outline: 3px solid #7dd3fc; outline-offset: 2px; }
+button:disabled { cursor: not-allowed; opacity: .58; }
+
+.v2-selector, .v2-shell { display: grid; gap: 1rem; max-width: 72rem; margin: 0 auto; padding: 2rem; }
+.v2-selector header, .v2-shell-header, .v2-execution { border: 1px solid #334155; border-radius: .75rem; padding: 1rem; background: #111827; }
+.v2-shell-header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.v2-eyebrow { margin: 0; color: #7dd3fc; font-size: .78rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.v2-selector h1, .v2-shell h1, .v2-shell h2, .v2-shell h3, .v2-shell h4 { margin: .25rem 0; }
+.v2-selector form { display: grid; gap: .6rem; max-width: 42rem; }
+.v2-selector input, .v2-selector button, .v2-shell button { border: 1px solid #475569; border-radius: .4rem; padding: .55rem .75rem; color: inherit; background: #172033; }
+.v2-selector button, .v2-shell button { width: fit-content; background: #075985; }
+.v2-selector ul, .v2-shell ul { display: grid; gap: .55rem; padding-left: 1.25rem; }
+.v2-selector li span { display: block; color: #a5b4cc; font-family: ui-monospace, monospace; font-size: .85rem; }
+.v2-connection-status { padding: .75rem; border-left: 3px solid #fbbf24; background: #422006; }
+.v2-cursors { color: #a5b4cc; font-size: .86rem; }
+.v2-execution-list { padding: 0; list-style: none; }
+.v2-execution-list > li { display: grid; gap: .6rem; }
+.v2-execution header { display: flex; justify-content: space-between; gap: 1rem; }
+.v2-execution [role='status'] { margin: 0; color: #7dd3fc; font-weight: 700; }
+.v2-execution details { border-top: 1px solid #334155; padding-top: .75rem; }
+.v2-execution dt { color: #a5b4cc; font-size: .8rem; }
+.v2-execution dd { margin: .1rem 0 .5rem; overflow-wrap: anywhere; font-family: ui-monospace, monospace; }
+[role='tablist'] { display: flex; gap: .5rem; border-bottom: 1px solid #334155; padding-bottom: .6rem; }
+[role='tab'][aria-selected='true'] { background: #0369a1; }
+[role='tabpanel'] { padding: 1rem 0; }
+
+@media (max-width: 640px) {
+  .v2-selector, .v2-shell { padding: 1rem; }
+  .v2-shell-header { display: grid; }
+}
