@@ -764,6 +764,38 @@ describe('SessionRegistry Developer attachment', () => {
     expect(invalidatedPlanning).toContain('shutdown-session');
   });
 
+  it('invalidates planning authority before reconciling a stopped runtime', async () => {
+    const repositories = createTestRepositories();
+    const driver = new FakeClaudeSessionDriver();
+    const order: string[] = [];
+    const registry = new SessionRegistry({
+      ...repositories,
+      driver,
+      invalidatePlanningCapability: (sessionId) =>
+        order.push(`invalidate:${sessionId}`),
+      onRuntimeStopped: (sessionId) => order.push(`reconcile:${sessionId}`),
+      closeDatabase: () => undefined,
+    });
+    seed(repositories, 'stopped-pm');
+    cleanups.push(async () => {
+      await registry.shutdown();
+      repositories.dispose();
+    });
+    await registry.create('stopped-pm', {
+      role: 'pm',
+      initialPrompt: 'Plan the project.',
+      availableTools: PM_AVAILABLE_TOOLS,
+      allowedTools: PM_AVAILABLE_TOOLS,
+      submitProposal: async () => undefined,
+    });
+
+    driver.createdSessions[0]?.crash(new Error('PM runtime stopped'));
+
+    await vi.waitFor(() =>
+      expect(order).toEqual(['invalidate:stopped-pm', 'reconcile:stopped-pm']),
+    );
+  });
+
   it('notifies reconciliation when a runtime stops after an unexpected crash', async () => {
     const repositories = createTestRepositories();
     const driver = new FakeClaudeSessionDriver();

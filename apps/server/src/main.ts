@@ -60,6 +60,7 @@ import {
   reconcileTaskAttemptLaunchReservations,
   reconcileTaskAttempts,
 } from './tasks/reconcile-attempts.js';
+import { reconcileProjectPlans } from './tasks/reconcile-project-plans.js';
 import { ReviewAutomationService } from './tasks/review-automation-service.js';
 import { ProjectRunService } from './tasks/project-run-service.js';
 import { createProjectRunPreflight } from './tasks/project-run-preflight.js';
@@ -237,7 +238,9 @@ export const startServer = async (
   } = {};
   const runDrains = new Map<string, Promise<void>>();
   const rerunRunDrains = new Set<string>();
-  let pendingStoppedRuntimeReconciliation: SessionRegistry | undefined;
+  let pendingStoppedRuntimeReconciliation:
+    | { registry: SessionRegistry; sessionIds: Set<string> }
+    | undefined;
   let runDrainFailure: unknown;
   const requireReviewAutomation = (): ReviewAutomationService => {
     if (!roleServices.reviewAutomation) {
@@ -296,10 +299,12 @@ export const startServer = async (
           runDrains.delete(runId);
           if (rerunRunDrains.delete(runId)) scheduleRunDrains([runId]);
           if (runDrains.size === 0 && pendingStoppedRuntimeReconciliation) {
-            const activeRegistry = pendingStoppedRuntimeReconciliation;
+            const pending = pendingStoppedRuntimeReconciliation;
             pendingStoppedRuntimeReconciliation = undefined;
             try {
-              reconcileStoppedRuntime(activeRegistry);
+              reconcileStoppedRuntime(pending.registry, [
+                ...pending.sessionIds,
+              ]);
             } catch {
               // The reconciliation path already tripped the central audit barrier.
             }
@@ -314,9 +319,18 @@ export const startServer = async (
     }
     if (runDrainFailure) throw runDrainFailure;
   };
-  function reconcileStoppedRuntime(activeRegistry: SessionRegistry): void {
+  function reconcileStoppedRuntime(
+    activeRegistry: SessionRegistry,
+    stoppedSessionIds: readonly string[] = [],
+  ): void {
     if (runDrains.size > 0) {
-      pendingStoppedRuntimeReconciliation = activeRegistry;
+      pendingStoppedRuntimeReconciliation ??= {
+        registry: activeRegistry,
+        sessionIds: new Set(),
+      };
+      for (const sessionId of stoppedSessionIds) {
+        pendingStoppedRuntimeReconciliation.sessionIds.add(sessionId);
+      }
       return;
     }
     const cursors = projectCursors();
@@ -336,6 +350,17 @@ export const startServer = async (
       });
       runtimeRepairs.splice(0, runtimeRepairs.length, ...result.repairs);
       reconcileTaskAttemptLaunchReservations(database);
+      for (const stoppedSessionId of stoppedSessionIds) {
+        reconcileProjectPlans({
+          database,
+          projects,
+          plans,
+          sessions,
+          projectEvents,
+          capabilities: planningCapabilities,
+          stoppedSessionId,
+        });
+      }
       publishRecoveredEvents(cursors, activeRegistry);
       for (const taskId of new Set(
         result.repairs.map((repair) => repair.taskId),
@@ -364,7 +389,8 @@ export const startServer = async (
     invalidatePlanningCapability: (sessionId) => {
       planningCapabilities.invalidateSession(sessionId);
     },
-    onRuntimeStopped: () => reconcileStoppedRuntime(registry),
+    onRuntimeStopped: (sessionId) =>
+      reconcileStoppedRuntime(registry, [sessionId]),
   });
   const developerExecutionService = new DeveloperExecutionService({
     projects,
@@ -594,6 +620,19 @@ export const startServer = async (
     projectRuns,
     billingConflicts,
   });
+  try {
+    reconcileProjectPlans({
+      database,
+      projects,
+      plans,
+      sessions,
+      projectEvents,
+      capabilities: planningCapabilities,
+    });
+  } catch (error) {
+    failProjectRunAudit(error);
+    throw error;
+  }
   publishRecoveredEvents(recoveryCursors, registry);
   const app = buildApp({
     database,
