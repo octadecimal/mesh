@@ -6,39 +6,38 @@ export function ProjectSelector({
   model,
   onAddAndSelectProject,
   onSelectProject,
-  v1GuidanceHref = '/docs/development/session-platform.md',
+  v1GuidanceHref,
 }: {
   model: SelectorViewModel;
   onAddAndSelectProject: (repositoryPath: string) => void;
   onSelectProject: (projectId: string) => void;
-  v1GuidanceHref?: string;
+  v1GuidanceHref: string;
 }) {
   const [repositoryPath, setRepositoryPath] = useState('');
   const [validationMessage, setValidationMessage] = useState<string>();
-  const isReady = model.status === 'ready';
-  const auditBarrierReason =
-    model.status === 'ready' && model.snapshot.health.status === 'audit_barrier_tripped'
-      ? model.snapshot.health.error.message
+  const snapshot =
+    model.status === 'ready' || model.status === 'error'
+      ? model.snapshot
       : undefined;
-  const disabledReason = !isReady
-    ? model.status === 'loading'
+  const auditBarrierReason =
+    snapshot?.health.status === 'audit_barrier_tripped'
+      ? snapshot.health.error.message
+      : undefined;
+  const disabledReason =
+    model.status === 'loading'
       ? 'Projects are still loading.'
       : model.status === 'disconnected'
         ? 'Reconnect before adding a project.'
-        : 'Resolve the current problem before adding a project.'
-    : model.submitting
-      ? 'Adding the project is in progress.'
-      : auditBarrierReason
-        ? auditBarrierReason
-        : !model.registration.enabled
-          ? model.registration.disabledReason
-      : undefined;
-  const projects =
-    model.status === 'ready'
-      ? model.snapshot.projects
-      : model.status === 'error'
-        ? model.snapshot?.projects ?? []
-        : [];
+        : model.status === 'ready' && model.submitting
+          ? 'Adding the project is in progress.'
+          : auditBarrierReason
+            ? auditBarrierReason
+            : model.status === 'ready' || model.status === 'error'
+              ? model.registration.enabled
+                ? undefined
+                : model.registration.disabledReason
+              : undefined;
+  const projects = snapshot?.projects ?? [];
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -61,12 +60,12 @@ export function ProjectSelector({
       {model.status === 'loading' ? <p role="status">Loading projects…</p> : null}
       {model.status === 'disconnected' ? <p role="status">{model.message}</p> : null}
       {model.status === 'error' ? <p role="alert">{model.message}</p> : null}
-      {model.status === 'ready' ? (
+      {snapshot ? (
         <section aria-label="System health">
           <p role="status">
-            {model.snapshot.health.status === 'ok'
+            {snapshot.health.status === 'ok'
               ? 'System health: operational'
-              : model.snapshot.health.error.message}
+              : snapshot.health.error.message}
           </p>
         </section>
       ) : null}
@@ -103,14 +102,14 @@ export function ProjectSelector({
           </ul>
         )}
       </section>
-      {model.status === 'ready' ? (
+      {snapshot ? (
         <section aria-labelledby="global-profiles-heading">
           <h2 id="global-profiles-heading">Approved global profiles</h2>
-          {model.snapshot.globalProfiles.length === 0 ? (
+          {snapshot.globalProfiles.length === 0 ? (
             <p>No global profiles are approved.</p>
           ) : (
             <ul aria-label="Approved global profiles">
-              {model.snapshot.globalProfiles.map((profile) => (
+              {snapshot.globalProfiles.map((profile) => (
                 <li key={profile.profileId}>
                   {profile.displayName} · revision {profile.approvedRevision}
                 </li>

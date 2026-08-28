@@ -13,7 +13,12 @@ export type SelectorViewModel =
       submitting: boolean;
       registration: MutationAvailability;
     }
-  | { status: 'error'; snapshot?: V2SystemSnapshot; message: string };
+  | {
+      status: 'error';
+      snapshot?: V2SystemSnapshot;
+      message: string;
+      registration: MutationAvailability;
+    };
 
 export type ProjectShellViewModel =
   | { status: 'loading'; projectId: string }

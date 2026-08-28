@@ -49,6 +49,7 @@ describe('ProjectSelector', () => {
         }}
         onAddAndSelectProject={onAddAndSelectProject}
         onSelectProject={onSelectProject}
+        v1GuidanceHref="/guidance/v1"
       />,
     );
 
@@ -65,7 +66,7 @@ describe('ProjectSelector', () => {
 
   it('renders loading, empty, disconnected, and invalid-path states with safe controls', () => {
     const { rerender } = render(
-      <ProjectSelector model={{ status: 'loading' }} onAddAndSelectProject={vi.fn()} onSelectProject={vi.fn()} />,
+      <ProjectSelector model={{ status: 'loading' }} onAddAndSelectProject={vi.fn()} onSelectProject={vi.fn()} v1GuidanceHref="/guidance/v1" />,
     );
     expect(screen.getByRole('status')).toHaveTextContent('Loading projects');
     expect(screen.getByRole('button', { name: 'Add and select project' })).toBeDisabled();
@@ -80,6 +81,7 @@ describe('ProjectSelector', () => {
         }}
         onAddAndSelectProject={vi.fn()}
         onSelectProject={vi.fn()}
+        v1GuidanceHref="/guidance/v1"
       />,
     );
     expect(screen.getByText('No projects have been added yet.')).toBeVisible();
@@ -91,6 +93,7 @@ describe('ProjectSelector', () => {
         model={{ status: 'disconnected', message: 'Connection lost' }}
         onAddAndSelectProject={vi.fn()}
         onSelectProject={vi.fn()}
+        v1GuidanceHref="/guidance/v1"
       />,
     );
     expect(screen.getByRole('status')).toHaveTextContent('Connection lost');
@@ -99,18 +102,20 @@ describe('ProjectSelector', () => {
 
     rerender(
       <ProjectSelector
-        model={{ status: 'error', snapshot: systemSnapshot, message: 'Repository path is invalid' }}
+        model={{ status: 'error', snapshot: systemSnapshot, message: 'Repository path is invalid', registration: { enabled: false, disabledReason: 'Correct the repository path first.' } }}
         onAddAndSelectProject={vi.fn()}
         onSelectProject={vi.fn()}
+        v1GuidanceHref="/guidance/v1"
       />,
     );
     expect(screen.getByRole('alert')).toHaveTextContent('Repository path is invalid');
 
     rerender(
       <ProjectSelector
-        model={{ status: 'error', snapshot: systemSnapshot, message: 'Repository identity conflicts with Todo' }}
+        model={{ status: 'error', snapshot: systemSnapshot, message: 'Repository identity conflicts with Todo', registration: { enabled: true } }}
         onAddAndSelectProject={vi.fn()}
         onSelectProject={vi.fn()}
+        v1GuidanceHref="/guidance/v1"
       />,
     );
     expect(screen.getByRole('alert')).toHaveTextContent('Repository identity conflicts with Todo');
@@ -123,6 +128,7 @@ describe('ProjectSelector', () => {
         model={{ status: 'ready', snapshot: systemSnapshot, submitting: false, registration: { enabled: true } }}
         onAddAndSelectProject={onRegister}
         onSelectProject={vi.fn()}
+        v1GuidanceHref="/guidance/v1"
       />,
     );
 
@@ -146,12 +152,43 @@ describe('ProjectSelector', () => {
         }}
         onAddAndSelectProject={vi.fn()}
         onSelectProject={vi.fn()}
+        v1GuidanceHref="/guidance/v1"
       />,
     );
 
     expect(screen.getByRole('status')).toHaveTextContent('Audit writes failed');
     expect(screen.getByText('Foundation worker · revision 2')).toBeVisible();
-    expect(screen.getByRole('link', { name: 'V1 operating guidance' })).toHaveAttribute('href', '/docs/development/session-platform.md');
+    expect(screen.getByRole('link', { name: 'V1 operating guidance' })).toHaveAttribute('href', '/guidance/v1');
     expect(screen.getByRole('button', { name: 'Add and select project' })).toBeDisabled();
+  });
+
+  it('keeps an error snapshot visible and lets its explicit retry availability control registration', async () => {
+    const user = userEvent.setup();
+    const onAddAndSelectProject = vi.fn();
+    const onSelectProject = vi.fn();
+    render(
+      <ProjectSelector
+        model={{
+          status: 'error',
+          snapshot: systemSnapshot,
+          message: 'Repository identity conflicts with Todo',
+          registration: { enabled: true },
+        }}
+        onAddAndSelectProject={onAddAndSelectProject}
+        onSelectProject={onSelectProject}
+        v1GuidanceHref="/served-v1-guidance"
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent('System health: operational');
+    expect(screen.getByRole('list', { name: 'Known projects' })).toHaveTextContent('Todo');
+    expect(screen.getByRole('list', { name: 'Approved global profiles' })).toHaveTextContent('Foundation worker');
+    expect(screen.getByRole('button', { name: 'Add and select project' })).toBeEnabled();
+    await user.type(screen.getByLabelText('Repository path'), 'C:\\repos\\retry');
+    await user.click(screen.getByRole('button', { name: 'Add and select project' }));
+    await user.click(screen.getByRole('button', { name: 'Select Todo' }));
+    expect(onAddAndSelectProject).toHaveBeenCalledWith('C:\\repos\\retry');
+    expect(onSelectProject).toHaveBeenCalledWith(systemSnapshot.projects[0].id);
+    expect(screen.getByRole('link', { name: 'V1 operating guidance' })).toHaveAttribute('href', '/served-v1-guidance');
   });
 });
