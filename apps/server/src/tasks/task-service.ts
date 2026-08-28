@@ -16,8 +16,10 @@ import type { Database } from '../db/database.js';
 import type { CommandRepository } from '../repositories/command-repository.js';
 import type { ProjectEventRepository } from '../repositories/project-event-repository.js';
 import type { ProjectRepository } from '../repositories/project-repository.js';
+import type { TaskDependencyRepository } from '../repositories/task-dependency-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
+import { incompletePrerequisiteIds } from '../domain/task-dependencies.js';
 import { authorizeTaskTransition } from '../domain/task-lifecycle.js';
 
 const rankAlphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
@@ -103,6 +105,7 @@ type TaskServiceDependencies = {
   database: Database;
   projects: ProjectRepository;
   tasks: TaskRepository;
+  dependencies: TaskDependencyRepository;
   transitions: TaskTransitionRepository;
   projectEvents: ProjectEventRepository;
   commands: CommandRepository;
@@ -263,12 +266,18 @@ export class TaskService {
         input.expectedRevision,
       );
       const nextState = taskLifecycleStateSchema.parse(input.nextState);
+      const incompleteDependencies = incompletePrerequisiteIds(
+        task.id,
+        this.dependencies.tasks.listByProject(task.projectId),
+        this.dependencies.dependencies.listByProject(task.projectId),
+      );
       authorizeTaskTransition({
         task,
         nextState,
         actor: input.actor,
         reason: input.reason,
         operation,
+        incompletePrerequisiteIds: incompleteDependencies,
       });
       const occurredAt = this.now();
       const updated = this.update(task, input.expectedRevision, {

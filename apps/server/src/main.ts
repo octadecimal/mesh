@@ -40,6 +40,7 @@ import { ProjectRunRepository } from './repositories/project-run-repository.js';
 import { QaExecutionRepository } from './repositories/qa-execution-repository.js';
 import { SessionRepository } from './repositories/session-repository.js';
 import { TaskAttemptRepository } from './repositories/task-attempt-repository.js';
+import { TaskDependencyRepository } from './repositories/task-dependency-repository.js';
 import { TaskRepository } from './repositories/task-repository.js';
 import { TaskTransitionRepository } from './repositories/task-transition-repository.js';
 import { WorkspaceRepository } from './repositories/workspace-repository.js';
@@ -193,6 +194,7 @@ export const startServer = async (
   const projects = new ProjectRepository(database);
   const projectRuns = new ProjectRunRepository(database);
   const tasks = new TaskRepository(database);
+  const dependencies = new TaskDependencyRepository(database);
   const attempts = new TaskAttemptRepository(database);
   const transitions = new TaskTransitionRepository(database);
   const projectEvents = new ProjectEventRepository(database);
@@ -209,6 +211,7 @@ export const startServer = async (
     database,
     projects,
     tasks,
+    dependencies,
     transitions,
     projectEvents,
     commands,
@@ -406,6 +409,7 @@ export const startServer = async (
     projects,
     projectRuns,
     tasks,
+    dependencies,
     attempts,
     sessions,
     workspaces,
@@ -427,6 +431,7 @@ export const startServer = async (
     database,
     projects,
     tasks,
+    dependencies,
     attempts,
     developerExecutions,
     projectRuns,

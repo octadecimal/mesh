@@ -19,7 +19,9 @@ import type { ProjectEventRepository } from '../repositories/project-event-repos
 import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
+import type { TaskDependencyRepository } from '../repositories/task-dependency-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
+import { incompletePrerequisiteIds } from '../domain/task-dependencies.js';
 import {
   AttemptAuditUnavailableError,
   AttemptReconciliationRequiredError,
@@ -69,6 +71,7 @@ type ProjectRunServiceDependencies = {
   database: Database;
   projects: ProjectRepository;
   tasks: TaskRepository;
+  dependencies: TaskDependencyRepository;
   attempts: TaskAttemptRepository;
   developerExecutions: Pick<DeveloperExecutionRepository, 'listByTask'>;
   projectRuns: ProjectRunRepository;
@@ -155,10 +158,23 @@ export class ProjectRunService {
           )
           .map(({ id }) => id),
       );
+      const projectDependencies = this.dependencies.dependencies.listByProject(
+        project.id,
+      );
+      const dependencyBlockedTaskIds = new Set(
+        tasks
+          .filter(
+            (task) =>
+              incompletePrerequisiteIds(task.id, tasks, projectDependencies)
+                .length > 0,
+          )
+          .map(({ id }) => id),
+      );
       const eligible = selectEligibleRunTasks({
         project,
         tasks,
         currentAttemptTaskIds,
+        dependencyBlockedTaskIds,
       });
       const currentPolicyRevision = project.qaConfiguration.revision;
       const currentTasks = eligible.map(({ task }) => ({

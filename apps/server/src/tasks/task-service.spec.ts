@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   projectSchema,
+  sessionSchema,
   taskActorSchema,
+  taskDependencySchema,
   taskSchema,
+  workspaceSchema,
   type Task,
 } from '@mesh-session-platform/contracts';
 
@@ -12,6 +15,10 @@ import { TaskService } from './task-service.js';
 const now = '2026-08-25T12:00:00.000Z';
 const human = taskActorSchema.parse({ type: 'human', id: 'human-1' });
 const agent = taskActorSchema.parse({ type: 'agent', id: 'agent-1' });
+const system = taskActorSchema.parse({
+  type: 'system',
+  id: 'project-run:run-1:item-1',
+});
 
 describe('TaskService', () => {
   const cleanups: Array<() => void> = [];
@@ -441,5 +448,139 @@ describe('TaskService', () => {
     expect(repositories.tasks.get(task.id)).toEqual(task);
     expect(repositories.transitions.listByTask(task.id)).toEqual([]);
     expect(repositories.projectEvents.after('project-1', 0)).toEqual([]);
+  });
+
+  it.each([
+    ['manual attempt launch', 'manual', human],
+    ['project-run attempt launch', 'project-run', system],
+  ] as const)(
+    're-reads incomplete prerequisites before authorizing %s',
+    async (_name, operation, actor) => {
+      const { repositories, service } = setup();
+      seedTask(repositories, { id: 'prerequisite' });
+      const dependent = seedTask(repositories, {
+        id: 'dependent',
+        lifecycleState: 'ready',
+      });
+      repositories.dependencies.create(
+        taskDependencySchema.parse({
+          projectId: 'project-1',
+          taskId: dependent.id,
+          prerequisiteTaskId: 'prerequisite',
+          createdBy: human,
+          createdAt: now,
+        }),
+      );
+
+      const transition = {
+        commandId: `command-${operation}-dependency-gate`,
+        taskId: dependent.id,
+        expectedRevision: dependent.revision,
+        nextState: 'in_progress' as const,
+        actor,
+      };
+      const result =
+        operation === 'project-run'
+          ? service.transitionProjectRun(transition)
+          : service.transition(transition);
+
+      await expect(result).rejects.toMatchObject({
+        code: 'task_not_ready',
+        problems: [{ type: 'dependency_incomplete', taskId: 'prerequisite' }],
+      });
+      expect(repositories.tasks.get(dependent.id)).toEqual(dependent);
+      expect(repositories.transitions.listByTask(dependent.id)).toEqual([]);
+    },
+  );
+
+  it('re-reads incomplete prerequisites before a manual ready transition', async () => {
+    const { repositories, service } = setup();
+    seedTask(repositories, { id: 'prerequisite' });
+    const dependent = seedTask(repositories, { id: 'dependent' });
+    repositories.dependencies.create(
+      taskDependencySchema.parse({
+        projectId: 'project-1',
+        taskId: dependent.id,
+        prerequisiteTaskId: 'prerequisite',
+        createdBy: human,
+        createdAt: now,
+      }),
+    );
+
+    await expect(
+      service.transition({
+        commandId: 'command-ready-dependency-gate',
+        taskId: dependent.id,
+        expectedRevision: dependent.revision,
+        nextState: 'ready',
+        actor: human,
+      }),
+    ).rejects.toMatchObject({
+      code: 'task_not_ready',
+      problems: [{ type: 'dependency_incomplete', taskId: 'prerequisite' }],
+    });
+    expect(repositories.tasks.get(dependent.id)).toEqual(dependent);
+  });
+
+  it('reopening a prerequisite does not demote or interrupt an active dependent', async () => {
+    const { repositories, service } = setup();
+    const prerequisite = seedTask(repositories, {
+      id: 'prerequisite',
+      lifecycleState: 'done',
+    });
+    const dependent = seedTask(repositories, {
+      id: 'dependent',
+      lifecycleState: 'in_progress',
+    });
+    repositories.dependencies.create(
+      taskDependencySchema.parse({
+        projectId: 'project-1',
+        taskId: dependent.id,
+        prerequisiteTaskId: prerequisite.id,
+        createdBy: human,
+        createdAt: now,
+      }),
+    );
+    const workspace = repositories.workspaces.create(
+      workspaceSchema.parse({
+        id: 'workspace-dependent',
+        projectId: 'project-1',
+        type: 'shared',
+        path: 'C:/code/mesh',
+      }),
+    );
+    const session = repositories.sessions.create(
+      sessionSchema.parse({
+        id: 'session-dependent',
+        projectId: 'project-1',
+        workspaceId: workspace.id,
+        title: dependent.title,
+        permissionMode: 'safe_auto',
+        lifecycleState: 'running',
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+    const attempt = repositories.attempts.createForTask(
+      dependent.id,
+      session.id,
+      'launched',
+      human,
+      'developer',
+    );
+
+    await service.transition({
+      commandId: 'command-reopen-prerequisite',
+      taskId: prerequisite.id,
+      expectedRevision: prerequisite.revision,
+      nextState: 'review',
+      reason: 'Additional verification is required.',
+      actor: human,
+    });
+
+    expect(repositories.tasks.get(dependent.id)).toEqual(dependent);
+    expect(repositories.attempts.listByTask(dependent.id)).toEqual([
+      expect.objectContaining({ id: attempt.id, unlinkedAt: null }),
+    ]);
   });
 });

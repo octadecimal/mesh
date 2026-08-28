@@ -8,6 +8,7 @@ import {
   sessionSchema,
   taskActorSchema,
   taskAttemptSourceSchema,
+  taskDependencySchema,
   taskSchema,
   workspaceSchema,
   type Project,
@@ -16,6 +17,7 @@ import {
 } from '@mesh-session-platform/contracts';
 
 import { createTestRepositories } from '../test/create-test-database.js';
+import { incompletePrerequisiteIds } from '../domain/task-dependencies.js';
 import {
   AttemptAuditUnavailableError,
   AttemptReconciliationRequiredError,
@@ -206,6 +208,18 @@ const startRun = (
     project,
     tasks,
     currentAttemptTaskIds,
+    dependencyBlockedTaskIds: new Set(
+      tasks
+        .filter(
+          (task) =>
+            incompletePrerequisiteIds(
+              task.id,
+              tasks,
+              repositories.dependencies.listByProject(projectId),
+            ).length > 0,
+        )
+        .map(({ id }) => id),
+    ),
   }).map(({ task }) => ({
     taskId: task.id,
     revision: task.revision,
@@ -384,6 +398,86 @@ describe('ProjectRunService startRun', () => {
     });
     expect(publisher.publishProject).toHaveBeenCalledOnce();
     expect(publisher.publishProject).toHaveBeenCalledWith(outcome.events[0]);
+  });
+
+  it('re-reads dependency truth before expected-task parity and rejects a stale browser preview', async () => {
+    const { repositories, project, service } = setup();
+    const prerequisite = repositories.tasks.create(
+      createTask(project.id, 'prerequisite', { rank: 'a' }),
+    );
+    const dependent = repositories.tasks.create(
+      createTask(project.id, 'dependent', { rank: 'b' }),
+    );
+    const staleExpectedTasks = [prerequisite, dependent].map((task) => ({
+      taskId: task.id,
+      revision: task.revision,
+      automationStatus: task.reviewAutomation.status,
+      automationGeneration: task.reviewAutomation.generation,
+    }));
+    repositories.dependencies.create(
+      taskDependencySchema.parse({
+        projectId: project.id,
+        taskId: dependent.id,
+        prerequisiteTaskId: prerequisite.id,
+        createdBy: human,
+        createdAt: now,
+      }),
+    );
+
+    await expect(
+      service.startRun({
+        projectId: project.id,
+        concurrency: 1,
+        expectedPolicyRevision: project.qaConfiguration.revision,
+        expectedTasks: staleExpectedTasks,
+        actor: human,
+        idempotencyKey: 'dependency-stale-preview',
+      }),
+    ).rejects.toMatchObject({
+      code: 'project_run_stale',
+      details: {
+        expectedTasks: staleExpectedTasks,
+        currentTasks: [expect.objectContaining({ taskId: prerequisite.id })],
+      },
+    });
+    expect(repositories.projectRuns.listByProject(project.id)).toEqual([]);
+  });
+
+  it('freezes only dependency-actionable tasks and does not admit a task unblocked later', async () => {
+    const { repositories, project, service } = setup();
+    const prerequisite = repositories.tasks.create(
+      createTask(project.id, 'prerequisite', { rank: 'a' }),
+    );
+    const dependent = repositories.tasks.create(
+      createTask(project.id, 'dependent', { rank: 'b' }),
+    );
+    repositories.dependencies.create(
+      taskDependencySchema.parse({
+        projectId: project.id,
+        taskId: dependent.id,
+        prerequisiteTaskId: prerequisite.id,
+        createdBy: human,
+        createdAt: now,
+      }),
+    );
+
+    const outcome = await startRun(
+      service,
+      project.id,
+      'dependency-frozen-membership',
+      1,
+    );
+    expect(outcome.run.items.map(({ taskId }) => taskId)).toEqual([
+      prerequisite.id,
+    ]);
+
+    repositories.tasks.update(
+      { ...prerequisite, lifecycleState: 'done', updatedAt: now },
+      prerequisite.revision,
+    );
+    expect(repositories.projectRuns.get(outcome.run.id)?.items).toEqual(
+      outcome.run.items,
+    );
   });
 
   it('requires a human actor', async () => {

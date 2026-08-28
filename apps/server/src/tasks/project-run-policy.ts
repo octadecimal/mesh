@@ -17,12 +17,14 @@ export interface SelectEligibleRunTasksInput {
   project: Project;
   tasks: readonly Task[];
   currentAttemptTaskIds: ReadonlySet<string>;
+  dependencyBlockedTaskIds: ReadonlySet<string>;
 }
 
 export const selectEligibleRunTasks = ({
   project,
   tasks,
   currentAttemptTaskIds,
+  dependencyBlockedTaskIds,
 }: SelectEligibleRunTasksInput): EligibleRunTask[] =>
   tasks
     .filter(
@@ -30,7 +32,8 @@ export const selectEligibleRunTasks = ({
         task.projectId === project.id &&
         task.lifecycleState === 'ready' &&
         task.blocked === null &&
-        !currentAttemptTaskIds.has(task.id),
+        !currentAttemptTaskIds.has(task.id) &&
+        !dependencyBlockedTaskIds.has(task.id),
     )
     .sort(
       (left, right) =>
