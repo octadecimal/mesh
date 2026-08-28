@@ -105,7 +105,9 @@ const runProductionBuild = (
 
 const tableNames = (database: Database): string[] =>
   database
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
+    )
     .all()
     .map((row) => (row as { name: string }).name);
 
@@ -334,9 +336,7 @@ const assertPlanningStorageConstraints = (database: Database): void => {
   );
   expect(() =>
     database
-      .prepare(
-        'UPDATE project_plan_proposals SET ordinal = ? WHERE id = ?',
-      )
+      .prepare('UPDATE project_plan_proposals SET ordinal = ? WHERE id = ?')
       .run(2, 'planning-constraint-proposal'),
   ).toThrow();
   expect(() =>
@@ -1008,7 +1008,9 @@ describe('migrate', () => {
       projects: database.prepare('SELECT * FROM projects').all(),
       tasks: database.prepare('SELECT * FROM tasks').all(),
       attempts: database.prepare('SELECT * FROM task_attempts').all(),
-      executions: database.prepare('SELECT * FROM developer_execution_cycles').all(),
+      executions: database
+        .prepare('SELECT * FROM developer_execution_cycles')
+        .all(),
       qaExecutions: database.prepare('SELECT * FROM qa_execution_cycles').all(),
       commands: database.prepare('SELECT * FROM processed_commands').all(),
       runs: database.prepare('SELECT * FROM project_runs').all(),
@@ -1037,7 +1039,9 @@ describe('migrate', () => {
       projects: database.prepare('SELECT * FROM projects').all(),
       tasks: database.prepare('SELECT * FROM tasks').all(),
       attempts: database.prepare('SELECT * FROM task_attempts').all(),
-      executions: database.prepare('SELECT * FROM developer_execution_cycles').all(),
+      executions: database
+        .prepare('SELECT * FROM developer_execution_cycles')
+        .all(),
       qaExecutions: database.prepare('SELECT * FROM qa_execution_cycles').all(),
       commands: database.prepare('SELECT * FROM processed_commands').all(),
       runs: database.prepare('SELECT * FROM project_runs').all(),

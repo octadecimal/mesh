@@ -107,15 +107,16 @@ export type CreatePlanBaseInput = Omit<
   'planId' | 'ordinal'
 >;
 
-export type AppendPlanProposalInput =
-  z.input<typeof projectPlanProposalInputSchema> & {
+export type AppendPlanProposalInput = z.input<
+  typeof projectPlanProposalInputSchema
+> & {
   id: string;
   planId: string;
   expectedRevision: number;
   baseId: string;
   sessionId: string;
   submittedAt: string;
-  };
+};
 
 export type AppendPlanFeedbackInput = Omit<
   z.input<typeof projectPlanFeedbackSchema>,
@@ -194,7 +195,9 @@ export class PlanningRepository {
       throw new TypeError('The initial base must be the plan current base');
     }
     if (value.currentSessionId !== sessionId) {
-      throw new TypeError('The initial session must be the plan current session');
+      throw new TypeError(
+        'The initial session must be the plan current session',
+      );
     }
     if (value.revision !== 1) {
       throw new TypeError('A planning cycle must begin at revision one');
@@ -206,7 +209,9 @@ export class PlanningRepository {
       throw new TypeError('A planning cycle cannot have initial feedback');
     }
 
-    this.database.prepare(`
+    this.database
+      .prepare(
+        `
       INSERT INTO project_plans (
         id, project_id, goal, constraints_json, non_goals_json, policy_version,
         status, revision, current_base_id, current_session_id,
@@ -218,13 +223,19 @@ export class PlanningRepository {
         @latestProposalOrdinal, @attentionJson, @createdByJson, @createdAt,
         @updatedAt, @terminalAt, @terminalByJson, @terminalReason
       )
-    `).run(this.planParameters(value));
+    `,
+      )
+      .run(this.planParameters(value));
     this.insertBase(initialBase);
-    this.database.prepare(`
+    this.database
+      .prepare(
+        `
       INSERT INTO project_plan_sessions (
         session_id, plan_id, project_id, capability_generation, started_at, ended_at
       ) VALUES (?, ?, ?, 1, ?, NULL)
-    `).run(sessionId, value.id, value.projectId, value.createdAt);
+    `,
+      )
+      .run(sessionId, value.id, value.projectId, value.createdAt);
     return value;
   }
 
@@ -234,13 +245,17 @@ export class PlanningRepository {
   }
 
   getActiveByProject(projectId: string): ProjectPlan | undefined {
-    const row = this.database.prepare(`
+    const row = this.database
+      .prepare(
+        `
       SELECT * FROM project_plans
       WHERE project_id = ?
         AND status IN ('planning', 'awaiting_review', 'revising', 'attention_required')
       ORDER BY created_at DESC, id DESC
       LIMIT 1
-    `).get(idSchema.parse(projectId)) as PlanRow | undefined;
+    `,
+      )
+      .get(idSchema.parse(projectId)) as PlanRow | undefined;
     return row ? this.toPlan(row) : undefined;
   }
 
@@ -254,7 +269,9 @@ export class PlanningRepository {
     }
     const id = idSchema.parse(projectId);
     const before = options.before ? idSchema.parse(options.before) : null;
-    const rows = this.database.prepare(`
+    const rows = this.database
+      .prepare(
+        `
       SELECT id, project_id, goal, status, revision, latest_proposal_ordinal,
              created_at, updated_at, terminal_at
       FROM project_plans
@@ -268,17 +285,22 @@ export class PlanningRepository {
         )
       ORDER BY terminal_at DESC, id DESC
       LIMIT @limit
-    `).all({ projectId: id, before, limit }) as Array<Pick<PlanRow,
-      | 'id'
-      | 'project_id'
-      | 'goal'
-      | 'status'
-      | 'revision'
-      | 'latest_proposal_ordinal'
-      | 'created_at'
-      | 'updated_at'
-      | 'terminal_at'
-    >>;
+    `,
+      )
+      .all({ projectId: id, before, limit }) as Array<
+      Pick<
+        PlanRow,
+        | 'id'
+        | 'project_id'
+        | 'goal'
+        | 'status'
+        | 'revision'
+        | 'latest_proposal_ordinal'
+        | 'created_at'
+        | 'updated_at'
+        | 'terminal_at'
+      >
+    >;
     return rows.map((row) =>
       projectPlanSummarySchema.parse({
         id: row.id,
@@ -300,12 +322,20 @@ export class PlanningRepository {
     const feedback = this.listFeedback(row.id);
     return {
       plan: this.toPlan(row, feedback),
-      bases: (this.database.prepare(
-        'SELECT * FROM project_plan_bases WHERE plan_id = ? ORDER BY ordinal, id',
-      ).all(row.id) as BaseRow[]).map(toBase),
-      proposals: (this.database.prepare(
-        'SELECT * FROM project_plan_proposals WHERE plan_id = ? ORDER BY ordinal, id',
-      ).all(row.id) as ProposalRow[]).map((proposal) => this.toProposal(proposal)),
+      bases: (
+        this.database
+          .prepare(
+            'SELECT * FROM project_plan_bases WHERE plan_id = ? ORDER BY ordinal, id',
+          )
+          .all(row.id) as BaseRow[]
+      ).map(toBase),
+      proposals: (
+        this.database
+          .prepare(
+            'SELECT * FROM project_plan_proposals WHERE plan_id = ? ORDER BY ordinal, id',
+          )
+          .all(row.id) as ProposalRow[]
+      ).map((proposal) => this.toProposal(proposal)),
       feedback,
     };
   }
@@ -321,16 +351,20 @@ export class PlanningRepository {
     if (!current) throw new Error('Plan was not found');
     const ordinal = this.nextOrdinal('project_plan_bases', id);
     const base = projectPlanBaseSchema.parse({ ...input, planId: id, ordinal });
-    const updated = this.database.prepare(`
+    const updated = this.database
+      .prepare(
+        `
       UPDATE project_plans
       SET current_base_id = @baseId, revision = revision + 1, updated_at = @updatedAt
       WHERE id = @planId AND revision = @expectedRevision
-    `).run({
-      baseId: base.id,
-      updatedAt: base.createdAt,
-      planId: id,
-      expectedRevision: revision,
-    });
+    `,
+      )
+      .run({
+        baseId: base.id,
+        updatedAt: base.createdAt,
+        planId: id,
+        expectedRevision: revision,
+      });
     if (updated.changes !== 1) throw new Error('Plan revision conflict');
     this.insertBase(base);
     return base;
@@ -354,33 +388,45 @@ export class PlanningRepository {
       revision: revision + 1,
       updatedAt,
     });
-    const updated = this.database.prepare(`
+    const updated = this.database
+      .prepare(
+        `
       UPDATE project_plans
       SET current_session_id = @sessionId, revision = revision + 1, updated_at = @updatedAt
       WHERE id = @planId AND revision = @expectedRevision
-    `).run({
-      sessionId: parsedSessionId,
-      updatedAt,
-      planId: id,
-      expectedRevision: revision,
-    });
+    `,
+      )
+      .run({
+        sessionId: parsedSessionId,
+        updatedAt,
+        planId: id,
+        expectedRevision: revision,
+      });
     if (updated.changes !== 1) throw new Error('Plan revision conflict');
-    this.database.prepare(`
+    this.database
+      .prepare(
+        `
       UPDATE project_plan_sessions
       SET ended_at = ?
       WHERE plan_id = ? AND ended_at IS NULL
-    `).run(updatedAt, id);
-    this.database.prepare(`
+    `,
+      )
+      .run(updatedAt, id);
+    this.database
+      .prepare(
+        `
       INSERT INTO project_plan_sessions (
         session_id, plan_id, project_id, capability_generation, started_at, ended_at
       ) VALUES (?, ?, ?, ?, ?, NULL)
-    `).run(
-      parsedSessionId,
-      id,
-      current.project_id,
-      this.nextCapabilityGeneration(id),
-      updatedAt,
-    );
+    `,
+      )
+      .run(
+        parsedSessionId,
+        id,
+        current.project_id,
+        this.nextCapabilityGeneration(id),
+        updatedAt,
+      );
     return next;
   }
 
@@ -388,12 +434,16 @@ export class PlanningRepository {
     planId: string,
     sessionId: string,
   ): PlanSessionAssociation | undefined {
-    const row = this.database.prepare(`
+    const row = this.database
+      .prepare(
+        `
       SELECT session_id, plan_id, project_id, capability_generation,
              started_at, ended_at
       FROM project_plan_sessions
       WHERE plan_id = ? AND session_id = ?
-    `).get(idSchema.parse(planId), idSchema.parse(sessionId)) as
+    `,
+      )
+      .get(idSchema.parse(planId), idSchema.parse(sessionId)) as
       | {
           session_id: string;
           plan_id: string;
@@ -428,11 +478,15 @@ export class PlanningRepository {
       throw new Error('Plan session is not current');
     }
     const generation = this.nextCapabilityGeneration(id);
-    const updated = this.database.prepare(`
+    const updated = this.database
+      .prepare(
+        `
       UPDATE project_plan_sessions
       SET capability_generation = ?, started_at = ?, ended_at = NULL
       WHERE plan_id = ? AND session_id = ? AND ended_at IS NULL
-    `).run(generation, occurredAt, id, parsedSessionId);
+    `,
+      )
+      .run(generation, occurredAt, id, parsedSessionId);
     if (updated.changes !== 1) throw new Error('Plan session is not active');
     const association = this.getSessionAssociation(id, parsedSessionId);
     if (!association) throw new Error('Plan session update disappeared');
@@ -445,10 +499,14 @@ export class PlanningRepository {
     const current = this.selectPlan(planId);
     if (!current) throw new Error('Plan was not found');
     const ordinal = this.nextOrdinal('project_plan_proposals', planId);
-    const capability = this.database.prepare(`
+    const capability = this.database
+      .prepare(
+        `
       SELECT capability_generation FROM project_plan_sessions
       WHERE plan_id = ? AND session_id = ?
-    `).get(planId, idSchema.parse(input.sessionId)) as
+    `,
+      )
+      .get(planId, idSchema.parse(input.sessionId)) as
       | { capability_generation: number }
       | undefined;
     if (!capability) throw new Error('Plan session was not found');
@@ -458,18 +516,24 @@ export class PlanningRepository {
       planRevision: expectedRevision + 1,
       capabilityGeneration: capability.capability_generation,
     });
-    const updated = this.database.prepare(`
+    const updated = this.database
+      .prepare(
+        `
       UPDATE project_plans
       SET latest_proposal_ordinal = @ordinal, revision = revision + 1, updated_at = @updatedAt
       WHERE id = @planId AND revision = @expectedRevision
-    `).run({
-      ordinal,
-      updatedAt: proposal.submittedAt,
-      planId,
-      expectedRevision,
-    });
+    `,
+      )
+      .run({
+        ordinal,
+        updatedAt: proposal.submittedAt,
+        planId,
+        expectedRevision,
+      });
     if (updated.changes !== 1) throw new Error('Plan revision conflict');
-    this.database.prepare(`
+    this.database
+      .prepare(
+        `
       INSERT INTO project_plan_proposals (
         id, plan_id, base_id, project_id, ordinal, plan_revision,
         capability_generation, session_id, assumptions_json, risks_json,
@@ -479,13 +543,15 @@ export class PlanningRepository {
         @capabilityGeneration, @sessionId, @assumptionsJson, @risksJson,
         @exclusionsJson, @submittedAt
       )
-    `).run({
-      ...proposal,
-      projectId: current.project_id,
-      assumptionsJson: JSON.stringify(proposal.assumptions),
-      risksJson: JSON.stringify(proposal.risks),
-      exclusionsJson: JSON.stringify(proposal.exclusions),
-    });
+    `,
+      )
+      .run({
+        ...proposal,
+        projectId: current.project_id,
+        assumptionsJson: JSON.stringify(proposal.assumptions),
+        risksJson: JSON.stringify(proposal.risks),
+        exclusionsJson: JSON.stringify(proposal.exclusions),
+      });
     const insertTask = this.database.prepare(`
       INSERT INTO project_plan_proposal_tasks (
         proposal_id, task_key, ordinal, title, description,
@@ -512,7 +578,10 @@ export class PlanningRepository {
         prerequisite_task_key, prerequisite_task_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
-    for (const [dependencyOrdinal, dependency] of proposal.dependencies.entries()) {
+    for (const [
+      dependencyOrdinal,
+      dependency,
+    ] of proposal.dependencies.entries()) {
       insertDependency.run(
         proposal.id,
         current.project_id,
@@ -533,28 +602,36 @@ export class PlanningRepository {
   appendFeedback(input: AppendPlanFeedbackInput): ProjectPlanFeedback {
     const expectedRevision = assertExpectedRevision(input.expectedRevision);
     const feedback = projectPlanFeedbackSchema.parse(input);
-    const updated = this.database.prepare(`
+    const updated = this.database
+      .prepare(
+        `
       UPDATE project_plans
       SET revision = revision + 1, updated_at = @updatedAt
       WHERE id = @planId AND revision = @expectedRevision
-    `).run({
-      planId: feedback.planId,
-      expectedRevision,
-      updatedAt: feedback.createdAt,
-    });
+    `,
+      )
+      .run({
+        planId: feedback.planId,
+        expectedRevision,
+        updatedAt: feedback.createdAt,
+      });
     if (updated.changes !== 1) throw new Error('Plan revision conflict');
-    this.database.prepare(`
+    this.database
+      .prepare(
+        `
       INSERT INTO project_plan_feedback (
         id, plan_id, proposal_id, content, actor_json, created_at
       ) VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      feedback.id,
-      feedback.planId,
-      feedback.proposalId,
-      feedback.content,
-      JSON.stringify(feedback.actor),
-      feedback.createdAt,
-    );
+    `,
+      )
+      .run(
+        feedback.id,
+        feedback.planId,
+        feedback.proposalId,
+        feedback.content,
+        JSON.stringify(feedback.actor),
+        feedback.createdAt,
+      );
     return feedback;
   }
 
@@ -572,16 +649,20 @@ export class PlanningRepository {
       ...update,
       revision: revision + 1,
     });
-    const result = this.database.prepare(`
+    const result = this.database
+      .prepare(
+        `
       UPDATE project_plans
       SET status = @status, revision = @revision, attention_json = @attentionJson,
           updated_at = @updatedAt, terminal_at = @terminalAt,
           terminal_by_json = @terminalByJson, terminal_reason = @terminalReason
       WHERE id = @id AND revision = @expectedRevision
-    `).run({
-      ...this.planParameters(next),
-      expectedRevision: revision,
-    });
+    `,
+      )
+      .run({
+        ...this.planParameters(next),
+        expectedRevision: revision,
+      });
     return result.changes === 1 ? next : undefined;
   }
 
@@ -592,10 +673,14 @@ export class PlanningRepository {
   ): void {
     const plan = idSchema.parse(planId);
     const proposal = idSchema.parse(proposalId);
-    const row = this.database.prepare(`
+    const row = this.database
+      .prepare(
+        `
       SELECT project_id FROM project_plan_proposals
       WHERE id = ? AND plan_id = ?
-    `).get(proposal, plan) as { project_id: string } | undefined;
+    `,
+      )
+      .get(proposal, plan) as { project_id: string } | undefined;
     if (!row) throw new Error('Plan proposal was not found');
     const insert = this.database.prepare(`
       INSERT INTO project_plan_task_mappings (
@@ -614,12 +699,15 @@ export class PlanningRepository {
   }
 
   private selectPlan(planId: string): PlanRow | undefined {
-    return this.database.prepare('SELECT * FROM project_plans WHERE id = ?').get(
-      idSchema.parse(planId),
-    ) as PlanRow | undefined;
+    return this.database
+      .prepare('SELECT * FROM project_plans WHERE id = ?')
+      .get(idSchema.parse(planId)) as PlanRow | undefined;
   }
 
-  private toPlan(row: PlanRow, feedback = this.listFeedback(row.id)): ProjectPlan {
+  private toPlan(
+    row: PlanRow,
+    feedback = this.listFeedback(row.id),
+  ): ProjectPlan {
     return projectPlanSchema.parse({
       id: row.id,
       projectId: row.project_id,
@@ -638,16 +726,24 @@ export class PlanningRepository {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       terminalAt: row.terminal_at,
-      terminalBy: row.terminal_by_json ? JSON.parse(row.terminal_by_json) : null,
+      terminalBy: row.terminal_by_json
+        ? JSON.parse(row.terminal_by_json)
+        : null,
       terminalReason: row.terminal_reason,
     });
   }
 
   private toProposal(row: ProposalRow): ProjectPlanProposal {
-    const tasks = (this.database.prepare(`
+    const tasks = (
+      this.database
+        .prepare(
+          `
       SELECT * FROM project_plan_proposal_tasks
       WHERE proposal_id = ? ORDER BY ordinal, task_key
-    `).all(row.id) as ProposalTaskRow[]).map((task) => ({
+    `,
+        )
+        .all(row.id) as ProposalTaskRow[]
+    ).map((task) => ({
       key: task.task_key,
       title: task.title,
       description: task.description,
@@ -657,15 +753,27 @@ export class PlanningRepository {
       rationale: task.rationale,
       goalMapping: task.goal_mapping,
     }));
-    const dependencies = (this.database.prepare(`
+    const dependencies = (
+      this.database
+        .prepare(
+          `
       SELECT * FROM project_plan_proposal_dependencies
       WHERE proposal_id = ? ORDER BY ordinal, dependent_task_key
-    `).all(row.id) as ProposalDependencyRow[]).map((dependency) => ({
+    `,
+        )
+        .all(row.id) as ProposalDependencyRow[]
+    ).map((dependency) => ({
       dependentTaskKey: dependency.dependent_task_key,
       prerequisite:
         dependency.prerequisite_type === 'proposal_task'
-          ? { type: 'proposal_task' as const, taskKey: dependency.prerequisite_task_key }
-          : { type: 'existing_task' as const, taskId: dependency.prerequisite_task_id },
+          ? {
+              type: 'proposal_task' as const,
+              taskKey: dependency.prerequisite_task_key,
+            }
+          : {
+              type: 'existing_task' as const,
+              taskId: dependency.prerequisite_task_id,
+            },
     }));
     return projectPlanProposalSchema.parse({
       id: row.id,
@@ -685,29 +793,48 @@ export class PlanningRepository {
   }
 
   private listFeedback(planId: string): ProjectPlanFeedback[] {
-    return (this.database.prepare(`
+    return (
+      this.database
+        .prepare(
+          `
       SELECT * FROM project_plan_feedback
       WHERE plan_id = ? ORDER BY created_at, id
-    `).all(planId) as FeedbackRow[]).map(toFeedback);
+    `,
+        )
+        .all(planId) as FeedbackRow[]
+    ).map(toFeedback);
   }
 
-  private nextOrdinal(table: 'project_plan_bases' | 'project_plan_proposals', planId: string): number {
-    const row = this.database.prepare(`
+  private nextOrdinal(
+    table: 'project_plan_bases' | 'project_plan_proposals',
+    planId: string,
+  ): number {
+    const row = this.database
+      .prepare(
+        `
       SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal FROM ${table} WHERE plan_id = ?
-    `).get(planId) as { ordinal: number };
+    `,
+      )
+      .get(planId) as { ordinal: number };
     return row.ordinal;
   }
 
   private nextCapabilityGeneration(planId: string): number {
-    const row = this.database.prepare(`
+    const row = this.database
+      .prepare(
+        `
       SELECT COALESCE(MAX(capability_generation), 0) + 1 AS generation
       FROM project_plan_sessions WHERE plan_id = ?
-    `).get(planId) as { generation: number };
+    `,
+      )
+      .get(planId) as { generation: number };
     return row.generation;
   }
 
   private insertBase(base: ProjectPlanBase): void {
-    this.database.prepare(`
+    this.database
+      .prepare(
+        `
       INSERT INTO project_plan_bases (
         id, plan_id, ordinal, repository_identity, tasks_json, dependencies_json,
         project_archived_at, project_revision, policy_revision, created_at
@@ -715,11 +842,13 @@ export class PlanningRepository {
         @id, @planId, @ordinal, @repositoryIdentity, @tasksJson, @dependenciesJson,
         @projectArchivedAt, @projectRevision, @policyRevision, @createdAt
       )
-    `).run({
-      ...base,
-      tasksJson: JSON.stringify(base.tasks),
-      dependenciesJson: JSON.stringify(base.dependencies),
-    });
+    `,
+      )
+      .run({
+        ...base,
+        tasksJson: JSON.stringify(base.tasks),
+        dependenciesJson: JSON.stringify(base.dependencies),
+      });
   }
 
   private planParameters(plan: ProjectPlan) {

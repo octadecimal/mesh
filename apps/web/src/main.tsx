@@ -91,6 +91,8 @@ const start = async () => {
   const connectedApi = {
     diagnostics: api.diagnostics.bind(api),
     discover: api.discover.bind(api),
+    projectPlanDetails: api.projectPlanDetails.bind(api),
+    projectPlanHistory: api.projectPlanHistory.bind(api),
     projectSnapshot: api.projectSnapshot.bind(api),
     command: async (...args: Parameters<MeshApi['command']>) => {
       let response: Awaited<ReturnType<MeshApi['command']>>;

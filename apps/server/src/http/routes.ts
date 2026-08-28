@@ -116,26 +116,23 @@ export const registerRoutes = (
     }
   });
 
-  app.get(
-    '/api/projects/:projectId/plans/:planId',
-    async (request, reply) => {
-      try {
-        const { projectId, planId } = request.params as {
-          projectId: string;
-          planId: string;
-        };
-        requireProject(dependencies, projectId);
-        const details = dependencies.plans.getDetails(planId);
-        if (!details || details.plan.projectId !== projectId) {
-          throw new CommandError(
-            'project_plan_not_found',
-            `Project plan '${planId}' was not found`,
-          );
-        }
-        return projectPlanDetailsSchema.parse(details);
-      } catch (error) {
-        return sendError(reply, error);
+  app.get('/api/projects/:projectId/plans/:planId', async (request, reply) => {
+    try {
+      const { projectId, planId } = request.params as {
+        projectId: string;
+        planId: string;
+      };
+      requireProject(dependencies, projectId);
+      const details = dependencies.plans.getDetails(planId);
+      if (!details || details.plan.projectId !== projectId) {
+        throw new CommandError(
+          'project_plan_not_found',
+          `Project plan '${planId}' was not found`,
+        );
       }
-    },
-  );
+      return projectPlanDetailsSchema.parse(details);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 };

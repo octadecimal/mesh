@@ -288,9 +288,7 @@ const dependencyResponse = (result: DependencyMutationResult) => ({
   projectEventCursor: result.event.sequence,
 });
 
-const requirePlanningExecutionService = (
-  dependencies: CommandDependencies,
-) => {
+const requirePlanningExecutionService = (dependencies: CommandDependencies) => {
   if (!dependencies.planningExecutionService) {
     throw new CommandError(
       'invalid_command',
@@ -344,10 +342,7 @@ const executePlanningCommand = async (
   }
   if (command.type === 'project.plan.request_revision') {
     const details = dependencies.plans.getDetails(command.payload.planId);
-    if (
-      !details ||
-      details.plan.projectId !== command.payload.projectId
-    ) {
+    if (!details || details.plan.projectId !== command.payload.projectId) {
       throw new CommandError(
         'project_plan_not_found',
         `Project plan '${command.payload.planId}' was not found`,

@@ -20,7 +20,10 @@ import {
 } from './planning-repository.js';
 
 const actor = (): ProjectPlan['createdBy'] =>
-  taskActorSchema.parse({ type: 'human', id: 'operator-1' }) as ProjectPlan['createdBy'];
+  taskActorSchema.parse({
+    type: 'human',
+    id: 'operator-1',
+  }) as ProjectPlan['createdBy'];
 
 const project = (id = 'project-1') =>
   projectSchema.parse({
@@ -60,9 +63,7 @@ const seedSession = (
   );
 };
 
-const plan = (
-  overrides: Record<string, unknown> = {},
-): ProjectPlan =>
+const plan = (overrides: Record<string, unknown> = {}): ProjectPlan =>
   projectPlanSchema.parse({
     id: 'plan-1',
     projectId: 'project-1',
@@ -86,9 +87,7 @@ const plan = (
     ...overrides,
   });
 
-const base = (
-  overrides: Record<string, unknown> = {},
-): ProjectPlanBase =>
+const base = (overrides: Record<string, unknown> = {}): ProjectPlanBase =>
   projectPlanBaseSchema.parse({
     id: 'base-1',
     planId: 'plan-1',
@@ -180,7 +179,9 @@ describe('PlanningRepository', () => {
         repos.database.prepare('SELECT id FROM project_plan_bases').all(),
       ).toEqual([]);
       expect(
-        repos.database.prepare('SELECT session_id FROM project_plan_sessions').all(),
+        repos.database
+          .prepare('SELECT session_id FROM project_plan_sessions')
+          .all(),
       ).toEqual([]);
     },
   );
@@ -190,7 +191,11 @@ describe('PlanningRepository', () => {
     repositories.push(repos);
     seedSession(repos);
     const repository = new PlanningRepository(repos.database);
-    repository.create({ plan: plan(), base: base(), sessionId: 'pm-session-1' });
+    repository.create({
+      plan: plan(),
+      base: base(),
+      sessionId: 'pm-session-1',
+    });
 
     expect(() =>
       repository.create({
@@ -217,7 +222,11 @@ describe('PlanningRepository', () => {
       sessionId: 'pm-session-1',
     });
 
-    const appended = repository.appendBase(created.id, created.revision, nextBase());
+    const appended = repository.appendBase(
+      created.id,
+      created.revision,
+      nextBase(),
+    );
 
     expect(appended).toEqual(base({ ...nextBase(), ordinal: 2 }));
     expect(repository.getDetails(created.id)?.bases).toEqual([
@@ -256,18 +265,26 @@ describe('PlanningRepository', () => {
       }),
     );
     const repository = new PlanningRepository(repos.database);
-    repository.create({ plan: plan(), base: base(), sessionId: 'pm-session-1' });
+    repository.create({
+      plan: plan(),
+      base: base(),
+      sessionId: 'pm-session-1',
+    });
 
     expect(() => repository.appendSession('plan-1', 2, 'pm-session-2')).toThrow(
       'Plan revision conflict',
     );
-    expect(repository.appendSession('plan-1', 1, 'pm-session-2')).toMatchObject({
-      currentSessionId: 'pm-session-2',
-      revision: 2,
-    });
+    expect(repository.appendSession('plan-1', 1, 'pm-session-2')).toMatchObject(
+      {
+        currentSessionId: 'pm-session-2',
+        revision: 2,
+      },
+    );
     expect(
       repos.database
-        .prepare('SELECT session_id, capability_generation FROM project_plan_sessions WHERE plan_id = ? ORDER BY capability_generation')
+        .prepare(
+          'SELECT session_id, capability_generation FROM project_plan_sessions WHERE plan_id = ? ORDER BY capability_generation',
+        )
         .all('plan-1'),
     ).toEqual([
       { session_id: 'pm-session-1', capability_generation: 1 },
@@ -280,7 +297,11 @@ describe('PlanningRepository', () => {
     repositories.push(repos);
     seedSession(repos);
     const repository = new PlanningRepository(repos.database);
-    repository.create({ plan: plan(), base: base(), sessionId: 'pm-session-1' });
+    repository.create({
+      plan: plan(),
+      base: base(),
+      sessionId: 'pm-session-1',
+    });
 
     const first = repository.appendProposal({
       id: 'proposal-1',
@@ -358,35 +379,100 @@ describe('PlanningRepository', () => {
     seedSession(repos);
     repos.tasks.create(
       taskSchema.parse({
-        id: 'task-1', projectId: 'project-1', title: 'Published task',
-        description: 'This is canonical.', acceptanceCriteria: ['It exists.'],
-        priority: 'normal', rank: 'a', lifecycleState: 'backlog', labels: [], notes: '',
-        blocked: null, revision: 1, createdAt: '2026-08-27T00:00:00.000Z', updatedAt: '2026-08-27T00:00:00.000Z',
+        id: 'task-1',
+        projectId: 'project-1',
+        title: 'Published task',
+        description: 'This is canonical.',
+        acceptanceCriteria: ['It exists.'],
+        priority: 'normal',
+        rank: 'a',
+        lifecycleState: 'backlog',
+        labels: [],
+        notes: '',
+        blocked: null,
+        revision: 1,
+        createdAt: '2026-08-27T00:00:00.000Z',
+        updatedAt: '2026-08-27T00:00:00.000Z',
       }),
     );
     const repository = new PlanningRepository(repos.database);
-    repository.create({ plan: plan(), base: base(), sessionId: 'pm-session-1' });
+    repository.create({
+      plan: plan(),
+      base: base(),
+      sessionId: 'pm-session-1',
+    });
     repository.appendProposal({
-      id: 'proposal-1', planId: 'plan-1', expectedRevision: 1, baseId: 'base-1', sessionId: 'pm-session-1',
-      tasks: [{ key: 'proposal-task-1', title: 'Publish task', description: 'Create it.', acceptanceCriteria: ['It exists.'], priority: 'normal', labels: [], rationale: 'Needed.', goalMapping: 'Goal.' }],
-      dependencies: [], assumptions: [], risks: [], exclusions: [], submittedAt: '2026-08-27T00:03:00.000Z',
+      id: 'proposal-1',
+      planId: 'plan-1',
+      expectedRevision: 1,
+      baseId: 'base-1',
+      sessionId: 'pm-session-1',
+      tasks: [
+        {
+          key: 'proposal-task-1',
+          title: 'Publish task',
+          description: 'Create it.',
+          acceptanceCriteria: ['It exists.'],
+          priority: 'normal',
+          labels: [],
+          rationale: 'Needed.',
+          goalMapping: 'Goal.',
+        },
+      ],
+      dependencies: [],
+      assumptions: [],
+      risks: [],
+      exclusions: [],
+      submittedAt: '2026-08-27T00:03:00.000Z',
     });
 
-    expect(repository.update('plan-1', 1, {
-      status: 'approved', attention: null, updatedAt: '2026-08-27T00:04:00.000Z', terminalAt: '2026-08-27T00:04:00.000Z', terminalBy: actor(), terminalReason: 'Approved',
-    })).toBeUndefined();
+    expect(
+      repository.update('plan-1', 1, {
+        status: 'approved',
+        attention: null,
+        updatedAt: '2026-08-27T00:04:00.000Z',
+        terminalAt: '2026-08-27T00:04:00.000Z',
+        terminalBy: actor(),
+        terminalReason: 'Approved',
+      }),
+    ).toBeUndefined();
     const updated = repository.update('plan-1', 2, {
-      status: 'approved', attention: null, updatedAt: '2026-08-27T00:04:00.000Z', terminalAt: '2026-08-27T00:04:00.000Z', terminalBy: actor(), terminalReason: 'Approved',
+      status: 'approved',
+      attention: null,
+      updatedAt: '2026-08-27T00:04:00.000Z',
+      terminalAt: '2026-08-27T00:04:00.000Z',
+      terminalBy: actor(),
+      terminalReason: 'Approved',
     });
-    expect(updated).toMatchObject({ status: 'approved', revision: 3, terminalReason: 'Approved' });
+    expect(updated).toMatchObject({
+      status: 'approved',
+      revision: 3,
+      terminalReason: 'Approved',
+    });
 
-    repository.recordApprovalMappings('plan-1', 'proposal-1', [{ proposalTaskKey: 'proposal-task-1', taskId: 'task-1', createdAt: '2026-08-27T00:04:00.000Z' }]);
+    repository.recordApprovalMappings('plan-1', 'proposal-1', [
+      {
+        proposalTaskKey: 'proposal-task-1',
+        taskId: 'task-1',
+        createdAt: '2026-08-27T00:04:00.000Z',
+      },
+    ]);
     expect(
       repos.database
-        .prepare('SELECT proposal_task_key, task_id FROM project_plan_task_mappings')
+        .prepare(
+          'SELECT proposal_task_key, task_id FROM project_plan_task_mappings',
+        )
         .all(),
     ).toEqual([{ proposal_task_key: 'proposal-task-1', task_id: 'task-1' }]);
-    expect(() => repository.recordApprovalMappings('plan-1', 'proposal-1', [{ proposalTaskKey: 'proposal-task-1', taskId: 'task-1', createdAt: '2026-08-27T00:04:00.000Z' }])).toThrow();
+    expect(() =>
+      repository.recordApprovalMappings('plan-1', 'proposal-1', [
+        {
+          proposalTaskKey: 'proposal-task-1',
+          taskId: 'task-1',
+          createdAt: '2026-08-27T00:04:00.000Z',
+        },
+      ]),
+    ).toThrow();
   });
 
   it('returns the active plan and terminal summaries in deterministic cursor order', () => {
@@ -394,7 +480,11 @@ describe('PlanningRepository', () => {
     repositories.push(repos);
     seedSession(repos);
     const repository = new PlanningRepository(repos.database);
-    repository.create({ plan: plan(), base: base(), sessionId: 'pm-session-1' });
+    repository.create({
+      plan: plan(),
+      base: base(),
+      sessionId: 'pm-session-1',
+    });
 
     for (let index = 1; index <= 22; index += 1) {
       const id = `terminal-${String(index).padStart(2, '0')}`;
@@ -422,17 +512,42 @@ describe('PlanningRepository', () => {
         }),
       );
       repository.create({
-        plan: plan({ id, status: 'approved', currentBaseId: `base-${id}`, currentSessionId: sessionId, createdAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, updatedAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, terminalAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`, terminalBy: actor(), terminalReason: 'Approved' }),
-        base: base({ id: `base-${id}`, planId: id, createdAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z` }),
+        plan: plan({
+          id,
+          status: 'approved',
+          currentBaseId: `base-${id}`,
+          currentSessionId: sessionId,
+          createdAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`,
+          updatedAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`,
+          terminalAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`,
+          terminalBy: actor(),
+          terminalReason: 'Approved',
+        }),
+        base: base({
+          id: `base-${id}`,
+          planId: id,
+          createdAt: `2026-08-27T01:${String(index).padStart(2, '0')}:00.000Z`,
+        }),
         sessionId,
       });
     }
 
     expect(repository.getActiveByProject('project-1')?.id).toBe('plan-1');
     const first = repository.listSummaries('project-1', { limit: 20 });
-    const second = repository.listSummaries('project-1', { before: first.at(-1)?.id, limit: 20 });
-    expect(first.map((summary) => summary.id)).toEqual(Array.from({ length: 20 }, (_, offset) => `terminal-${String(22 - offset).padStart(2, '0')}`));
-    expect(second.map((summary) => summary.id)).toEqual(['terminal-02', 'terminal-01']);
+    const second = repository.listSummaries('project-1', {
+      before: first.at(-1)?.id,
+      limit: 20,
+    });
+    expect(first.map((summary) => summary.id)).toEqual(
+      Array.from(
+        { length: 20 },
+        (_, offset) => `terminal-${String(22 - offset).padStart(2, '0')}`,
+      ),
+    );
+    expect(second.map((summary) => summary.id)).toEqual([
+      'terminal-02',
+      'terminal-01',
+    ]);
   });
 
   it('allows caller-owned transactions to roll back a partially composed base append', () => {
@@ -440,11 +555,17 @@ describe('PlanningRepository', () => {
     repositories.push(repos);
     seedSession(repos);
     const repository = new PlanningRepository(repos.database);
-    repository.create({ plan: plan(), base: base(), sessionId: 'pm-session-1' });
+    repository.create({
+      plan: plan(),
+      base: base(),
+      sessionId: 'pm-session-1',
+    });
 
     repos.database.exec('BEGIN IMMEDIATE');
     try {
-      expect(() => repository.appendBase('plan-1', 1, { ...nextBase(), id: 'base-1' })).toThrow();
+      expect(() =>
+        repository.appendBase('plan-1', 1, { ...nextBase(), id: 'base-1' }),
+      ).toThrow();
     } finally {
       repos.database.exec('ROLLBACK');
     }

@@ -354,7 +354,12 @@ describe('PlanningExecutionService', () => {
   it('rejects a project revision changed during identity resolution before planning side effects', async () => {
     const identityStarted = deferred();
     const releaseIdentity = deferred();
-    const { project, registry, repositories: repos, service } = arrange({
+    const {
+      project,
+      registry,
+      repositories: repos,
+      service,
+    } = arrange({
       resolveIdentity: async () => {
         identityStarted.resolve();
         await releaseIdentity.promise;

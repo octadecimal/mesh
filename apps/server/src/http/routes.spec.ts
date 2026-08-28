@@ -1592,8 +1592,9 @@ describe('HTTP command routes', () => {
     expect(firstPageResponse.statusCode).toBe(200);
     expect(firstPage.plans).toHaveLength(20);
     expect(firstPage.plans.map(({ id: planId }) => planId)).toEqual(
-      Array.from({ length: 20 }, (_, index) =>
-        `plan-${String(21 - index).padStart(2, '0')}`,
+      Array.from(
+        { length: 20 },
+        (_, index) => `plan-${String(21 - index).padStart(2, '0')}`,
       ),
     );
     expect(firstPage.nextAfter).toBe('plan-02');
@@ -1615,9 +1616,9 @@ describe('HTTP command routes', () => {
       url: '/api/projects/p1/plans/plan-21',
     });
     expect(detailsResponse.statusCode).toBe(200);
-    expect(
-      projectPlanDetailsSchema.parse(detailsResponse.json()).plan.id,
-    ).toBe('plan-21');
+    expect(projectPlanDetailsSchema.parse(detailsResponse.json()).plan.id).toBe(
+      'plan-21',
+    );
 
     const missingProject = await fixture.app.inject({
       method: 'GET',

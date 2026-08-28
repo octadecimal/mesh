@@ -28,25 +28,33 @@ export class TaskDependencyRepository {
 
   create(dependency: TaskDependency): TaskDependency {
     const value = taskDependencySchema.parse(dependency);
-    this.database.prepare(`
+    this.database
+      .prepare(
+        `
       INSERT INTO task_dependencies (
         project_id, task_id, prerequisite_task_id, created_by_json, created_at
       ) VALUES (?, ?, ?, ?, ?)
-    `).run(
-      value.projectId,
-      value.taskId,
-      value.prerequisiteTaskId,
-      JSON.stringify(value.createdBy),
-      value.createdAt,
-    );
+    `,
+      )
+      .run(
+        value.projectId,
+        value.taskId,
+        value.prerequisiteTaskId,
+        JSON.stringify(value.createdBy),
+        value.createdAt,
+      );
     return value;
   }
 
   remove(taskId: string, prerequisiteTaskId: string): boolean {
-    const result = this.database.prepare(`
+    const result = this.database
+      .prepare(
+        `
       DELETE FROM task_dependencies
       WHERE task_id = ? AND prerequisite_task_id = ?
-    `).run(idSchema.parse(taskId), idSchema.parse(prerequisiteTaskId));
+    `,
+      )
+      .run(idSchema.parse(taskId), idSchema.parse(prerequisiteTaskId));
     return result.changes === 1;
   }
 
@@ -72,8 +80,14 @@ export class TaskDependencyRepository {
   }
 
   private list(where: string, value: string): TaskDependency[] {
-    return (this.database.prepare(`
+    return (
+      this.database
+        .prepare(
+          `
       SELECT * FROM task_dependencies ${where}
-    `).all(value) as TaskDependencyRow[]).map(toDependency);
+    `,
+        )
+        .all(value) as TaskDependencyRow[]
+    ).map(toDependency);
   }
 }

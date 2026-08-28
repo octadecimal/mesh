@@ -49,6 +49,16 @@ association, while the session stream owns the session lifecycle and transcript.
 Workspaces and sessions retain their existing project identities, and repository
 discovery remains suggestion-only rather than creating durable projects.
 
+Project planning is also project-owned truth. A plan records immutable bases,
+structured proposal revisions, operator feedback, and terminal history, while
+its linked PM session owns only runtime lifecycle and transcript. The PM runs
+against the imported repository in read-only mode and receives one scoped
+proposal-submission control; it cannot edit the worktree, mutate canonical
+tasks, approve its own proposal, or launch work. Human approval is the only
+boundary that atomically materializes proposal tasks and dependencies into the
+canonical board. Task dependencies then belong to the task domain, independent
+of the plan that proposed them.
+
 Launching a task attempt composes the existing workspace and session boundaries:
 the server validates a ready, unblocked task; resolves or creates the workspace;
 persists the session, attempt, and project audit event; starts the session
@@ -247,6 +257,35 @@ an explicit paused repair condition. Reconciliation neither manufactures a
 verdict nor silently repeats QA or Developer work. State-specific recovery
 preserves the workspace, cycles, reports, diagnostics, and action history.
 
+`PlanningExecutionService` owns PM start, revision, resume, retry, cancellation,
+and restart reconciliation. Starting or revising first commits the plan state,
+immutable base, linked session, and ordered project event, then attaches the
+read-only PM runtime. Its ephemeral capability is bound to that plan, base,
+session, and capability generation. A structured proposal submission is
+validated against those bindings and persisted with the plan transition and
+project event before publication. Cancellation invalidates the capability
+before interrupting the runtime, so an interrupt-time callback cannot create a
+late proposal.
+
+`PlanApprovalService` owns the human approval transaction. It revalidates the
+proposal's captured task and policy base against current canonical truth; a
+stale approval creates no task or dependency rows. A valid approval creates all
+tasks, resolves proposal-local dependency keys, appends their ordered audit
+events, and terminalizes the plan in one transaction before publishing. Plans
+already `awaiting_review` survive restart without a live PM. A plan formerly in
+`planning` or `revising` becomes `attention_required` when its runtime cannot be
+proven live; resume and retry are explicit operator operations and issue fresh
+capability authority rather than reviving an old token.
+
+Task dependency readiness is evaluated from canonical dependency rows and
+prerequisite lifecycle. A task cannot enter `ready`, launch manually, or enter a
+new project-run preview while any prerequisite is incomplete. Reopening a
+prerequisite does not roll back or interrupt dependents that are already
+`ready`, `in_progress`, `review`, or `done`; it blocks their next launch or
+future wave membership instead. A finite project run never expands its frozen
+wave when dependencies later become satisfied, and it never admits work that
+was ineligible when the preview was authorized.
+
 Project-run orchestration is a finite authorization over current task truth,
 not an open-ended scheduler. The browser first previews the ordered eligible
 tasks, then sends their ids and revisions as `expectedTasks`. The start command
@@ -287,14 +326,16 @@ State-bearing driver input is written with its raw diagnostic before it is
 published. This audit barrier is intentional: if durable persistence fails,
 Mesh must not continue presenting an unaudited state as successful.
 
-Projects, Developer and QA instructions, review policy, tasks, attempts,
-Developer and QA cycles, completion, blocker, and verdict reports, review or
-unblock feedback, review-automation actions and pause state, task transitions,
-and ordered project events are durable repository state. Writes representing
-one Developer or QA outcome commit atomically. Their foreign keys preserve
-project, session, workspace, and layout identities when an existing database is
-upgraded. Capability tokens and live MCP handler state are deliberately absent
-from persistence.
+Projects, Developer and QA instructions, review policy, tasks, dependencies,
+attempts, Developer and QA cycles, completion, blocker, and verdict reports,
+review or unblock feedback, review-automation actions and pause state, plans,
+immutable planning bases, proposal revisions, planning feedback, task
+transitions, and ordered project events are durable repository state. Writes
+representing one Developer or QA outcome, plan approval, or plan lifecycle
+operation commit atomically. Their foreign keys preserve project, session,
+workspace, and layout identities when an existing database is upgraded.
+Developer, QA, and PM capability tokens and live MCP handler state are
+deliberately absent from persistence.
 
 Project-run storage was introduced by migrations 012 through 015. Migration
 012 adds runs, their frozen queue items, capacity states, and the one-active-run
@@ -314,7 +355,7 @@ cover both fresh and upgraded databases.
 replay/resync behavior, selection, filters, drafts, and connection health.
 `apps/web/src/projects` and `apps/web/src/tasks` render project import, board,
 drawer, Developer and QA execution history and reports, automation budget,
-attempt, and repair states.
+attempt, planning history and review, dependencies, and repair states.
 `apps/web/src/sessions` and `apps/web/src/workspace` render and compose session
 states. Components should express interaction and presentation rather than
 reimplementing server lifecycle rules.
@@ -325,6 +366,12 @@ stale-write guard. Running, paused, draining, and completed views are projection
 of durable run state, including occupied capacity, per-item outcomes, pause
 reason, and final history. Refresh and reconnect must preserve the same run id,
 frozen order, item statuses, and terminal counts.
+
+The planning panel renders server-owned plan history and structured proposal
+details. Its start, revise, approve, reject, cancel, resume, and retry controls
+remain disabled when transport state is disconnected or stale. The board and
+task drawer project dependency blockers from the snapshot; they do not infer
+readiness locally or treat a visible PM transcript as an approved plan.
 
 Treat disconnect, stale snapshot, invalid payload, empty data, loading,
 permission requests, and terminal states as first-class UI states. Reconnect
@@ -350,7 +397,8 @@ apps/server/                     Fastify API, runtime, drivers, persistence
   src/repositories/              persistent data access
   src/runtime/                   lifecycle, registry, recovery, publication
   src/tasks/                     task lifecycle, attempts, Developer and QA
-                                 execution, review automation, restart repair
+                                 execution, PM planning and approval,
+                                 dependencies, review automation, restart repair
 apps/web/                        React/Vite client
   src/api/                       HTTP and WebSocket clients
   src/projects/                  explicit project import
