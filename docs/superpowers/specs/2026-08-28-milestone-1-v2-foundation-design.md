@@ -129,12 +129,15 @@ V2 application file. The only initially shared surfaces are repository tooling,
 third-party dependencies, TypeScript configuration, and Nx conventions.
 
 V1 keeps ports `3737` and `4200`, its `MESH_*` environment variables, and its
-`session-platform.sqlite` identity. V2 uses ports `3838` and `4300`, only
+`session-platform.sqlite` identity. V2 defaults to ports `3838` and `4300`, only
 `MESH_V2_*` variables, and defaults to
 `%USERPROFILE%/.mesh/v2/mesh-v2.sqlite` on Windows or the equivalent home path
-on other platforms. Production V2 serves `dist/apps/v2-web`; development V2
-accepts only `http://127.0.0.1:4300` unless an explicit loopback origin is
-configured.
+on other platforms. Production V2 serves the exact built-web root supplied by
+`MESH_V2_WEB_ROOT` (normally `dist/apps/v2-web`); development V2 accepts only
+`http://127.0.0.1:4300` unless an explicit loopback origin is configured. The
+fake-only stop-condition fixture starts that production server with
+`MESH_V2_PORT=0`, reads its loopback bound origin from the structured ready
+line, and loads both UI and API from that one origin.
 
 V2 SQLite databases use `PRAGMA application_id = 1297494528` (`MV2\0`) and a
 `v2_schema_migrations` ledger. Opening logic follows these rules before any
@@ -146,6 +149,14 @@ migration changes data:
 - a non-empty database with application ID zero or any different ID is rejected
   as `database_identity_mismatch`;
 - V2 never probes, attaches, copies, imports, or rewrites the V1 database.
+
+The V2 server production build exposes
+`apps/v2-server/src/db/database.js` and copies
+`apps/v2-server/src/db/migrations/**/*.sql` to both `db/migrations` and the
+emitted source-relative `apps/v2-server/src/db/migrations` layout beneath its
+output root, matching the repository's proven production mechanism. A
+production-output test imports that emitted entrypoint and opens a fresh
+identified database, so source-tree-only migration resolution cannot pass M1.
 
 ## Project Identity and Selection
 
@@ -173,6 +184,14 @@ non-interactive `git rev-parse --path-format=absolute --show-toplevel
 normalized canonical common-directory path is the durable
 `repositoryIdentity`; the canonical top-level is the mutable display/operation
 path. The identity is unique.
+
+The HEAD lookup is a separate shell-free process invocation. Exactly one
+trimmed 40- or 64-character lowercase hexadecimal object ID is accepted.
+Unborn HEAD fails as `repository_head_unborn`, ambiguity or multiple/invalid
+successful output fails as `repository_head_ambiguous`, and process
+spawn/timeout or other nonzero failure fails as `repository_head_failed`. Every
+case writes nothing; Mesh never substitutes a working-tree hash or empty
+sentinel.
 
 Registering the same identity and path is idempotent. Registering a different
 path for an existing identity returns `repository_identity_conflict`; M1 does
@@ -323,7 +342,11 @@ then a semantic-version match when supplied, otherwise the adapter's single
 approved descriptor. Ambiguous matches are unavailable. M1 does not download,
 import, inspect, or approve skill content.
 
-A preferred unavailable skill snapshots
+A profile's `requiredCapabilities` are compared with the adapter capability
+snapshot before an operation intent is created and before `start` is called. A
+missing capability stores a terminal `failed` execution, domain event, and
+idempotent command result with code `required_capability_unavailable`; it does
+not invoke the adapter. A preferred unavailable skill snapshots
 `mesh-native-fallback` using the stable workflow identifier
 `mesh.foundation-check/v1`; execution continues because Mesh owns the domain
 gate. A required unavailable or ambiguous skill snapshots `unavailable`, stores
@@ -392,6 +415,7 @@ interface HarnessAdapter {
 interface HarnessSession {
   readonly nativeHandle: string;
   events(afterAdapterCursor: number): AsyncIterable<HarnessEventEnvelope>;
+  close(): Promise<void>;
 }
 
 type HarnessEventEnvelope = {
@@ -413,7 +437,9 @@ emits output plus nested child start/finish activity, can inject malformed input
 or adapter failure, can hold after a configured cursor, and resumes from the
 next cursor in a fresh adapter instance. Its opaque handle is treated as a
 string by all non-adapter code. Fake controls are constructor/test configuration,
-not public production commands.
+not public production commands. The built-process e2e fixture may supply
+`MESH_V2_FAKE_HOLD_AFTER_CURSOR` only with `NODE_ENV=test`; other modes reject
+that setting.
 
 ## Datastore, Event Ordering, and Audit Barrier
 
@@ -495,11 +521,16 @@ For a harness envelope, one transaction:
 5. commits before either event is published.
 
 If any required write fails, no normalized event is published, the server-wide
-in-memory `AuditBarrier` trips, the affected harness is interrupted best-effort,
-all later mutation commands return `audit_barrier_tripped`, and health/realtime
-clients show the failure. Restart clears the in-memory barrier only after the
-database opens successfully and reconciliation converts every ambiguous open
-execution or operation into an explicit state.
+in-memory `AuditBarrier` trips, and the affected owned harness session stops
+consuming immediately. Mesh attempts adapter interruption and always closes the
+session best-effort, even if interruption fails. This rule applies uniformly to
+raw-diagnostic insert, normalized-runtime insert, execution-cursor update, and
+lifecycle/domain append failure: the transaction rolls back every write, no
+publication occurs, and no later adapter envelope is requested. All later
+mutation commands return `audit_barrier_tripped`, and health/realtime clients
+show the failure. Restart clears the in-memory barrier only after the database
+opens successfully and reconciliation converts every ambiguous open execution
+or operation into an explicit state.
 
 ## Commands, HTTP, Snapshots, and Realtime
 
@@ -517,9 +548,14 @@ All V2 HTTP paths begin `/api/v2`; V1 paths are untouched.
   an ordered retained replay window or `resync_required` when the cursor is
   outside retained history.
 - `GET /api/v2/realtime` upgrades to WebSocket. The first client message is a
-  strict subscription containing project ID and both cursors. The server replays
-  committed events, then follows publications. Invalid, cross-project, or
-  gapped subscriptions receive `v2.resync_required` and no guessed projection.
+  strict subscription containing project ID and both cursors. For each stream,
+  the server installs its committed-publication listener first in buffering
+  mode, reads and sends the retained replay with its high-water mark, drops
+  buffered duplicates at or below that high-water, drains the remaining buffer
+  in exact sequence, and only then changes the same listener to live mode.
+  Events arriving during replay or drain stay buffered. Invalid, cross-project,
+  retained-gap, or non-contiguous buffered subscriptions receive
+  `v2.resync_required` and no guessed projection.
 
 Commands validate actor, expected revision, origin, project ownership, profile
 scope, lifecycle, audit status, and adapter availability at the transport edge
@@ -626,11 +662,13 @@ databases, loopback ephemeral ports, and Playwright Chromium.
 - Contract tests parse every command, event, snapshot, profile, execution,
   skill-resolution, and realtime variant and reject V1/provider shapes.
 - Database tests cover empty creation, existing V2 reopen, forward migration,
-  V1/unknown rejection, foreign keys, transaction rollback, idempotency, and
-  independent per-project/per-stream ordering.
+  V1/unknown rejection, foreign keys, transaction rollback, idempotency,
+  independent per-project/per-stream ordering, and opening a fresh database
+  through the production-built database entrypoint with packaged migration SQL.
 - Project tests cover Windows path normalization, Git common-directory identity,
-  boundary escape, duplicate import, and identity conflict using temporary Git
-  repositories.
+  boundary escape, duplicate import, identity conflict, and valid, unborn,
+  failed, and ambiguous results from the separate HEAD command using temporary
+  Git repositories plus an injected process boundary.
 - Profile tests cover strict YAML, immutable revisions, stale approval, global
   and project scope, pinned one-level extension, forbidden recursion, exact
   replacement/append merge rules, digest stability, and preserved old snapshots.
@@ -638,20 +676,27 @@ databases, loopback ephemeral ports, and Playwright Chromium.
   resolution, start, streaming, nested child activity, malformed input,
   interruption, exact resume, and failure.
 - Runtime tests prove intent-before-side-effect, raw-before-normalized-before-
-  publish, lifecycle legality, required-skill fail-closed, preferred fallback,
-  audit-barrier behavior, and reconciliation outcomes.
+  publish, lifecycle legality, required-capability and required-skill
+  fail-closed behavior with zero adapter starts, preferred fallback, all four
+  audit-write failure points with rollback/session-stop/no-publication/no-later-
+  consumption evidence, and reconciliation outcomes.
 - Transport tests cover local origin, strict commands, stable errors, project
-  snapshots, replay, duplicate delivery, gaps, resync, and stop-accepting.
+  snapshots, replay, duplicate delivery, gaps, resync, stop-accepting, and
+  deterministic domain/runtime publications interleaved with replay.
 - React tests cover every selector and focused-shell state and prove future-pane
   placeholders have no active workflow controls.
 - V1 regression gates build and test `contracts`, `server`, `web`, and `e2e`
-  unchanged while the normal repository gate includes the new V2 projects.
+  unchanged. The normal repository `verify` gate explicitly runs both the V1
+  `e2e` and V2 `v2-e2e` Chromium targets while excluding `external-smoke`.
 
 ### Executable Todo stop-condition scenario
 
 `v2-e2e` creates a temporary frontend/backend Todo Git repository with one
-commit and a temporary V2 database. It launches the built V2 web and server with
-the fake adapter, registers and selects the repository through the browser,
+commit and a temporary V2 database. It builds the V2 web and server, then
+launches only the built V2 Node server with the fake adapter, an explicit
+built-web root, and ephemeral loopback port. The fixture parses the server's
+structured ready line and uses that single origin for UI, API, and WebSocket;
+it registers and selects the repository through the browser,
 approves a global and extending project profile through V2 commands, and starts
 `todo-foundation-v1`.
 
@@ -676,7 +721,10 @@ repository map and M1 request/event/restart flow. It adds
 `docs/development/v2-foundation.md` with V1/V2 commands, ports, environment
 names, data paths, fake-only verification, database identity behavior, and the
 Todo scenario. V1 session-platform guidance remains accurate and links to the
-V2 guide rather than being rewritten as V2.
+V2 guide rather than being rewritten as V2. The documentation task indexes the
+complete docs corpus with jDocMunch, reports the overall broken-link count, and
+requires zero broken links sourced from those three changed development
+documents; formatting alone is not link proof.
 
 ## Autonomous Decisions
 
@@ -690,11 +738,12 @@ V2 guide rather than being rewritten as V2.
 | What profile states exist in M1? | Immutable human-approved revisions only; the approval command directly creates the next revision. | Satisfies approval snapshots without building proposal or planning workflows. |
 | How does one-level extension merge? | Missing fields inherit, present fields replace, and instructions append behind a labelled separator. | Deterministic and reviewable; avoids surprising array unions. |
 | Which assignment exists? | `foundation-check` only. | Exercises the substrate without introducing Task, Developer, QA, run, or integration semantics. |
-| How are unavailable skills handled? | Preferred falls back to `mesh.foundation-check/v1`; required stores failure before `start`. | Preserves Mesh-owned workflow semantics and proves fail-closed behavior. |
+| How are unavailable capabilities or skills handled? | Required capabilities and skills store durable failure before an operation intent or `start`; preferred skills fall back to `mesh.foundation-check/v1`. | Preserves Mesh-owned workflow semantics and proves fail-closed behavior with zero external side effects. |
 | Which harness runs? | A deterministic fake adapter only. | Proves neutrality and recovery without subscription usage; real adapter work remains later. |
 | How does restart work? | Resume the same execution only after exact fake probe proof; otherwise require attention. | Demonstrates durable recovery without guessing or provider session concepts. |
-| How are event orders modeled? | Independent domain and runtime sequences per project, joined by Mesh IDs. | Separates authority from transport while preserving replay and diagnostics. |
-| What happens on audit failure? | Trip a server-wide mutation barrier and stop the affected fake runtime. | Prevents unaudited continuation; restart reconciliation exposes ambiguity. |
+| How are event orders modeled? | Independent domain and runtime sequences per project, joined by Mesh IDs; realtime subscribes before replay and drains buffered events against each replay high-water. | Separates authority from transport without a replay/listener lost-event window. |
+| What happens on audit failure? | Roll back, trip a server-wide mutation barrier, stop consuming, interrupt best-effort, and close the affected owned session. | Prevents publication or unaudited continuation at every write stage; restart reconciliation exposes ambiguity. |
+| How does the stop-condition browser avoid port and origin races? | One production-built V2 server binds an ephemeral loopback port and serves the explicitly configured built-web root on the same origin. | Eliminates Vite/server collision and cross-origin setup while retaining a real process restart. |
 | What UI is delivered? | Project selector and focused shell with honest future-pane placeholders plus profile/execution diagnostics. | Proves project focus without prematurely implementing later workflows. |
 | Should project/profile deletion exist? | No; deselection and new immutable profile revisions are the M1 reverse paths. | Avoids destructive state and cleanup semantics not needed by the stop condition. |
 
@@ -709,13 +758,14 @@ V2 guide rather than being rewritten as V2.
   and immutable execution snapshots match the defined schema and merge rules.
 - WorkerExecution contains Mesh assignment/runtime facts only and the fake
   adapter satisfies the exact contract.
-- Preferred and required skills produce durable, deterministic snapshots with
-  fallback and fail-closed behavior.
-- Raw diagnostics and ordered events obey the audit barrier before publication.
+- Required capabilities plus preferred and required skills produce durable,
+  deterministic snapshots with zero-start fail-closed behavior or fallback.
+- Raw diagnostics and ordered events obey the audit barrier before publication;
+  every audit-stage failure rolls back and stops the owned session.
 - Restart reconciliation is evidence-based and demonstrated with a fresh server
   and fake adapter object.
 - UI loading, empty, disconnected, stale, failure, attention, and terminal
-  states converge from snapshots and replay.
+  states converge from snapshots and gap-free subscribe-before-replay delivery.
 - The Todo scenario and all default checks use fake or temporary resources and
   emit no external-agent traffic.
 - Later milestone concepts and generic frameworks are absent.

@@ -35,9 +35,10 @@ Library, and Playwright.
   V2 imports contracts only as `@mesh/v2-contracts`.
 - V2 must not import `@mesh-session-platform/contracts` or any file beneath
   `apps/server`, `apps/web`, or `e2e`. V1 must not import V2 code.
-- V1 ports remain `3737` and `4200`. V2 ports are `3838` and `4300`. V2 reads
-  only `MESH_V2_*` settings and defaults to `.mesh/v2/mesh-v2.sqlite` under the
-  operator home directory.
+- V1 ports remain `3737` and `4200`. V2 server/web development ports default to
+  `3838` and `4300`; only the test-only built-server fixture may request server
+  port `0`. V2 reads only `MESH_V2_*` settings and defaults to
+  `.mesh/v2/mesh-v2.sqlite` under the operator home directory.
 - SQLite application ID is exactly `1297494528`; the migration ledger is
   `v2_schema_migrations`; a non-empty database without that identity is rejected
   before mutation.
@@ -49,10 +50,12 @@ Library, and Playwright.
   append after `Project specialization:`. Arrays never union implicitly.
 - Preferred unavailable skills use `mesh.foundation-check/v1`; required
   unavailable skills create `required_skill_unavailable` and must not call the
-  adapter start method.
+  adapter start method. Missing `requiredCapabilities` create
+  `required_capability_unavailable` before operation intent or adapter start.
 - Raw harness input and required diagnostics commit before normalized runtime or
-  lifecycle publication. Any failed audit write trips the mutation barrier and
-  stops the affected runtime best-effort.
+  lifecycle publication. Any failed audit write rolls back, trips the mutation
+  barrier, stops event consumption, interrupts best-effort, closes the affected
+  owned session, and publishes nothing.
 - No M1 type, table, command, route, component, or copy may introduce
   `PlanningCycle`, Requirement Ledger records, milestones, tasks, attempts,
   runs, scheduling, QA, evidence verdicts, integration authority, worktree
@@ -60,6 +63,9 @@ Library, and Playwright.
 - All normal tests use temporary Git repositories, temporary V2 databases,
   fake harnesses, and loopback ports. No verification command may invoke Codex,
   Claude Code, an SDK query, or a paid API.
+- The root `verify` script runs both `e2e` and `v2-e2e` with Chromium and keeps
+  `external-smoke` excluded. The V2 stop-condition browser uses one built server
+  origin; it never starts Vite beside the server.
 - Every behavior change follows red-green-refactor. Before each commit, run the
   task's complete focused gate and `git diff --check`.
 
@@ -118,6 +124,7 @@ export interface HarnessAdapter {
 export interface HarnessSession {
   readonly nativeHandle: string;
   events(afterAdapterCursor: number): AsyncIterable<HarnessEventEnvelope>;
+  close(): Promise<void>;
 }
 
 export type ProjectRegisterEnvelope = V2CommandEnvelope & {
@@ -211,12 +218,12 @@ export class V2CommandRepository {
 | Wave | Tasks | Why ready | Non-overlap proof | Gate |
 | --- | --- | --- | --- | --- |
 | 0 | T01 | No implementation dependency | Sole owner of root dependency/path edits, V2 project scaffolds, and all `packages/v2-contracts/**` | Contract tests, scaffold typechecks/builds |
-| 1 | T02, T03 | T01 contracts accepted | T02 owns only `apps/v2-server/src/db`, `storage`, and test DB helper; T03 owns only `apps/v2-web/src/components`, component tests, and shell CSS | Database tests plus presentational UI tests |
+| 1 | T02, T03 | T01 contracts accepted | T02 owns only `apps/v2-server/src/db`, `storage`, and test DB helper; T03 owns only `apps/v2-web/src/components`, component tests, and shell CSS | Source/production-output database tests plus presentational UI tests |
 | 2 | T04, T05, T06, T07 | T02 schema accepted for server work; T01 contracts accepted for web work | Separate server `projects`, `profiles`, `executions` directories and separate web `api`/`state` directories | All four focused suites and typechecks |
-| 3 | T08 | Project, profile, execution services accepted | Sole owner of V2 server config, platform process/path boundary, HTTP, realtime, app, main, and server integration tests | V2 server test/typecheck/build |
+| 3 | T08 | Project, profile, execution services accepted | Sole owner of V2 server config, platform process/path boundary, HTTP, realtime, app, main, and server integration tests | V2 server tests including both replay interleavings, typecheck, and build |
 | 4 | T09 | Presentational shell, web projection, and server protocol accepted | Sole owner of V2 web app/main and integrated UI tests | V2 web test/typecheck/build |
-| 5 | T10 | Integrated V2 apps accepted | Sole owner of `e2e-v2/**` | Todo restart e2e |
-| 6 | T11 | T10 executable commands and evidence accepted | Sole owner of named development docs | Documentation formatting and link checks |
+| 5 | T10 | Integrated V2 apps accepted | Sole owner of `e2e-v2/**` | Same-origin built-server Todo restart e2e |
+| 6 | T11 | T10 executable commands and evidence accepted | Sole owner of named development docs | Documentation formatting and jDocMunch link checks |
 
 No two tasks in one wave own the same file or interface. If a worker discovers
 that it must change a T01 contract or T02 table, the affected wave stops and the
@@ -306,6 +313,10 @@ realtime, UI components, and e2e behavior.
 `DomainEvent`, `RuntimeEvent`, `RawDiagnostic`, `V2SystemSnapshot`,
 `V2ProjectSnapshot`, `V2CommandResult`, `ClientRealtimeMessage`, and
 `ServerRealtimeMessage`. Export both each Zod schema and its inferred type.
+The closed V2 error-code schema includes
+`required_capability_unavailable`, `repository_head_unborn`,
+`repository_head_failed`, and `repository_head_ambiguous` for the owning
+services below; later tasks may not add these as ad hoc strings.
 
 - [ ] **Step 1: Add failing contract tests**
 
@@ -369,6 +380,50 @@ export const V2_SERVER_NOT_COMPOSED = true as const;
 export const V2_WEB_NOT_COMPOSED = true as const;
 ```
 
+T01 is the sole owner of `apps/v2-server/project.json`, so it must reserve the
+production database entrypoint and migration assets that T02 will supply:
+
+```json
+{
+  "targets": {
+    "build": {
+      "options": {
+        "additionalEntryPoints": ["apps/v2-server/src/db/database.ts"],
+        "assets": [
+          {
+            "input": "apps/v2-server/src/db/migrations",
+            "glob": "**/*.sql",
+            "output": "db/migrations"
+          },
+          {
+            "input": "apps/v2-server/src/db/migrations",
+            "glob": "**/*.sql",
+            "output": "apps/v2-server/src/db/migrations"
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+The production build must therefore emit
+`apps/v2-server/src/db/database.js` and both supported migration asset layouts,
+including `apps/v2-server/src/db/migrations/001_foundation.sql`, beneath a
+custom output root once T02 lands. This mirrors the repository's proven
+source-relative production migration lookup without importing V1 code.
+T01 also changes the root verification script exactly to keep both acceptance
+suites in the normal fake-only gate:
+
+```json
+{
+  "verify": "nx format:check && nx run-many -t lint typecheck test build --exclude=external-smoke && nx e2e e2e --project=chromium && nx e2e v2-e2e --project=chromium"
+}
+```
+
+The `v2-e2e` project arrives in T10, so Waves 0-4 use their listed wave gates;
+from Wave 5 onward `corepack pnpm verify` is the complete repository gate.
+
 Use `z.strictObject`, UUID IDs, ISO timestamp validation, non-negative integer
 revisions/cursors, lowercase logical IDs, and discriminated unions. Do not use
 `z.unknown()` for authoritative payloads; raw diagnostics alone may carry
@@ -382,6 +437,7 @@ corepack pnpm nx typecheck v2-contracts
 corepack pnpm nx typecheck v2-server
 corepack pnpm nx typecheck v2-web
 corepack pnpm nx build v2-contracts
+node -e "const s=require('./package.json').scripts.verify;if(!s.includes('nx e2e e2e --project=chromium')||!s.includes('nx e2e v2-e2e --project=chromium')||!s.includes('--exclude=external-smoke'))process.exit(1)"
 git diff --check
 ```
 
@@ -396,8 +452,10 @@ git commit -m "feat(v2): establish foundation contracts"
 
 **Acceptance criteria:** All named contracts parse valid examples and reject
 wrong scope, unknown fields, duplicate skill requests, invalid lifecycle values,
-and provider-native fields; Nx sees three distinct V2 projects; V1 files are
-unchanged.
+provider-native fields, and missing-capability failure codes; Nx sees three
+distinct V2 projects; the server build contract includes the T02 database entry
+and SQL assets; the root verifier names both e2e targets and excludes
+`external-smoke`; V1 files are unchanged.
 
 ### Task T02: V2 Database Identity, Schema, Commands, and Event Stores
 
@@ -412,6 +470,7 @@ atomic command results, and independent project domain/runtime ordering.
 - Create: `apps/v2-server/src/db/migrate.ts`
 - Create: `apps/v2-server/src/db/migrations/001_foundation.sql`
 - Create: `apps/v2-server/src/db/database.spec.ts`
+- Create: `apps/v2-server/src/db/database.production.spec.ts`
 - Create: `apps/v2-server/src/storage/command-repository.ts`
 - Create: `apps/v2-server/src/storage/event-store.ts`
 - Create: `apps/v2-server/src/storage/event-store.spec.ts`
@@ -462,13 +521,44 @@ it('orders domain and runtime streams independently', () => {
 });
 ```
 
+Add a production-output test owned by T02. Its `beforeAll` uses the repository's
+proven shell-free `corepack pnpm nx build` test helper pattern to build
+`v2-server --configuration=production --skip-nx-cache` into a unique temporary
+output beneath the worktree, after removing inherited `NX_*` task variables.
+This makes the proof run under `nx test v2-server` and the root verifier without
+depending on a pre-existing `dist`. Import the emitted `database.js`, prove the
+SQL asset is present, and open a fresh database through that built module rather
+than through TypeScript source:
+
+```ts
+beforeAll(() => runProductionV2Build(workspaceRoot, builtRoot));
+
+it('opens a fresh V2 database from the production build', async () => {
+  const builtDatabase = join(builtRoot, 'apps/v2-server/src/db/database.js');
+  const builtMigration = join(
+    builtRoot,
+    'apps/v2-server/src/db/migrations/001_foundation.sql',
+  );
+  expect(existsSync(builtMigration)).toBe(true);
+  const built = createRequire(__filename)(builtDatabase);
+  const database = built.openV2Database(join(directory, 'built.sqlite'));
+  expect(database.pragma('application_id', { simple: true })).toBe(1_297_494_528);
+  expect(
+    database.prepare("SELECT name FROM sqlite_schema WHERE name = 'worker_executions'").get(),
+  ).toBeDefined();
+  database.close();
+});
+```
+
 - [ ] **Step 2: Run red**
 
 ```powershell
 corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/storage/event-store.spec.ts --config apps/v2-server/vitest.config.ts
+corepack pnpm exec vitest run apps/v2-server/src/db/database.production.spec.ts --config apps/v2-server/vitest.config.ts
 ```
 
-Expected: failure because database and storage modules do not exist.
+Expected: failure because database/storage modules and the packaged migration do
+not exist.
 
 - [ ] **Step 3: Implement identity and migration**
 
@@ -515,9 +605,10 @@ appendRuntimeWithDiagnosticInTransaction(
 - [ ] **Step 5: Run the T02 gate**
 
 ```powershell
-corepack pnpm exec vitest run apps/v2-server/src/db apps/v2-server/src/storage --config apps/v2-server/vitest.config.ts
+corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/storage --config apps/v2-server/vitest.config.ts
+corepack pnpm exec vitest run apps/v2-server/src/db/database.production.spec.ts --config apps/v2-server/vitest.config.ts
 corepack pnpm nx typecheck v2-server
-corepack pnpm nx build v2-server
+corepack pnpm nx build v2-server --configuration=production --skip-nx-cache
 git diff --check
 ```
 
@@ -534,7 +625,9 @@ git commit -m "feat(v2): add isolated foundation datastore"
 **Acceptance criteria:** Both fresh and existing V2 databases open; non-empty
 unknown databases retain their byte hash on rejection; all M1 tables exist;
 transactions roll back completely; stream sequences are gap-free per project
-and kind; raw diagnostic insert failure creates no runtime event.
+and kind; raw diagnostic insert failure creates no runtime event; the production
+build packages migration 001 and its emitted database entrypoint opens a fresh
+identified database.
 
 ### Task T03: Presentational Project Selector and Focused Shell
 
@@ -715,7 +808,30 @@ it('does not silently rebind an existing repository identity', async () => {
 Use temporary Git repositories to cover canonical root, common directory,
 Windows case normalization, non-repository, boundary escape, duplicate same
 command, same request with a second idempotency key, and conflicting input under
-one key.
+one key. Use a committed temporary repository for the valid HEAD case, an
+initialized repository with no commit for the unborn case, and the injected
+process runner for failed and ambiguous results:
+
+```ts
+it.each([
+  ['unborn', 'repository_head_unborn'],
+  ['failed', 'repository_head_failed'],
+  ['ambiguous', 'repository_head_ambiguous'],
+] as const)('rejects a %s HEAD without storing a project', async (outcome, code) => {
+  processRunner.headOutcome = outcome;
+  await expect(resolveRepositoryIdentity(repository)).rejects.toMatchObject({ code });
+  expect(projects.list()).toEqual([]);
+});
+
+it('stores the separately verified commit object ID', async () => {
+  const identity = await resolveRepositoryIdentity(committedRepository);
+  expect(identity.headCommit).toMatch(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/);
+  expect(processRunner.calls.at(-1)?.args).toEqual([
+    '-c', 'credential.interactive=false', '-C', identity.canonicalPath,
+    'rev-parse', '--verify', 'HEAD^{commit}',
+  ]);
+});
+```
 
 - [ ] **Step 2: Run red**
 
@@ -739,7 +855,21 @@ const result = await processRunner.run(
    'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'],
   { cwd: canonicalPath },
 );
+
+const head = await processRunner.run(
+  gitExecutable,
+  ['-c', 'credential.interactive=false', '-C', canonicalPath,
+   'rev-parse', '--verify', 'HEAD^{commit}'],
+  { cwd: canonicalPath },
+);
 ```
+
+Do not combine the root/common-directory and HEAD queries. Accept exactly one
+trimmed lowercase 40- or 64-hex object ID. Map the real empty-repository result
+to `repository_head_unborn`, process spawn/timeout or other nonzero failure to
+`repository_head_failed`, and Git ambiguity or multiple/invalid successful
+output lines to `repository_head_ambiguous`; every case fails before the
+registration transaction.
 
 Registration transaction inserts the project at revision 1, appends
 `project.registered`, and stores the command result before commit. Publish is a
@@ -763,6 +893,8 @@ git commit -m "feat(v2): add explicit project registry"
 **Acceptance criteria:** All identity/path failures write nothing; successful
 registration writes one project, one command result, and one ordered domain
 event; duplicate identity never changes the stored path; no Git write occurs.
+Valid, unborn, failed, and ambiguous HEAD outcomes have focused executable
+tests, and `Project.headCommit` always comes from the separate verified command.
 
 ### Task T05: Approved WorkerProfile Registry and Resolution
 
@@ -934,6 +1066,7 @@ export class ExecutionRuntime {
   start(envelope: StartExecutionEnvelope): Promise<V2CommandResult>;
   interrupt(envelope: InterruptExecutionEnvelope): Promise<V2CommandResult>;
   attach(executionId: string, session: HarnessSession): Promise<void>;
+  drain(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -985,7 +1118,8 @@ it('resumes the Todo script from the next durable adapter cursor', async () => {
 ```
 
 Also cover capabilities, descriptors, nested child events, malformed envelope,
-adapter failure, interrupt idempotency, and no cursor duplication.
+adapter failure, interrupt idempotency, `HarnessSession.close()` stopping the
+iterator, and no cursor duplication.
 
 - [ ] **Step 2: Run fake tests red**
 
@@ -1021,6 +1155,27 @@ export const legalExecutionTransitions = new Set([
 - [ ] **Step 4: Write failing runtime/audit/skill tests**
 
 ```ts
+it('durably fails a missing required capability before adapter start', async () => {
+  fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
+  const result = await runtime.start(requiresExecutionStreamCommand);
+  expect(result).toMatchObject({
+    ok: false,
+    error: { code: 'required_capability_unavailable' },
+  });
+  expect(executions.list(project.id)[0]).toMatchObject({
+    lifecycle: 'failed',
+    failure: {
+      code: 'required_capability_unavailable',
+      missing: ['execution.stream'],
+    },
+  });
+  expect(events.domainAfter(project.id, 0).events.at(-1)?.type)
+    .toBe('worker_execution.failed');
+  expect(commands.find(requiresExecutionStreamCommand.idempotencyKey)).toBeDefined();
+  expect(operations.listForExecution(executionId)).toEqual([]);
+  expect(fake.startCount).toBe(0);
+});
+
 it('fails a missing required skill before adapter start', async () => {
   const result = await runtime.start(requiredUnavailableCommand);
   expect(result).toMatchObject({
@@ -1032,21 +1187,64 @@ it('fails a missing required skill before adapter start', async () => {
     .toBe('unavailable');
 });
 
-it('publishes only after diagnostic and runtime commit', async () => {
-  failDiagnosticInsert();
-  await expect(runtime.start(startCommand)).rejects.toThrow();
-  expect(published).toEqual([]);
+it.each([
+  'raw_insert',
+  'runtime_insert',
+  'cursor_update',
+  'lifecycle_domain_append',
+] as const)('contains an audit failure at %s', async (faultPoint) => {
+  const session = await fixture.startOwnedSession();
+  const before = fixture.auditSnapshot();
+  fixture.installSqliteAbortTrigger(faultPoint);
+
+  await fixture.releaseOneEnvelopeThatReaches(faultPoint);
+  await runtime.drain();
+
+  expect(fixture.auditSnapshot()).toEqual(before);
   expect(barrier.status).toBe('tripped');
+  expect(fake.interruptCalls).toEqual([session.nativeHandle]);
+  expect(session.closeCount).toBe(1);
+  expect(published).toEqual([]);
+  expect(session.consumedAdapterCursors).toEqual([fixture.failingAdapterCursor]);
 });
 ```
 
+`installSqliteAbortTrigger` is test-only SQL in
+`execution-runtime.spec.ts`: abort before `raw_diagnostics` insert, before
+`runtime_events` insert, before the `worker_executions` cursor update, or before
+the lifecycle `domain_events` insert after the lifecycle update. Each test
+captures rows and execution revision immediately before the envelope
+transaction, so equality proves rollback of diagnostics, runtime data, cursors,
+lifecycle, and domain sequence. Repeat the raw-insert case with
+`adapter.interrupt` throwing and assert `session.closeCount === 1`; interruption
+is best-effort but closure and consumption stop are mandatory. The fake iterator
+records every `next()` request, so the final assertion proves no later envelope
+was consumed rather than relying on a timer.
+
 - [ ] **Step 5: Implement execution start, stream, interrupt, and reconcile**
 
-Snapshot capabilities/profile/skills before side effects. Persist operation
-intent before `start` or `interrupt`. For every envelope use the T02 atomic
-diagnostic/runtime method, apply lifecycle in the same transaction, then publish
-runtime followed by domain events. Invalid normalized input is an audited
-adapter failure, never an unvalidated event.
+Read and store the adapter capability snapshot, then compare every effective
+profile `requiredCapabilities` value before skill resolution, operation intent,
+or `start`. Missing capabilities atomically store the terminal execution,
+`worker_execution.failed` domain event, command result, and structured missing
+list; publish that committed domain event and return without creating an
+operation or calling the adapter. Apply the same no-operation/no-start rule to a
+missing required skill.
+
+For allowed starts, snapshot profile/skills before side effects and persist the
+operation intent before `start` or `interrupt`. For every envelope use one
+immediate transaction for raw insert, runtime insert, execution cursor update,
+lifecycle change/domain append, and operation observation as applicable; only
+after commit publish runtime followed by domain events. Invalid normalized input
+is an audited adapter failure, never an unvalidated event.
+
+On any envelope-transaction error, trip `AuditBarrier` synchronously before the
+iterator can request another item, remove the owned session from active
+consumption, attempt `adapter.interrupt(nativeHandle)`, and call
+`session.close()` in `finally`. Swallow interruption/close errors only after
+recording them in in-memory unhealthy diagnostics because the durable audit path
+is unavailable. Resolve `drain()` only when that containment sequence finishes;
+publish nothing from the failed transaction.
 
 Reconciliation implements every design matrix row. A new fake adapter object
 must resume `running` at `lastAdapterCursor + 1`; unknown probes and pending
@@ -1068,10 +1266,12 @@ git commit -m "feat(v2): add fake worker execution runtime"
 ```
 
 **Acceptance criteria:** Fake conformance passes; snapshots precede start;
-required skills never start; preferred skills visibly fall back; operation
-intent precedes side effect; audit failure publishes nothing and trips the
-barrier; restart resumes only with proof; no provider or future-workflow type
-exists.
+required capabilities and required skills durably fail with no operation and
+zero adapter starts; preferred skills visibly fall back; operation intent
+precedes side effect; each of the four audit failure points rolls back, trips
+the barrier, interrupts/closes the owned session, publishes nothing, and consumes
+nothing later; restart resumes only with proof; no provider or future-workflow
+type exists.
 
 ### Task T07: V2 Web API, Projection, Replay, and Resync
 
@@ -1230,6 +1430,7 @@ export type V2ServerConfig = {
   databasePath: string;
   developmentOrigin?: string;
   webRoot?: string;
+  testFakeHoldAfterAdapterCursor?: number;
 };
 
 export type RunningV2Server = {
@@ -1250,6 +1451,11 @@ export type StartV2ServerOptions = {
 export const startV2Server: (
   options?: StartV2ServerOptions,
 ) => Promise<RunningV2Server>;
+
+export type V2ReadyLine = {
+  type: 'mesh.v2.ready';
+  origin: string;
+};
 ```
 
 - [ ] **Step 1: Write failing config and route tests**
@@ -1259,6 +1465,13 @@ it('uses only the V2 port and database namespace', () => {
   const config = loadV2ServerConfig({}, 'C:\\work\\mesh');
   expect(config.port).toBe(3838);
   expect(config.databasePath).toMatch(/[\\/]\.mesh[\\/]v2[\\/]mesh-v2\.sqlite$/);
+});
+
+it('allows an ephemeral port only for the fake-only test process', () => {
+  expect(loadV2ServerConfig({ NODE_ENV: 'test', MESH_V2_PORT: '0' }, root).port)
+    .toBe(0);
+  expect(() => loadV2ServerConfig({ NODE_ENV: 'production', MESH_V2_PORT: '0' }, root))
+    .toThrowError(expect.objectContaining({ code: 'invalid_v2_port' }));
 });
 
 it('rejects a non-loopback origin before command dispatch', async () => {
@@ -1286,8 +1499,13 @@ corepack pnpm exec vitest run apps/v2-server/src/config.spec.ts apps/v2-server/s
 
 Read only `MESH_V2_HOST`, `MESH_V2_PORT`, `MESH_V2_WORKSPACE_ROOT`,
 `MESH_V2_DATA_DIR`, `MESH_V2_DATABASE_PATH`, `MESH_V2_DEV_ORIGIN`, and
-`MESH_V2_GIT_EXECUTABLE`. Approve one absolute Git executable at startup; never
-search from a repository-controlled working directory.
+`MESH_V2_GIT_EXECUTABLE`, plus `MESH_V2_WEB_ROOT` for the production static
+root. Approve one absolute Git executable at startup; never search from a
+repository-controlled working directory. Accept port `0` only when
+`NODE_ENV=test`; after reconciliation and listen, `main.ts` writes exactly one
+JSON `V2ReadyLine` to stdout containing the actual loopback bound origin.
+Only with `NODE_ENV=test`, accept `MESH_V2_FAKE_HOLD_AFTER_CURSOR` into
+`testFakeHoldAfterAdapterCursor`; reject that setting in every other mode.
 
 ```ts
 app.post('/api/v2/commands', async (request, reply) => {
@@ -1300,6 +1518,25 @@ app.post('/api/v2/commands', async (request, reply) => {
 - [ ] **Step 4: Write failing replay and restart-order tests**
 
 ```ts
+it.each(['domain', 'runtime'] as const)(
+  'does not lose a %s event published while replay is blocked',
+  async (stream) => {
+    const fixture = await createSocketReplayFixture(stream);
+    const subscription = fixture.subscribeFrom(0);
+    await fixture.waitUntilListenerInstalledAndReplayBlocked();
+
+    const interleaved = fixture.commitAndPublishNext(stream);
+    fixture.releaseReplay();
+
+    expect(await subscription.collectThrough(interleaved.sequence)).toEqual(
+      fixture.eventsThrough(interleaved.sequence),
+    );
+    expect(subscription.sequences(stream)).toEqual(
+      fixture.contiguousSequencesThrough(interleaved.sequence),
+    );
+  },
+);
+
 it('reconciles before accepting a snapshot request', async () => {
   const first = await startV2Server({ test: restartFixture.holdAtCursor2 });
   await restartFixture.startExecution(first.origin);
@@ -1317,10 +1554,27 @@ it('reconciles before accepting a snapshot request', async () => {
 - [ ] **Step 5: Implement realtime and server lifecycle**
 
 Construct repositories/services, run `reconcileExecutions`, publish recovered
-committed events, then listen. Socket subscription replays both cursors before
-installing live listeners and closes with `v2.resync_required` on a retained
-gap. Shutdown order is stop accepting, reject new starts, close socket hub,
-drain runtime event promises, close execution runtime, close database.
+committed events, then begin accepting network traffic. A socket subscription
+uses one serialized state machine per connection:
+
+1. validate the project and both client cursors;
+2. install domain and runtime committed-publication listeners in `buffering`
+   mode before querying either replay window;
+3. read retained windows and their `highWater` values, then send each replay in
+   stream order;
+4. discard buffered duplicates whose sequence is at or below that stream's
+   replay high-water, and drain later buffered events in exact sequence;
+5. keep buffering publications that arrive during the drain, repeat until the
+   queue is empty, then atomically change the already-installed listeners to
+   `live` mode.
+
+A retained gap or non-contiguous buffer closes with `v2.resync_required`.
+Listener cleanup occurs on every error/close. The two deterministic tests above
+block replay sending only after listeners are observably installed, commit and
+publish one event during that block, and prove exactly-once contiguous delivery
+for domain and runtime independently. Shutdown order is stop accepting, reject
+new starts, close socket hub, drain runtime event promises, close execution
+runtime, close database.
 
 - [ ] **Step 6: Run the T08 gate**
 
@@ -1340,8 +1594,10 @@ git commit -m "feat(v2): compose foundation server"
 
 **Acceptance criteria:** V2 config cannot collide by default with V1; only
 loopback traffic enters; routes and sockets use strict V2 schemas; events replay
-before live follow; reconciliation precedes listen; audit/stop barriers reject
-mutation; build serves only `dist/apps/v2-web` in production.
+without a listener gap and interleavings are deduplicated per stream;
+reconciliation precedes listen; audit/stop barriers reject mutation; a test
+production process may bind port zero, reports its actual origin once, and
+serves only the explicit V2 built-web root.
 
 ### Task T09: Integrated V2 Web Application
 
@@ -1455,6 +1711,8 @@ contracts only.
 
 **Interface produced:** Nx project `v2-e2e` whose `e2e` target depends on
 `v2-server:build` and `v2-web:build` and runs Playwright Chromium with one worker.
+The built server is the sole child process and serves `dist/apps/v2-web` on its
+own ephemeral loopback origin.
 
 - [ ] **Step 1: Write the failing browser scenario**
 
@@ -1462,7 +1720,7 @@ contracts only.
 test('Todo foundation survives restart without V1 state', async ({ page }) => {
   const fixture = await V2ProcessFixture.createTodo();
   await fixture.start({ holdAfterAdapterCursor: 2 });
-  await page.goto(fixture.webOrigin);
+  await page.goto(fixture.origin);
   await page.getByLabel('Repository path').fill(fixture.todoRepository);
   await page.getByRole('button', { name: 'Add and select project' }).click();
   await fixture.approveProfilesAndStartExecution();
@@ -1491,16 +1749,24 @@ Expected: failure because the V2 e2e project/fixture does not exist.
 - [ ] **Step 3: Implement isolated process and repository fixtures**
 
 Use `mkdtemp`, explicit resolved paths, `git init`, local test-only user name and
-email, and a single Todo commit. Spawn only built V2 Node and Vite processes;
-pass `NODE_ENV=test`, `MESH_V2_PORT=0`, the temporary database/path root, and
-fake hold configuration. Track exact child PIDs and terminate only those PIDs.
+email, and a single Todo commit. First build both V2 projects. Spawn only
+`dist/apps/v2-server/main.js`; do not start Vite. Pass `NODE_ENV=test`,
+`MESH_V2_PORT=0`, the temporary database/path root, the absolute
+`dist/apps/v2-web` path, and fake hold configuration. Parse exactly one ready
+line shaped like
+`{"type":"mesh.v2.ready","origin":"http://127.0.0.1:49152"}`, require the
+parsed port to be a positive integer returned by the child, reject a
+non-loopback origin, and use that same origin for Playwright, API, and WebSocket.
+Track the exact server PID and terminate only that PID.
 
 ```ts
 const environment = {
   ...minimalSystemEnvironment(),
   NODE_ENV: 'test',
+  MESH_V2_PORT: '0',
   MESH_V2_WORKSPACE_ROOT: fixtureRoot,
   MESH_V2_DATABASE_PATH: databasePath,
+  MESH_V2_WEB_ROOT: resolve('dist/apps/v2-web'),
   MESH_V2_FAKE_HOLD_AFTER_CURSOR: '2',
 };
 ```
@@ -1526,7 +1792,8 @@ git commit -m "test(v2): prove foundation restart scenario"
 **Acceptance criteria:** Browser proves selection and focus; execution/profile/
 skills remain stable; runtime resumes with no duplicate/gap; required failure
 never starts; database mismatch is non-mutating; teardown touches only owned
-temporary paths; no external-agent traffic occurs.
+temporary paths; the UI/API/socket share one ephemeral server origin; no Vite,
+port collision, cross-origin allowance, or external-agent traffic occurs.
 
 ### Task T11: V2 Foundation Operating Documentation
 
@@ -1587,8 +1854,29 @@ corepack pnpm exec prettier --check docs/development/architecture.md docs/develo
 git diff --check
 ```
 
-Expected: formatting and whitespace checks exit zero; links resolve within the
-repository.
+Then use the required jDocMunch MCP surface, not an inferred formatter result:
+
+```text
+index_local {
+  "path": "docs",
+  "name": "mesh-v2-foundation-docs",
+  "incremental": false,
+  "use_ai_summaries": false,
+  "use_embeddings": false,
+  "worktree_mode": "branch_local"
+}
+get_broken_links { "repo": "local/mesh-v2-foundation-docs" }
+```
+
+Expected: formatter and `git diff --check` exit zero, `index_local` covers the
+complete `docs` corpus without truncation so cross-document targets can resolve,
+and `get_broken_links` contains zero entries whose `source_file` is one of the
+three changed documents. Record both MCP receipts, the reported overall
+`broken_link_count`, and the changed-source filtered count in TASK HANDOFF
+verification. Any broken link sourced from a changed document blocks the task;
+pre-existing entries sourced elsewhere are reported as unverified repository
+debt rather than silently claimed clean. If jDocMunch is unavailable, mark the
+task blocked; do not claim links were verified.
 
 - [ ] **Step 4: Commit**
 
@@ -1599,7 +1887,9 @@ git commit -m "docs(v2): document foundation operation"
 
 **Acceptance criteria:** Documentation describes implemented M1 only, keeps V1
 instructions accurate, distinguishes all ports/settings/data, labels fake-only
-behavior, and contains no provider smoke-test instruction.
+behavior, contains no provider smoke-test instruction, and has a reported
+jDocMunch full-corpus scan with zero broken links sourced from the three changed
+documents.
 
 ## Deterministic Integration Order and Wave Gates
 
@@ -1661,21 +1951,21 @@ corepack pnpm nx build v2-web
 After Wave 5:
 
 ```powershell
-corepack pnpm nx e2e v2-e2e --project=chromium
-corepack pnpm nx typecheck v2-e2e
+corepack pnpm verify
 ```
 
 After Wave 6:
 
 ```powershell
-corepack pnpm nx e2e v2-e2e --project=chromium
 corepack pnpm verify
 ```
 
 `corepack pnpm verify` is permitted because repository policy defines it as
-deterministic and fake-only. The `external-smoke` target remains excluded. Any
-new prompt, SDK query, or real harness process in this gate is a milestone
-failure.
+deterministic and fake-only. T01 makes that script run both
+`nx e2e e2e --project=chromium` and
+`nx e2e v2-e2e --project=chromium`; the `external-smoke` target remains
+excluded. Any missing e2e invocation, new prompt, SDK query, or real harness
+process in this gate is a milestone failure.
 
 ## Final Milestone Acceptance Audit
 
@@ -1688,24 +1978,30 @@ design section:
 2. Scope and deferrals: search V2 symbols and routes for every prohibited
    future concept and real adapter dependency; any implementation is a finding.
 3. V2/V1 boundaries: inspect imports, Nx projects, ports, environment variables,
-   database paths, and run focused V1 plus V2 builds/tests.
+   database paths, production SQL assets/database-open proof, and the root
+   verifier's explicit V1 plus V2 e2e invocations.
 4. Project identity/selection: verify temporary Git path, conflict, deselect,
-   reload, Windows normalization, and no repository mutation.
+   reload, Windows normalization, separate verified HEAD command with valid,
+   unborn, failed, and ambiguous cases, and no repository mutation.
 5. Profiles: verify strict YAML, immutable revision, one-level extension,
    approval actor, merge rules, stale write, and old snapshot preservation.
 6. Skills/execution: verify assignment/profile/capability/skill snapshots,
-   preferred fallback, required fail-closed, fake conformance, child activity,
-   lifecycle, and interrupt reverse state.
+   preferred fallback, required capability/skill durable zero-start failures,
+   fake conformance, child activity, lifecycle, and interrupt reverse state.
 7. Persistence/audit: verify application ID, fresh/reopen/mismatch cases,
    transaction rollback, idempotency, independent ordering, raw diagnostic
-   reference, publish-after-commit, and audit barrier.
+   reference, publish-after-commit, and all four audit-failure points with
+   session interrupt/close, no publication, and no later consumption.
 8. Commands/realtime/UI: verify strict routes, local origin, snapshot/replay,
-   duplicate/gap/resync, selector/focused-shell states, and inert future panes.
+   duplicate/gap/resync, deterministic domain/runtime replay interleavings,
+   selector/focused-shell states, and inert future panes.
 9. Restart/security/workspace/billing: verify a fresh process and fake adapter
    resume from durable cursor, ambiguity attention, loopback/path safety, no
-   filesystem mutation, no credentials, and no external-agent traffic.
+   filesystem mutation, one ephemeral same-origin built server with no Vite, no
+   credentials, and no external-agent traffic.
 10. Documentation: verify current docs name exact implemented behavior and keep
-    V1 instructions correct.
+    V1 instructions correct; cite the full-corpus jDocMunch index receipt,
+    overall broken-link count, and zero changed-source broken-link result.
 
 The reviewer then runs fresh:
 
