@@ -907,6 +907,73 @@ describe('V2 foundation contracts', () => {
     ).toThrow(/project/i);
   });
 
+  it('accepts global and matching-project profiles for harness start and resume', () => {
+    const globalStart = {
+      executionId,
+      project,
+      assignment: execution.assignment,
+      profile: resolvedProfile,
+      resolvedSkills: execution.resolvedSkills,
+    };
+    const projectStart = {
+      ...globalStart,
+      profile: resolvedProjectProfile,
+    };
+
+    expect(harnessStartRequestSchema.parse(globalStart).profile.projectId).toBe(
+      null,
+    );
+    expect(
+      harnessStartRequestSchema.parse(projectStart).profile.projectId,
+    ).toBe(projectId);
+    expect(
+      harnessResumeRequestSchema.parse({
+        ...globalStart,
+        nativeHandle: 'fake-handle-global',
+        afterAdapterCursor: 1,
+      }).profile.projectId,
+    ).toBe(null);
+    expect(
+      harnessResumeRequestSchema.parse({
+        ...projectStart,
+        nativeHandle: 'fake-handle-project',
+        afterAdapterCursor: 1,
+      }).profile.projectId,
+    ).toBe(projectId);
+  });
+
+  it('rejects a cross-project profile snapshot from a harness start request', () => {
+    expect(() =>
+      harnessStartRequestSchema.parse({
+        executionId,
+        project,
+        assignment: execution.assignment,
+        profile: {
+          ...resolvedProjectProfile,
+          projectId: otherProjectId,
+        },
+        resolvedSkills: execution.resolvedSkills,
+      }),
+    ).toThrow(/project/i);
+  });
+
+  it('rejects a cross-project profile snapshot from a harness resume request', () => {
+    expect(() =>
+      harnessResumeRequestSchema.parse({
+        executionId,
+        project,
+        assignment: execution.assignment,
+        profile: {
+          ...resolvedProjectProfile,
+          projectId: otherProjectId,
+        },
+        resolvedSkills: execution.resolvedSkills,
+        nativeHandle: 'fake-handle-project',
+        afterAdapterCursor: 1,
+      }),
+    ).toThrow(/project/i);
+  });
+
   it('requires a project-scoped execution profile snapshot to match the execution project', () => {
     const projectExecution = {
       ...execution,

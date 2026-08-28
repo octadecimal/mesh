@@ -226,7 +226,11 @@ const harnessStartRequestShape = {
 };
 
 const requireHarnessProjectCoherence = (
-  value: { project: Project; assignment: FoundationCheckAssignment },
+  value: {
+    project: Project;
+    assignment: FoundationCheckAssignment;
+    profile: ResolvedWorkerProfileSnapshot;
+  },
   context: z.RefinementCtx,
 ) => {
   if (value.project.id !== value.assignment.projectId) {
@@ -234,6 +238,16 @@ const requireHarnessProjectCoherence = (
       code: 'custom',
       path: ['assignment', 'projectId'],
       message: 'Assignment project must match the harness project',
+    });
+  }
+  if (
+    value.profile.projectId !== null &&
+    value.profile.projectId !== value.project.id
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['profile', 'projectId'],
+      message: 'Project profile must match the harness project',
     });
   }
 };
