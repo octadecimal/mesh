@@ -21,25 +21,43 @@ const systemSnapshot: V2SystemSnapshot = {
       updatedAt: '2026-08-28T00:00:00.000Z',
     },
   ],
-  globalProfiles: [],
+  globalProfiles: [
+    {
+      profileId: '33333333-3333-4333-8333-333333333333',
+      projectId: null,
+      scope: 'global',
+      name: 'foundation-worker',
+      displayName: 'Foundation worker',
+      approvedRevision: 2,
+    },
+  ],
 };
 
 describe('ProjectSelector', () => {
-  it('submits a repository path from the ready selector', async () => {
+  it('adds and selects a repository through callback-only controls', async () => {
     const user = userEvent.setup();
-    const onRegister = vi.fn();
+    const onAddAndSelectProject = vi.fn();
+    const onSelectProject = vi.fn();
 
     render(
       <ProjectSelector
-        model={{ status: 'ready', snapshot: systemSnapshot, submitting: false }}
-        onRegister={onRegister}
+        model={{
+          status: 'ready',
+          snapshot: systemSnapshot,
+          submitting: false,
+          registration: { enabled: true },
+        }}
+        onAddAndSelectProject={onAddAndSelectProject}
+        onSelectProject={onSelectProject}
       />,
     );
 
     await user.type(screen.getByLabelText('Repository path'), 'C:\\repos\\new');
-    await user.click(screen.getByRole('button', { name: 'Add project' }));
+    await user.click(screen.getByRole('button', { name: 'Add and select project' }));
+    await user.click(screen.getByRole('button', { name: 'Select Todo' }));
 
-    expect(onRegister).toHaveBeenCalledWith('C:\\repos\\new');
+    expect(onAddAndSelectProject).toHaveBeenCalledWith('C:\\repos\\new');
+    expect(onSelectProject).toHaveBeenCalledWith(systemSnapshot.projects[0].id);
     expect(screen.getByRole('list', { name: 'Known projects' })).toHaveTextContent(
       'Todo',
     );
@@ -47,10 +65,10 @@ describe('ProjectSelector', () => {
 
   it('renders loading, empty, disconnected, and invalid-path states with safe controls', () => {
     const { rerender } = render(
-      <ProjectSelector model={{ status: 'loading' }} onRegister={vi.fn()} />,
+      <ProjectSelector model={{ status: 'loading' }} onAddAndSelectProject={vi.fn()} onSelectProject={vi.fn()} />,
     );
     expect(screen.getByRole('status')).toHaveTextContent('Loading projects');
-    expect(screen.getByRole('button', { name: 'Add project' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add and select project' })).toBeDisabled();
 
     rerender(
       <ProjectSelector
@@ -58,28 +76,32 @@ describe('ProjectSelector', () => {
           status: 'ready',
           snapshot: { ...systemSnapshot, projects: [] },
           submitting: true,
+          registration: { enabled: true },
         }}
-        onRegister={vi.fn()}
+        onAddAndSelectProject={vi.fn()}
+        onSelectProject={vi.fn()}
       />,
     );
     expect(screen.getByText('No projects have been added yet.')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Add project' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add and select project' })).toBeDisabled();
     expect(screen.getByText('Adding the project is in progress.')).toBeVisible();
 
     rerender(
       <ProjectSelector
         model={{ status: 'disconnected', message: 'Connection lost' }}
-        onRegister={vi.fn()}
+        onAddAndSelectProject={vi.fn()}
+        onSelectProject={vi.fn()}
       />,
     );
     expect(screen.getByRole('status')).toHaveTextContent('Connection lost');
-    expect(screen.getByRole('button', { name: 'Add project' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Add and select project' })).toBeDisabled();
     expect(screen.getByText('Reconnect before adding a project.')).toBeVisible();
 
     rerender(
       <ProjectSelector
         model={{ status: 'error', snapshot: systemSnapshot, message: 'Repository path is invalid' }}
-        onRegister={vi.fn()}
+        onAddAndSelectProject={vi.fn()}
+        onSelectProject={vi.fn()}
       />,
     );
     expect(screen.getByRole('alert')).toHaveTextContent('Repository path is invalid');
@@ -87,7 +109,8 @@ describe('ProjectSelector', () => {
     rerender(
       <ProjectSelector
         model={{ status: 'error', snapshot: systemSnapshot, message: 'Repository identity conflicts with Todo' }}
-        onRegister={vi.fn()}
+        onAddAndSelectProject={vi.fn()}
+        onSelectProject={vi.fn()}
       />,
     );
     expect(screen.getByRole('alert')).toHaveTextContent('Repository identity conflicts with Todo');
@@ -97,14 +120,38 @@ describe('ProjectSelector', () => {
     const onRegister = vi.fn();
     render(
       <ProjectSelector
-        model={{ status: 'ready', snapshot: systemSnapshot, submitting: false }}
-        onRegister={onRegister}
+        model={{ status: 'ready', snapshot: systemSnapshot, submitting: false, registration: { enabled: true } }}
+        onAddAndSelectProject={onRegister}
+        onSelectProject={vi.fn()}
       />,
     );
 
-    fireEvent.submit(screen.getByRole('form', { name: 'Add a project' }));
+    fireEvent.submit(screen.getByRole('form', { name: 'Add and select a project' }));
 
     expect(onRegister).not.toHaveBeenCalled();
     expect(screen.getByText('Enter a repository path.')).toBeVisible();
+  });
+
+  it('shows health, approved global profiles, and disables registration at the audit barrier', () => {
+    render(
+      <ProjectSelector
+        model={{
+          status: 'ready',
+          snapshot: {
+            ...systemSnapshot,
+            health: { status: 'audit_barrier_tripped', error: { code: 'audit_barrier_tripped', message: 'Audit writes failed' } },
+          },
+          submitting: false,
+          registration: { enabled: true },
+        }}
+        onAddAndSelectProject={vi.fn()}
+        onSelectProject={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent('Audit writes failed');
+    expect(screen.getByText('Foundation worker · revision 2')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'V1 operating guidance' })).toHaveAttribute('href', '/docs/development/session-platform.md');
+    expect(screen.getByRole('button', { name: 'Add and select project' })).toBeDisabled();
   });
 });

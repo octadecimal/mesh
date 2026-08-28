@@ -11,6 +11,9 @@ button:focus-visible, input:focus-visible { outline: 3px solid #7dd3fc; outline-
 button:disabled { cursor: not-allowed; opacity: .58; }
 
 .v2-selector, .v2-shell { display: grid; gap: 1rem; max-width: 72rem; margin: 0 auto; padding: 2rem; }
+.v2-project-layout { display: grid; grid-template-columns: minmax(14rem, .36fr) minmax(0, 1fr); gap: 1rem; min-width: 0; }
+.v2-project-content { display: grid; gap: 1rem; min-width: 0; }
+.v2-pm-pane { align-self: stretch; border: 1px solid #334155; border-radius: .75rem; padding: 1rem; background: #111827; }
 .v2-selector header, .v2-shell-header, .v2-execution { border: 1px solid #334155; border-radius: .75rem; padding: 1rem; background: #111827; }
 .v2-shell-header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
 .v2-eyebrow { margin: 0; color: #7dd3fc; font-size: .78rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
@@ -36,4 +39,5 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 @media (max-width: 640px) {
   .v2-selector, .v2-shell { padding: 1rem; }
   .v2-shell-header { display: grid; }
+  .v2-project-layout { grid-template-columns: 1fr; }
 }

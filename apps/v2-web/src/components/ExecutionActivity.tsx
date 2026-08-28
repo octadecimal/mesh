@@ -1,10 +1,13 @@
-import type { ResolvedSkillSnapshot, WorkerExecution } from '@mesh/v2-contracts';
+import type {
+  ProjectEventCursors,
+  ResolvedSkillSnapshot,
+  WorkerExecution,
+} from '@mesh/v2-contracts';
 
 export type ChildActivity = {
   id: string;
   title: string;
   lifecycle: 'running' | 'completed' | 'failed' | 'interrupted';
-  children?: readonly ChildActivity[];
 };
 
 function skillOutcome(skill: ResolvedSkillSnapshot) {
@@ -30,7 +33,6 @@ function ChildActivityTree({
       {activities.map((activity) => (
         <li key={activity.id}>
           <span>{activity.title}</span> <span>{activity.lifecycle}</span>
-          {activity.children ? <ChildActivityTree activities={activity.children} /> : null}
         </li>
       ))}
     </ul>
@@ -41,10 +43,12 @@ export function ExecutionActivity({
   execution,
   childActivities = [],
   diagnosticId,
+  projectCursors,
 }: {
   execution: WorkerExecution;
   childActivities?: readonly ChildActivity[];
   diagnosticId?: string;
+  projectCursors: ProjectEventCursors;
 }) {
   const headingId = `execution-${execution.id}`;
   return (
@@ -76,8 +80,10 @@ export function ExecutionActivity({
           <div><dt>Adapter ID</dt><dd>{execution.adapterId}</dd></div>
           <div><dt>Opaque handle</dt><dd>{execution.nativeHandle ?? 'None'}</dd></div>
           <div><dt>Raw diagnostic ID</dt><dd>{diagnosticId ?? 'None'}</dd></div>
-          <div><dt>Domain cursor</dt><dd>{execution.revision}</dd></div>
-          <div><dt>Runtime cursor</dt><dd>{execution.lastRuntimeSequence}</dd></div>
+          <div><dt>Execution revision</dt><dd>{execution.revision}</dd></div>
+          <div><dt>Adapter cursor</dt><dd>{execution.lastAdapterCursor}</dd></div>
+          <div><dt>Domain cursor</dt><dd>{projectCursors.domain}</dd></div>
+          <div><dt>Runtime cursor</dt><dd>{projectCursors.runtime}</dd></div>
         </dl>
       </details>
     </article>

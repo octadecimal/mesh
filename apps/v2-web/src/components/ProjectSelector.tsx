@@ -4,14 +4,22 @@ import type { SelectorViewModel } from './shell-state';
 
 export function ProjectSelector({
   model,
-  onRegister,
+  onAddAndSelectProject,
+  onSelectProject,
+  v1GuidanceHref = '/docs/development/session-platform.md',
 }: {
   model: SelectorViewModel;
-  onRegister: (repositoryPath: string) => void;
+  onAddAndSelectProject: (repositoryPath: string) => void;
+  onSelectProject: (projectId: string) => void;
+  v1GuidanceHref?: string;
 }) {
   const [repositoryPath, setRepositoryPath] = useState('');
   const [validationMessage, setValidationMessage] = useState<string>();
   const isReady = model.status === 'ready';
+  const auditBarrierReason =
+    model.status === 'ready' && model.snapshot.health.status === 'audit_barrier_tripped'
+      ? model.snapshot.health.error.message
+      : undefined;
   const disabledReason = !isReady
     ? model.status === 'loading'
       ? 'Projects are still loading.'
@@ -20,6 +28,10 @@ export function ProjectSelector({
         : 'Resolve the current problem before adding a project.'
     : model.submitting
       ? 'Adding the project is in progress.'
+      : auditBarrierReason
+        ? auditBarrierReason
+        : !model.registration.enabled
+          ? model.registration.disabledReason
       : undefined;
   const projects =
     model.status === 'ready'
@@ -36,7 +48,7 @@ export function ProjectSelector({
       return;
     }
     setValidationMessage(undefined);
-    onRegister(value);
+    onAddAndSelectProject(value);
   }
 
   return (
@@ -49,7 +61,16 @@ export function ProjectSelector({
       {model.status === 'loading' ? <p role="status">Loading projects…</p> : null}
       {model.status === 'disconnected' ? <p role="status">{model.message}</p> : null}
       {model.status === 'error' ? <p role="alert">{model.message}</p> : null}
-      <form aria-label="Add a project" onSubmit={submit}>
+      {model.status === 'ready' ? (
+        <section aria-label="System health">
+          <p role="status">
+            {model.snapshot.health.status === 'ok'
+              ? 'System health: operational'
+              : model.snapshot.health.error.message}
+          </p>
+        </section>
+      ) : null}
+      <form aria-label="Add and select a project" onSubmit={submit}>
         <label htmlFor="repository-path">Repository path</label>
         <input
           id="repository-path"
@@ -59,7 +80,7 @@ export function ProjectSelector({
           disabled={disabledReason !== undefined}
         />
         <button type="submit" disabled={disabledReason !== undefined}>
-          Add project
+          Add and select project
         </button>
         {disabledReason ? <p id="repository-path-reason">{disabledReason}</p> : null}
         {validationMessage ? <p role="alert">{validationMessage}</p> : null}
@@ -74,11 +95,31 @@ export function ProjectSelector({
               <li key={project.id}>
                 <strong>{project.displayName}</strong>
                 <span>{project.repositoryPath}</span>
+                <button type="button" onClick={() => onSelectProject(project.id)}>
+                  Select {project.displayName}
+                </button>
               </li>
             ))}
           </ul>
         )}
       </section>
+      {model.status === 'ready' ? (
+        <section aria-labelledby="global-profiles-heading">
+          <h2 id="global-profiles-heading">Approved global profiles</h2>
+          {model.snapshot.globalProfiles.length === 0 ? (
+            <p>No global profiles are approved.</p>
+          ) : (
+            <ul aria-label="Approved global profiles">
+              {model.snapshot.globalProfiles.map((profile) => (
+                <li key={profile.profileId}>
+                  {profile.displayName} · revision {profile.approvedRevision}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      ) : null}
+      <a href={v1GuidanceHref}>V1 operating guidance</a>
     </section>
   );
 }

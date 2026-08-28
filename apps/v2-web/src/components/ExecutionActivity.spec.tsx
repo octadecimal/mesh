@@ -71,13 +71,13 @@ const children: readonly ChildActivity[] = [
     id: 'child-1',
     title: 'Inspect package layout',
     lifecycle: 'running',
-    children: [{ id: 'child-2', title: 'Read package.json', lifecycle: 'completed' }],
   },
+  { id: 'child-2', title: 'Read package.json', lifecycle: 'completed' },
 ];
 
 describe('ExecutionActivity', () => {
   it('renders skill outcomes and nested child activity without provider details by default', () => {
-    render(<ExecutionActivity execution={execution} childActivities={children} />);
+    render(<ExecutionActivity execution={execution} childActivities={children} projectCursors={{ domain: 4, runtime: 12 }} />);
 
     expect(screen.getByRole('article', { name: 'Todo foundation worker' })).toBeVisible();
     expect(screen.getByText('Preferred skill fallback')).toBeVisible();
@@ -89,13 +89,18 @@ describe('ExecutionActivity', () => {
   });
 
   it('keeps provider-specific details inside the diagnostics disclosure', () => {
-    render(<ExecutionActivity execution={execution} childActivities={[]} diagnosticId="raw-1" />);
+    render(<ExecutionActivity execution={execution} childActivities={[]} diagnosticId="raw-1" projectCursors={{ domain: 23, runtime: 29 }} />);
 
     expect(screen.getByText('Adapter ID')).not.toBeVisible();
     screen.getByText('Diagnostics').click();
     expect(screen.getByText('Adapter ID')).toBeVisible();
     expect(screen.getByText('opaque-handle')).toBeVisible();
     expect(screen.getByText('raw-1')).toBeVisible();
+    expect(screen.getByText('Execution revision')).toBeVisible();
+    expect(screen.getByText('Adapter cursor')).toBeVisible();
+    expect(screen.getByText('8')).toBeVisible();
+    expect(screen.getByText('23')).toBeVisible();
+    expect(screen.getByText('29')).toBeVisible();
   });
 });
 

@@ -16,6 +16,7 @@ const executionFixture = {
   nativeHandle: null,
   revision: 4,
   lastRuntimeSequence: 12,
+  lastAdapterCursor: 8,
 } as WorkerExecution;
 
 const snapshot: V2ProjectSnapshot = {
@@ -50,17 +51,28 @@ describe('FocusedProjectShell', () => {
     const onInterrupt = vi.fn();
     render(
       <FocusedProjectShell
-        model={{ status: 'ready', snapshot }}
+        model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
         onDeselect={onDeselect}
         onInterrupt={onInterrupt}
+        activityByExecutionId={{
+          [executionFixture.id]: { childActivities: [{ id: 'child-1', title: 'Read package.json', lifecycle: 'running' }] },
+        }}
       />,
     );
 
     expect(screen.getAllByText('Available in a later milestone')).toHaveLength(3);
-    const pmTab = screen.getByRole('tab', { name: 'PM Chat' });
-    await user.click(pmTab);
+    expect(screen.getByRole('complementary', { name: 'PM Chat' })).toBeVisible();
+    const boardTab = screen.getByRole('tab', { name: 'Board' });
+    await user.click(boardTab);
     await user.keyboard('{ArrowRight}');
-    expect(screen.getByRole('tab', { name: 'Board' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
+    await user.keyboard('{Home}');
+    expect(screen.getByRole('tab', { name: 'Board' })).toHaveFocus();
+    await user.keyboard('{End}');
+    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
+    expect(boardTab).toHaveAttribute('id', 'project-pane-tab-board');
+    expect(boardTab).toHaveAttribute('aria-controls', 'project-pane-panel-board');
     expect(screen.queryByRole('button', { name: /start|approve|create/i })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Deselect project' }));
@@ -70,6 +82,7 @@ describe('FocusedProjectShell', () => {
     expect(screen.getByRole('region', { name: 'Attention items' })).toHaveTextContent(
       'Required skill is unavailable.',
     );
+    expect(screen.getByRole('list', { name: 'Child activity for Todo foundation worker' })).toHaveTextContent('Read package.json');
   });
 
   it.each(['created', 'starting', 'running', 'interrupting', 'completed', 'failed', 'interrupted', 'attention_required'] as const)(
@@ -78,7 +91,7 @@ describe('FocusedProjectShell', () => {
       render(
         <FocusedProjectShell
           model={{
-            status: 'ready',
+            status: 'ready', interrupt: { enabled: true },
             snapshot: { ...snapshot, executions: [{ ...executionFixture, lifecycle }] },
           }}
           onDeselect={vi.fn()}
@@ -119,5 +132,17 @@ describe('FocusedProjectShell', () => {
     );
     expect(screen.getByRole('button', { name: 'Interrupt execution' })).toBeDisabled();
     expect(screen.getByText('Reconnect before interrupting an execution.')).toBeVisible();
+  });
+
+  it('uses the ready presentation reason when interrupting is unavailable', () => {
+    render(
+      <FocusedProjectShell
+        model={{ status: 'ready', snapshot, interrupt: { enabled: false, disabledReason: 'Audit barrier is active.' } }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Interrupt execution' })).toBeDisabled();
+    expect(screen.getByText('Audit barrier is active.')).toBeVisible();
   });
 });
