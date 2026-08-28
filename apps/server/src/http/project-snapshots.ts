@@ -12,6 +12,7 @@ import type { ProjectRepository } from '../repositories/project-repository.js';
 import type { ProjectRunRepository } from '../repositories/project-run-repository.js';
 import type { QaExecutionRepository } from '../repositories/qa-execution-repository.js';
 import type { TaskAttemptRepository } from '../repositories/task-attempt-repository.js';
+import type { TaskDependencyRepository } from '../repositories/task-dependency-repository.js';
 import type { TaskRepository } from '../repositories/task-repository.js';
 import type { TaskTransitionRepository } from '../repositories/task-transition-repository.js';
 import { CommandError } from './errors.js';
@@ -20,6 +21,7 @@ export interface ProjectSnapshotDependencies {
   database: Database;
   projects: ProjectRepository;
   tasks: TaskRepository;
+  dependencies: Pick<TaskDependencyRepository, 'listByProject'>;
   attempts: Pick<TaskAttemptRepository, 'listByTask'>;
   transitions: TaskTransitionRepository;
   projectEvents: ProjectEventRepository;
@@ -100,6 +102,7 @@ export const buildProjectSnapshot = (
       reviewAutomationActions:
         dependencies.qaExecutions.listAutomationActionsForTasks(taskIds),
       runs: dependencies.projectRuns.listByProject(project.id),
+      dependencies: dependencies.dependencies.listByProject(project.id),
       projectRunLimits: {
         maxConcurrency: dependencies.projectRunMaxConcurrency ?? 1,
       },

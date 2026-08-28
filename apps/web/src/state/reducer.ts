@@ -18,6 +18,7 @@ import type {
   SessionSnapshot,
   Task,
   TaskAttempt,
+  TaskDependency,
   TaskTransition,
 } from '@mesh-session-platform/contracts';
 
@@ -37,6 +38,7 @@ export type MeshProjection = {
   projects: SessionSnapshot['projects'];
   projectsById: Record<string, Project>;
   tasksById: Record<string, Task>;
+  dependenciesByTaskId: Record<string, TaskDependency[]>;
   attemptsById: Record<string, TaskAttempt>;
   transitionsByTaskId: Record<string, TaskTransition[]>;
   repairsByProjectId: Record<string, AttemptRepair[]>;
@@ -115,6 +117,7 @@ export const createProjection = (
   projects: snapshot.projects,
   projectsById: byId(snapshot.projects),
   tasksById: {},
+  dependenciesByTaskId: {},
   attemptsById: {},
   transitionsByTaskId: {},
   repairsByProjectId: {},
@@ -197,6 +200,7 @@ export const replaceSnapshot = (
   return {
     ...createProjection(snapshot),
     tasksById: state.tasksById,
+    dependenciesByTaskId: state.dependenciesByTaskId,
     attemptsById: state.attemptsById,
     transitionsByTaskId: state.transitionsByTaskId,
     repairsByProjectId: state.repairsByProjectId,
@@ -257,6 +261,18 @@ const transitionsByTask = (transitions: readonly TaskTransition[]) =>
     ];
     return result;
   }, {});
+
+const dependenciesByTask = (dependencies: readonly TaskDependency[]) =>
+  dependencies.reduce<Record<string, TaskDependency[]>>(
+    (result, dependency) => {
+      result[dependency.taskId] = [
+        ...(result[dependency.taskId] ?? []),
+        dependency,
+      ];
+      return result;
+    },
+    {},
+  );
 
 const cyclesByAttempt = (cycles: readonly DeveloperExecutionCycle[]) =>
   cycles.reduce<Record<string, DeveloperExecutionCycle[]>>((result, cycle) => {
@@ -334,6 +350,11 @@ export const replaceProjectSnapshot = (
       ([, attempt]) => !replacedTaskIds.has(attempt.taskId),
     ),
   ) as Record<string, TaskAttempt>;
+  const dependenciesByTaskId = Object.fromEntries(
+    Object.entries(state.dependenciesByTaskId).filter(
+      ([taskId]) => !replacedTaskIds.has(taskId),
+    ),
+  ) as Record<string, TaskDependency[]>;
   const replacedAttemptIds = new Set<string>([
     ...Object.values(state.attemptsById)
       .filter((attempt) => replacedTaskIds.has(attempt.taskId))
@@ -411,6 +432,10 @@ export const replaceProjectSnapshot = (
       [snapshot.project.id]: snapshot.project,
     },
     tasksById: { ...tasksById, ...byId(snapshot.tasks) },
+    dependenciesByTaskId: {
+      ...dependenciesByTaskId,
+      ...dependenciesByTask(snapshot.dependencies),
+    },
     attemptsById: { ...attemptsById, ...byId(snapshot.attempts) },
     transitionsByTaskId: {
       ...transitionsByTaskId,
@@ -524,6 +549,16 @@ export const applyProjectEvent = (
         )
           ? transitions
           : [...transitions, event.payload.transition],
+      },
+    };
+  }
+
+  if (event.type === 'task.dependencies_changed') {
+    next = {
+      ...next,
+      dependenciesByTaskId: {
+        ...next.dependenciesByTaskId,
+        [event.payload.taskId]: event.payload.dependencies,
       },
     };
   }

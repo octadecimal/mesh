@@ -185,7 +185,7 @@ describe('TaskDependencyService', () => {
   ] as const)(
     'rejects %s without changing dependency truth',
     async (_name, override, code) => {
-      const { repositories, service } = setup();
+      const { onAuditFailure, repositories, service } = setup();
       seedProject(repositories);
       seedTask(repositories, 'prerequisite');
       const dependent = seedTask(repositories, 'dependent');
@@ -196,6 +196,7 @@ describe('TaskDependencyService', () => {
       expect(repositories.tasks.get(dependent.id)).toEqual(dependent);
       expect(repositories.dependencies.listByProject('project-1')).toEqual([]);
       expect(repositories.projectEvents.after('project-1', 0)).toEqual([]);
+      expect(onAuditFailure).not.toHaveBeenCalled();
     },
   );
 
@@ -371,7 +372,7 @@ describe('TaskDependencyService', () => {
   });
 
   it('rolls back every mutation and publication when command-result persistence fails', async () => {
-    const { publisher, repositories, service } = setup({
+    const { onAuditFailure, publisher, repositories, service } = setup({
       failCommandCompleteFor: 'dependency-add-1',
     });
     seedProject(repositories);
@@ -388,6 +389,10 @@ describe('TaskDependencyService', () => {
       found: false,
     });
     expect(publisher.publishProject).not.toHaveBeenCalled();
+    expect(onAuditFailure).toHaveBeenCalledOnce();
+    expect(onAuditFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'command complete failed' }),
+    );
   });
 
   it('reports incomplete prerequisites and all dependency-blocked tasks from current truth', async () => {

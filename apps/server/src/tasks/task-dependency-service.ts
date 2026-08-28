@@ -126,16 +126,22 @@ export class TaskDependencyService {
       );
     if (existing.found) return existing.response;
 
-    let committedMutation = false;
-    const result = this.repositories.commands.executeOnceInImmediateTransaction(
-      commandId,
-      () => {
-        const mutation = this.mutateInTransaction(operation, input);
-        committedMutation = true;
-        return mutation;
-      },
-    );
-    if (committedMutation) {
+    let mutationPrepared = false;
+    let result: DependencyMutationResult;
+    try {
+      result = this.repositories.commands.executeOnceInImmediateTransaction(
+        commandId,
+        () => {
+          const mutation = this.mutateInTransaction(operation, input);
+          mutationPrepared = true;
+          return mutation;
+        },
+      );
+    } catch (error) {
+      if (mutationPrepared) this.reportAuditFailure(error);
+      throw error;
+    }
+    if (mutationPrepared) {
       this.repositories.publisher.publishProject(result.event);
     }
     return result;
@@ -266,13 +272,17 @@ export class TaskDependencyService {
         payload: { taskId: task.id, dependencies },
       });
     } catch (error) {
-      try {
-        this.repositories.onAuditFailure?.(error);
-      } catch {
-        // Preserve the durable audit error as the operation failure.
-      }
+      this.reportAuditFailure(error);
       throw error;
     }
     return { task: updated, dependencies, event };
+  }
+
+  private reportAuditFailure(error: unknown): void {
+    try {
+      this.repositories.onAuditFailure?.(error);
+    } catch {
+      // Preserve the durable audit error as the operation failure.
+    }
   }
 }

@@ -99,12 +99,18 @@ export const selectEligibleRunPreview = (
       .filter((attempt) => attempt.unlinkedAt === null)
       .map((attempt) => attempt.taskId),
   );
+  const dependenciesAreComplete = (taskId: string) =>
+    (state.dependenciesByTaskId[taskId] ?? []).every(
+      ({ prerequisiteTaskId }) =>
+        state.tasksById[prerequisiteTaskId]?.lifecycleState === 'done',
+    );
   return Object.values(state.tasksById)
     .filter(
       (task) =>
         task.projectId === projectId &&
         task.lifecycleState === 'ready' &&
         task.blocked === null &&
+        dependenciesAreComplete(task.id) &&
         !taskIdsWithCurrentAttempt.has(task.id),
     )
     .sort(

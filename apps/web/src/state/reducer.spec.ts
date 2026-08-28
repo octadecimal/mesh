@@ -14,6 +14,7 @@ import type {
   SessionSnapshot,
   Task,
   TaskAttempt,
+  TaskDependency,
   TaskTransition,
 } from '@mesh-session-platform/contracts';
 import { projectEventSchema } from '@mesh-session-platform/contracts';
@@ -302,6 +303,7 @@ const projectSnapshot = (
   qaReports: [qaReport],
   reviewAutomationActions: [automationAction],
   runs: [],
+  dependencies: [],
   projectRunLimits: { maxConcurrency: 4 },
   cursor: 3,
   ...overrides,
@@ -315,6 +317,17 @@ const projectEvent = (sequence: number): ProjectEvent => ({
   occurredAt: timestamp,
   type: 'task.rank_changed',
   payload: { task: task({ rank: `rank-${sequence}` }) },
+});
+
+const dependency = (
+  overrides: Partial<TaskDependency> = {},
+): TaskDependency => ({
+  projectId: project.id,
+  taskId: task().id,
+  prerequisiteTaskId: 'prerequisite',
+  createdBy: { type: 'human', id: 'operator' },
+  createdAt: timestamp,
+  ...overrides,
 });
 
 describe('applyEvent', () => {
@@ -778,6 +791,34 @@ describe('project projection', () => {
     expect(next.lastSequenceBySession).toEqual({ 'session-1': 3 });
     expect(next.events).toEqual([event(3)]);
     expect(next.promptDrafts).toEqual({ 'session-1': 'keep this draft' });
+  });
+
+  it('projects snapshot dependencies and replaces them from complete-set events', () => {
+    const initial = dependency();
+    const replacement = dependency({ prerequisiteTaskId: 'replacement' });
+    const starting = replaceProjectSnapshot(
+      createProjection(snapshot()),
+      projectSnapshot({ dependencies: [initial] }),
+    );
+
+    expect(starting.dependenciesByTaskId[task().id]).toEqual([initial]);
+
+    const applied = applyProjectEvent(starting, {
+      protocolVersion: 1,
+      id: 'project-event-4',
+      projectId: project.id,
+      sequence: 4,
+      occurredAt: timestamp,
+      type: 'task.dependencies_changed',
+      payload: { taskId: task().id, dependencies: [replacement] },
+    });
+
+    expect(applied.kind).toBe('applied');
+    if (applied.kind === 'applied') {
+      expect(applied.state.dependenciesByTaskId[task().id]).toEqual([
+        replacement,
+      ]);
+    }
   });
 
   it('orders project events and projects task, transition, attempt, and repair updates', () => {

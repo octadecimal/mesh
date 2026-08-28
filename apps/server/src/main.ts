@@ -540,6 +540,7 @@ export const startServer = async (
     database,
     projects,
     tasks,
+    dependencies,
     taskService,
     attemptService,
     developerExecutionService,

@@ -12,6 +12,7 @@ import {
   reviewAutomationActionSchema,
   sessionSchema,
   taskAttemptSchema,
+  taskDependencySchema,
   taskSchema,
   workspaceSchema,
 } from '@mesh-session-platform/contracts';
@@ -167,6 +168,31 @@ describe('project snapshot read consistency', () => {
       revision: 2,
       updatedBy: { type: 'human', id: 'qa-operator' },
     });
+  });
+
+  it('projects the current task dependency edges', () => {
+    const fixture = seed();
+    const prerequisite = fixture.repositories.tasks.create(
+      taskSchema.parse({
+        ...fixture.task,
+        id: 'prerequisite',
+        title: 'Prerequisite',
+        rank: '0',
+      }),
+    );
+    const dependency = taskDependencySchema.parse({
+      projectId: fixture.project.id,
+      taskId: fixture.task.id,
+      prerequisiteTaskId: prerequisite.id,
+      createdBy: { type: 'human', id: 'operator' },
+      createdAt: now,
+    });
+    fixture.repositories.dependencies.create(dependency);
+
+    expect(
+      buildProjectSnapshot(fixture.repositories, fixture.project.id)
+        .dependencies,
+    ).toEqual([dependency]);
   });
 
   it('projects complete ordered project-run history with configured limits and project isolation', () => {

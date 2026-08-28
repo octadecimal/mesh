@@ -121,6 +121,47 @@ describe('project run selectors', () => {
     ).toEqual(['task-a', 'task-a-later']);
   });
 
+  it('excludes ready tasks whose projected prerequisites are not done', () => {
+    const prerequisite = task('prerequisite', '0', {
+      lifecycleState: 'in_progress',
+    });
+    const dependent = task('dependent', 'a');
+    const state = projection({
+      tasksById: {
+        [prerequisite.id]: prerequisite,
+        [dependent.id]: dependent,
+      },
+      dependenciesByTaskId: {
+        [dependent.id]: [
+          {
+            projectId,
+            taskId: dependent.id,
+            prerequisiteTaskId: prerequisite.id,
+            createdBy: { type: 'human', id: 'operator' },
+            createdAt: timestamp,
+          },
+        ],
+      },
+    });
+
+    expect(selectEligibleRunPreview(state, projectId)).toEqual([]);
+    expect(
+      selectEligibleRunPreview(
+        {
+          ...state,
+          tasksById: {
+            ...state.tasksById,
+            [prerequisite.id]: {
+              ...prerequisite,
+              lifecycleState: 'done',
+            },
+          },
+        },
+        projectId,
+      ).map(({ id }) => id),
+    ).toEqual([dependent.id]);
+  });
+
   it('matches the server code-unit ordering for case and supplementary Unicode', () => {
     const state = projection({
       tasksById: Object.fromEntries(

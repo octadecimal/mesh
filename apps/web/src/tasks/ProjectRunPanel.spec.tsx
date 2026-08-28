@@ -266,6 +266,52 @@ describe('ProjectRunPanel', () => {
     );
   });
 
+  it('omits dependency-blocked tasks from the preview and expected task payload', async () => {
+    const user = userEvent.setup();
+    const prerequisite = task({
+      id: 'prerequisite',
+      title: 'Incomplete prerequisite',
+      rank: '0',
+      lifecycleState: 'in_progress',
+    });
+    const dependent = task({ id: 'dependent', title: 'Dependent', rank: 'b' });
+    const actionable = task({ id: 'actionable', title: 'Actionable' });
+    const onCommand = vi.fn().mockResolvedValue(undefined);
+    renderPanel({
+      tasks: [prerequisite, dependent, actionable],
+      projectionOverrides: {
+        dependenciesByTaskId: {
+          [dependent.id]: [
+            {
+              projectId: project.id,
+              taskId: dependent.id,
+              prerequisiteTaskId: prerequisite.id,
+              createdBy: operator,
+              createdAt: timestamp,
+            },
+          ],
+        },
+      },
+      onCommand,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+    expect(screen.queryByText('Dependent')).toBeNull();
+    await user.click(
+      screen.getByRole('checkbox', { name: /subscription capacity/i }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Authorize run' }));
+
+    expect(onCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'project.run.start',
+        payload: expect.objectContaining({
+          expectedTasks: [expect.objectContaining({ taskId: actionable.id })],
+        }),
+      }),
+    );
+  });
+
   it('clears start pending when the first projected run is already completed', async () => {
     const user = userEvent.setup();
     const pending = deferred<unknown>();
