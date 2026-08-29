@@ -478,6 +478,13 @@ those expected start failures therefore remain bindable. The existing public
 `start` keeps its M1 signature and behavior as a wrapper that reserves, activates
 when `activationRequired`, and returns `result`, preserving foundation callers.
 
+Project/profile lookup or an adapter capability/skill probe that cannot produce
+the snapshots required by `WorkerExecution` fails before reservation with a
+typed no-write error. The `start` wrapper maps it to its existing command result;
+the planning launcher leaves the turn `launch_pending` for idempotent startup
+retry or human abandonment. Because no execution or adapter session exists,
+there is nothing to bind or consume at that boundary.
+
 The planning launcher reserves with key `planning-turn:<turnId>`, durably binds
 that exact execution to the human turn in a planning transaction, publishes
 the binding event, and only then calls `activateReserved`. Binding a terminal
@@ -488,10 +495,11 @@ binding leaves `launch_pending` and replays the reservation; a crash after
 binding but before activation leaves an exact starting execution for M1
 execution reconciliation. No adapter event can be consumed for an unbound PM
 execution. A reservation-transaction exception creates no execution and leaves
-the turn `launch_pending` for retry; capability/skill rejection binds the exact
-terminal execution; adapter startup or attachment failure terminalizes the
-already-bound execution. These cases cover every start-failure boundary without
-inventing a second execution.
+the turn `launch_pending` for retry; pre-reservation lookup/probe failure follows
+the same no-write rule; capability/skill rejection binds the exact terminal
+execution; adapter startup or attachment failure terminalizes the already-bound
+execution. These cases cover every start-failure boundary without inventing a
+second execution.
 
 ## Persistence and Transaction Ordering
 
