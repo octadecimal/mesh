@@ -351,8 +351,7 @@ export class V2ProcessFixture {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    let owned!: RunningChild;
-    owned = observeChild(child, {
+    const owned = observeChild(child, {
       blockSigterm: options.blockSigterm,
       ignoreClose: options.ignoreClose,
       onSignal: options.onSignal,
@@ -587,8 +586,7 @@ export class V2ProcessFixture {
       stdio: 'ignore',
       windowsHide: true,
     });
-    let partialChild!: RunningChild;
-    partialChild = observeChild(partialProcess, {
+    const partialChild = observeChild(partialProcess, {
       onSignal: (signal) => partialSignals.push(signal),
       release: () => {
         if (this.child === partialChild) this.child = undefined;
