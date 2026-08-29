@@ -115,15 +115,20 @@ export const loadV2ServerConfig = (
       'Fake cursor hold is outside the fake script',
     );
   }
+  const developmentOrigin =
+    environment.MESH_V2_DEV_ORIGIN ??
+    (environment.NODE_ENV === 'development'
+      ? 'http://127.0.0.1:4300'
+      : undefined);
 
   return {
     host,
     port,
     workspaceRoot,
     databasePath,
-    ...(environment.MESH_V2_DEV_ORIGIN === undefined
+    ...(developmentOrigin === undefined
       ? {}
-      : { developmentOrigin: loopbackOrigin(environment.MESH_V2_DEV_ORIGIN) }),
+      : { developmentOrigin: loopbackOrigin(developmentOrigin) }),
     ...(environment.MESH_V2_WEB_ROOT === undefined
       ? {}
       : {

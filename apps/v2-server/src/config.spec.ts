@@ -38,6 +38,30 @@ describe('loadV2ServerConfig', () => {
     );
   });
 
+  it('defaults the development web origin only in development', () => {
+    expect(
+      loadV2ServerConfig({ NODE_ENV: 'development' }, root).developmentOrigin,
+    ).toBe('http://127.0.0.1:4300');
+    expect(
+      loadV2ServerConfig({ NODE_ENV: 'production' }, root).developmentOrigin,
+    ).toBeUndefined();
+    expect(
+      loadV2ServerConfig({ NODE_ENV: 'test' }, root).developmentOrigin,
+    ).toBeUndefined();
+  });
+
+  it('prefers an explicit valid loopback development origin', () => {
+    expect(
+      loadV2ServerConfig(
+        {
+          NODE_ENV: 'development',
+          MESH_V2_DEV_ORIGIN: 'http://127.0.0.1:4400',
+        },
+        root,
+      ).developmentOrigin,
+    ).toBe('http://127.0.0.1:4400');
+  });
+
   it.each(['0.0.0.0', 'localhost', 'example.com'])(
     'rejects non-loopback host %s',
     (host) => {
