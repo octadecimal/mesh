@@ -11,7 +11,9 @@ const contiguousAfter = (before: number, after: number) =>
 
 type CleanupProbe = {
   pid: number;
-  origin: string;
+  origin?: string;
+  elapsedMs: number;
+  namedListenerCount: number;
 };
 
 const pathExists = async (path: string) => {
@@ -23,7 +25,12 @@ const pathExists = async (path: string) => {
   }
 };
 
-const expectProcessAndListenerGone = async ({ pid, origin }: CleanupProbe) => {
+const expectProcessAndListenerGone = async ({
+  pid,
+  origin,
+  elapsedMs,
+  namedListenerCount,
+}: CleanupProbe) => {
   await expect
     .poll(() => {
       try {
@@ -34,16 +41,20 @@ const expectProcessAndListenerGone = async ({ pid, origin }: CleanupProbe) => {
       }
     })
     .toBe(false);
-  await expect
-    .poll(async () => {
-      try {
-        await fetch(`${origin}/api/v2/snapshot`);
-        return true;
-      } catch {
-        return false;
-      }
-    })
-    .toBe(false);
+  if (origin) {
+    await expect
+      .poll(async () => {
+        try {
+          await fetch(`${origin}/api/v2/snapshot`);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .toBe(false);
+  }
+  expect(elapsedMs).toBeLessThan(8_000);
+  expect(namedListenerCount).toBe(0);
 };
 
 test('repository setup failure removes only its owned fixture root', async () => {
@@ -79,7 +90,12 @@ test('repository setup failure removes only its owned fixture root', async () =>
   }
 });
 
-for (const mode of ['invalid-origin', 'timeout'] as const) {
+for (const mode of [
+  'invalid-origin',
+  'timeout',
+  'blocked-sigterm',
+  'duplicate-ready',
+] as const) {
   test(`rejected ${mode} readiness cleans its exact server and listener`, async () => {
     const fixture = await V2ProcessFixture.createTodo();
     try {
@@ -91,10 +107,20 @@ for (const mode of ['invalid-origin', 'timeout'] as const) {
   });
 }
 
+test('early startup exit clears exact child ownership within its deadline', async () => {
+  const fixture = await V2ProcessFixture.createTodo();
+  try {
+    const evidence = await fixture.probeEarlyExitCleanup();
+    await expectProcessAndListenerGone(evidence);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test('mismatch probe cleans an unexpectedly ready server and listener', async () => {
   const fixture = await V2ProcessFixture.createTodo();
   try {
-    const evidence = await fixture.probeUnexpectedMismatchReadyCleanup();
+    const evidence = await fixture.probeUnexpectedMismatchReadyCleanup(true);
     await expectProcessAndListenerGone(evidence);
   } finally {
     await fixture.dispose();

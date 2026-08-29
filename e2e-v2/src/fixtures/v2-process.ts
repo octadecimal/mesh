@@ -27,9 +27,20 @@ import {
 } from './todo-repository.js';
 
 type ReadyLine = { type: 'mesh.v2.ready'; origin: string };
+type TerminalState = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+};
 type RunningChild = {
   process: ChildProcess;
-  exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  error: Promise<Error>;
+  exited: Promise<TerminalState>;
+  closed: Promise<TerminalState>;
+  closeState?: TerminalState;
+  closing?: Promise<void>;
+  detachers: Array<() => void>;
+  release: () => void;
+  signalExact: (signal: NodeJS.Signals) => boolean;
   origin?: string;
   readyLines: ReadyLine[];
   stderr: () => string;
@@ -38,9 +49,15 @@ type RunningChild = {
 type SpawnServerOptions = {
   holdAfterAdapterCursor?: number;
   readinessTimeoutMs?: number;
-  readinessProbe?: 'invalid-origin' | 'timeout';
-  onSpawn?: (pid: number) => void;
+  readinessProbe?:
+    | 'invalid-origin'
+    | 'timeout'
+    | 'blocked-sigterm'
+    | 'duplicate-ready';
+  blockSigterm?: boolean;
+  onOwned?: (child: RunningChild) => void;
   onReadyObserved?: (ready: ReadyLine) => void;
+  onSignal?: (signal: NodeJS.Signals) => void;
 };
 
 const workspaceRoot = resolve(__dirname, '..', '..', '..');
@@ -48,6 +65,9 @@ const serverMain = join(workspaceRoot, 'dist', 'apps', 'v2-server', 'main.js');
 const webRoot = join(workspaceRoot, 'dist', 'apps', 'v2-web');
 const fixturePrefix = 'mesh-v2-e2e-';
 const readinessTimeoutMs = 15_000;
+const probeReadinessTimeoutMs = 3_000;
+const gracefulCloseMs = 250;
+const forcedCloseMs = 1_000;
 
 const hashFile = async (path: string) => {
   const { readFile } = await import('node:fs/promises');
@@ -89,12 +109,74 @@ const parseOrigin = (value: string) => {
   return origin.origin;
 };
 
-const childExit = (child: ChildProcess) =>
-  new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolveExit) => {
-      child.once('exit', (code, signal) => resolveExit({ code, signal }));
+const deferred = <T>() => {
+  let resolvePromise!: (value: T) => void;
+  const promise = new Promise<T>((resolveValue) => {
+    resolvePromise = resolveValue;
+  });
+  return { promise, resolve: resolvePromise };
+};
+
+const observeChild = (
+  child: ChildProcess,
+  options: {
+    blockSigterm?: boolean;
+    onSignal?: (signal: NodeJS.Signals) => void;
+    release: () => void;
+  },
+) => {
+  const error = deferred<Error>();
+  const exited = deferred<TerminalState>();
+  const closed = deferred<TerminalState>();
+  const detachers: Array<() => void> = [];
+  const owned: RunningChild = {
+    process: child,
+    error: error.promise,
+    exited: exited.promise,
+    closed: closed.promise,
+    detachers,
+    release: options.release,
+    signalExact: (signal) => {
+      options.onSignal?.(signal);
+      if (options.blockSigterm && signal === 'SIGTERM') return true;
+      return child.kill(signal);
     },
+    readyLines: [],
+    stderr: () => '',
+  };
+  const onError = (value: Error) => error.resolve(value);
+  const onExit = (code: number | null, signal: NodeJS.Signals | null) =>
+    exited.resolve({ code, signal });
+  const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+    owned.closeState = { code, signal };
+    closed.resolve(owned.closeState);
+  };
+  child.on('error', onError);
+  child.on('exit', onExit);
+  child.on('close', onClose);
+  detachers.push(
+    () => child.off('error', onError),
+    () => child.off('exit', onExit),
+    () => child.off('close', onClose),
   );
+  return owned;
+};
+
+const settlesWithin = async (promise: Promise<unknown>, timeoutMs: number) =>
+  new Promise<boolean>((resolveSettled) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveSettled(value);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    void promise.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
 
 const assertOwnedFixtureRoot = (candidate: string) => {
   const root = resolve(candidate);
@@ -112,18 +194,55 @@ const assertOwnedFixtureRoot = (candidate: string) => {
   return root;
 };
 
-const terminateExactChild = async (
+const closeExactChild = (
   child: RunningChild,
-  signal: NodeJS.Signals,
+  options: { force?: boolean } = {},
 ) => {
-  if (child.process.exitCode === null && child.process.signalCode === null) {
-    if (!child.process.pid || !child.process.kill(signal)) {
-      throw new Error(
-        `Could not terminate owned V2 server PID ${String(child.process.pid)}`,
-      );
+  if (child.closing) return child.closing;
+  child.closing = (async () => {
+    let failure: Error | undefined;
+    try {
+      if (!child.closeState) {
+        if (!options.force) {
+          try {
+            child.signalExact('SIGTERM');
+          } catch {
+            // Continue to the exact-child SIGKILL fallback.
+          }
+        }
+        const gracefullyClosed =
+          !options.force &&
+          (await settlesWithin(child.closed, gracefulCloseMs));
+        if (!gracefullyClosed && !child.closeState) {
+          try {
+            child.signalExact('SIGKILL');
+          } catch {
+            // The bounded terminal wait below remains authoritative.
+          }
+          if (!(await settlesWithin(child.closed, forcedCloseMs))) {
+            failure = new Error(
+              `Owned V2 server PID ${String(child.process.pid)} did not close after SIGKILL`,
+            );
+          }
+        }
+      }
+    } finally {
+      try {
+        child.release();
+      } catch {
+        // Listener cleanup remains mandatory even if ownership release fails.
+      }
+      for (const detach of child.detachers.splice(0)) {
+        try {
+          detach();
+        } catch {
+          // Detaching the remaining owned listeners still takes priority.
+        }
+      }
     }
-  }
-  await child.exited;
+    if (failure) throw failure;
+  })();
+  return child.closing;
 };
 
 export class V2ProcessFixture {
@@ -216,124 +335,215 @@ export class V2ProcessFixture {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    const exited = childExit(child);
-    const readyLines: ReadyLine[] = [];
+    let owned!: RunningChild;
+    owned = observeChild(child, {
+      blockSigterm: options.blockSigterm,
+      onSignal: options.onSignal,
+      release: () => {
+        if (this.child === owned) this.child = undefined;
+      },
+    });
+    this.child = owned;
+    options.onOwned?.(owned);
     let stdoutBuffer = '';
     let stderr = '';
-    child.stderr?.on('data', (chunk: Buffer) => {
+    const onStderr = (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
-    });
-    const owned: RunningChild = {
-      process: child,
-      exited,
-      readyLines,
-      stderr: () => stderr,
     };
-    this.child = owned;
-    if (!child.pid) throw new Error('Spawned V2 server has no PID');
-    options.onSpawn?.(child.pid);
-    const ready = new Promise<string>((resolveReady, rejectReady) => {
-      const reject = (error: Error) => {
-        clearTimeout(timeout);
-        rejectReady(error);
-      };
-      const timeout = setTimeout(
-        () =>
-          reject(
-            new Error(
-              `V2 server PID ${String(child.pid)} did not become ready within ${String(options.readinessTimeoutMs ?? readinessTimeoutMs)}ms`,
-            ),
-          ),
-        options.readinessTimeoutMs ?? readinessTimeoutMs,
-      );
-      child.once('error', (error) => reject(error));
-      child.once('exit', (code, signal) =>
-        reject(
-          new Error(
-            `V2 server exited before ready (${String(code)}/${String(signal)}): ${stderr}`,
-          ),
-        ),
-      );
-      child.stdout?.on('data', (chunk: Buffer) => {
-        stdoutBuffer += chunk.toString('utf8');
-        const lines = stdoutBuffer.split(/\r?\n/u);
-        stdoutBuffer = lines.pop() ?? '';
-        for (const line of lines) {
-          if (!line) continue;
-          let candidate: unknown;
-          try {
-            candidate = JSON.parse(line);
-          } catch {
-            reject(new Error(`Unexpected V2 server stdout: ${line}`));
-            continue;
-          }
-          if (
-            typeof candidate !== 'object' ||
-            candidate === null ||
-            (candidate as { type?: unknown }).type !== 'mesh.v2.ready' ||
-            typeof (candidate as { origin?: unknown }).origin !== 'string'
-          ) {
-            reject(new Error(`Unexpected V2 server stdout: ${line}`));
-            continue;
-          }
-          const observed = candidate as ReadyLine;
-          options.onReadyObserved?.(observed);
-          if (options.readinessProbe === 'timeout') continue;
-          const accepted =
-            options.readinessProbe === 'invalid-origin'
-              ? {
-                  ...observed,
-                  origin: observed.origin.replace('127.0.0.1', 'localhost'),
-                }
-              : observed;
-          readyLines.push(accepted);
-          if (readyLines.length !== 1) {
-            reject(new Error('V2 server emitted more than one ready line'));
-            continue;
-          }
-          try {
-            const origin = parseOrigin(readyLines[0].origin);
-            clearTimeout(timeout);
-            resolveReady(origin);
-          } catch (error) {
-            reject(error instanceof Error ? error : new Error(String(error)));
-          }
-        }
-      });
+    child.stderr?.on('data', onStderr);
+    owned.detachers.push(() => child.stderr?.off('data', onStderr));
+    owned.stderr = () => stderr;
+    let readySettled = false;
+    let resolveReady!: (origin: string) => void;
+    let rejectReady!: (error: Error) => void;
+    const ready = new Promise<string>((resolveValue, rejectValue) => {
+      resolveReady = resolveValue;
+      rejectReady = rejectValue;
     });
+    const rejectProtocol = (error: Error) => {
+      if (!readySettled) {
+        readySettled = true;
+        rejectReady(error);
+        return;
+      }
+      void closeExactChild(owned).catch(() => undefined);
+    };
+    const onStdout = (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString('utf8');
+      const lines = stdoutBuffer.split(/\r?\n/u);
+      stdoutBuffer = lines.pop() ?? '';
+      const batch: ReadyLine[] = [];
+      for (const line of lines) {
+        if (!line) continue;
+        let candidate: unknown;
+        try {
+          candidate = JSON.parse(line);
+        } catch {
+          rejectProtocol(new Error(`Unexpected V2 server stdout: ${line}`));
+          return;
+        }
+        if (
+          typeof candidate !== 'object' ||
+          candidate === null ||
+          (candidate as { type?: unknown }).type !== 'mesh.v2.ready' ||
+          typeof (candidate as { origin?: unknown }).origin !== 'string'
+        ) {
+          rejectProtocol(new Error(`Unexpected V2 server stdout: ${line}`));
+          return;
+        }
+        batch.push(candidate as ReadyLine);
+      }
+      if (batch.length === 0) return;
+      for (const observed of batch) options.onReadyObserved?.(observed);
+      if (options.readinessProbe === 'duplicate-ready' && batch.length > 0) {
+        batch.push(...batch);
+      }
+      if (
+        options.readinessProbe === 'timeout' ||
+        options.readinessProbe === 'blocked-sigterm'
+      ) {
+        return;
+      }
+      const accepted = batch.map((observed) =>
+        options.readinessProbe === 'invalid-origin'
+          ? {
+              ...observed,
+              origin: observed.origin.replace('127.0.0.1', 'localhost'),
+            }
+          : observed,
+      );
+      if (owned.readyLines.length + accepted.length !== 1) {
+        rejectProtocol(new Error('V2 server emitted more than one ready line'));
+        return;
+      }
+      owned.readyLines.push(...accepted);
+      try {
+        const origin = parseOrigin(owned.readyLines[0].origin);
+        if (!readySettled) {
+          readySettled = true;
+          resolveReady(origin);
+        }
+      } catch (error) {
+        rejectProtocol(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+    };
+    child.stdout?.on('data', onStdout);
+    owned.detachers.push(() => child.stdout?.off('data', onStdout));
+    let timeout: NodeJS.Timeout | undefined;
     try {
-      owned.origin = await ready;
+      if (!child.pid) throw new Error('Spawned V2 server has no PID');
+      const deadline = new Promise<never>((_, rejectDeadline) => {
+        timeout = setTimeout(
+          () =>
+            rejectDeadline(
+              new Error(
+                `V2 server PID ${String(child.pid)} did not become ready within ${String(options.readinessTimeoutMs ?? readinessTimeoutMs)}ms`,
+              ),
+            ),
+          options.readinessTimeoutMs ?? readinessTimeoutMs,
+        );
+      });
+      owned.origin = await Promise.race([
+        ready,
+        owned.error.then((error) => {
+          throw error;
+        }),
+        owned.exited.then(({ code, signal }) => {
+          throw new Error(
+            `V2 server exited before ready (${String(code)}/${String(signal)}): ${stderr}`,
+          );
+        }),
+        owned.closed.then(({ code, signal }) => {
+          throw new Error(
+            `V2 server closed before ready (${String(code)}/${String(signal)}): ${stderr}`,
+          );
+        }),
+        deadline,
+      ]);
       return owned.origin;
     } catch (error) {
       try {
-        await terminateExactChild(owned, 'SIGTERM');
-      } finally {
-        if (this.child === owned) this.child = undefined;
+        await closeExactChild(owned);
+      } catch (cleanupError) {
+        throw new Error(
+          `V2 server startup failed (${String(error)}) and exact-child cleanup failed (${String(cleanupError)})`,
+        );
       }
       throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
     }
   }
 
-  async probeRejectedReadinessCleanup(mode: 'invalid-origin' | 'timeout') {
-    let pid: number | undefined;
+  async probeRejectedReadinessCleanup(
+    mode: 'invalid-origin' | 'timeout' | 'blocked-sigterm' | 'duplicate-ready',
+  ) {
+    const startedAt = Date.now();
+    let observedChild: RunningChild | undefined;
     let origin: string | undefined;
+    const signals: NodeJS.Signals[] = [];
     await expect(
       this.spawnServer(this.databasePath, {
-        readinessTimeoutMs: 500,
+        readinessTimeoutMs: probeReadinessTimeoutMs,
         readinessProbe: mode,
-        onSpawn: (spawnedPid) => {
-          pid = spawnedPid;
+        blockSigterm: mode === 'blocked-sigterm',
+        onOwned: (child) => {
+          observedChild = child;
         },
         onReadyObserved: (ready) => {
           origin = ready.origin;
         },
+        onSignal: (signal) => signals.push(signal),
       }),
     ).rejects.toThrow(
-      mode === 'invalid-origin' ? 'invalid loopback origin' : 'within 500ms',
+      mode === 'invalid-origin'
+        ? 'invalid loopback origin'
+        : mode === 'duplicate-ready'
+          ? 'more than one ready line'
+          : `within ${String(probeReadinessTimeoutMs)}ms`,
     );
     expect(this.child).toBeUndefined();
-    if (!pid || !origin) throw new Error(`No ${mode} cleanup evidence`);
-    return { pid, origin };
+    if (!observedChild?.process.pid || !origin)
+      throw new Error(`No ${mode} cleanup evidence`);
+    if (mode === 'blocked-sigterm') {
+      expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
+    }
+    return {
+      pid: observedChild.process.pid,
+      origin,
+      elapsedMs: Date.now() - startedAt,
+      namedListenerCount: observedChild.detachers.length,
+    };
+  }
+
+  async probeEarlyExitCleanup() {
+    const startedAt = Date.now();
+    const databasePath = assertContainedPath(
+      this.fixtureRoot,
+      join(this.fixtureRoot, 'partial-start.sqlite'),
+    );
+    const database = new Database(databasePath);
+    database.exec('CREATE TABLE partial_start_marker (value TEXT NOT NULL)');
+    database.close();
+    let observedChild: RunningChild | undefined;
+    await expect(
+      this.spawnServer(databasePath, {
+        readinessTimeoutMs: probeReadinessTimeoutMs,
+        onOwned: (child) => {
+          observedChild = child;
+        },
+      }),
+    ).rejects.toThrow(/exited before ready|closed before ready/u);
+    expect(this.child).toBeUndefined();
+    if (!observedChild?.process.pid)
+      throw new Error('No early-exit cleanup evidence');
+    return {
+      pid: observedChild.process.pid,
+      elapsedMs: Date.now() - startedAt,
+      namedListenerCount: observedChild.detachers.length,
+    };
   }
 
   private async command(envelope: V2CommandEnvelope) {
@@ -493,8 +703,7 @@ spec:
     const child = this.child;
     if (!child) throw new Error('V2 server is not running');
     expect(child.readyLines).toHaveLength(1);
-    await terminateExactChild(child, 'SIGKILL');
-    this.child = undefined;
+    await closeExactChild(child, { force: true });
   }
 
   async restartWithFreshFake() {
@@ -717,8 +926,12 @@ spec:
 
   private async runMismatchProbe(
     databasePath: string,
-    onReady?: (ready: ReadyLine) => void,
-    onSpawn?: (pid: number) => void,
+    options: {
+      blockSigterm?: boolean;
+      onOwned?: (child: RunningChild) => void;
+      onReady?: (ready: ReadyLine) => void;
+      onSignal?: (signal: NodeJS.Signals) => void;
+    } = {},
   ) {
     const environment: NodeJS.ProcessEnv = {
       ...minimalSystemEnvironment(),
@@ -737,17 +950,15 @@ spec:
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    if (!child.pid) throw new Error('Spawned mismatch probe has no PID');
-    onSpawn?.(child.pid);
+    const owned = observeChild(child, {
+      blockSigterm: options.blockSigterm,
+      onSignal: options.onSignal,
+      release: () => undefined,
+    });
+    options.onOwned?.(owned);
     let stdout = '';
     let stderr = '';
-    const exited = childExit(child);
-    const owned: RunningChild = {
-      process: child,
-      exited,
-      readyLines: [],
-      stderr: () => stderr,
-    };
+    owned.stderr = () => stderr;
     let stdoutBuffer = '';
     let rejectUnexpectedReady: (error: Error) => void = () => undefined;
     const unexpectedReady = new Promise<never>((_, reject) => {
@@ -772,7 +983,7 @@ spec:
             } satisfies ReadyLine;
             owned.readyLines.push(ready);
             owned.origin = ready.origin;
-            onReady?.(ready);
+            options.onReady?.(ready);
             rejectUnexpectedReady(
               new Error(
                 `Database mismatch probe unexpectedly became ready at ${ready.origin}`,
@@ -791,60 +1002,79 @@ spec:
     };
     child.stdout?.on('data', onStdout);
     child.stderr?.on('data', onStderr);
-    let rejectTimeout: (error: Error) => void = () => undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      rejectTimeout = reject;
-    });
-    const timer = setTimeout(
-      () =>
-        rejectTimeout(
-          new Error(
-            `Database mismatch probe PID ${String(child.pid)} did not exit within ${String(readinessTimeoutMs)}ms`,
-          ),
-        ),
-      readinessTimeoutMs,
+    owned.detachers.push(
+      () => child.stdout?.off('data', onStdout),
+      () => child.stderr?.off('data', onStderr),
     );
+    let timer: NodeJS.Timeout | undefined;
+    let exit: TerminalState | undefined;
     try {
-      const exit = await Promise.race([exited, unexpectedReady, timeout]);
-      return { exit, stdout, stderr, pid: child.pid };
+      if (!child.pid) throw new Error('Spawned mismatch probe has no PID');
+      const timeout = new Promise<never>((_, rejectTimeout) => {
+        timer = setTimeout(
+          () =>
+            rejectTimeout(
+              new Error(
+                `Database mismatch probe PID ${String(child.pid)} did not exit within ${String(readinessTimeoutMs)}ms`,
+              ),
+            ),
+          readinessTimeoutMs,
+        );
+      });
+      exit = await Promise.race([
+        owned.exited,
+        owned.error.then((error) => {
+          throw error;
+        }),
+        unexpectedReady,
+        timeout,
+      ]);
     } finally {
-      clearTimeout(timer);
-      await terminateExactChild(owned, 'SIGTERM');
-      child.stdout?.off('data', onStdout);
-      child.stderr?.off('data', onStderr);
+      if (timer) clearTimeout(timer);
+      await closeExactChild(owned);
     }
+    if (!exit) throw new Error('Database mismatch probe produced no exit');
+    return { exit, stdout, stderr, pid: child.pid };
   }
 
-  async probeUnexpectedMismatchReadyCleanup() {
+  async probeUnexpectedMismatchReadyCleanup(blockSigterm = false) {
+    const startedAt = Date.now();
     let observed: ReadyLine | undefined;
-    let pid: number | undefined;
+    let observedChild: RunningChild | undefined;
+    const signals: NodeJS.Signals[] = [];
     let rejected = false;
     try {
-      await this.runMismatchProbe(
-        this.databasePath,
-        (ready) => {
+      await this.runMismatchProbe(this.databasePath, {
+        blockSigterm,
+        onOwned: (child) => {
+          observedChild = child;
+        },
+        onReady: (ready) => {
           observed = ready;
         },
-        (spawnedPid) => {
-          pid = spawnedPid;
-        },
-      );
+        onSignal: (signal) => signals.push(signal),
+      });
     } catch (error) {
       rejected = true;
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain('unexpectedly became ready');
     }
     expect(rejected).toBe(true);
-    if (!observed || !pid)
+    if (!observed || !observedChild?.process.pid)
       throw new Error('Mismatch cleanup emitted incomplete ready evidence');
+    if (blockSigterm) expect(signals).toEqual(['SIGTERM', 'SIGKILL']);
     const ready = observed as ReadyLine;
-    return { pid, origin: ready.origin };
+    return {
+      pid: observedChild.process.pid,
+      origin: ready.origin,
+      elapsedMs: Date.now() - startedAt,
+      namedListenerCount: observedChild.detachers.length,
+    };
   }
 
   async dispose() {
     if (this.child) {
-      await terminateExactChild(this.child, 'SIGTERM');
-      this.child = undefined;
+      await closeExactChild(this.child);
     }
     const root = assertOwnedFixtureRoot(this.fixtureRoot);
     await rm(root, { recursive: true, force: true });
