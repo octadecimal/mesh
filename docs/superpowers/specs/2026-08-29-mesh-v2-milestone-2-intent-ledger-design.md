@@ -492,16 +492,25 @@ those expected start failures therefore remain bindable. The existing public
 when `activationRequired`, and returns `result`, preserving foundation callers.
 
 The durable reservation-to-execution link is the existing M1
-`execution_operations` row, not the generic command result. Every execution
-reservation creates exactly one `kind: 'start'` operation whose request stores
-the idempotency key and request hash and whose `execution_id` points to the exact
-inserted execution. A starting reservation leaves it `pending`; a terminal
-capability/skill reservation creates and finishes it `failed` in the same
-transaction. Migration 2 adds a partial unique index for the normalized start
-request idempotency key and request hash. `reserveStart` replay reads the stored
-command result, resolves that unique operation link, loads its execution, and
-returns the same `ReservedExecutionStart`; a missing or conflicting link trips
-the audit barrier rather than guessing from planning assignment data.
+`execution_operations` row, not the generic command result. Every reservation
+created after migration 2 creates exactly one `kind: 'start'` operation whose
+request stores the idempotency key and request hash and whose `execution_id`
+points to the exact inserted execution. A starting reservation leaves it
+`pending`; a terminal capability/skill reservation creates and finishes it
+`failed` in the same transaction. Migration 2 adds a partial unique index for
+the normalized start request idempotency key and request hash. `reserveStart`
+replay reads the stored command result, resolves that unique operation link,
+loads its execution, and returns the same `ReservedExecutionStart`; a missing or
+conflicting M2/PM link trips the audit barrier rather than guessing from planning
+assignment data.
+
+Compatibility is explicit for terminal M1 foundation commands created before
+migration 2, which may have a command result and execution but no start operation.
+The existing public `start` wrapper retains its early replay path and returns
+that stored legacy result without calling `reserveStart`; it does not need an
+execution identity because no planning binding consumes it. Direct
+`reserveStart` is used only for post-migration reservations and therefore never
+fabricates a link for legacy history.
 
 Project/profile lookup or an adapter capability/skill probe that cannot produce
 the snapshots required by `WorkerExecution` fails before reservation with a
@@ -565,9 +574,10 @@ storage and parsed through shared contracts on read.
 The operation-link index is the expression index
 `UNIQUE(json_extract(request_json, '$.idempotencyKey'),
 json_extract(request_json, '$.requestHash')) WHERE kind = 'start'`. Migration
-tests first validate every existing start request against the M1 operation
-schema, so an absent key/hash fails the upgrade instead of creating an ambiguous
-index entry.
+tests first validate every existing `kind: 'start'` operation request against
+the M1 operation schema, so an absent key/hash fails the upgrade instead of
+creating an ambiguous index entry. A legacy terminal foundation result with no
+operation remains legal and exercises the wrapper-only compatibility path.
 
 Human turn acceptance orders writes as follows:
 
