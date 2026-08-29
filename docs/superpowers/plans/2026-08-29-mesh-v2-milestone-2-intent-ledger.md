@@ -1439,7 +1439,7 @@ owning transport, reducer, lifecycle, or Board behavior.
   $env:NX_DAEMON='false'
   $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
-  corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vite.config.ts
   ```
 
   Expected: FAIL because both components do not exist.
@@ -1479,7 +1479,7 @@ owning transport, reducer, lifecycle, or Board behavior.
   $env:NX_DAEMON='false'
   $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
-  corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vite.config.ts
   git diff --check
   ```
 
@@ -1749,7 +1749,7 @@ placeholder.
   Run:
 
   ```powershell
-  corepack pnpm exec vitest run apps/v2-web/src/api/client.spec.ts apps/v2-web/src/api/socket.spec.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/app/use-project-connection.spec.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx --config apps/v2-web/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-web/src/api/client.spec.ts apps/v2-web/src/api/socket.spec.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/app/use-project-connection.spec.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx --config apps/v2-web/vite.config.ts
   ```
 
   Expected: FAIL because the existing projection and shell do not carry M2
@@ -2020,7 +2020,7 @@ $env:NX_SKIP_NX_CACHE='true'
 git rev-parse HEAD
 corepack pnpm nx test v2-contracts
 corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-service.spec.ts apps/v2-server/src/planning/pm-report-consumer.spec.ts apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts --config apps/v2-server/vitest.config.ts
-corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vitest.config.ts
+corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vite.config.ts
 corepack pnpm nx typecheck v2-server
 git diff --check
 ```
