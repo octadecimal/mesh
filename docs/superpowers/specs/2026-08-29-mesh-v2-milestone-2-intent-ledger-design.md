@@ -153,7 +153,9 @@ attention_required -> execution_active    (new human retry turn)
 `attention_required` accept another human turn. A turn increments the cycle
 revision, is persisted as `launch_pending`, and freezes the latest approved
 intent revision, ledger revision, next proposal revision, and prior conversation
-through IDs in its PM assignment. Binding an execution moves it to
+through IDs in its PM assignment. Creating a cycle also freezes an explicitly
+selected approved PM profile ID and revision; later turns reuse that snapshot
+and never silently follow a newer profile. Binding an execution moves it to
 `execution_active`. A valid question report moves it to `awaiting_human`; a
 valid proposal report moves it to `awaiting_approval`.
 
@@ -465,7 +467,8 @@ proposal/cycle history, its ordered event, and command result.
 The V2 command union adds:
 
 - `planning_cycle.submit_turn` with project, optional existing cycle,
-  expected cycle revision, and human message;
+  expected cycle revision, human message, and an approved PM profile ID and
+  revision when creating a cycle;
 - `planning_proposal.approve` with project, cycle, proposal, expected proposal
   revision, expected intent revision, and expected ledger revision;
 - `planning_proposal.reject` with the same proposal identity and human
