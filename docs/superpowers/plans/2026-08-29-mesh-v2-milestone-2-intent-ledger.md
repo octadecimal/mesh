@@ -231,6 +231,8 @@ export type PmExecutionReservation = {
   activationRequired: boolean;
 };
 
+export type PmExecutionLaunchInput = StartExecutionEnvelope;
+
 export type PmExecutionLauncher = {
   findReserved(
     input: PmExecutionLaunchInput,
@@ -302,6 +304,19 @@ export class ExecutionRuntime {
 
 `ReservedExecutionStart` and T02's `PmExecutionReservation` are deliberately
 structurally identical; the T05 adapter is the sole W1 composition point.
+T02 exports `PmExecutionLaunchInput` from
+`apps/v2-server/src/planning/planning-service.ts` as an implementation-local
+alias of T01's existing `StartExecutionEnvelope`; it is not a new contracts
+type. T01's assignment-union extension makes the existing envelope schema accept
+`PmDiscoveryAssignment`, while every other field and validation rule remains
+owned by `startExecutionEnvelopeSchema`. T02 constructs and parses the complete
+envelope—derived turn key, human actor, start command discriminator, exact
+project, frozen profile ID/revision, and exact PM assignment—without optional or
+inferred launcher fields. T05 passes that object unchanged to
+`ExecutionRuntime.findReservedStart` or `reserveStart`.
+The service boundary has no implicit local type names: its planning-specific
+types are declared in this map, and every remaining referenced type is an
+existing M1 contract or a T01-owned cross-process type named above.
 `findReserved` and `ExecutionRuntime.findReservedStart` are synchronous,
 read-only SQLite lookups. Therefore `reconcilePendingReservations` remains
 synchronous and must return only after every existing reservation has been
@@ -700,6 +715,7 @@ runtime or transport composition.
   `ExecutionRepository`, `WorkerProfileService.resolveApproved`,
   `inImmediateTransaction`, `AuditBarrier`, and test DB.
 - Produces: `PlanningRepository`, `PlanningService`, `PmReportConsumer`,
+  implementation-local `PmExecutionLaunchInput = StartExecutionEnvelope`,
   `PmExecutionLauncher`, `planningSnapshot(projectId)`,
   `approvedIntentLedger(projectId)`, and durable pending-launch reads.
 
@@ -819,6 +835,15 @@ runtime or transport composition.
   truth and completes the cycle view as attention, and reserve/activate are not
   called. A pending turn with no operation may reserve and activate freshly.
 
+  Capture every `PmExecutionLauncher.findReserved` and `reserve` argument.
+  Assert it parses through T01's `startExecutionEnvelopeSchema` and equals the
+  complete `PmExecutionLaunchInput`: `idempotencyKey` is exactly
+  `planning-turn:<humanTurnId>`; actor is exactly `{ kind: 'human' }`; command
+  type is `worker_execution.start`; project ID is the cycle project; profile ID
+  and revision are the cycle's frozen approved PM profile; assignment is the
+  exact frozen `PmDiscoveryAssignment`. Reject omissions, substitutions, extra
+  fields, or project/profile/assignment mismatches before the launcher call.
+
   Use controlled launcher barriers for both Abandon races. Pause after
   `reserve` commits but before bind, signal Abandon, release the barrier, and
   assert `cancelReserved` terminalizes that exact execution/start operation,
@@ -894,6 +919,13 @@ runtime or transport composition.
   reservations bind then move the cycle to attention, and activation failures
   terminalize an already-bound execution.
 
+  Build the launcher input once in `planning-service.ts` and validate it with
+  `startExecutionEnvelopeSchema.parse`; export its compile-time type only as
+  `PmExecutionLaunchInput = StartExecutionEnvelope`. Reuse that exact parsed
+  object for the read-only lookup and, only when absent, reservation. Do not
+  reconstruct it in the launcher adapter or infer project, profile, assignment,
+  actor, or idempotency fields from ambient state.
+
   Turn acceptance sets both the turn launch state and cycle lifecycle to
   `launch_pending` inside its command transaction. The drain coalesces by turn
   ID, re-reads before binding, and permits activation only after one committed
@@ -966,7 +998,8 @@ runtime or transport composition.
   persistence failures leave no partial canonical, receipt, attention,
   command-result, or event rows. Accepted, superseded, rejected, cancelled, and
   abandoned reservations have the exact canonical or noncanonical semantics
-  defined by the design, and neither Abandon race starts an adapter late.
+  defined by the design, neither Abandon race starts an adapter late, and every
+  launcher call receives one schema-validated complete start envelope.
 
 - [ ] **Step 9: Commit T02**
 
@@ -978,7 +1011,8 @@ runtime or transport composition.
 **Acceptance:** Migration 2 is forward-only; all planning and canonical history
 survives reopen; human approval is exact and atomic; invalid/duplicate worker
 output cannot partially mutate canonical intent; profile incompatibility and
-every lifecycle limit fail before unauthorized writes.
+every lifecycle limit fail before unauthorized writes. The only launch-input
+type exported by T02 is the local alias to T01's validated start envelope.
 
 ---
 
@@ -1349,8 +1383,9 @@ placeholder.
 
 **Interfaces:**
 
-- Consumes: all T01 contracts, T02 planning service/consumer/read models, T03
-  structured runtime events/fake scenarios, T04 leaf component props.
+- Consumes: all T01 contracts, T02 planning service/consumer/read models and
+  `PmExecutionLaunchInput`, T03 structured runtime events/fake scenarios, T04
+  leaf component props.
 - Produces: existing `registerV2Routes`, snapshot/replay endpoints,
   `createV2Api`, `ProjectProjection`, `App`, and `FocusedProjectShell` extended
   for M2; `ExecutionActivity` narrowed across both assignment kinds; no new
@@ -1430,6 +1465,20 @@ placeholder.
   `worker_execution.structured_output` and terminal execution notifications,
   and calls T02's planning-specific methods. Add one explicit optional runtime
   observer dependency rather than a registry.
+
+  The T05 adapter is an identity mapping for the frozen launch input:
+
+  ```ts
+  findReserved: (input: PmExecutionLaunchInput) =>
+    executionRuntime.findReservedStart(input),
+  reserve: (input: PmExecutionLaunchInput) =>
+    executionRuntime.reserveStart(input),
+  ```
+
+  In `planning-runtime.spec.ts`, capture both runtime calls and assert the exact
+  parsed object from T02 is forwarded by reference/value with no added, omitted,
+  or recomputed field. Cover both an existing reservation lookup and a fresh
+  reservation.
 
   ```ts
   export type ExecutionRuntimeObserver = {
@@ -1561,7 +1610,9 @@ placeholder.
 restart ordering is deterministic; UI state is a server projection; the Board
 and M3 domain remain untouched. No bound terminal cycle can remain
 `execution_active` across startup. Foundation and PM activity labels are
-deterministic without pretending the PM assignment has a foundation title.
+deterministic without pretending the PM assignment has a foundation title. The
+T02→T05 launch boundary exports one implementation-local alias to the validated
+M1 envelope and forwards it unchanged.
 
 ---
 
