@@ -1,4 +1,7 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative, resolve } from 'node:path';
 
 import {
   V2_PROTOCOL_VERSION,
@@ -13,7 +16,9 @@ import type { V2RouteDependencies } from './routes';
 import { createV2Snapshots } from './snapshots';
 import { AuditBarrier } from '../executions/audit-barrier';
 import { ExecutionRepository } from '../executions/execution-repository';
+import { auditAwareRepositoryIdentityResolver } from '../main';
 import { ProjectRepository } from '../projects/project-repository';
+import { ProjectService } from '../projects/project-service';
 import { WorkerProfileService } from '../profiles/profile-service';
 import { createV2TestDatabase } from '../test/create-v2-test-database';
 
@@ -85,14 +90,38 @@ const createDependencies = (): V2RouteDependencies => ({
 });
 
 const apps: Array<ReturnType<typeof createV2HttpApp>> = [];
+const webRoots: string[] = [];
 const createApp = (dependencies = createDependencies()) => {
   const app = createV2HttpApp(dependencies);
   apps.push(app);
   return app;
 };
 
+const gate = () => {
+  let entered!: () => void;
+  let release!: () => void;
+  return {
+    entered: new Promise<void>((resolve) => (entered = resolve)),
+    release: new Promise<void>((resolve) => (release = resolve)),
+    markEntered: entered,
+    open: release,
+  };
+};
+
 afterEach(async () => {
   await Promise.all(apps.splice(0).map((app) => app.close()));
+  for (const webRoot of webRoots.splice(0)) {
+    const resolved = resolve(webRoot);
+    const fromTemp = relative(resolve(tmpdir()), resolved);
+    if (
+      fromTemp === '' ||
+      fromTemp.startsWith('..') ||
+      !resolved.includes('mesh-v2-web-root-test-')
+    ) {
+      throw new Error('Refusing to remove an unverified V2 web-root fixture');
+    }
+    rmSync(resolved, { force: true, recursive: true });
+  }
 });
 
 describe('V2 HTTP routes', () => {
@@ -298,8 +327,92 @@ describe('V2 HTTP routes', () => {
     });
   });
 
+  it('rechecks the audit barrier after repository identity resolution', async () => {
+    const fixture = createV2TestDatabase();
+    try {
+      const identityGate = gate();
+      const barrier = new AuditBarrier();
+      const projects = new ProjectRepository(fixture.database);
+      const newProjectId = randomUUID();
+      const idempotencyKey = randomUUID();
+      const beforeProjects = projects.list();
+      const service = new ProjectService({
+        database: fixture.database,
+        projects,
+        commands: fixture.commands,
+        events: fixture.events,
+        projectId: () => newProjectId,
+        resolveRepositoryIdentity: auditAwareRepositoryIdentityResolver(
+          async () => {
+            identityGate.markEntered();
+            await identityGate.release;
+            return {
+              repositoryIdentity: 'delayed-repository',
+              canonicalPath: fixture.directory,
+              commonDirectory: fixture.directory,
+              headCommit: 'c'.repeat(40),
+            };
+          },
+          barrier,
+        ),
+      });
+      const dependencies = createDependencies();
+      dependencies.projects = service;
+      const pending = createApp(dependencies).inject({
+        method: 'POST',
+        url: '/api/v2/commands',
+        payload: {
+          idempotencyKey,
+          actor: { kind: 'human' },
+          command: {
+            type: 'project.register',
+            repositoryPath: fixture.directory,
+          },
+        },
+      });
+
+      await identityGate.entered;
+      barrier.trip(new Error('audit failed during identity lookup'), timestamp);
+      identityGate.open();
+      const response = await pending;
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({
+        error: {
+          code: 'audit_barrier_tripped',
+          message: 'Audit persistence is unavailable.',
+        },
+      });
+      expect(projects.list()).toEqual(beforeProjects);
+      expect(fixture.events.cursors(newProjectId)).toEqual({
+        domain: 0,
+        runtime: 0,
+      });
+      expect(fixture.commands.find(idempotencyKey)).toBeUndefined();
+    } finally {
+      fixture.close();
+    }
+  });
+
   it('does not expose a V1 /api route', async () => {
     expect((await createApp().inject({ url: '/api' })).statusCode).toBe(404);
+  });
+
+  it('serves the V2 SPA for direct project-route reloads without masking APIs', async () => {
+    const webRoot = mkdtempSync(join(tmpdir(), 'mesh-v2-web-root-test-'));
+    webRoots.push(webRoot);
+    writeFileSync(join(webRoot, 'index.html'), '<h1>V2 SPA marker</h1>');
+    const app = createV2HttpApp(createDependencies(), { webRoot });
+    apps.push(app);
+
+    const [projectRoute, apiRoute] = await Promise.all([
+      app.inject({ url: `/projects/${projectId}` }),
+      app.inject({ url: '/api' }),
+    ]);
+
+    expect(projectRoute.statusCode).toBe(200);
+    expect(projectRoute.body).toContain('V2 SPA marker');
+    expect(apiRoute.statusCode).toBe(404);
   });
 });
 

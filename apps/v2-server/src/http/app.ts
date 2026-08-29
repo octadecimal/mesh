@@ -15,6 +15,17 @@ export const createV2HttpApp = (
   registerV2Routes(app, dependencies);
   if (options.webRoot) {
     void app.register(staticFiles, { root: options.webRoot });
+    app.setNotFoundHandler((request, reply) => {
+      const path = request.url.split('?', 1)[0];
+      if (
+        request.method === 'GET' &&
+        path !== '/api' &&
+        !path?.startsWith('/api/')
+      ) {
+        return reply.sendFile('index.html');
+      }
+      return reply.status(404).send();
+    });
   }
   return app;
 };

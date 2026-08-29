@@ -135,26 +135,43 @@ export class V2SocketHub {
       this.options.publisher.subscribeDomain(
         subscription.projectId,
         (event) => {
-          if (event.projectId !== subscription.projectId) {
-            this.resync(connection, subscription.projectId, 'project_mismatch');
-          } else if (domain.buffering) domain.buffer.push(event);
-          else
-            this.deliverLive(connection, subscription.projectId, domain, event);
+          this.deliverPublished(connection, () => {
+            if (event.projectId !== subscription.projectId) {
+              this.resync(
+                connection,
+                subscription.projectId,
+                'project_mismatch',
+              );
+            } else if (domain.buffering) domain.buffer.push(event);
+            else
+              this.deliverLive(
+                connection,
+                subscription.projectId,
+                domain,
+                event,
+              );
+          });
         },
       ),
       this.options.publisher.subscribeRuntime(
         subscription.projectId,
         (event) => {
-          if (event.projectId !== subscription.projectId) {
-            this.resync(connection, subscription.projectId, 'project_mismatch');
-          } else if (runtime.buffering) runtime.buffer.push(event);
-          else
-            this.deliverLive(
-              connection,
-              subscription.projectId,
-              runtime,
-              event,
-            );
+          this.deliverPublished(connection, () => {
+            if (event.projectId !== subscription.projectId) {
+              this.resync(
+                connection,
+                subscription.projectId,
+                'project_mismatch',
+              );
+            } else if (runtime.buffering) runtime.buffer.push(event);
+            else
+              this.deliverLive(
+                connection,
+                subscription.projectId,
+                runtime,
+                event,
+              );
+          });
         },
       ),
     );
@@ -276,6 +293,22 @@ export class V2SocketHub {
             event,
           },
     );
+  }
+
+  private deliverPublished(
+    connection: ActiveConnection,
+    deliver: () => void,
+  ): void {
+    try {
+      deliver();
+    } catch {
+      connection.cleanup();
+      try {
+        connection.socket.close(1011, 'Socket delivery failed');
+      } catch {
+        // The listener is removed even when a broken transport cannot close.
+      }
+    }
   }
 
   private resync(

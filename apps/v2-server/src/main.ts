@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 
 import type {
   HarnessAdapter,
+  HarnessSession,
   ServerRealtimeMessage,
   V2Health,
 } from '@mesh/v2-contracts';
@@ -25,7 +26,10 @@ import {
 import { WorkerProfileService } from './profiles/profile-service.js';
 import { ProjectRepository } from './projects/project-repository.js';
 import { ProjectService } from './projects/project-service.js';
-import { createRepositoryIdentityResolver } from './projects/repository-identity.js';
+import {
+  createRepositoryIdentityResolver,
+  type ResolveRepositoryIdentity,
+} from './projects/repository-identity.js';
 import { V2EventPublisher } from './realtime/event-publisher.js';
 import { registerV2SocketHub, V2SocketHub } from './realtime/socket-hub.js';
 import { V2CommandRepository } from './storage/command-repository.js';
@@ -49,6 +53,60 @@ export type StartV2ServerOptions = {
 export type V2ReadyLine = {
   type: 'mesh.v2.ready';
   origin: string;
+};
+
+export const auditAwareRepositoryIdentityResolver =
+  (
+    resolveIdentity: ResolveRepositoryIdentity,
+    barrier: Pick<AuditBarrier, 'health'>,
+  ): ResolveRepositoryIdentity =>
+  async (repositoryPath) => {
+    const identity = await resolveIdentity(repositoryPath);
+    if (barrier.health().status === 'tripped') {
+      throw Object.assign(new Error('Audit persistence is unavailable.'), {
+        code: 'audit_barrier_tripped' as const,
+      });
+    }
+    return identity;
+  };
+
+const createFakeHoldController = (
+  underlying: HarnessAdapter,
+  holdAfterAdapterCursor: number | undefined,
+): { adapter: HarnessAdapter; release(): void } => {
+  let released = holdAfterAdapterCursor === undefined;
+  let releaseHold!: () => void;
+  const hold = new Promise<void>((resolve) => (releaseHold = resolve));
+  const wrapSession = (session: HarnessSession): HarnessSession => ({
+    get nativeHandle() {
+      return session.nativeHandle;
+    },
+    async *events(afterAdapterCursor) {
+      for await (const event of session.events(afterAdapterCursor)) {
+        yield event;
+        if (!released && event.adapterCursor === holdAfterAdapterCursor) {
+          await hold;
+        }
+      }
+    },
+    close: () => session.close(),
+  });
+  return {
+    adapter: {
+      id: underlying.id,
+      capabilities: () => underlying.capabilities(),
+      resolveSkills: (requests) => underlying.resolveSkills(requests),
+      start: async (request) => wrapSession(await underlying.start(request)),
+      probe: (nativeHandle) => underlying.probe(nativeHandle),
+      resume: async (request) => wrapSession(await underlying.resume(request)),
+      interrupt: (nativeHandle) => underlying.interrupt(nativeHandle),
+    },
+    release: () => {
+      if (released) return;
+      released = true;
+      releaseHold();
+    },
+  };
 };
 
 const health = (barrier: AuditBarrier): V2Health => {
@@ -112,11 +170,14 @@ export const startV2Server = async (
       projects: projectsRepository,
       commands,
       events,
-      resolveRepositoryIdentity: createRepositoryIdentityResolver({
-        workspaceRoot: config.workspaceRoot,
-        gitExecutable: trustedGit.path,
-        processRunner: createV2GitProcessRunner(trustedGit),
-      }),
+      resolveRepositoryIdentity: auditAwareRepositoryIdentityResolver(
+        createRepositoryIdentityResolver({
+          workspaceRoot: config.workspaceRoot,
+          gitExecutable: trustedGit.path,
+          processRunner: createV2GitProcessRunner(trustedGit),
+        }),
+        barrier,
+      ),
       publish: (event) => publisher.domain(event),
     });
     const profiles = new WorkerProfileService({
@@ -131,11 +192,11 @@ export const startV2Server = async (
     });
     const executions = new ExecutionRepository(database);
     const operations = new OperationRepository(database);
-    const adapter =
-      options.test?.adapter ??
-      new FakeHarnessAdapter({
-        holdAfterAdapterCursor: config.testFakeHoldAfterAdapterCursor,
-      });
+    const fakeHold = createFakeHoldController(
+      options.test?.adapter ?? new FakeHarnessAdapter(),
+      config.testFakeHoldAfterAdapterCursor,
+    );
+    const adapter = fakeHold.adapter;
     runtime = new ExecutionRuntime({
       database,
       commands,
@@ -217,13 +278,14 @@ export const startV2Server = async (
           accepting = false;
           hub?.close();
           await app?.close();
+          fakeHold.release();
           await runtime?.drain();
           await runtime?.close();
           database?.close();
         })();
         return closePromise;
       },
-      releaseFakeHold: () => undefined,
+      releaseFakeHold: fakeHold.release,
     };
   } catch (error) {
     accepting = false;

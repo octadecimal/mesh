@@ -91,6 +91,17 @@ class TestSocket extends EventEmitter implements V2SocketConnection {
   }
 }
 
+class ThrowingSocket extends TestSocket {
+  sendAttempts = 0;
+  throwOnSend = false;
+
+  override send(value: string): void {
+    this.sendAttempts += 1;
+    if (this.throwOnSend) throw new Error('socket send failed');
+    super.send(value);
+  }
+}
+
 const gate = () => {
   let entered!: () => void;
   let release!: () => void;
@@ -245,5 +256,43 @@ describe('V2SocketHub', () => {
     publisher.runtime(runtimeEvent(1));
     expect(second.sent).toHaveLength(1);
     expect(second.closed).toHaveLength(1);
+  });
+
+  it('removes a socket whose send fails without disrupting other listeners', async () => {
+    const publisher = new V2EventPublisher();
+    const hub = new V2SocketHub({
+      publisher,
+      projectExists: () => true,
+      events: {
+        domainAfter: () => ({ lowWater: 1, highWater: 0, events: [] }),
+        runtimeAfter: () => ({ lowWater: 1, highWater: 0, events: [] }),
+      },
+    });
+    const broken = new ThrowingSocket();
+    const healthy = new TestSocket();
+    hub.attach(broken);
+    hub.attach(healthy);
+    broken.subscribe();
+    healthy.subscribe();
+    await Promise.all([
+      broken.waitFor((message) => message.type === 'v2.subscribed'),
+      healthy.waitFor((message) => message.type === 'v2.subscribed'),
+    ]);
+    broken.throwOnSend = true;
+
+    publisher.domain(domainEvent(1));
+
+    expect(broken.closed).toEqual([
+      { code: 1011, reason: 'Socket delivery failed' },
+    ]);
+    expect(
+      healthy.sent.some(
+        (message) =>
+          message.type === 'v2.domain_event' && message.event.sequence === 1,
+      ),
+    ).toBe(true);
+    expect(broken.sendAttempts).toBe(2);
+    publisher.domain(domainEvent(2));
+    expect(broken.sendAttempts).toBe(2);
   });
 });
