@@ -234,6 +234,7 @@ export type PmExecutionReservation = {
 export type PmExecutionLauncher = {
   reserve(input: PmExecutionLaunchInput): Promise<PmExecutionReservation>;
   activate(executionId: WorkerExecutionId): Promise<void>;
+  cancelReserved(executionId: WorkerExecutionId): Promise<WorkerExecution>;
   interrupt(executionId: WorkerExecutionId): Promise<void>;
 };
 
@@ -263,10 +264,11 @@ export class PmReportConsumer {
 }
 ```
 
-T03 adds `ExecutionRuntime.reserveStart` and `activateReserved` while preserving
-the existing `start` signature as a reserve/activate wrapper. T05 adapts those
-methods to `PmExecutionLauncher`; T02 reserves with deterministic idempotency
-key `planning-turn:<humanTurnId>`, commits the exact execution binding, and only
+T03 adds `ExecutionRuntime.reserveStart`, `activateReserved`, and
+`cancelReserved` while preserving the existing `start` signature as a
+reserve/activate wrapper. T05 adapts those methods to `PmExecutionLauncher`;
+T02 reserves with deterministic idempotency key
+`planning-turn:<humanTurnId>`, commits the exact execution binding, and only
 then activates it. No layer duplicates execution lifecycle code.
 
 ```ts
@@ -285,6 +287,7 @@ export class ExecutionRuntime {
     envelope: StartExecutionEnvelope,
   ): Promise<ReservedExecutionStart>;
   activateReserved(executionId: WorkerExecutionId): Promise<void>;
+  cancelReserved(executionId: WorkerExecutionId): Promise<WorkerExecution>;
   start(envelope: StartExecutionEnvelope): Promise<V2CommandResult>;
 }
 ```
@@ -316,6 +319,16 @@ distinct turn returns `planning_cycle_revision_conflict` with no write.
 `drainPendingLaunches` coalesces by turn, and `activateReserved` coalesces by
 execution until durable start-operation reconciliation or terminal/running
 state owns it.
+
+One per-cycle `PlanningLaunchCoordinator` arbitrates drain and Abandon. Abandon
+signals cancellation before waiting. `cancelReserved` shares the execution
+interlock with activation: if cancellation owns the boundary it fails the
+linked starting execution and pending start operation with existing
+`startup_interrupted_before_start` evidence and no adapter call; if activation
+already owns it, cancellation waits and returns the running or terminal
+execution. Planning interrupts the running result before committing Abandon.
+No adapter start may occur after the abandoned-cycle commit, and M1's public
+running-only interrupt contract is unchanged.
 
 T01 freezes these planning result codes; T02 returns them and T05 may not
 reinterpret them:
@@ -685,6 +698,18 @@ runtime or transport composition.
   command/execution with no operation and prove upgrade preserves its legal M1
   wrapper-replay compatibility.
 
+  Seed nonempty `command_results` with one valid replayable row for each M1
+  command type. Snapshot those rows, command-repository replay results, the
+  table SQL, and every M1 index before upgrade; after migration assert the rows
+  and replay values are byte-equivalent, every unrelated M1 table/index is
+  unchanged, and primary-key/idempotency uniqueness still holds. On both fresh
+  and upgraded databases insert and replay all four M2 command/result variants:
+  `planning_cycle.submit_turn`, `planning_proposal.approve`,
+  `planning_proposal.reject`, and `planning_cycle.abandon`. Force a later
+  migration statement to fail after the rebuild and prove the outer transaction
+  restores the exact migration-1 table SQL, rows, indices, ledger, and replay
+  results with no migration-2 entry.
+
   ```ts
   expect(migrationRows(database)).toEqual([
     { version: 1, name: '001_foundation' },
@@ -717,6 +742,15 @@ runtime or transport composition.
   lexical storage constraints for symmetric edges, and no provenance variant
   beyond durable conversation turns.
 
+  Do not alter `001_foundation.sql`. At the start of `002_intent_ledger.sql`,
+  rebuild only `command_results` within `migrateV2Database`'s existing immediate
+  transaction: create a replacement with the identical five columns and checks
+  except for a `command_type` check containing exactly the four M1 plus four M2
+  values; copy all rows without transformation; drop the old table; rename the
+  replacement; and preserve primary-key uniqueness. Continue all other
+  migration-2 statements in that same transaction so any failure rolls the
+  rebuild and migration ledger back together.
+
   ```ts
   const intentLedgerMigration = {
     version: 2,
@@ -733,8 +767,10 @@ runtime or transport composition.
 
   Rerun Step 2.
 
-  Expected: PASS for fresh/upgrade databases, foreign keys, uniqueness,
-  immutable revision history, and restart reads.
+  Expected: PASS for fresh/upgrade databases, all eight command-result types,
+  byte-equivalent M1 rows/replay, rollback to exact M1 schema after an injected
+  later failure, foreign keys, uniqueness, immutable revision history, and
+  restart reads.
 
 - [ ] **Step 5: Write red service tests for turns, proposals, and authority**
 
@@ -759,6 +795,26 @@ runtime or transport composition.
   `execution_bound` and cycle to attention, and never activates it. Also cover a
   nonterminal reservation crash before binding and single activation after
   restart.
+
+  Use controlled launcher barriers for both Abandon races. Pause after
+  `reserve` commits but before bind, signal Abandon, release the barrier, and
+  assert `cancelReserved` terminalizes that exact execution/start operation,
+  the cycle commits `abandoned`, and bind/activate/adapter start never occur.
+  Repeat after binding but before activation and prove the same cancellation,
+  no late adapter start, no pending start operation, one complete abandoned
+  cycle event, and no canonical mutation. Let activation win a third race and
+  prove Abandon waits for one running result, interrupts it, then commits; no
+  start occurs after that commit. Inject cancellation and interruption failures
+  and prove no successful Abandon command result or falsely abandoned cycle is
+  stored.
+
+  For malformed payloads and well-formed reports with wrong project/cycle/turn,
+  revision, or schema binding, assert one immediate transaction stores a
+  rejected durable receipt with stable reason, moves the complete cycle to
+  `attention_required`, and appends its complete-cycle event while inserting no
+  PM turn, question, proposal, reservation, or canonical row. Inject failures at
+  rejected-receipt insert, attention update, and event append; each must roll
+  back the entire rejected path and publish nothing.
 
   T02 owns approved-profile validation. Using an injected
   `Pick<WorkerProfileService, 'resolveApproved'>`, prove the selected revision
@@ -806,20 +862,29 @@ runtime or transport composition.
   `launch_pending` inside its command transaction. The drain coalesces by turn
   ID, re-reads before binding, and permits activation only after one committed
   `execution_bound` transition. A distinct command cannot create another turn
-  while either launch-pending or execution-active.
-  The consumer accepts only a matching `pm_discovery` assignment and performs
+  while either launch-pending or execution-active. A per-cycle
+  `PlanningLaunchCoordinator` accepts an Abandon cancellation signal before it
+  waits for the drain. The drain checks that signal after reserve, before bind,
+  and inside the execution activation claim. Cancellation invokes
+  `cancelReserved`; an activation-owned running result is interrupted before
+  the abandoned cycle transaction commits.
+
+  The consumer is invoked only for a `pm_discovery` assignment. It derives the
+  authoritative cycle/turn from that frozen assignment, then performs parsing,
+  binding checks, receipt persistence, cycle transition, and event append in
   one immediate transaction per report.
 
   ```ts
   const launchKey = (turnId: string) => `planning-turn:${turnId}`;
 
   consume(execution, event): void {
-    const report = pmDiscoveryReportSchema.parse(event.payload.value);
-    requireFrozenBinding(execution.assignment, report);
     inImmediateTransaction(this.database, () => {
       if (this.repository.replayReceipt(execution.id, event)) return;
-      this.repository.insertReceipt(execution, event, report);
-      const change = this.repository.applyReport(execution, report);
+      const cycle = this.repository.requireAssignedCycle(execution.assignment);
+      const parsed = validatePmReportInTransaction(execution, event, cycle);
+      const change = parsed.ok
+        ? this.repository.acceptReport(execution, event, parsed.report, cycle)
+        : this.repository.rejectReport(execution, event, parsed.reason, cycle);
       this.events.appendDomainInTransaction(
         execution.projectId,
         planningCycleChangedDraft(change, event.occurredAt),
@@ -846,10 +911,11 @@ runtime or transport composition.
   git diff --check
   ```
 
-  Expected: all commands exit `0`; injected persistence failures leave no
-  partial canonical, receipt, command-result, or event rows. Accepted,
-  superseded, rejected, and abandoned reservations have the exact canonical or
-  noncanonical semantics defined by the design.
+  Expected: all commands exit `0`; injected accepted- or rejected-receipt
+  persistence failures leave no partial canonical, receipt, attention,
+  command-result, or event rows. Accepted, superseded, rejected, cancelled, and
+  abandoned reservations have the exact canonical or noncanonical semantics
+  defined by the design, and neither Abandon race starts an adapter late.
 
 - [ ] **Step 9: Commit T02**
 
@@ -891,8 +957,9 @@ persistent planning session.
 - Produces: `FakePmScenario = 'todo' | 'malformed' | 'duplicate' |
   'missing_output'`; `FakeHarnessAdapter` constructor option
   `pmScenario?: FakePmScenario`; `ExecutionRuntime.reserveStart` and
-  `activateReserved`; `OperationRepository.findStartReservation`; the existing
-  `start` signature and behavior preserved as their wrapper.
+  `activateReserved` and `cancelReserved`;
+  `OperationRepository.findStartReservation`; the existing `start` signature
+  and behavior preserved as their wrapper.
 
 - [ ] **Step 1: Add red runtime ordering and fake scenario tests**
 
@@ -901,6 +968,14 @@ persistent planning session.
   event has a raw diagnostic committed first; malformed emits unparseable
   value; duplicate emits two output envelopes; missing-output emits only
   completion. Assert no second call reuses a native PM handle.
+
+  Freeze absent scenario behavior: a `pm_discovery` assignment with no
+  `pmScenario` must start and complete normally through the fake harness with no
+  structured output, producing the ordinary planning
+  completion-without-receipt attention path. It must not throw, reject an
+  import/type, start infrastructure, or affect the unchanged
+  `foundation-check` default. This is the deterministic pre-fixture behavior
+  used by T06's red journey.
 
   Add runtime boundary cases proving `reserveStart` returns the exact execution
   and command result without calling `adapter.start`, attaching, or consuming
@@ -922,6 +997,17 @@ persistent planning session.
   Separately seed a pre-migration terminal foundation command result without an
   operation and prove public `start` still returns that stored result without
   adapter work, while direct post-migration `reserveStart` never infers it.
+
+  Add controlled `cancelReserved` races against activation. If cancellation
+  claims the shared execution interlock first, assert the exact linked
+  `starting` execution transitions to `failed` with
+  `startup_interrupted_before_start`, its pending start operation finishes
+  failed with `planning_cycle_abandoned`, and adapter start/attach/consume remain
+  zero. If activation owns first, cancellation waits and returns the one running
+  or terminal execution for planning to interrupt or accept. Repeated
+  cancellation is idempotent, preserves the operation link, and injected
+  execution/operation/event persistence failure trips the audit barrier without
+  reporting cancellation success.
 
   ```ts
   const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });
@@ -966,13 +1052,22 @@ persistent planning session.
   from assignment fields. Coalesce activation promises by execution ID before
   `adapter.start`, remove them only after durable running/terminal ownership,
   and let startup reconciliation own an already-pending recovered operation.
+  Implement `cancelReserved` under that same per-execution interlock. It may
+  close only an exact operation-linked `starting` execution with a pending start
+  operation, using the existing `starting -> failed` transition and
+  `startup_interrupted_before_start` failure code; it never calls or broadens M1
+  `interrupt`. If activation already owns the interlock, await its durable
+  running/terminal result and return that execution without claiming it was
+  cancelled.
 
   Branch the fake only on `assignment.kind`. Keep the existing foundation
   script intact. For `pm_discovery`, generate a fresh finite native handle and
   the deterministic report bound to assignment IDs/revisions. The Todo proposal
   must include the design's five record types, three requirements, `depends_on`,
   `constrains`, and provenance to both turns. Do not add an adapter session cache
-  or provider resume concept.
+  or provider resume concept. When `pmScenario` is absent, use exactly the
+  finite completion-only behavior of `missing_output`; this is a legitimate
+  planning failure, not a thrown configuration or infrastructure error.
 
   ```ts
   const scriptEnvelope = (
@@ -1007,7 +1102,9 @@ persistent planning session.
   show no adapter event can precede the planning binding, while every expected
   or unexpected start failure leaves exactly one durable execution outcome.
   Terminal replay and concurrent activation retain one execution, operation,
-  adapter session, and event consumer.
+  adapter session, and event consumer. Cancellation-first races retain the same
+  auditable operation link with no adapter session, and an absent PM scenario
+  deterministically reaches completion-without-receipt attention.
 
 - [ ] **Step 5: Commit T03**
 
@@ -1246,8 +1343,8 @@ placeholder.
 - [ ] **Step 3: Compose the planning runtime without a generic framework**
 
   `planning-runtime.ts` adapts the planning launcher to
-  `ExecutionRuntime.reserveStart`, `activateReserved`, and the existing
-  interruption method, subscribes only to
+  `ExecutionRuntime.reserveStart`, `activateReserved`, `cancelReserved`, and the
+  existing running-only interruption method, subscribes only to
   `worker_execution.structured_output` and terminal execution notifications,
   and calls T02's planning-specific methods. Add one explicit optional runtime
   observer dependency rather than a registry.
@@ -1432,14 +1529,17 @@ describe the implemented boundary without claiming M3.
   $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
   git diff --name-only
+  corepack pnpm nx typecheck v2-e2e
   corepack pnpm nx e2e v2-e2e -- --grep "conversation becomes an approved intent ledger"
   ```
 
-  Expected: the new test compiles, runs, and FAILS at the first structured PM
-  question/proposal assertion because the existing fixture cannot select the
-  Todo PM scenario. Record that assertion, exact HEAD, and clean process
-  evidence; a compiler failure, build contamination, or unrelated test failure
-  is not the required red evidence.
+  Expected: `typecheck v2-e2e` exits `0`, then the new test runs and FAILS at the
+  first structured PM question assertion because the fixture's absent fake-PM
+  option deterministically takes T03's completion-without-receipt attention
+  path rather than the Todo scenario. Record both exit codes, that assertion,
+  exact HEAD, and clean process evidence; a compiler/import/type failure, thrown
+  fake configuration, build contamination, infrastructure failure, or unrelated
+  test failure is not the required red evidence.
 
 - [ ] **Step 3: Implement only the owned fixture support and make the journey green**
 
@@ -1455,8 +1555,9 @@ describe the implemented boundary without claiming M3.
   existing target cannot preserve the explicit option. Update the journey to
   create the fixture with `{ fakePmScenario: 'todo' }` and add the forced-resync
   assertion. Do not edit production source to make the journey pass. Rerun the
-  exact Step 2 command with the same daemon/cache environment and exact-head
-  evidence.
+  exact Step 2 typecheck-then-E2E sequence with the same daemon/cache environment
+  and exact-head evidence. Green requires both commands to exit `0` in that
+  order; an E2E-only rerun is insufficient.
 
   Expected: PASS using built server/web output, a temporary database/repository,
   port `0`, a fixture-owned fake PM option on both child processes, and no
@@ -1488,6 +1589,7 @@ describe the implemented boundary without claiming M3.
   corepack pnpm nx build v2-contracts
   corepack pnpm nx build v2-server
   corepack pnpm nx build v2-web
+  corepack pnpm nx typecheck v2-e2e
   corepack pnpm nx e2e v2-e2e -- --grep "conversation becomes an approved intent ledger"
   corepack pnpm verify
   git diff --check
@@ -1566,6 +1668,42 @@ After W2, run the T05 W2 gate. After W3, run the T06 final gate and
 stop-condition audit. A green worker test without accepted review and clean
 integration evidence is insufficient.
 
+After every W0-W3 integration gate, and before starting the next wave or final
+milestone review, dispatch a fresh independent read-only integration reviewer.
+The reviewer may not be a worker whose commit is in that wave, that wave's
+integrator, or the reviewer of the latest rework included in the integration
+head. It independently verifies the exact wave base/head, ordered commit set,
+base-to-head diff and changed paths, ownership/prohibited surfaces, interface
+compatibility, gate commands/results, mandatory Nx environment evidence, and
+wave stop condition, then returns exactly:
+
+```text
+INTEGRATION REVIEW HANDOFF
+Wave: <W0 | W1 | W2 | W3>
+Reviewer: <fresh independent reviewer ID>
+Wave base: <full SHA>
+Integration head: <full reviewed SHA>
+Integrated commits: <ordered full SHAs>
+Diff and paths: <exact base..head command, result, and changed paths>
+Verdict: accept | rework | blocked
+Findings: <severity, owner, path:line, impact, required correction; or none>
+Ownership and exclusions: <satisfied, unsatisfied, or unverified with evidence>
+Interfaces and stop condition: <satisfied, unsatisfied, or unverified with evidence>
+Verification: <exact commands, exit codes, NX_DAEMON/NX_SKIP_NX_CACHE, tested HEAD>
+Residual risks: <items or none>
+```
+
+`accept` applies only to that exact integration head. On `rework`, route each
+task-owned finding to its original worker; route only an authorized
+integration-only finding to the integrator. Each correction receives its normal
+fresh task review, is reintegrated in deterministic task order, and the full
+wave gate reruns daemon-disabled and uncached on the new exact head. A different
+fresh integration reviewer then reviews that new head; prior evidence does not
+transfer. On `blocked`, record the exact owner/condition and do not start the
+next wave. The coordinator records every integration handoff, reviewer,
+finding, rework/reintegration commit, re-gate, and re-review verdict in the
+campaign ledger before advancing.
+
 ### Final Independent Milestone Review
 
 After W3 is integrated, the coordinator records the exact final integration
@@ -1618,18 +1756,23 @@ following:
   symmetric conflict/duplicate edges;
 - one finite fake PM execution per human turn and one strict, idempotent,
   binding-validated report receipt per accepted output;
+- migration 2 transactionally accepts all four planning command results while
+  preserving every nonempty M1 command row, result, index, and replay path on
+  upgrade and rollback;
 - exact execution reservation and durable binding before activation, including
   a unique start-operation link for terminal capability/skill replay and
-  adapter-start failures, with no pre-binding event consumption or duplicate
-  execution/session;
+  adapter-start failures, plus Abandon arbitration that leaves no late adapter
+  start, orphan starting execution, or pending start operation, with no
+  pre-binding event consumption or duplicate execution/session;
 - one active nonterminal cycle per project, bounded assignment/snapshot history,
   non-accepting single-flight `launch_pending`, replay-complete proposal
   supersede/reject/abandon events, and incremental projection equivalent to a
   fresh snapshot;
 - audit-before-publish, immediate atomic approval, stale/invalid/failure
-  rollback, snapshot/replay/resync, and restart recovery that reconciles durable
-  output/terminal executions before session attachment, pending launch, or
-  command acceptance;
+  rollback, transactional rejected receipts plus complete-cycle attention for
+  malformed/wrongly-bound output, snapshot/replay/resync, and restart recovery
+  that reconciles durable output/terminal executions before session attachment,
+  pending launch, or command acceptance;
 - accessible PM and Requirements UI with human-only all-or-nothing approval;
 - deterministic built-process Todo acceptance with no paid traffic,
   credentials, real repository, or operator state;
