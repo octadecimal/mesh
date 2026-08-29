@@ -309,7 +309,8 @@ export class PlanningInterruptCleanupError extends Error {
   readonly code:
     | 'planning_interrupt_not_running'
     | 'planning_interrupt_unproven'
-    | 'planning_interrupt_audit_failure';
+    | 'planning_interrupt_audit_failure'
+    | 'planning_interrupt_quiescence_failure';
 }
 ```
 
@@ -336,13 +337,26 @@ or accept commands before that return.
 `interruptForPlanning` is T03-owned and internal. It accepts only an execution
 ID, never synthesizes `InterruptExecutionEnvelope`, never traverses the public
 human command route, and never reads or writes `command_results`. On the first
-running call it asserts the audit barrier, transitions the exact execution to
-interrupting, creates an `execution_operations.kind = 'interrupt'` row whose
-request is tagged `mesh.v2.planning-interrupt/v1`, appends/publishes the durable
-lifecycle event, awaits the adapter interrupt, then transactionally records the
-proven interrupted or attention-required terminal state, operation proof, and
-terminal event before resolving. It preserves M1 audit-before-publish,
-containment, barrier, and diagnostic ordering.
+running call, under M1's per-execution interlock, it captures the exact
+`ActiveSession` entry (`HarnessSession` and consume task), marks that entry
+fenced, asserts the audit barrier, transitions the exact execution to
+interrupting, and creates an `execution_operations.kind = 'interrupt'` row
+whose request is tagged `mesh.v2.planning-interrupt/v1`. The consume loop checks
+that fence after each iterator result and before every diagnostic, event,
+persistence, or publication boundary. A late result is discarded.
+
+Still owning the cleanup attempt, the bridge appends/publishes the committed
+interrupting event, awaits adapter interrupt with barrier checks, closes the
+captured `HarnessSession`, awaits settlement and removal of that exact consume
+task, and checks the barrier again. Only after that fence proves consumer
+quiescence does it transactionally record the interrupted or attention-required
+terminal state, operation proof, and terminal event and resolve. It preserves
+M1 audit-before-publish, containment, barrier, and diagnostic ordering. The
+bridge is callable only from the external planning coordinator; a call from its
+own consume task throws typed before fencing, so it can never await itself.
+After fencing, close-and-join is mandatory containment even when adapter
+interrupt rejects; retain the adapter rejection as the primary typed diagnostic
+and attach any close/join failure without reporting cleanup success.
 
 Calls for the same execution coalesce while live. After a successful prior
 planning-interrupt operation, replay against its already-terminal execution is
@@ -351,9 +365,12 @@ state throws `PlanningInterruptCleanupError` without adapter work. Adapter
 rejection/unproven interruption records attention plus the operation proof and
 throws `planning_interrupt_unproven`. Barrier or audit-write failure contains
 owned work, performs no later adapter/publication work, and throws
-`planning_interrupt_audit_failure`. The planning coordinator awaits this method
-and may commit Abandon only after it resolves; every typed failure occurs before
-the Abandon transaction and stores no successful Abandon result/event.
+`planning_interrupt_audit_failure`. Exact-session close or consume-task
+settlement/removal failure preserves the operation and diagnostics, contains
+owned work, and throws `planning_interrupt_quiescence_failure`; it must not
+claim terminal cleanup. The planning coordinator awaits this method and may
+commit Abandon only after it resolves; every typed failure occurs before the
+Abandon transaction and stores no successful Abandon result/event.
 The exact execution ID plus its first tagged planning-interrupt operation is the
 durable coordinator-attempt identity; replay never creates a second tagged
 operation for that execution.
@@ -396,10 +413,11 @@ already owns it, cancellation waits and returns the running or terminal
 execution. Planning interrupts the running result before committing Abandon.
 No adapter start may occur after the abandoned-cycle commit, and M1's public
 human interrupt contract is unchanged and is never called by planning. Planning
-instead awaits T03's internal `interruptForPlanning`; cancellation or internal
-interruption failure stores no successful Abandon result/event and does not mark
-the cycle abandoned. Cleanup succeeds first and the abandoned transaction
-always commits last.
+instead awaits T03's internal `interruptForPlanning`, whose success means the
+exact active session is closed and its consume task has settled and been
+removed; cancellation, interruption, or quiescence failure stores no successful
+Abandon result/event and does not mark the cycle abandoned. Cleanup succeeds
+first and the abandoned transaction always commits last.
 
 T01 freezes these planning result codes; T02 returns them and T05 may not
 reinterpret them:
@@ -424,9 +442,9 @@ failures are `503`; unknown exceptions are `500`.
 
 | Wave | Tasks | Why ready | Non-overlap proof | Gate |
 | --- | --- | --- | --- | --- |
-| W0 | T01 | No implementation dependency | Sole owner of `packages/v2-contracts/**` | Contract tests/typecheck/build |
-| W1 | T02, T03, T04 | T01 accepted | T02 owns database/planning domain; T03 owns execution runtime/fake; T04 owns new leaf web components only | Three focused suites and typechecks |
-| W2 | T05 | All W1 tasks accepted | Sole serialized owner of server/web composition and every shared file | Integrated server/web tests, typechecks, builds |
+| W0 | T01 | No implementation dependency | Sole owner of `packages/v2-contracts/**` | Contract tests/typecheck/build; downstream compatibility debt recorded |
+| W1 | T02, T03, T04 | T01 accepted | T02 owns database/planning domain; T03 owns execution runtime/fake; T04 owns new leaf web components only | Three focused suites plus integrated server typecheck; web typecheck deferred |
+| W2 | T05 | All W1 tasks accepted | Sole serialized owner of server/web composition and every shared file | Integrated server/web tests, typechecks, builds; no deferred compatibility remains |
 | W3 | T06 | T05 accepted | Sole owner of `e2e-v2/**` and current development docs | Todo E2E, full verify, stop-condition audit |
 
 W1 workers start from the same accepted W0 head. They must not import another
@@ -434,6 +452,18 @@ W1 worker's new implementation file. T01 contracts are the only shared
 interface. T05 starts from the deterministic integration of T02, T03, then T04
 and is intentionally serialized because it touches shared composition. T06
 starts only after T05 review and integration.
+
+T01 intentionally widens strict contract unions before their server and web
+consumers can be updated. That temporary incompatibility is bounded: T01 proves
+only `v2-contracts`; T02 defers the full `v2-server` typecheck until accepted
+T02 and T03 commits share the W1 integration head; T04 defers full `v2-web`
+test/typecheck/build until T05 lands on the W2 integration head. A focused
+Vitest command remains a worker gate only when it loads the owned leaf modules
+without compiling incompatible consumers. If the repository's configured test
+target instead performs a whole-project compile, record that command as the
+same deferred gate rather than claiming a false worker pass. W1 cannot advance
+to W2 without the integrated server typecheck; W2 cannot advance to W3 without
+the integrated web test, typecheck, and build.
 
 ## Required Worker and Reviewer Handoffs
 
@@ -453,6 +483,8 @@ Acceptance evidence:
 - every criterion with repository or test evidence
 Verification:
 - every exact command, exit code, and concise result
+Deferred compatibility gates:
+- exact command, reason, compatibility owner, and required integration wave; or none
 Unverified:
 - every unverified item, or none
 Risks or decisions:
@@ -468,7 +500,11 @@ focused tests, safety invariants, and overbuilding risk. The reviewer returns
 evidence. Rework returns to the original worker and receives a new independent
 review. No task enters integration from its worker report alone. Reviewer gate
 evidence must show the exact reviewed HEAD and both mandatory Nx environment
-values; otherwise the result is unverified.
+values; otherwise the result is unverified. Reviewers must distinguish the
+explicit T02 server and T04 web compatibility deferments from unexpected
+failures and confirm that each is assigned to its mandatory integration gate;
+they may not require a worker to claim a whole-project gate that this plan says
+is temporarily unrunnable.
 
 Every reviewer returns:
 
@@ -483,6 +519,8 @@ Contract coverage:
 - every acceptance criterion marked satisfied, unsatisfied, or unverified with evidence
 Verification:
 - every exact command, exit code, and concise result
+Deferred compatibility gates:
+- bounded deferments and mandatory integration owner/wave; or none
 Residual risks:
 - every residual risk, or none
 ```
@@ -505,6 +543,11 @@ and resulting head; commands/results; decisions and assumptions; blockers; the
 observed `origin/master` SHA; and whether origin drifted from the campaign base.
 Every Nx/verify command entry records `NX_DAEMON=false`,
 `NX_SKIP_NX_CACHE=true`, and the exact tested HEAD.
+Every deliberately deferred compatibility gate also gets a ledger entry with
+the originating task/head, exact command not yet runnable, observed or expected
+incompatibility, responsible compatibility owner, required integration wave,
+and the later exact-head passing evidence. A deferment is neither a pass nor a
+worker defect unless it exceeds this plan's frozen boundary.
 Origin drift is informational unless the coordinator explicitly replans; no
 worker rebases or absorbs it.
 
@@ -522,6 +565,7 @@ Tasks: <each ID, branch, worktree, worker commit, review ID/verdict, rework comm
 Integration: <ordered commits, integration commits, resulting heads>
 Decisions and assumptions: <settled items or none>
 Verification: <exact commands, exit codes, concise results, and head tested>
+Deferred gates: <origin, command, owner/wave, and discharge evidence; or none>
 Stop-condition proof: <each final criterion satisfied/unproved with evidence>
 Blockers: <owner and bounded next action, or none>
 Review: <final independent reviewer ID, exact head, verdict, findings>
@@ -710,7 +754,10 @@ snapshots, without introducing an M3 type.
 
   Expected: all commands exit `0`; contract tests include explicit failures for
   `taskId`, `covers`, unknown fields, non-human command envelopes, and
-  incompatible PM profile/output bindings.
+  incompatible PM profile/output bindings. Record, without running or claiming,
+  the downstream full `v2-server` and `v2-web` compatibility gates: widened
+  strict unions are allowed to remain temporarily unhandled until T03 and T05,
+  respectively. This bounded deferment does not weaken the T01 contract gate.
 
 - [ ] **Step 7: Commit T01**
 
@@ -1034,16 +1081,22 @@ runtime or transport composition.
   $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
   corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-service.spec.ts apps/v2-server/src/planning/pm-report-consumer.spec.ts --config apps/v2-server/vitest.config.ts
-  corepack pnpm nx typecheck v2-server
   git diff --check
   ```
 
-  Expected: all commands exit `0`; injected accepted- or rejected-receipt
+  Expected: the focused Vitest command and diff check exit `0`; injected
+  accepted- or rejected-receipt
   persistence failures leave no partial canonical, receipt, attention,
   command-result, or event rows. Accepted, superseded, rejected, cancelled, and
   abandoned reservations have the exact canonical or noncanonical semantics
   defined by the design, neither Abandon race starts an adapter late, and every
-  launcher call receives one schema-validated complete start envelope.
+  launcher call receives one schema-validated complete start envelope. Do not
+  run or claim full `corepack pnpm nx typecheck v2-server` on the isolated T02
+  branch: T01 widened execution unions whose runtime consumers are owned by
+  T03. Record that exact command as deferred to the mandatory W1 integration
+  gate after accepted T02+T03. If this focused Vitest invocation is discovered
+  to compile those incompatible unowned consumers, defer it with the same
+  evidence instead of weakening types or editing outside T02 ownership.
 
 - [ ] **Step 9: Commit T02**
 
@@ -1142,21 +1195,33 @@ persistent planning session.
 
   Add focused `interruptForPlanning` cases. A running execution must transition
   through interrupting, append/publish its event only after commit, create one
-  tagged internal interrupt operation, await adapter success, and durably finish
-  execution/operation/event as interrupted before resolving. Concurrent calls
-  coalesce; replay after that exact finished planning operation and terminal
-  execution is an idempotent no-op. An already-terminal execution without that
-  operation and every other non-running lifecycle throw
+  tagged internal interrupt operation, and capture/fence its exact active
+  `HarnessSession` plus consume task. Use a fake iterator blocked in `next()`
+  that attempts to deliver a structured PM report and completion after adapter
+  interrupt. Assert the bridge awaits adapter success, closes that exact
+  session, waits for that exact task to settle and leave the active map, then
+  durably finishes execution/operation/event before resolving. Assert zero late
+  diagnostic writes, receipt consumption, runtime/domain events, or publication
+  after resolution. The consume loop must check the fence after iterator return
+  and before every durable/public boundary. Concurrent calls coalesce; replay
+  after that exact finished planning operation and terminal execution is an
+  idempotent no-op. A direct self-wait attempt fails before fencing. An
+  already-terminal execution without that operation and every other
+  non-running lifecycle throw
   `planning_interrupt_not_running` with zero adapter, event, command-result, or
   operation writes. Adapter rejection or unproven already-terminal probe records
   attention plus exact proof and throws `planning_interrupt_unproven`.
 
   Inject barrier trip, interrupt-operation insert failure, interrupting-event
   insert failure, terminal execution/operation/event persistence failure, and
-  adapter rejection. Assert the existing barrier/containment path runs, the
-  typed `planning_interrupt_audit_failure` reaches the coordinator where
-  applicable, no `command_results` row is written, no uncommitted event is
-  published, and no adapter or publication work occurs after containment.
+  adapter rejection, exact-session close rejection, and consume-task
+  settlement/removal failure. Assert the existing barrier/containment path runs;
+  the exact `planning_interrupt_audit_failure`,
+  `planning_interrupt_unproven`, or
+  `planning_interrupt_quiescence_failure` reaches the coordinator; operation
+  and audit diagnostics remain; no `command_results` row is written; no
+  uncommitted event is published; and no adapter, persistence, or publication
+  work occurs after containment.
 
   ```ts
   const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });
@@ -1218,13 +1283,24 @@ persistent planning session.
   event helpers. The internal method has no actor/idempotency envelope and never
   touches `command_results`; tag its durable operation request
   `mesh.v2.planning-interrupt/v1`. Coalesce its live Promise by execution ID.
+  Under the existing execution interlock, capture the exact `ActiveSession`,
+  mark it fenced before adapter interruption, and make `consume` exit without
+  observing/persisting/publishing any iterator value returned after that fence.
+  After adapter interruption and barrier checks, close the captured
+  `HarnessSession`, await its captured consume task, and verify that exact entry
+  is removed before terminalization and resolution. The method is invoked only
+  outside `consume`; detect/reject self-wait before fencing to avoid deadlock.
+  Execute close-and-join in the contained failure path as well when adapter
+  interruption rejects; preserve both diagnostics and never skip the fence.
   Treat a finished tagged operation plus its interrupted execution as replay
   success; reject unrelated terminal/non-running state with
   `PlanningInterruptCleanupError`. Resolve only after proven terminal writes;
   record unproven adapter outcomes as attention then throw; convert audit/barrier
   failures to the exact typed cleanup error only after containment has stopped
-  late work. Keep the public human interruption path byte-for-behavior
-  compatible.
+  late work. A close or consume settlement/removal failure preserves the
+  operation/diagnostics, contains the execution, and throws
+  `planning_interrupt_quiescence_failure` without authorizing terminal cleanup.
+  Keep the public human interruption path byte-for-behavior compatible.
 
   Branch the fake only on `assignment.kind`. Keep the existing foundation
   script intact. For `pm_discovery`, generate a fresh finite native handle and
@@ -1271,8 +1347,9 @@ persistent planning session.
   adapter session, and event consumer. Cancellation-first races retain the same
   auditable operation link with no adapter session, and an absent PM scenario
   deterministically reaches completion-without-receipt attention. Internal
-  running interruption is awaited, replay-safe for its exact operation, audit-
-  first, command-result-free, and leaves zero late work after typed failure.
+  running interruption is awaited, replay-safe for its exact operation,
+  audit-first, command-result-free, closes and joins the exact fenced consumer,
+  and leaves zero late work after success or typed failure.
 
 - [ ] **Step 5: Commit T03**
 
@@ -1403,12 +1480,17 @@ owning transport, reducer, lifecycle, or Board behavior.
   $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
   corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vitest.config.ts
-  corepack pnpm nx typecheck v2-web
   git diff --check
   ```
 
-  Expected: all commands exit `0`; callback assertions prove one complete
-  approval action and no partial-selection UI.
+  Expected: the focused component tests and diff check exit `0`; callback
+  assertions prove one complete approval action and no partial-selection UI.
+  Do not run or claim full `v2-web` test/typecheck/build on the isolated T04
+  branch: existing snapshot, reducer, shell, socket, and assignment-union
+  consumers are serialized T05 ownership. Record those exact gates as deferred
+  to W2. If this focused Vitest invocation is configured to compile incompatible
+  unowned consumers, defer it with the same evidence rather than changing a T05
+  file. W2 must prove full web test, typecheck, and build before W3 starts.
 
 - [ ] **Step 5: Commit T04**
 
@@ -1509,12 +1591,17 @@ placeholder.
 
   Compose a running-execution Abandon through the real planning launcher adapter
   and controlled runtime. Assert `interruptForPlanning` owns one internal tagged
-  operation, adapter cleanup and the durable interrupted/attention outcome are
-  awaited before the planning abandoned event/result transaction, and no public
-  interrupt envelope or command-result row is created. Inject each
-  `PlanningInterruptCleanupError`; assert no successful Abandon result/event or
-  abandoned lifecycle is stored and no cleanup/publication work occurs after
-  the failure.
+  operation; fences, closes, settles, and removes the exact active consumer; and
+  only then records its durable interrupted/attention outcome and resolves.
+  Assert this quiescence proof is awaited before the planning abandoned
+  event/result transaction and no public interrupt envelope or command-result
+  row is created. Release a blocked iterator with late structured output and
+  completion after adapter interrupt and assert neither can write or publish,
+  including after Abandon commits. Inject each
+  `PlanningInterruptCleanupError`, including close/task-settlement failure;
+  assert no successful Abandon result/event or abandoned lifecycle is stored,
+  diagnostics remain auditable, and no cleanup/publication work occurs after
+  containment.
 
   In `config.spec.ts`, add red cases proving
   `MESH_V2_TEST_FAKE_PM_SCENARIO=todo` is accepted only with `NODE_ENV=test`, is
@@ -1573,7 +1660,8 @@ placeholder.
   or recomputed field. Cover both an existing reservation lookup and a fresh
   reservation. Assert the interruption mapping passes only the execution ID and
   awaits the exact runtime Promise; it never constructs a public command
-  envelope.
+  envelope. The composed Abandon test must observe runtime consumer quiescence
+  before the repository begins the final abandoned-cycle transaction.
 
   ```ts
   export type ExecutionRuntimeObserver = {
@@ -1921,7 +2009,10 @@ the task's owned files and stop on any unexpected path. A conflict in W1 means
 the ownership audit was violated; do not resolve it mechanically. A changed T01
 interface pauses all dependent tasks and returns to planning.
 
-After W0, run the T01 green gate. After W1 integration, run:
+After W0, run the T01 green gate and record the bounded downstream server/web
+compatibility deferments; do not mislabel unrun downstream typechecks as W0
+passes. After accepted T02 and T03 are both on the W1 integration head (and T04
+is applied in its declared order), run:
 
 ```powershell
 $env:NX_DAEMON='false'
@@ -1931,13 +2022,18 @@ corepack pnpm nx test v2-contracts
 corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-service.spec.ts apps/v2-server/src/planning/pm-report-consumer.spec.ts apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts --config apps/v2-server/vitest.config.ts
 corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vitest.config.ts
 corepack pnpm nx typecheck v2-server
-corepack pnpm nx typecheck v2-web
 git diff --check
 ```
 
-After W2, run the T05 W2 gate. After W3, run the T06 final gate and
-stop-condition audit. A green worker test without accepted review and clean
-integration evidence is insufficient.
+The W1 server typecheck discharges T02's deferred gate and must pass before W2
+starts. The focused leaf web test is evidence only for T04; full `v2-web`
+test/typecheck/build remain explicitly deferred because T05 owns the existing
+union, snapshot, reducer, socket, connection, activity, and shell consumers.
+After W2, run the T05 W2 gate, including full `v2-web` test, typecheck, and
+build; those commands discharge the T04/W1 web deferment and must pass before
+W3 starts. After W3, run the T06 final gate and stop-condition audit. A green
+worker test without accepted review and clean integration evidence is
+insufficient.
 
 After every W0-W3 integration gate, and before starting the next wave or final
 milestone review, dispatch a fresh independent read-only integration reviewer.
@@ -1961,6 +2057,7 @@ Findings: <severity, owner, path:line, impact, required correction; or none>
 Ownership and exclusions: <satisfied, unsatisfied, or unverified with evidence>
 Interfaces and stop condition: <satisfied, unsatisfied, or unverified with evidence>
 Verification: <exact commands, exit codes, NX_DAEMON/NX_SKIP_NX_CACHE, tested HEAD>
+Deferred gates: <originating task, exact command, reason, owner/wave, and discharged evidence; or none>
 Residual risks: <items or none>
 ```
 
@@ -2034,10 +2131,11 @@ following:
   a unique start-operation link for terminal capability/skill replay and
   adapter-start failures, plus cleanup-first/commit-last Abandon arbitration
   whose running path awaits one internal command-result-free interrupt operation
-  before the final Abandon transaction, stores no success on cleanup failure,
-  and leaves no late adapter start, orphan starting execution, or pending start
-  operation, with no pre-binding event consumption or duplicate
-  execution/session;
+  that fences/closes the exact active session and joins its consume task before
+  the final Abandon transaction, stores no success on cleanup or quiescence
+  failure, and leaves no late adapter start, consumer write, orphan starting
+  execution, or pending start operation, with no pre-binding event consumption
+  or duplicate execution/session;
 - fail-closed restart handling for both ambiguous adapter-start windows: M1
   operation `unknown`, execution/cycle attention, exact audit link preserved,
   and no automatic activation; only never-reserved turns launch freshly;
@@ -2054,7 +2152,9 @@ following:
 - deterministic built-process Todo acceptance with no paid traffic,
   credentials, real repository, or operator state;
 - every Nx/verify acceptance result is uncached, daemon-disabled, and bound to
-  its recorded exact HEAD;
+  its recorded exact HEAD; every bounded transitional deferment is recorded and
+  discharged at its mandatory integrated server or web gate before the next
+  dependent wave;
 - no milestone, task, dependency, readiness, coverage, scheduling, Board, real
   adapter, persistent provider session, or generic consumer implementation.
 
