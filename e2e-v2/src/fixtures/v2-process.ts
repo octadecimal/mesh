@@ -30,14 +30,24 @@ type ReadyLine = { type: 'mesh.v2.ready'; origin: string };
 type RunningChild = {
   process: ChildProcess;
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
-  origin: string;
+  origin?: string;
   readyLines: ReadyLine[];
   stderr: () => string;
+};
+
+type SpawnServerOptions = {
+  holdAfterAdapterCursor?: number;
+  readinessTimeoutMs?: number;
+  readinessProbe?: 'invalid-origin' | 'timeout';
+  onSpawn?: (pid: number) => void;
+  onReadyObserved?: (ready: ReadyLine) => void;
 };
 
 const workspaceRoot = resolve(__dirname, '..', '..', '..');
 const serverMain = join(workspaceRoot, 'dist', 'apps', 'v2-server', 'main.js');
 const webRoot = join(workspaceRoot, 'dist', 'apps', 'v2-web');
+const fixturePrefix = 'mesh-v2-e2e-';
+const readinessTimeoutMs = 15_000;
 
 const hashFile = async (path: string) => {
   const { readFile } = await import('node:fs/promises');
@@ -86,19 +96,34 @@ const childExit = (child: ChildProcess) =>
     },
   );
 
+const assertOwnedFixtureRoot = (candidate: string) => {
+  const root = resolve(candidate);
+  const temp = resolve(tmpdir());
+  const relation = relative(temp, root);
+  if (
+    !relation.startsWith(fixturePrefix) ||
+    relation.length === fixturePrefix.length ||
+    relation.includes('/') ||
+    relation.includes('\\') ||
+    resolve(temp, relation) !== root
+  ) {
+    throw new Error(`Refusing unowned fixture root: ${root}`);
+  }
+  return root;
+};
+
 const terminateExactChild = async (
   child: RunningChild,
   signal: NodeJS.Signals,
 ) => {
-  if (child.process.exitCode !== null || child.process.signalCode !== null)
-    return;
-  if (!child.process.pid || !child.process.kill(signal)) {
-    throw new Error(
-      `Could not terminate owned V2 server PID ${String(child.process.pid)}`,
-    );
+  if (child.process.exitCode === null && child.process.signalCode === null) {
+    if (!child.process.pid || !child.process.kill(signal)) {
+      throw new Error(
+        `Could not terminate owned V2 server PID ${String(child.process.pid)}`,
+      );
+    }
   }
   await child.exited;
-  expect(child.readyLines).toHaveLength(1);
 };
 
 export class V2ProcessFixture {
@@ -120,20 +145,23 @@ export class V2ProcessFixture {
     );
   }
 
-  static async createTodo() {
-    const root = await mkdtemp(join(resolve(tmpdir()), 'mesh-v2-e2e-'));
-    const relation = relative(resolve(tmpdir()), resolve(root));
-    if (!relation || relation.startsWith('..')) {
-      throw new Error(
-        `Temporary fixture escaped the system temp root: ${root}`,
+  static async createTodo(options: { onRoot?: (root: string) => void } = {}) {
+    let root: string | undefined;
+    try {
+      root = assertOwnedFixtureRoot(
+        await mkdtemp(join(resolve(tmpdir()), fixturePrefix)),
       );
+      options.onRoot?.(root);
+      const repository = await createTodoRepository(root);
+      return new V2ProcessFixture(root, repository);
+    } catch (error) {
+      if (root) await rm(root, { recursive: true, force: true });
+      throw error;
     }
-    const repository = await createTodoRepository(root);
-    return new V2ProcessFixture(root, repository);
   }
 
   get origin() {
-    if (!this.child) throw new Error('V2 server is not running');
+    if (!this.child?.origin) throw new Error('V2 server is not ready');
     return this.child.origin;
   }
 
@@ -157,16 +185,13 @@ export class V2ProcessFixture {
 
   async start(options: { holdAfterAdapterCursor?: number } = {}) {
     if (this.child) throw new Error('V2 server is already running');
-    this.child = await this.spawnServer(
-      this.databasePath,
-      options.holdAfterAdapterCursor,
-    );
+    await this.spawnServer(this.databasePath, options);
     return this.origin;
   }
 
   private async spawnServer(
     databasePath: string,
-    holdAfterAdapterCursor?: number,
+    options: SpawnServerOptions = {},
   ) {
     await Promise.all([access(serverMain), access(webRoot)]);
     const environment: NodeJS.ProcessEnv = {
@@ -179,9 +204,9 @@ export class V2ProcessFixture {
       HOME: this.fixtureRoot,
       USERPROFILE: this.fixtureRoot,
     };
-    if (holdAfterAdapterCursor !== undefined) {
+    if (options.holdAfterAdapterCursor !== undefined) {
       environment.MESH_V2_FAKE_HOLD_AFTER_CURSOR = String(
-        holdAfterAdapterCursor,
+        options.holdAfterAdapterCursor,
       );
     }
     const child = spawn(process.execPath, [serverMain], {
@@ -198,10 +223,32 @@ export class V2ProcessFixture {
     child.stderr?.on('data', (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
     });
+    const owned: RunningChild = {
+      process: child,
+      exited,
+      readyLines,
+      stderr: () => stderr,
+    };
+    this.child = owned;
+    if (!child.pid) throw new Error('Spawned V2 server has no PID');
+    options.onSpawn?.(child.pid);
     const ready = new Promise<string>((resolveReady, rejectReady) => {
-      child.once('error', rejectReady);
+      const reject = (error: Error) => {
+        clearTimeout(timeout);
+        rejectReady(error);
+      };
+      const timeout = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `V2 server PID ${String(child.pid)} did not become ready within ${String(options.readinessTimeoutMs ?? readinessTimeoutMs)}ms`,
+            ),
+          ),
+        options.readinessTimeoutMs ?? readinessTimeoutMs,
+      );
+      child.once('error', (error) => reject(error));
       child.once('exit', (code, signal) =>
-        rejectReady(
+        reject(
           new Error(
             `V2 server exited before ready (${String(code)}/${String(signal)}): ${stderr}`,
           ),
@@ -217,7 +264,7 @@ export class V2ProcessFixture {
           try {
             candidate = JSON.parse(line);
           } catch {
-            rejectReady(new Error(`Unexpected V2 server stdout: ${line}`));
+            reject(new Error(`Unexpected V2 server stdout: ${line}`));
             continue;
           }
           if (
@@ -226,22 +273,67 @@ export class V2ProcessFixture {
             (candidate as { type?: unknown }).type !== 'mesh.v2.ready' ||
             typeof (candidate as { origin?: unknown }).origin !== 'string'
           ) {
-            rejectReady(new Error(`Unexpected V2 server stdout: ${line}`));
+            reject(new Error(`Unexpected V2 server stdout: ${line}`));
             continue;
           }
-          readyLines.push(candidate as ReadyLine);
+          const observed = candidate as ReadyLine;
+          options.onReadyObserved?.(observed);
+          if (options.readinessProbe === 'timeout') continue;
+          const accepted =
+            options.readinessProbe === 'invalid-origin'
+              ? {
+                  ...observed,
+                  origin: observed.origin.replace('127.0.0.1', 'localhost'),
+                }
+              : observed;
+          readyLines.push(accepted);
           if (readyLines.length !== 1) {
-            rejectReady(
-              new Error('V2 server emitted more than one ready line'),
-            );
+            reject(new Error('V2 server emitted more than one ready line'));
             continue;
           }
-          resolveReady(parseOrigin(readyLines[0].origin));
+          try {
+            const origin = parseOrigin(readyLines[0].origin);
+            clearTimeout(timeout);
+            resolveReady(origin);
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
         }
       });
     });
-    const origin = await ready;
-    return { process: child, exited, origin, readyLines, stderr: () => stderr };
+    try {
+      owned.origin = await ready;
+      return owned.origin;
+    } catch (error) {
+      try {
+        await terminateExactChild(owned, 'SIGTERM');
+      } finally {
+        if (this.child === owned) this.child = undefined;
+      }
+      throw error;
+    }
+  }
+
+  async probeRejectedReadinessCleanup(mode: 'invalid-origin' | 'timeout') {
+    let pid: number | undefined;
+    let origin: string | undefined;
+    await expect(
+      this.spawnServer(this.databasePath, {
+        readinessTimeoutMs: 500,
+        readinessProbe: mode,
+        onSpawn: (spawnedPid) => {
+          pid = spawnedPid;
+        },
+        onReadyObserved: (ready) => {
+          origin = ready.origin;
+        },
+      }),
+    ).rejects.toThrow(
+      mode === 'invalid-origin' ? 'invalid loopback origin' : 'within 500ms',
+    );
+    expect(this.child).toBeUndefined();
+    if (!pid || !origin) throw new Error(`No ${mode} cleanup evidence`);
+    return { pid, origin };
   }
 
   private async command(envelope: V2CommandEnvelope) {
@@ -400,6 +492,7 @@ spec:
   async crashServer() {
     const child = this.child;
     if (!child) throw new Error('V2 server is not running');
+    expect(child.readyLines).toHaveLength(1);
     await terminateExactChild(child, 'SIGKILL');
     this.child = undefined;
   }
@@ -509,6 +602,13 @@ spec:
         payload: { outcome: 'completed' },
       }),
     ]);
+    expect(
+      runtime.events.filter(
+        (event) =>
+          event.executionId === this.executionId &&
+          event.type === 'worker_execution.child_finished',
+      ),
+    ).toEqual([expect.objectContaining({ adapterCursor: 4 })]);
 
     const domain = await this.domainEventsAfter(0);
     expect(domain.events.map(({ sequence }) => sequence)).toEqual(
@@ -605,12 +705,27 @@ spec:
     await copyFile(unmarkedSource, rejectedCopy);
     const before = await hashFile(rejectedCopy);
 
+    const result = await this.runMismatchProbe(rejectedCopy);
+    expect(result.exit.code).not.toBe(0);
+    expect(result.stdout).not.toContain('mesh.v2.ready');
+    expect(result.stderr).toContain(
+      'Refusing to open non-V2 database with SQLite application ID 0',
+    );
+    expect(await hashFile(rejectedCopy)).toBe(before);
+    return { hash: before, ...result };
+  }
+
+  private async runMismatchProbe(
+    databasePath: string,
+    onReady?: (ready: ReadyLine) => void,
+    onSpawn?: (pid: number) => void,
+  ) {
     const environment: NodeJS.ProcessEnv = {
       ...minimalSystemEnvironment(),
       NODE_ENV: 'test',
       MESH_V2_PORT: '0',
       MESH_V2_WORKSPACE_ROOT: this.fixtureRoot,
-      MESH_V2_DATABASE_PATH: rejectedCopy,
+      MESH_V2_DATABASE_PATH: databasePath,
       MESH_V2_WEB_ROOT: webRoot,
       HOME: this.fixtureRoot,
       USERPROFILE: this.fixtureRoot,
@@ -622,22 +737,108 @@ spec:
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    if (!child.pid) throw new Error('Spawned mismatch probe has no PID');
+    onSpawn?.(child.pid);
     let stdout = '';
     let stderr = '';
-    child.stdout?.on('data', (chunk: Buffer) => {
+    const exited = childExit(child);
+    const owned: RunningChild = {
+      process: child,
+      exited,
+      readyLines: [],
+      stderr: () => stderr,
+    };
+    let stdoutBuffer = '';
+    let rejectUnexpectedReady: (error: Error) => void = () => undefined;
+    const unexpectedReady = new Promise<never>((_, reject) => {
+      rejectUnexpectedReady = reject;
+    });
+    const onStdout = (chunk: Buffer) => {
       stdout += chunk.toString('utf8');
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString('utf8');
+      const lines = stdoutBuffer.split(/\r?\n/u);
+      stdoutBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line) continue;
+        try {
+          const candidate = JSON.parse(line) as Partial<ReadyLine>;
+          if (
+            candidate.type === 'mesh.v2.ready' &&
+            typeof candidate.origin === 'string'
+          ) {
+            const ready = {
+              type: candidate.type,
+              origin: parseOrigin(candidate.origin),
+            } satisfies ReadyLine;
+            owned.readyLines.push(ready);
+            owned.origin = ready.origin;
+            onReady?.(ready);
+            rejectUnexpectedReady(
+              new Error(
+                `Database mismatch probe unexpectedly became ready at ${ready.origin}`,
+              ),
+            );
+          }
+        } catch (error) {
+          rejectUnexpectedReady(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+      }
+    };
+    const onStderr = (chunk: Buffer) => {
       stderr += chunk.toString('utf8');
+    };
+    child.stdout?.on('data', onStdout);
+    child.stderr?.on('data', onStderr);
+    let rejectTimeout: (error: Error) => void = () => undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      rejectTimeout = reject;
     });
-    const exit = await childExit(child);
-    expect(exit.code).not.toBe(0);
-    expect(stdout).not.toContain('mesh.v2.ready');
-    expect(stderr).toContain(
-      'Refusing to open non-V2 database with SQLite application ID 0',
+    const timer = setTimeout(
+      () =>
+        rejectTimeout(
+          new Error(
+            `Database mismatch probe PID ${String(child.pid)} did not exit within ${String(readinessTimeoutMs)}ms`,
+          ),
+        ),
+      readinessTimeoutMs,
     );
-    expect(await hashFile(rejectedCopy)).toBe(before);
-    return { hash: before, exit, stderr, pid: child.pid };
+    try {
+      const exit = await Promise.race([exited, unexpectedReady, timeout]);
+      return { exit, stdout, stderr, pid: child.pid };
+    } finally {
+      clearTimeout(timer);
+      await terminateExactChild(owned, 'SIGTERM');
+      child.stdout?.off('data', onStdout);
+      child.stderr?.off('data', onStderr);
+    }
+  }
+
+  async probeUnexpectedMismatchReadyCleanup() {
+    let observed: ReadyLine | undefined;
+    let pid: number | undefined;
+    let rejected = false;
+    try {
+      await this.runMismatchProbe(
+        this.databasePath,
+        (ready) => {
+          observed = ready;
+        },
+        (spawnedPid) => {
+          pid = spawnedPid;
+        },
+      );
+    } catch (error) {
+      rejected = true;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain('unexpectedly became ready');
+    }
+    expect(rejected).toBe(true);
+    if (!observed || !pid)
+      throw new Error('Mismatch cleanup emitted incomplete ready evidence');
+    const ready = observed as ReadyLine;
+    return { pid, origin: ready.origin };
   }
 
   async dispose() {
@@ -645,16 +846,7 @@ spec:
       await terminateExactChild(this.child, 'SIGTERM');
       this.child = undefined;
     }
-    const root = resolve(this.fixtureRoot);
-    const temp = resolve(tmpdir());
-    const relation = relative(temp, root);
-    if (
-      !relation ||
-      relation.startsWith('..') ||
-      resolve(temp, relation) !== root
-    ) {
-      throw new Error(`Refusing to remove unowned fixture root: ${root}`);
-    }
+    const root = assertOwnedFixtureRoot(this.fixtureRoot);
     await rm(root, { recursive: true, force: true });
   }
 }

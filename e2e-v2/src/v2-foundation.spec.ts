@@ -1,9 +1,105 @@
+import { access, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { relative, resolve } from 'node:path';
+
 import { expect, test } from '@playwright/test';
 
 import { V2ProcessFixture } from './fixtures/v2-process.js';
 
 const contiguousAfter = (before: number, after: number) =>
   Array.from({ length: after - before }, (_, index) => before + index + 1);
+
+type CleanupProbe = {
+  pid: number;
+  origin: string;
+};
+
+const pathExists = async (path: string) => {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const expectProcessAndListenerGone = async ({ pid, origin }: CleanupProbe) => {
+  await expect
+    .poll(() => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .toBe(false);
+  await expect
+    .poll(async () => {
+      try {
+        await fetch(`${origin}/api/v2/snapshot`);
+        return true;
+      } catch {
+        return false;
+      }
+    })
+    .toBe(false);
+};
+
+test('repository setup failure removes only its owned fixture root', async () => {
+  const originalPath = process.env.PATH;
+  const originalPathAlias = process.env.Path;
+  let root: string | undefined;
+  try {
+    process.env.PATH = '';
+    process.env.Path = '';
+    await expect(
+      V2ProcessFixture.createTodo({
+        onRoot: (createdRoot) => {
+          root = createdRoot;
+        },
+      }),
+    ).rejects.toThrow();
+    if (!root) throw new Error('Repository setup did not create a root');
+    expect(await pathExists(root)).toBe(false);
+  } finally {
+    process.env.PATH = originalPath;
+    process.env.Path = originalPathAlias;
+    if (root && (await pathExists(root))) {
+      const relation = relative(resolve(tmpdir()), root);
+      if (
+        relation.startsWith('mesh-v2-e2e-') &&
+        !relation.includes('/') &&
+        !relation.includes('\\') &&
+        resolve(tmpdir(), relation) === root
+      ) {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+for (const mode of ['invalid-origin', 'timeout'] as const) {
+  test(`rejected ${mode} readiness cleans its exact server and listener`, async () => {
+    const fixture = await V2ProcessFixture.createTodo();
+    try {
+      const evidence = await fixture.probeRejectedReadinessCleanup(mode);
+      await expectProcessAndListenerGone(evidence);
+    } finally {
+      await fixture.dispose();
+    }
+  });
+}
+
+test('mismatch probe cleans an unexpectedly ready server and listener', async () => {
+  const fixture = await V2ProcessFixture.createTodo();
+  try {
+    const evidence = await fixture.probeUnexpectedMismatchReadyCleanup();
+    await expectProcessAndListenerGone(evidence);
+  } finally {
+    await fixture.dispose();
+  }
+});
 
 test('Todo foundation survives restart without V1 state', async ({ page }) => {
   const fixture = await V2ProcessFixture.createTodo();
@@ -45,6 +141,13 @@ test('Todo foundation survives restart without V1 state', async ({ page }) => {
           name: 'Runtime activity for Todo foundation check',
         })
         .getByText('child.started', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      execution
+        .getByRole('region', {
+          name: 'Child activity for Todo foundation check',
+        })
+        .getByText('Todo check completed', { exact: true }),
     ).toBeVisible();
     const completed =
       await fixture.expectContinuousStreamsAndStableSnapshots(page);
