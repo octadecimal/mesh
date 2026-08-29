@@ -286,7 +286,11 @@ export function App({
     const controller = new AbortController();
     void api
       .systemSnapshot(controller.signal)
-      .then((snapshot) => setSystem({ status: 'ready', snapshot }))
+      .then((snapshot) => {
+        if (!controller.signal.aborted) {
+          setSystem({ status: 'ready', snapshot });
+        }
+      })
       .catch((cause: unknown) => {
         if (!controller.signal.aborted) {
           setSystem({

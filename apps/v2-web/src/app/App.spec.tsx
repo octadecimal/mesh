@@ -547,6 +547,59 @@ describe('App', () => {
     );
   });
 
+  it('ignores a stale system snapshot after replacing the API', async () => {
+    let resolveStale!: (snapshot: typeof systemSnapshot) => void;
+    const staleApi = createApi();
+    vi.mocked(staleApi.systemSnapshot).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveStale = resolve;
+        }),
+    );
+    const currentApi = createApi();
+    vi.mocked(currentApi.systemSnapshot).mockResolvedValueOnce(
+      v2SystemSnapshotSchema.parse({
+        ...systemSnapshot,
+        health: {
+          status: 'audit_barrier_tripped',
+          error: {
+            code: 'audit_barrier_tripped',
+            message: 'Current audit writes failed.',
+          },
+        },
+        projects: [],
+      }),
+    );
+    const app = renderApp({ api: staleApi });
+    const staleSignal = vi.mocked(staleApi.systemSnapshot).mock.calls[0]?.[0];
+
+    app.rerender(
+      <App
+        api={currentApi}
+        socketFactory={app.socketFactory}
+        location={app.location}
+        history={app.history}
+      />,
+    );
+    expect(
+      await screen.findByText('No projects have been added yet.'),
+    ).toBeVisible();
+    expect(
+      screen.getByRole('button', { name: 'Add and select project' }),
+    ).toBeDisabled();
+    expect(staleSignal?.aborted).toBe(true);
+
+    await act(async () => resolveStale(systemSnapshot));
+
+    expect(screen.getByText('No projects have been added yet.')).toBeVisible();
+    expect(
+      screen.getByRole('button', { name: 'Add and select project' }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole('button', { name: 'Select Todo' }),
+    ).not.toBeInTheDocument();
+  });
+
   it('disables interruption while disconnected or stale and sends the exact running revision', async () => {
     const user = userEvent.setup();
     const disconnected = renderApp({ pathname: `/projects/${projectId}` });
