@@ -1,0 +1,24 @@
+{
+  "name": "v2-e2e",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "e2e-v2/src",
+  "projectType": "application",
+  "targets": {
+    "e2e": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "dependsOn": ["v2-server:build", "v2-web:build"],
+      "options": {
+        "command": "playwright test --config=e2e-v2/playwright.config.ts"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "options": {
+        "command": "tsc --noEmit -p e2e-v2/tsconfig.json"
+      }
+    }
+  },
+  "tags": ["type:e2e"]
+}
