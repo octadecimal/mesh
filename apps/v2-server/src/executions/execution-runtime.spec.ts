@@ -3,11 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type {
+  DomainEvent,
   HarnessEventEnvelope,
   HarnessSession,
   HarnessStartRequest,
   InterruptExecutionEnvelope,
   ResolvedWorkerProfileSnapshot,
+  RuntimeEvent,
   StartExecutionEnvelope,
 } from '@mesh/v2-contracts';
 
@@ -42,6 +44,10 @@ const createRuntime = (
     profile?: (
       snapshot: ResolvedWorkerProfileSnapshot,
     ) => ResolvedWorkerProfileSnapshot;
+    publisher?: {
+      domain(event: DomainEvent): void;
+      runtime(event: RuntimeEvent): void;
+    };
   } = {},
 ) => {
   const fixture = createV2TestDatabase();
@@ -73,7 +79,7 @@ const createRuntime = (
     executions,
     operations,
     adapter: fake,
-    publisher: {
+    publisher: options.publisher ?? {
       domain: (event) => published.domain.push(event),
       runtime: (event) => published.runtime.push(event),
     },
@@ -791,6 +797,175 @@ describe('ExecutionRuntime', () => {
     expect(order.slice(-2)).toEqual(['runtime', 'domain']);
   });
 
+  it.each(['starting', 'running'] as const)(
+    'preserves committed start truth when %s publication throws',
+    async (lifecycle) => {
+      const publisher = {
+        domain: vi.fn((event: DomainEvent) => {
+          if (
+            event.type === 'worker_execution.lifecycle_changed' &&
+            event.payload.execution.lifecycle === lifecycle
+          ) {
+            throw new Error(`publish ${lifecycle} failed`);
+          }
+        }),
+        runtime: vi.fn(),
+      };
+      const context = createRuntime({
+        fake: new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 }),
+        publisher,
+      });
+
+      const result = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const executionId =
+        result.ok && 'execution' in result ? result.execution.id : '';
+
+      expect(context.fake.startCount).toBe(1);
+      expect(context.executions.get(executionId)).toMatchObject({
+        lifecycle: 'running',
+        lastAdapterCursor: 2,
+        failure: null,
+      });
+      expect(context.operations.listForExecution(executionId)).toMatchObject([
+        { kind: 'start', state: 'succeeded' },
+      ]);
+      expect(
+        context.fixture.events.domainAfter(context.fixture.project.id, 0).events,
+      ).toHaveLength(2);
+      expect(context.barrier.status).toBe('healthy');
+      expect(context.barrier.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            message: 'Domain publication failed',
+            cause: `publish ${lifecycle} failed`,
+          }),
+        ]),
+      );
+    },
+  );
+
+  it('continues after runtime publication fails without misclassifying adapter input', async () => {
+    const publisher = {
+      domain: vi.fn(),
+      runtime: vi.fn((event: RuntimeEvent) => {
+        if (event.adapterCursor === 1) {
+          throw new Error('runtime publish failed');
+        }
+      }),
+    };
+    const context = createRuntime({
+      fake: new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 }),
+      publisher,
+    });
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'running',
+      lastAdapterCursor: 2,
+      failure: null,
+    });
+    expect(
+      context.fixture.events.runtimeAfter(context.fixture.project.id, 0).events,
+    ).toHaveLength(2);
+    expect(context.barrier.status).toBe('healthy');
+    expect(context.barrier.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: 'Runtime publication failed',
+          cause: 'runtime publish failed',
+        }),
+      ]),
+    );
+  });
+
+  it('preserves terminal completion when terminal publication throws', async () => {
+    const publisher = {
+      domain: vi.fn((event: DomainEvent) => {
+        if (
+          event.type === 'worker_execution.lifecycle_changed' &&
+          event.payload.execution.lifecycle === 'completed'
+        ) {
+          throw new Error('completion domain publish failed');
+        }
+      }),
+      runtime: vi.fn((event: RuntimeEvent) => {
+        if (event.adapterCursor === 6) {
+          throw new Error('completion runtime publish failed');
+        }
+      }),
+    };
+    const fake = new FakeHarnessAdapter();
+    const context = createRuntime({ fake, publisher });
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'completed',
+      lastAdapterCursor: 6,
+      failure: null,
+    });
+    expect(fake.sessions[0]?.closeCount).toBe(1);
+    expect(fake.interruptCalls).toEqual([]);
+    expect(context.barrier.status).toBe('healthy');
+    expect(context.barrier.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: 'Runtime publication failed' }),
+        expect.objectContaining({ message: 'Domain publication failed' }),
+      ]),
+    );
+  });
+
+  it('preserves terminal completion when successful cleanup close throws', async () => {
+    const fake = new FakeHarnessAdapter();
+    const originalStart = fake.start.bind(fake);
+    let closeCount = 0;
+    vi.spyOn(fake, 'start').mockImplementation(async (request) => {
+      const session = await originalStart(request);
+      const wrapper: HarnessSession = {
+        get nativeHandle() {
+          return session.nativeHandle;
+        },
+        events: (afterAdapterCursor) => session.events(afterAdapterCursor),
+        async close() {
+          closeCount += 1;
+          throw new Error('terminal close failed');
+        },
+      };
+      return wrapper as unknown as Awaited<ReturnType<typeof fake.start>>;
+    });
+    const context = createRuntime({ fake });
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'completed',
+      lastAdapterCursor: 6,
+      failure: null,
+    });
+    expect(closeCount).toBe(1);
+    expect(fake.interruptCalls).toEqual([]);
+    expect(context.barrier.status).toBe('healthy');
+    expect(context.barrier.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: 'Session close failed after successful completion',
+          cause: 'terminal close failed',
+        }),
+      ]),
+    );
+  });
+
   it('persists immutable interrupt acceptance before proof and replays without another side effect', async () => {
     const context = createRuntime();
     const started = await context.runtime.start(context.start);
@@ -865,6 +1040,65 @@ describe('ExecutionRuntime', () => {
     expect(context.barrier.status).toBe('healthy');
     expect(context.fake.interruptCalls).toHaveLength(1);
   });
+
+  it.each(['interrupting', 'interrupted'] as const)(
+    'preserves committed interrupt truth when %s publication throws',
+    async (lifecycle) => {
+      const publisher = {
+        domain: vi.fn((event: DomainEvent) => {
+          if (
+            event.type === 'worker_execution.lifecycle_changed' &&
+            event.payload.execution.lifecycle === lifecycle
+          ) {
+            throw new Error(`publish ${lifecycle} failed`);
+          }
+        }),
+        runtime: vi.fn(),
+      };
+      const context = createRuntime({ publisher });
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const running = required(
+        context.executions.get(
+          started.ok && 'execution' in started ? started.execution.id : '',
+        ),
+        'Expected a running execution',
+      );
+      const interrupt: InterruptExecutionEnvelope = {
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'worker_execution.interrupt',
+          projectId: running.projectId,
+          executionId: running.id,
+          expectedRevision: running.revision,
+        },
+      };
+
+      await context.runtime.interrupt(interrupt);
+
+      expect(context.fake.interruptCalls).toHaveLength(1);
+      expect(context.executions.get(running.id)).toMatchObject({
+        lifecycle: 'interrupted',
+        failure: null,
+      });
+      expect(
+        context.operations
+          .listForExecution(running.id)
+          .find((operation) => operation.kind === 'interrupt'),
+      ).toMatchObject({ state: 'succeeded' });
+      expect(context.fixture.commands.find(interrupt.idempotencyKey)).toBeDefined();
+      expect(context.barrier.status).toBe('healthy');
+      expect(context.barrier.diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            message: 'Domain publication failed',
+            cause: `publish ${lifecycle} failed`,
+          }),
+        ]),
+      );
+    },
+  );
 
   it('lets one of two runtime instances reserve interrupt after both miss the fast lookup', async () => {
     const context = createRuntime();

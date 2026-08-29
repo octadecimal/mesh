@@ -45,6 +45,7 @@ const lifecycleDraft = (execution: WorkerExecution, occurredAt: string) => ({
 
 const operationObservation = async (
   adapter: HarnessAdapter,
+  barrier: AuditBarrier,
   execution: WorkerExecution,
   operation: ExecutionOperation,
   probe: HarnessProbeResult,
@@ -71,6 +72,7 @@ const operationObservation = async (
       ? await adapter.interrupt(execution.nativeHandle)
       : { status: 'unknown', reason: 'Execution has no native handle' };
   } catch (error) {
+    barrier.assertHealthy();
     return {
       state: 'unknown',
       result: {
@@ -79,6 +81,7 @@ const operationObservation = async (
       },
     };
   }
+  barrier.assertHealthy();
   if (
     interrupt.status === 'succeeded' &&
     (probe.status === 'resumable' ||
@@ -102,6 +105,18 @@ const operationObservation = async (
     };
   }
   return { state: 'unknown', result: { probe, interrupt } };
+};
+
+const closeRecoveredAfterBarrier = async (
+  barrier: AuditBarrier,
+  session: HarnessSession,
+  message: string,
+): Promise<void> => {
+  try {
+    await session.close();
+  } catch (error) {
+    barrier.record(message, error);
+  }
 };
 
 export const reconcileExecutions = async (
@@ -131,6 +146,7 @@ export const reconcileExecutions = async (
       const occurredAt = new Date().toISOString();
       try {
         dependencies.executions.transaction(() => {
+          dependencies.barrier.assertHealthy();
           dependencies.events.appendRawDiagnosticInTransaction({
             projectId: execution.projectId,
             executionId: execution.id,
@@ -160,7 +176,9 @@ export const reconcileExecutions = async (
           );
         });
       } catch (error) {
-        dependencies.barrier.trip(error, occurredAt);
+        if (dependencies.barrier.status === 'healthy') {
+          dependencies.barrier.trip(error, occurredAt);
+        }
         throw error;
       }
       summary.terminalized.push(execution.id);
@@ -172,11 +190,13 @@ export const reconcileExecutions = async (
         ? await dependencies.adapter.probe(execution.nativeHandle)
         : { status: 'unknown', reason: 'Execution has no native handle' };
     } catch (error) {
+      dependencies.barrier.assertHealthy();
       probe = {
         status: 'unknown',
         reason: error instanceof Error ? error.message : String(error),
       };
     }
+    dependencies.barrier.assertHealthy();
     const observations = [] as Array<{
       operation: ExecutionOperation;
       observation: Awaited<ReturnType<typeof operationObservation>>;
@@ -186,6 +206,7 @@ export const reconcileExecutions = async (
         operation,
         observation: await operationObservation(
           dependencies.adapter,
+          dependencies.barrier,
           execution,
           operation,
           probe,
@@ -249,7 +270,7 @@ export const reconcileExecutions = async (
             : 'Execution native handle was not found during recovery';
         } else {
           try {
-            recoveredSession = await dependencies.adapter.resume({
+            const resumed = await dependencies.adapter.resume({
               executionId: execution.id,
               project,
               assignment: execution.assignment,
@@ -258,7 +279,19 @@ export const reconcileExecutions = async (
               nativeHandle: execution.nativeHandle,
               afterAdapterCursor: execution.lastAdapterCursor,
             });
+            try {
+              dependencies.barrier.assertHealthy();
+            } catch (barrierError) {
+              await closeRecoveredAfterBarrier(
+                dependencies.barrier,
+                resumed,
+                'Recovered session close failed after audit barrier rejection',
+              );
+              throw barrierError;
+            }
+            recoveredSession = resumed;
           } catch (error) {
+            dependencies.barrier.assertHealthy();
             desired = 'attention_required';
             recoveryError =
               error instanceof Error ? error.message : String(error);
@@ -272,6 +305,7 @@ export const reconcileExecutions = async (
     const occurredAt = new Date().toISOString();
     try {
       dependencies.executions.transaction(() => {
+        dependencies.barrier.assertHealthy();
         if (observations.length === 0) {
           dependencies.events.appendRawDiagnosticInTransaction({
             projectId: execution.projectId,
@@ -343,21 +377,21 @@ export const reconcileExecutions = async (
         );
       });
     } catch (error) {
-      dependencies.barrier.trip(error, occurredAt);
+      if (dependencies.barrier.status === 'healthy') {
+        dependencies.barrier.trip(error, occurredAt);
+      }
       if (recoveredSession) {
-        try {
-          await recoveredSession.close();
-        } catch (closeError) {
-          dependencies.barrier.record(
-            'Recovered session close failed after reconciliation audit failure',
-            closeError,
-          );
-        }
+        await closeRecoveredAfterBarrier(
+          dependencies.barrier,
+          recoveredSession,
+          'Recovered session close failed after reconciliation audit failure',
+        );
       }
       throw error;
     }
     if (recoveredSession) {
       try {
+        dependencies.barrier.assertHealthy();
         await dependencies.attach(execution.id, recoveredSession);
         summary.resumed.push(execution.id);
       } catch (error) {
@@ -371,9 +405,11 @@ export const reconcileExecutions = async (
             closeError,
           );
         }
+        dependencies.barrier.assertHealthy();
         const attachmentFailedAt = new Date().toISOString();
         try {
           dependencies.executions.transaction(() => {
+            dependencies.barrier.assertHealthy();
             dependencies.events.appendRawDiagnosticInTransaction({
               projectId: execution.projectId,
               executionId: execution.id,
@@ -409,7 +445,9 @@ export const reconcileExecutions = async (
             );
           });
         } catch (auditError) {
-          dependencies.barrier.trip(auditError, attachmentFailedAt);
+          if (dependencies.barrier.status === 'healthy') {
+            dependencies.barrier.trip(auditError, attachmentFailedAt);
+          }
           throw auditError;
         }
         summary.attentionRequired.push(execution.id);

@@ -95,6 +95,20 @@ const diagnosticCount = (fixture: V2TestDatabase) =>
     }
   ).count;
 
+const reconciliationState = (
+  fixture: V2TestDatabase,
+  executions: ExecutionRepository,
+  operations: OperationRepository,
+  executionId: string,
+) => ({
+  execution: executions.get(executionId),
+  operations: operations.listForExecution(executionId),
+  diagnostics: fixture.database
+    .prepare('SELECT * FROM raw_diagnostics ORDER BY id')
+    .all(),
+  domain: fixture.database.prepare('SELECT * FROM domain_events ORDER BY id').all(),
+});
+
 const collect = async <T>(source: AsyncIterable<T>): Promise<T[]> => {
   const values: T[] = [];
   for await (const value of source) values.push(value);
@@ -292,6 +306,195 @@ describe('reconcileExecutions', () => {
         { message: 'Durable audit persistence failed' },
       ],
     });
+  });
+
+  it('does not reconcile after the barrier trips while probe is awaited', async () => {
+    const context = setup();
+    let probeCalledResolve: (() => void) | undefined;
+    let releaseProbe: (() => void) | undefined;
+    const probeCalled = new Promise<void>((resolve) => {
+      probeCalledResolve = resolve;
+    });
+    const probeRelease = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    try {
+      const running = advance(context.fixture, context.executions, 'running', 2);
+      context.executions.transaction(() =>
+        context.operations.createPendingInTransaction({
+          executionId: running.id,
+          kind: 'start',
+          request: { version: 'mesh.v2.execution-start/v1' },
+          createdAt: '2026-08-28T02:00:03.000Z',
+        }),
+      );
+      const before = reconciliationState(
+        context.fixture,
+        context.executions,
+        context.operations,
+        running.id,
+      );
+      const adapter = new FakeHarnessAdapter();
+      vi.spyOn(adapter, 'probe').mockImplementation(async () => {
+        probeCalledResolve?.();
+        await probeRelease;
+        return { status: 'resumable', afterAdapterCursor: 2 };
+      });
+      const attach = vi.fn();
+
+      const pending = reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach,
+      });
+      await probeCalled;
+      context.barrier.trip(new Error('concurrent audit failure'));
+      releaseProbe?.();
+
+      await expect(pending).rejects.toThrow('Audit barrier is tripped');
+      expect(
+        reconciliationState(
+          context.fixture,
+          context.executions,
+          context.operations,
+          running.id,
+        ),
+      ).toEqual(before);
+      expect(attach).not.toHaveBeenCalled();
+      expect(adapter.resumeCount).toBe(0);
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('closes recovery without attaching after the barrier trips while resume is awaited', async () => {
+    const context = setup();
+    let resumeCalledResolve: (() => void) | undefined;
+    let releaseResume: (() => void) | undefined;
+    const resumeCalled = new Promise<void>((resolve) => {
+      resumeCalledResolve = resolve;
+    });
+    const resumeRelease = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    try {
+      const running = advance(context.fixture, context.executions, 'running', 2);
+      const before = reconciliationState(
+        context.fixture,
+        context.executions,
+        context.operations,
+        running.id,
+      );
+      const adapter = new FakeHarnessAdapter();
+      let closeCount = 0;
+      const recovered: HarnessSession = {
+        nativeHandle: running.nativeHandle as string,
+        async *events() {
+          yield* [];
+        },
+        async close() {
+          closeCount += 1;
+          throw new Error('recovered close failed');
+        },
+      };
+      vi.spyOn(adapter, 'resume').mockImplementation(async () => {
+        resumeCalledResolve?.();
+        await resumeRelease;
+        return recovered as Awaited<ReturnType<typeof adapter.resume>>;
+      });
+      const attach = vi.fn();
+
+      const pending = reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach,
+      });
+      await resumeCalled;
+      context.barrier.trip(new Error('concurrent audit failure'));
+      releaseResume?.();
+
+      await expect(pending).rejects.toThrow('Audit barrier is tripped');
+      expect(closeCount).toBe(1);
+      expect(attach).not.toHaveBeenCalled();
+      expect(
+        reconciliationState(
+          context.fixture,
+          context.executions,
+          context.operations,
+          running.id,
+        ),
+      ).toEqual(before);
+      expect(context.barrier.diagnostics).toEqual([
+        expect.objectContaining({ cause: 'concurrent audit failure' }),
+        expect.objectContaining({
+          message:
+            'Recovered session close failed after audit barrier rejection',
+          cause: 'recovered close failed',
+        }),
+      ]);
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('does not reconcile interrupt proof after the barrier trips while interrupt is awaited', async () => {
+    const context = setup();
+    try {
+      const interrupting = advance(
+        context.fixture,
+        context.executions,
+        'interrupting',
+        2,
+      );
+      context.executions.transaction(() =>
+        context.operations.createPendingInTransaction({
+          executionId: interrupting.id,
+          kind: 'interrupt',
+          request: { version: 'mesh.v2.execution-interrupt/v1' },
+          createdAt: '2026-08-28T02:00:03.000Z',
+        }),
+      );
+      const before = reconciliationState(
+        context.fixture,
+        context.executions,
+        context.operations,
+        interrupting.id,
+      );
+      const adapter = new FakeHarnessAdapter();
+      adapter.blockInterrupt();
+      const attach = vi.fn();
+
+      const pending = reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach,
+      });
+      await adapter.waitUntilInterruptCalled();
+      context.barrier.trip(new Error('concurrent audit failure'));
+      adapter.releaseInterrupt({ status: 'succeeded' });
+
+      await expect(pending).rejects.toThrow('Audit barrier is tripped');
+      expect(
+        reconciliationState(
+          context.fixture,
+          context.executions,
+          context.operations,
+          interrupting.id,
+        ),
+      ).toEqual(before);
+      expect(attach).not.toHaveBeenCalled();
+    } finally {
+      context.fixture.close();
+    }
   });
 
   it.each([

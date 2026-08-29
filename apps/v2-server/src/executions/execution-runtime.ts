@@ -286,7 +286,7 @@ export class ExecutionRuntime {
       }
       throw error;
     }
-    if (domainEvent) this.dependencies.publisher.domain(domainEvent);
+    if (domainEvent) this.publishDomain(domainEvent);
     if (!acceptance.ok || operationId === undefined) return acceptance;
     const acceptedOperationId = operationId;
 
@@ -301,8 +301,9 @@ export class ExecutionRuntime {
       });
     } catch (error) {
       const failedAt = this.dependencies.now();
+      let failedEvent: DomainEvent;
       try {
-        const failedEvent = inImmediateTransaction(
+        failedEvent = inImmediateTransaction(
           this.dependencies.database,
           () => {
             const current = requireExecution(
@@ -338,16 +339,18 @@ export class ExecutionRuntime {
             );
           },
         );
-        this.dependencies.publisher.domain(failedEvent);
       } catch (auditError) {
         this.dependencies.barrier.trip(auditError, failedAt);
+        return acceptance;
       }
+      this.publishDomain(failedEvent);
       return acceptance;
     }
 
     const runningAt = this.dependencies.now();
+    let runningEvent: DomainEvent;
     try {
-      const runningEvent = inImmediateTransaction(
+      runningEvent = inImmediateTransaction(
         this.dependencies.database,
         () => {
           const current = requireExecution(
@@ -375,11 +378,11 @@ export class ExecutionRuntime {
           );
         },
       );
-      this.dependencies.publisher.domain(runningEvent);
     } catch (error) {
       await this.contain(session, error);
       return acceptance;
     }
+    this.publishDomain(runningEvent);
     this.attach(executionId, session);
     return acceptance;
   }
@@ -487,7 +490,7 @@ export class ExecutionRuntime {
     if (!acceptance.ok || operationId === undefined || nativeHandle === null)
       return acceptance;
     const acceptedOperationId = operationId;
-    if (domainEvent) this.dependencies.publisher.domain(domainEvent);
+    if (domainEvent) this.publishDomain(domainEvent);
 
     let proof: unknown;
     let proven = false;
@@ -538,7 +541,7 @@ export class ExecutionRuntime {
       }
       return acceptance;
     }
-    this.dependencies.publisher.domain(proofEvent);
+    this.publishDomain(proofEvent);
     return acceptance;
   }
 
@@ -668,14 +671,20 @@ export class ExecutionRuntime {
           await this.contain(session, error);
           return;
         }
-        this.dependencies.publisher.runtime(runtimeEvent);
+        this.publishRuntime(runtimeEvent);
         if (domainEvent) {
-          this.dependencies.publisher.domain(domainEvent);
-          await session.close();
+          this.publishDomain(domainEvent);
+          await this.closeAfterSuccess(
+            session,
+            'Session close failed after successful completion',
+          );
           return;
         }
       }
-      await session.close();
+      await this.closeAfterSuccess(
+        session,
+        'Session close failed after stream exhaustion',
+      );
     } catch (error) {
       await this.persistAdapterFailure(executionId, undefined, error, session);
     }
@@ -687,10 +696,11 @@ export class ExecutionRuntime {
     error: unknown,
     session: HarnessSession,
   ): Promise<void> {
+    const occurredAt = this.dependencies.now();
+    const message = error instanceof Error ? error.message : String(error);
+    let domainEvent: DomainEvent;
     try {
-      const occurredAt = this.dependencies.now();
-      const message = error instanceof Error ? error.message : String(error);
-      const domainEvent = inImmediateTransaction(
+      domainEvent = inImmediateTransaction(
         this.dependencies.database,
         () => {
           const current = requireExecution(
@@ -740,10 +750,41 @@ export class ExecutionRuntime {
           );
         },
       );
-      this.dependencies.publisher.domain(domainEvent);
-      await session.close();
     } catch (auditError) {
       await this.contain(session, auditError);
+      return;
+    }
+    this.publishDomain(domainEvent);
+    await this.closeAfterSuccess(
+      session,
+      'Session close failed after adapter failure',
+    );
+  }
+
+  private publishDomain(event: DomainEvent): void {
+    try {
+      this.dependencies.publisher.domain(event);
+    } catch (error) {
+      this.dependencies.barrier.record('Domain publication failed', error);
+    }
+  }
+
+  private publishRuntime(event: RuntimeEvent): void {
+    try {
+      this.dependencies.publisher.runtime(event);
+    } catch (error) {
+      this.dependencies.barrier.record('Runtime publication failed', error);
+    }
+  }
+
+  private async closeAfterSuccess(
+    session: HarnessSession,
+    message: string,
+  ): Promise<void> {
+    try {
+      await session.close();
+    } catch (error) {
+      this.dependencies.barrier.record(message, error);
     }
   }
 
