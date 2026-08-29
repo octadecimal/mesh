@@ -563,6 +563,75 @@ describe('reconcileExecutions', () => {
     }
   });
 
+  it('closes recovery without writes or a resumed summary after the barrier trips while attach is awaited', async () => {
+    const context = setup();
+    let attachCalledResolve: (() => void) | undefined;
+    let releaseAttach: (() => void) | undefined;
+    const attachCalled = new Promise<void>((resolve) => {
+      attachCalledResolve = resolve;
+    });
+    const attachRelease = new Promise<void>((resolve) => {
+      releaseAttach = resolve;
+    });
+    try {
+      const running = advance(context.fixture, context.executions, 'running', 2);
+      const adapter = new FakeHarnessAdapter();
+      let closeCount = 0;
+      const recovered: HarnessSession = {
+        nativeHandle: running.nativeHandle as string,
+        async *events() {
+          yield* [];
+        },
+        async close() {
+          closeCount += 1;
+        },
+      };
+      vi.spyOn(adapter, 'resume').mockResolvedValue(recovered);
+      let summary: Awaited<ReturnType<typeof reconcileExecutions>> | undefined;
+
+      const pending = reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach: async () => {
+          attachCalledResolve?.();
+          await attachRelease;
+        },
+      }).then((result) => {
+        summary = result;
+        return result;
+      });
+      await attachCalled;
+      const beforeTrip = reconciliationState(
+        context.fixture,
+        context.executions,
+        context.operations,
+        running.id,
+      );
+      context.barrier.trip(new Error('concurrent attach audit failure'));
+      releaseAttach?.();
+
+      await expect(pending).rejects.toThrow('Audit barrier is tripped');
+      expect(closeCount).toBe(1);
+      expect(summary).toBeUndefined();
+      expect(
+        reconciliationState(
+          context.fixture,
+          context.executions,
+          context.operations,
+          running.id,
+        ),
+      ).toEqual(beforeTrip);
+      expect(context.barrier.diagnostics).toEqual([
+        expect.objectContaining({ cause: 'concurrent attach audit failure' }),
+      ]);
+    } finally {
+      context.fixture.close();
+    }
+  });
+
   it('does not reconcile interrupt proof after the barrier trips while interrupt is awaited', async () => {
     const context = setup();
     try {

@@ -393,6 +393,7 @@ export const reconcileExecutions = async (
       try {
         dependencies.barrier.assertHealthy();
         await dependencies.attach(execution.id, recoveredSession);
+        dependencies.barrier.assertHealthy();
         summary.resumed.push(execution.id);
       } catch (error) {
         let cleanupError: unknown;
