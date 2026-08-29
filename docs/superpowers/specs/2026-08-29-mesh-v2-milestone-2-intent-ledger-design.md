@@ -291,14 +291,23 @@ type PmDiscoveryAssignment = {
   expectedProposalRevision: number;
   baseProjectIntentRevision: number | null;
   baseLedgerRevision: number | null;
+  input: {
+    conversation: readonly {
+      turnId: string;
+      actor: 'human' | 'pm';
+      message: string;
+    }[];
+    latestProposal: PlanningProposal | null;
+    approvedIntentLedger: ApprovedIntentLedger | null;
+  };
 };
 ```
 
-The assignment contains IDs and revision bindings, not a persistent provider
-session. The adapter receives the human turn and prior conversation from a
-planning input snapshot resolved at start. The PM profile is an approved M1
-profile and requests read-only/product reasoning capabilities only; a prompt or
-profile grants no approval authority.
+The assignment contains IDs, revision bindings, and the immutable conversation,
+latest-proposal, and approved-ledger input snapshot needed for that turn, not a
+persistent provider session. The PM profile is an approved M1 profile and
+requests read-only/product reasoning capabilities only; a prompt or profile
+grants no approval authority.
 
 ### `mesh.dev/pm-discovery-report/v1`
 
