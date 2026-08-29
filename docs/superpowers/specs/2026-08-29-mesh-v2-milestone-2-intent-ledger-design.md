@@ -51,7 +51,7 @@ real agent, inspect credentials, or consume subscription capacity.
 - requirement relationships `refines`, `depends_on`, `conflicts_with`,
   `supersedes`, and `duplicates`;
 - decision-to-requirement `constrains` traceability;
-- conversation-turn provenance and source-material provenance references;
+- conversation-turn provenance references;
 - complete-proposal review, human approval, rejection, and revision requests;
 - PM Chat question/proposal cards and the Requirements list/detail experience;
 - M1 command idempotency, immediate transactions, ordered project domain
@@ -96,9 +96,9 @@ used by this design.
 6. **How does PM output become durable domain state?** A planning-specific
    receipt consumer validates one strict report against the execution's frozen
    assignment. There is no generic output-consumer framework.
-7. **What does rejection do?** It terminalizes that proposal revision without
-   changing canonical intent. A new human turn may continue the same planning
-   cycle and produce a later proposal.
+7. **What does rejection do?** It terminalizes the proposal and cycle without
+   changing canonical intent. Continuing discovery starts a new cycle; revision
+   feedback sent before rejection stays in the current cycle.
 8. **What happens after a crash between accepting a human turn and launching
    its execution?** The turn remains `launch_pending`. A deterministic drain,
    invoked after the command and during startup, replays the derived execution
@@ -145,6 +145,7 @@ discovering -> execution_active -> awaiting_human
 awaiting_approval -> execution_active     (revision request)
 awaiting_approval -> approved             (human only)
 awaiting_approval -> proposal_rejected    (human only)
+any nonterminal state -> abandoned        (human only)
 execution_active -> attention_required    (invalid/missing output or runtime failure)
 attention_required -> execution_active    (new human retry turn)
 ```
@@ -159,12 +160,22 @@ and never silently follow a newer profile. Binding an execution moves it to
 `execution_active`. A valid question report moves it to `awaiting_human`; a
 valid proposal report moves it to `awaiting_approval`.
 
-`approved` is terminal for the cycle. `proposal_rejected` rejects the latest
-proposal but preserves all history; a new cycle is required for later work.
-There is no cancel command in M2 because stopping a finite fake execution and
-managing provider processes is not needed by the stop condition. Existing M1
-execution interruption remains available for diagnostics, but it cannot imply a
-planning outcome.
+`approved`, `proposal_rejected`, and `abandoned` are terminal. A partial unique
+index permits at most one nonterminal cycle per project, including
+`attention_required`; creating another returns `planning_cycle_active_conflict`.
+`proposal_rejected` rejects the latest proposal, while `abandoned` closes a
+cycle from any nonterminal state without changing canonical intent. Both
+preserve history, and only then may a new cycle begin. Abandoning an active
+execution first persists the terminal cycle event and then requests the
+existing M1 interruption; interruption failure is diagnostic and cannot reopen
+the cycle or imply a planning result.
+
+One cycle accepts at most 32 human and 32 PM turns and 16 proposal revisions.
+Messages remain bounded at 16 KiB and proposal/record limits remain those in
+the wire contract. The immutable PM assignment contains the whole current
+cycle, so these limits bound every assignment. A turn or proposal beyond the
+limit returns `planning_cycle_history_limit` without a write; the human can
+abandon the cycle and start another.
 
 ### Conversation and questions
 
@@ -234,22 +245,28 @@ maximum revision.
   `operational`, or `constraint`; `status` is exactly `proposed`, `approved`,
   `superseded`, `rejected`, or `retired`; `priority` is `must`, `should`, or
   `could`.
-- Decision: no extra lifecycle or solution authority is inferred; its approved
-  statement constrains requirements only through explicit edges.
-- Assumption: `confidence` is `low`, `medium`, or `high`.
-- Question: `resolution` is either absent or human-readable text.
-- Risk: `severity` is `low`, `medium`, or `high`, with a required `mitigation`.
+- Decision: `status` is `active`, `superseded`, or `retired`; its statement
+  constrains requirements only through explicit edges.
+- Assumption: `status` is `active`, `confirmed`, `invalidated`, or `retired`,
+  and `confidence` is `low`, `medium`, or `high`.
+- Question: `status` is `open`, `answered`, or `retired`; `resolution` is
+  required exactly when status is `answered`.
+- Risk: `status` is `open`, `mitigated`, `accepted`, or `retired`; `severity` is
+  `low`, `medium`, or `high`, with a required `mitigation`.
 
 Proposal content for a new or revised requirement uses status `proposed`.
 Approval rewrites only that proposed status to `approved`. Later proposals may
 explicitly create immutable `superseded`, `rejected`, or `retired` requirement
-revisions. Records are never physically deleted by the planning domain.
+revisions. A base-ledger member may never disappear from a later complete
+snapshot. The equivalent lifecycle-only revisions are decision
+`superseded|retired`, assumption `confirmed|invalidated|retired`, question
+`answered|retired`, and risk `mitigated|accepted|retired`. Records are never
+physically deleted by the planning domain, and terminal records remain members
+so history and relationships do not silently vanish.
 
-Each revision has one or more provenance references. M2 accepts
-`conversation_turn` and `source_material` references. A reference records the
-source ID and a short rationale; conversation references must belong to the
-same project and planning cycle. M2 stores source-material references but does
-not ingest files or URLs.
+Each revision has one or more `conversation_turn` provenance references. A
+reference records a durable planning turn ID and a short rationale; the turn
+must belong to the same project. No other provenance variant exists in M2.
 
 ### Ledger revision
 
@@ -262,17 +279,26 @@ points to one immutable record revision. An approved proposal may:
 - create a new stable record identity and first revision.
 
 Every member in the base ledger must appear in the proposed snapshot. Removal
-is expressed by a new rejected, superseded, or retired requirement revision,
-not omission. The server allocates IDs for proposed new records when the
-proposal is persisted and returns those IDs in the review projection; they are
-not canonical ledger members until approval.
+is expressed by the type-specific lifecycle revision above, not omission. When
+a proposal report is accepted, the server replaces each create-entry key with
+a newly generated UUID and stores the key-to-ID mapping in a
+`planning_proposal_records` reservation row. That UUID is durable proposal
+state but not canonical: no `ledger_records` or ledger membership row exists
+before approval. A revised proposal receives new reservations. Approval uses
+the exact reserved UUIDs when it inserts `ledger_records`; rejected,
+superseded, or abandoned proposal reservations never become canonical and are
+never reused.
 
-Requirement edges are directed and typed exactly as `refines`, `depends_on`,
-`conflicts_with`, `supersedes`, or `duplicates`. Both endpoints must be
-requirements in the same proposed snapshot. Decision constraint edges are
-directed `decision -> requirement` and have the sole type `constrains`.
-Duplicate identical edges and self-edges fail validation. Coverage, milestones,
-tasks, criteria, and evidence are not legal endpoints in M2.
+Requirement edges are typed exactly as `refines`, `depends_on`,
+`conflicts_with`, `supersedes`, or `duplicates`. `refines`, `depends_on`, and
+`supersedes` are directed. `conflicts_with` and `duplicates` are symmetric:
+the server normalizes their endpoint IDs into lexical order before uniqueness,
+storage, diffing, and event projection, so reversed duplicates are the same
+edge. Both endpoints must be requirements in the same proposed snapshot.
+Decision constraint edges are directed `decision -> requirement` and have the
+sole type `constrains`. Duplicate normalized edges and self-edges fail
+validation. Coverage, milestones, tasks, criteria, and evidence are not legal
+endpoints in M2.
 
 ## PM Execution and Structured Output
 
@@ -283,7 +309,7 @@ The existing `WorkerExecution.assignment` union gains
 
 ```ts
 type PmDiscoveryAssignment = {
-  kind: 'pm_discovery';
+  kind: 'pm-discovery';
   outputSchema: 'mesh.dev/pm-discovery-report/v1';
   planningCycleId: string;
   humanTurnId: string;
@@ -308,6 +334,14 @@ latest-proposal, and approved-ledger input snapshot needed for that turn, not a
 persistent provider session. The PM profile is an approved M1 profile and
 requests read-only/product reasoning capabilities only; a prompt or profile
 grants no approval authority.
+
+The planning service, not the route or adapter, validates the frozen approved
+profile. Its resolved scope must be global or this project, its
+`assignmentKinds` must include `pm-discovery`, and `outputSchema` must equal
+`mesh.dev/pm-discovery-report/v1`; otherwise the turn returns
+`planning_profile_incompatible` without creating a turn or execution. The
+profile contract adds `pm-discovery` without weakening existing
+`foundation-check` validation.
 
 ### `mesh.dev/pm-discovery-report/v1`
 
@@ -412,6 +446,50 @@ Completion without one accepted receipt is not planning success. When the
 execution ends, a planning-specific terminal check moves the cycle to
 `attention_required` if no valid report was consumed.
 
+### Reservation, binding, and activation
+
+M1 `ExecutionRuntime.start` currently reserves, starts, attaches, and begins
+consuming a harness session before its promise returns. M2 therefore introduces
+a narrow split in that same runtime rather than pretending its return value is
+a pre-start reservation:
+
+```ts
+type ReservedExecutionStart = {
+  execution: WorkerExecution;
+  result: V2CommandResult;
+  activationRequired: boolean;
+};
+
+ExecutionRuntime.reserveStart(
+  envelope: StartExecutionEnvelope,
+): Promise<ReservedExecutionStart>;
+ExecutionRuntime.activateReserved(executionId: string): Promise<void>;
+```
+
+`reserveStart` performs M1 capability/skill resolution and the existing
+immediate transaction that inserts the execution, pending start operation,
+ordered lifecycle event, and idempotent command result. It never calls
+`adapter.start`, attaches a session, or consumes events. It returns the exact
+execution even when missing capabilities or skills made reservation terminal;
+those expected start failures therefore remain bindable. The existing public
+`start` keeps its M1 signature and behavior as a wrapper that reserves, activates
+when `activationRequired`, and returns `result`, preserving foundation callers.
+
+The planning launcher reserves with key `planning-turn:<turnId>`, durably binds
+that exact execution to the human turn in a planning transaction, publishes
+the binding event, and only then calls `activateReserved`. Binding a terminal
+reservation moves the cycle directly to `attention_required` with its failure.
+Adapter-start failure occurs only after binding; the runtime persists its
+terminal lifecycle and notifies the planning terminal observer. A crash before
+binding leaves `launch_pending` and replays the reservation; a crash after
+binding but before activation leaves an exact starting execution for M1
+execution reconciliation. No adapter event can be consumed for an unbound PM
+execution. A reservation-transaction exception creates no execution and leaves
+the turn `launch_pending` for retry; capability/skill rejection binds the exact
+terminal execution; adapter startup or attachment failure terminalizes the
+already-bound execution. These cases cover every start-failure boundary without
+inventing a second execution.
+
 ## Persistence and Transaction Ordering
 
 Migration `002_intent_ledger.sql` is appended to the V2 migration ledger;
@@ -421,6 +499,7 @@ Migration `002_intent_ledger.sql` is appended to the V2 migration ledger;
 - `planning_turns`;
 - `planning_questions`;
 - `planning_proposals`;
+- `planning_proposal_records`;
 - `pm_output_receipts`;
 - `project_intent_revisions` and `project_intent_provenance`;
 - `ledger_records`, `ledger_record_revisions`, and
@@ -432,8 +511,10 @@ Foreign keys preserve project, cycle, execution, turn, proposal, record, and
 revision ownership. Unique constraints enforce one turn sequence, one proposal
 revision, one output receipt per execution, one record revision, one project
 intent revision, one ledger revision, one record membership per ledger
-revision, and one normalized relationship per ledger revision. JSON payloads
-are canonicalized before storage and parsed through shared contracts on read.
+revision, one reserved ID per proposal key, and one normalized relationship per
+ledger revision. A partial unique index enforces one nonterminal planning cycle
+per project. JSON payloads are canonicalized before storage and parsed through
+shared contracts on read.
 
 Human turn acceptance orders writes as follows:
 
@@ -443,22 +524,32 @@ Human turn acceptance orders writes as follows:
 4. append the ordered `planning_cycle.changed` event;
 5. store the command result and commit;
 6. publish the event;
-7. drain the pending turn through a derived idempotent M1 execution-start
-   command, then bind its execution in a second transaction and publish the
-   committed binding event.
+7. drain the pending turn by calling `reserveStart` with the derived idempotency
+   key;
+8. bind the returned exact execution in one planning transaction, moving a
+   terminal reservation to attention, and publish the complete-cycle event;
+9. call `activateReserved` only after the binding commit.
 
-Startup performs the same pending-launch drain after M1 execution
-reconciliation and before accepting commands. A crash at any boundary either
-replays a stored command result or finds a durable pending turn; it cannot
-silently lose or multiply the execution.
+Startup first runs M1 execution reconciliation while collecting recovered
+sessions without attaching them. It then runs idempotent planning
+reconciliation for every bound nonterminal cycle: replay an unconsumed durable
+structured-output event through `PmReportConsumer`, re-read the cycle, and move
+an execution-active cycle whose reconciled execution is terminal and still has
+no accepted receipt to `attention_required`. Only after those transactions and
+their committed events does startup publish the recovery window, attach the
+collected recovered sessions, drain unbound `launch_pending` turns through the
+reservation/binding/activation sequence, and begin accepting commands. Thus a
+crash after execution terminalization but before the live terminal callback
+cannot strand `execution_active`, and a durable valid output is consumed before
+terminal attention is inferred.
 
 Proposal approval uses one immediate transaction:
 
 1. replay-check the command and assert human actor;
 2. re-read the exact cycle, proposal, current intent, current ledger, record
    revisions, and relationship endpoints;
-3. allocate new record identities, insert all new immutable record revisions
-   and provenance;
+3. insert the proposal's exact reserved record IDs as canonical identities,
+   then insert all new immutable record revisions and provenance;
 4. insert the new immutable intent revision and provenance;
 5. insert the new ledger revision, complete memberships, and complete edges;
 6. mark the proposal and cycle approved;
@@ -481,17 +572,34 @@ The V2 command union adds:
 - `planning_proposal.approve` with project, cycle, proposal, expected proposal
   revision, expected intent revision, and expected ledger revision;
 - `planning_proposal.reject` with the same proposal identity and human
-  feedback.
+  feedback;
+- `planning_cycle.abandon` with project, cycle, and expected cycle revision.
 
-Stable failures include not found, stale cycle, stale proposal, stale canonical
-base, proposal invalid, output invalid, and approval forbidden. Exact codes are
-declared in `packages/v2-contracts` and mapped by the existing `/api/v2/commands`
-route; transport does not invent lifecycle rules.
+Expected planning failures are command results and therefore preserve the M1
+command-route convention of HTTP 200 with `ok: false`. Their exact codes are:
+
+| Code | Meaning |
+| --- | --- |
+| `planning_cycle_not_found` | Referenced cycle does not exist in the project |
+| `planning_cycle_active_conflict` | A different nonterminal cycle already exists |
+| `planning_cycle_revision_conflict` | Expected cycle revision/lifecycle is stale |
+| `planning_cycle_history_limit` | The bounded turn/proposal limit is exhausted |
+| `planning_proposal_not_found` | Referenced proposal does not exist in the cycle |
+| `planning_proposal_revision_conflict` | Expected proposal revision/lifecycle is stale |
+| `planning_canonical_base_conflict` | Approved intent, ledger, or record base changed |
+| `planning_profile_incompatible` | Approved profile scope, assignment kind, or output schema is invalid for PM discovery |
+| `planning_proposal_invalid` | Complete membership, provenance, or relationship validation failed |
+
+Malformed envelopes, including a non-human actor, are `invalid_request` HTTP
+400. Existing origin is 403, retained-gap/stable transport conflicts are 409,
+stopping/audit failures are 503, and unknown exceptions are 500. T01 owns these
+codes and T05 tests this table; neither layer invents an additional mapping.
 
 The domain event union adds:
 
-- `planning_cycle.changed`, carrying the current cycle plus only the newly
-  appended turn/questions/proposal needed for incremental projection;
+- `planning_cycle.changed`, carrying one complete bounded `PlanningCycleView`,
+  including every proposal's current lifecycle, so append, supersede, reject,
+  abandon, binding, attention, and receipt transitions are replay-complete;
 - `intent_ledger.approved`, carrying the approved intent/ledger projection and
   terminal cycle/proposal state.
 
@@ -500,18 +608,24 @@ events. The runtime stream adds only
 `worker_execution.structured_output`; raw adapter input and its diagnostic are
 persisted before publication exactly as in M1.
 
-`V2ProjectSnapshot` adds planning cycles with turns, questions, and proposal
-history plus `intentLedger`, which is absent before first approval. The
-Requirements projection is therefore reconstructed entirely from one snapshot
-and ordered domain events. Reconnect uses the existing subscription message,
-domain/runtime cursors, retained windows, gap detection, and resync route. No
-new socket or transport is introduced.
+`V2ProjectSnapshot` adds the active cycle, if any, plus the 19 most recently
+updated terminal `PlanningCycleView`s, `planningHistoryTruncated`, and
+`intentLedger`, which is absent before first approval. Each cycle view is
+bounded by the cycle limits above; older cycles remain durable but are not
+loaded into the M2 shell. The reducer replaces a cycle view atomically on
+`planning_cycle.changed` and replaces the ledger on approval. Contract,
+repository, and reducer tests apply the same event sequence to an earlier
+snapshot and assert byte-equivalent planning/ledger projection to a fresh final
+snapshot, including proposal supersede and reject. Reconnect uses the existing
+subscription message, domain/runtime cursors, retained windows, gap detection,
+and resync route. No new socket or transport is introduced.
 
 ## Recovery and Reverse States
 
-- **Start/restart:** pending human turns are re-drained idempotently; M1
-  execution reconciliation runs first. A valid already-consumed receipt is not
-  consumed again.
+- **Start/restart:** M1 reconciles execution truth without attachment; planning
+  then replays unconsumed durable output and terminal-checks every bound cycle;
+  recovered sessions attach next; pending human turns drain last. A valid
+  already-consumed receipt is not consumed again.
 - **Question/answer:** questions remain immutable when the next human turn is
   added. Answers are conversation turns, not in-place question edits.
 - **Proposal/revision:** a human turn from `awaiting_approval` requests a new
@@ -519,6 +633,9 @@ new socket or transport is introduced.
   `superseded` only when the new one is durably accepted.
 - **Approve/reject:** approval creates one new canonical snapshot; rejection
   creates none. Both target exact revisions and are idempotent.
+- **Abandon/restart:** abandonment terminalizes the cycle with no canonical
+  mutation, then requests interruption of any bound live execution. A later
+  cycle starts independently.
 - **Runtime failure:** a missing, failed, or interrupted execution leaves the
   turn and diagnostics visible and moves the cycle to `attention_required`.
   A new human retry turn creates a new execution; no native provider session is
@@ -582,7 +699,10 @@ code remains under `packages/v2-contracts`, `apps/v2-server`, `apps/v2-web`, and
 
 Contract tests prove strict successful parsing, unknown-field rejection,
 collection bounds, record discrimination, exact enums, endpoint references,
-human-only envelopes, event coherence, and snapshot round trips.
+human-only envelopes, event coherence, and snapshot round trips. They also
+prove that an approved PM profile accepts the `pm-discovery` assignment only
+with the exact discovery output schema while the existing `foundation-check`
+profile behavior remains unchanged.
 
 ### Persistence and domain
 
@@ -591,14 +711,26 @@ Focused tests cover fresh migration, upgrade from exact migration 1, unchanged
 membership, provenance, relationship constraints, idempotent turn launches,
 question and proposal receipts, stale bases, revision requests, rejection,
 human approval, agent self-approval rejection, duplicate/malformed output, and
-injected receipt/approval/event failure rollback.
+injected receipt/approval/event failure rollback. The suite additionally proves
+the single-active-cycle index, history limits and abandonment, proposal-time ID
+reservation without premature canonical rows, all five record lifecycle-only
+removals, symmetric edge normalization, complete-cycle proposal
+supersede/reject events, and byte-equivalent incremental versus final-snapshot
+projection.
 
 ### Runtime and fake harness
 
 Focused tests prove one finite PM execution per human turn, strict structured
 output before completion, malformed and duplicate fixture modes, no persistent
 native planning session, raw-diagnostic-before-runtime-event ordering, and
-completion-without-receipt attention.
+completion-without-receipt attention. Reservation tests prove that capability
+and skill failures still return a bindable exact execution and that neither a
+successful nor failed reservation can start an adapter or consume an event
+before binding. Activation-failure tests prove the bound cycle reaches
+attention. Startup tests crash after durable output and after execution
+terminalization, then prove output replay and terminal reconciliation happen
+before recovered-session attachment, pending-launch drain, and command
+acceptance.
 
 ### Web
 
@@ -634,13 +766,19 @@ smoke test is explicitly outside default verification.
 - Protocol stays `mesh.v2/1`; new variants extend the existing strict unions.
 - PM output schema is exactly `mesh.dev/pm-discovery-report/v1`.
 - Each human turn maps to exactly one finite `WorkerExecution` assignment.
+- `reserveStart` returns an exact non-consuming reservation;
+  `activateReserved` runs only after the PM execution binding commits.
 - `PmReportConsumer` is planning-specific; no generic consumer registry.
 - Proposals are complete desired snapshots and approval is all-or-nothing.
 - `ProjectIntent`, ledger, record revisions, memberships, edges, proposals,
   receipts, and turns are immutable history.
-- Canonical IDs are server-owned; proposal-local keys resolve when a proposal
-  is persisted.
-- Only human command envelopes approve or reject.
+- New record IDs are server-owned noncanonical proposal reservations and become
+  canonical only if that exact proposal is approved.
+- One project has at most one nonterminal cycle; assignments contain at most 64
+  bounded turns, and project snapshots contain at most 20 bounded cycle views.
+- `conflicts_with` and `duplicates` normalize lexically as symmetric edges; all
+  other edges retain direction.
+- Only human command envelopes approve, reject, or abandon.
 - M1 domain/runtime streams, snapshots, replay/resync, and HTTP command route
   remain the transport.
 - Migration 2 is forward-only; migration 1 is immutable.
