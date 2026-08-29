@@ -146,7 +146,7 @@ describe('ExecutionActivity', () => {
         adapterCursor: 5,
         occurredAt: '2026-08-28T00:00:05.000Z',
         type: 'worker_execution.child_started',
-        payload: { childId: 'child-1', title: 'child.started' },
+        payload: { childId: 'todo-check', title: 'Todo check' },
       },
       {
         id: '77777777-7777-4777-8777-777777777777',
@@ -173,7 +173,8 @@ describe('ExecutionActivity', () => {
     const activity = screen.getByRole('list', {
       name: 'Runtime activity for Todo foundation worker',
     });
-    expect(activity).toHaveTextContent('child.started');
+    expect(screen.getByText('child.started')).toBeVisible();
+    expect(screen.getByText('Todo check')).toBeVisible();
     expect(activity).toHaveTextContent('Execution completed');
     expect(activity).not.toHaveTextContent(runtimeActivity[0].diagnosticId);
   });

@@ -26,7 +26,11 @@ function runtimeActivityLabel(activity: RuntimeEvent) {
     case 'worker_execution.output':
       return activity.payload.text;
     case 'worker_execution.child_started':
-      return activity.payload.title;
+      return (
+        <>
+          <span>child.started</span> <span>{activity.payload.title}</span>
+        </>
+      );
     case 'worker_execution.child_finished':
       return `Child ${activity.payload.childId} ${activity.payload.outcome}`;
     case 'worker_execution.adapter_failed':
