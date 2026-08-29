@@ -605,6 +605,10 @@ bridge is called only by the external planning launch coordinator, never from
 inside the consume task; attempting a self-wait fails typed before fencing, so
 the implementation cannot deadlock on its own task. A replay of the same
 coordinator cleanup observes the already-terminal operation and is idempotent.
+Once the active entry is fenced, close-and-join runs as mandatory containment
+even if `adapter.interrupt` rejects; the adapter failure remains the primary
+typed diagnostic, while any additional close/join failure is durably attached
+and still prevents cleanup success.
 
 Adapter rejection, barrier failure, session-close failure, or consume-task
 settlement/removal failure preserves the internal operation and audit
