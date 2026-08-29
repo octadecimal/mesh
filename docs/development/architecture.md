@@ -61,6 +61,8 @@ requests, then allows the browser projection to converge from snapshots and
 replay. This is the implemented foundation-check flow only; the broader V2
 workflow domains in the architecture design are not implemented by M1.
 
+### Established V1 project workflow
+
 Project task-board state follows a parallel durable flow. Each imported project
 has its own ordered project-event sequence and cursor, separate from every
 session event stream. Project snapshots contain that project's tasks, attempts,
