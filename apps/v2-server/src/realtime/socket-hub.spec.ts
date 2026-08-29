@@ -265,6 +265,44 @@ describe('V2SocketHub', () => {
     expect(second.closed).toHaveLength(1);
   });
 
+  it('continues shutdown when one active socket close throws', async () => {
+    const publisher = new V2EventPublisher();
+    const hub = new V2SocketHub({
+      publisher,
+      projectExists: () => true,
+      events: {
+        domainAfter: () => ({ lowWater: 1, highWater: 0, events: [] }),
+        runtimeAfter: () => ({ lowWater: 1, highWater: 0, events: [] }),
+      },
+    });
+    const broken = new ThrowingCloseSocket();
+    const healthy = new TestSocket();
+    hub.attach(broken);
+    hub.attach(healthy);
+    broken.subscribe();
+    healthy.subscribe();
+    await Promise.all([
+      broken.waitFor((message) => message.type === 'v2.subscribed'),
+      healthy.waitFor((message) => message.type === 'v2.subscribed'),
+    ]);
+
+    expect(() => {
+      hub.close();
+      hub.close();
+    }).not.toThrow();
+    publisher.domain(domainEvent(1));
+    publisher.runtime(runtimeEvent(1));
+
+    expect(broken.closed).toEqual([
+      { code: 1001, reason: 'Server shutting down' },
+    ]);
+    expect(healthy.closed).toEqual([
+      { code: 1001, reason: 'Server shutting down' },
+    ]);
+    expect(broken.sendAttempts).toBe(1);
+    expect(healthy.sent).toHaveLength(1);
+  });
+
   it('stops a blocked replay after an asynchronous socket error', async () => {
     const publisher = new V2EventPublisher();
     const replayGate = gate();

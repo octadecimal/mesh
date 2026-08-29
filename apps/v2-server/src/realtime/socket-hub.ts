@@ -98,7 +98,11 @@ export class V2SocketHub {
   close(): void {
     for (const connection of [...this.connections]) {
       connection.cleanup();
-      connection.socket.close(1001, 'Server shutting down');
+      try {
+        connection.socket.close(1001, 'Server shutting down');
+      } catch {
+        // Continue closing the remaining connections during shutdown.
+      }
     }
   }
 
