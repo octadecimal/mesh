@@ -101,9 +101,10 @@ used by this design.
    feedback sent before rejection stays in the current cycle.
 8. **What happens after a crash between accepting a human turn and launching
    its execution?** The turn and cycle remain non-accepting `launch_pending`.
-   A deterministic drain, invoked after the command and during startup, replays
-   the derived execution reservation and follows its durable start-operation
-   link to bind the exact same execution, including a terminal reservation.
+   Startup first checks for the derived start-operation link. With no operation,
+   the turn was never reserved and the drain may make one fresh reservation.
+   With an existing operation, M1 reconciliation is authoritative: terminal or
+   attention state binds to the cycle, and startup never retries activation.
 9. **How can migration 2 store planning command results?** It rebuilds only
    `command_results` inside the migration transaction with the four M1 and four
    M2 command types in its `CHECK`, copies every M1 row unchanged, recreates its
@@ -191,9 +192,13 @@ index permits at most one nonterminal cycle per project, including
 `proposal_rejected` rejects the latest proposal, while `abandoned` closes a
 cycle from any nonterminal state without changing canonical intent. Both
 preserve history, and only then may a new cycle begin. Abandoning an active
-execution first persists the terminal cycle event and then requests the
-existing M1 interruption; interruption failure is diagnostic and cannot reopen
-the cycle or imply a planning result.
+execution acquires the per-cycle launch interlock, completes the applicable
+reserved cancellation or running interruption, and only then transactionally
+persists the abandoned cycle, complete event, and command result. Cleanup
+failure stores no successful Abandon result and does not move the cycle to
+`abandoned`; it remains nonterminal or moves to `attention_required` under its
+typed failure. Once committed, Abandon cannot reopen because cleanup preceded
+the terminal commit.
 
 One cycle accepts at most 32 human and 32 PM turns and 16 proposal revisions.
 Messages remain bounded at 16 KiB and proposal/record limits remain those in
@@ -543,16 +548,20 @@ that exact execution to the human turn in a planning transaction, publishes
 the binding event, and only then calls `activateReserved`. Binding a terminal
 reservation moves the cycle directly to `attention_required` with its failure.
 Adapter-start failure occurs only after binding; the runtime persists its
-terminal lifecycle and notifies the planning terminal observer. A crash before
-binding leaves `launch_pending` and replays the reservation; a crash after
-binding but before activation leaves an exact starting execution for M1
-execution reconciliation. No adapter event can be consumed for an unbound PM
-execution. A reservation-transaction exception creates no execution and leaves
-the turn `launch_pending` for retry; pre-reservation lookup/probe failure follows
-the same no-write rule; capability/skill rejection binds the exact terminal
-execution; adapter startup or attachment failure terminalizes the already-bound
-execution. These cases cover every start-failure boundary without inventing a
-second execution.
+terminal lifecycle and notifies the planning terminal observer. Any process loss
+after a starting reservation commits leaves `starting`, a pending start
+operation, and no durable native handle. That state cannot distinguish a crash
+before `adapter.start` from a crash after the adapter returned but before the
+running/native-handle transaction. M1 reconciliation therefore remains
+fail-closed: it probes unknown, finishes the start operation `unknown`, and moves
+the execution to `attention_required`; planning never invokes activation for it.
+No adapter event can be consumed for an unbound PM execution. A
+reservation-transaction exception creates no execution or operation and leaves
+the turn `launch_pending` eligible for one fresh reservation; pre-reservation
+lookup/probe failure follows the same no-write rule; capability/skill rejection
+binds the exact terminal execution; adapter startup or attachment failure in the
+live process terminalizes the already-bound execution. These cases cover every
+start-failure boundary without inventing a second execution or recovery marker.
 
 Abandon and the pending-launch drain share one narrow per-cycle
 `PlanningLaunchCoordinator`; it is not a generic job framework. Abandon first
@@ -568,6 +577,13 @@ operation, transitions it to `failed` with the existing
 failed with reason `planning_cycle_abandoned`, and preserves the operation link
 for replay/audit. Terminal replay is a no-op. M1 `interrupt` remains unchanged
 and continues to accept only `running`.
+
+This cancellation path is live-process arbitration only. After restart, an
+operation already finished `unknown` and an execution already moved to
+`attention_required` are treated as contained, auditable cleanup state;
+`cancelReserved` never rewrites them or retries their activation. Abandon may
+then commit after observing that no locally controllable running execution
+exists.
 
 If activation claimed the execution interlock first, Abandon waits for
 activation to become durable. It then uses M1 interrupt when the execution is
@@ -587,8 +603,8 @@ replays the same derived key, follows the finished start-operation link to the
 same terminal execution, binds it once, and moves the cycle to
 `attention_required`; no new execution or activation is permitted. In-process
 drains coalesce by turn ID. `activateReserved` separately coalesces concurrent
-calls by execution ID until the M1 start operation reaches running, terminal, or
-reconciliation ownership, closing the start-before-running/attachment window.
+calls by execution ID only within the live process, closing the concurrent
+start-before-running/attachment window without creating restart authority.
 
 ## Persistence and Transaction Ordering
 
@@ -672,22 +688,29 @@ Startup first runs M1 execution reconciliation while collecting recovered
 sessions without attaching them. It then runs idempotent planning
 reconciliation for every bound nonterminal cycle: replay an unconsumed durable
 structured-output event through `PmReportConsumer`, re-read the cycle, and move
-an execution-active cycle whose reconciled execution is terminal and still has
-no accepted receipt to `attention_required`. Only after those transactions and
-their committed events does startup publish the recovery window, attach the
-collected recovered sessions, drain unbound `launch_pending` turns through the
-reservation/binding/activation sequence, and begin accepting commands. Thus a
-crash after execution terminalization but before the live terminal callback
-cannot strand `execution_active`, and a durable valid output is consumed before
-terminal attention is inferred.
+an execution-active cycle whose reconciled execution is terminal or
+`attention_required` and still has no accepted receipt to
+`attention_required`. Before attachment or the general pending drain, planning
+also classifies every unbound `launch_pending` turn by its deterministic start
+key. If an operation link exists, it binds that exact reconciled execution and
+moves the complete cycle view to `attention_required` for terminal/attention
+state; it never calls `reserveStart` or `activateReserved` for that turn. If no
+operation link exists, the turn remains eligible for the later fresh drain.
+
+Only after those transactions and their committed events does startup publish
+the recovery window, attach collected recovered sessions, drain only never-
+reserved `launch_pending` turns through one fresh reservation/binding/live-
+activation sequence, and begin accepting commands. Thus a crash after execution
+terminalization cannot strand `execution_active`, either ambiguous adapter-start
+window cannot duplicate a session, and durable valid output is consumed before
+attention is inferred.
 
 The pending drain claims/coalesces work by turn ID and processes one turn per
-cycle. Replaying a bound turn is a no-op; replaying an unbound turn must obtain
-the same operation-linked execution before binding. It calls activation only
-for a newly bound nonterminal reservation with `activationRequired: true`.
-Startup owns recovered starting operations before the pending drain, while live
-`activateReserved` coalesces by execution ID, so neither the pre-running nor
-pre-attachment window can start the same adapter session twice.
+cycle. A bound turn or an unbound turn with an existing operation link is a
+startup-drain no-op after planning reconciliation. Only an unbound turn with no
+operation may call `reserveStart`; it calls activation only for the newly
+created, newly bound nonterminal reservation while still in that live process.
+There is no restart activation marker, retry, or inferred pre-invocation state.
 
 Proposal approval uses one immediate transaction:
 
@@ -786,7 +809,15 @@ and resync route. No new socket or transport is introduced.
   reservation or waits for and interrupts an activation it lost. Only then does
   abandonment terminalize the cycle with no canonical mutation. No adapter may
   start after that commit, no start operation remains pending, and a later cycle
-  starts independently.
+  starts independently. Cleanup failure commits no Abandon result/event and
+  leaves the cycle nonterminal or attention-required; it never creates a
+  terminal-then-reopen sequence.
+- **Ambiguous start after restart:** M1 finishes the pending start operation
+  `unknown` and moves the execution to `attention_required` whether the crash
+  preceded adapter invocation or followed adapter return but preceded durable
+  running/native-handle state. Planning binds/projects that exact truth to a
+  complete attention-required cycle and never starts another adapter. The human
+  may Abandon successfully contained attention state, then create a new cycle.
 - **Runtime failure:** a missing, failed, or interrupted execution leaves the
   turn and diagnostics visible and moves the cycle to `attention_required`.
   A new human retry turn creates a new execution; no native provider session is
@@ -827,6 +858,14 @@ the accepted human turn, and disables Send plus every proposal action. Abandon
 remains the sole enabled lifecycle action when connected and current. The UI
 never optimistically returns the cycle to an accepting state while reservation,
 binding, activation, or restart drain is unresolved.
+
+An `attention_required` cycle produced by ambiguous start reconciliation states
+that Mesh did not retry the execution after restart and preserves the execution
+and operation diagnostics. Its primary guidance is “Abandon this cycle to start
+a new one.” Connected/current Abandon remains enabled; after its cleanup-first
+commit removes the single-active-cycle constraint, the ordinary new-cycle form
+is available. The UI never represents unknown recovery as a retrying or running
+PM.
 
 The Requirements tab becomes a server-truth projection of the latest approved
 ledger. It groups the five record types, exposes requirement kind/status and
@@ -888,9 +927,10 @@ ledger, and replay behavior.
 Concurrency tests issue two distinct turns at the same acceptable cycle revision
 and prove exactly one commits `launch_pending`; the loser receives
 `planning_cycle_revision_conflict` with no write. Restart tests cover a pending
-turn before reservation, after nonterminal reservation, and after terminal
-capability/skill reservation, proving the same operation-linked execution binds
-once and activation starts at most once.
+turn before reservation, after a starting reservation, and after terminal
+capability/skill reservation. A never-reserved turn may reserve once after
+restart. Existing starting or terminal reservations bind the same linked
+execution and never activate after restart.
 
 Controlled concurrency tests pause after reservation/before binding and after
 binding/before activation, signal Abandon, and prove cancellation prevents
@@ -909,14 +949,20 @@ native planning session, raw-diagnostic-before-runtime-event ordering, and
 completion-without-receipt attention. Reservation tests prove that capability
 and skill failures still return a bindable exact execution and that neither a
 successful nor failed reservation can start an adapter or consume an event
-before binding. Replay tests prove every terminal and nonterminal reservation
-resolves its exact execution through the durable start-operation link, including
-a crash before planning binding. Activation-failure and concurrent-activation
-tests prove the bound cycle reaches attention or one running session without a
-duplicate. Startup tests crash after durable output and after execution
-terminalization, then prove output replay and terminal reconciliation happen
-before recovered-session attachment, pending-launch drain, and command
-acceptance.
+before binding. Live-process replay tests prove every terminal and nonterminal
+reservation resolves its exact execution through the durable start-operation
+link. Activation-failure and concurrent-activation tests prove the bound cycle
+reaches attention or one running session without a duplicate.
+
+Startup tests use M1 reconciliation for both indistinguishable durable crash
+windows: starting/pending/no-handle before adapter invocation and after adapter
+return but before running/native-handle persistence. In each case no restarted
+path calls `adapter.start`; the operation finishes `unknown`, the execution and
+complete planning cycle reach `attention_required`, and the exact link and raw
+reconciliation evidence remain auditable. Additional startup cases crash after
+durable output and after execution terminalization, proving output replay and
+terminal/attention planning reconciliation happen before recovered-session
+attachment, fresh pending-launch drain, and command acceptance.
 
 ### Web
 
@@ -956,6 +1002,9 @@ smoke test is explicitly outside default verification.
   `activateReserved` runs only after the PM execution binding commits.
 - Every reservation, including terminal capability/skill failure, has one
   durable start-operation link to its exact execution and replay follows it.
+- After process loss, any existing starting/pending/no-handle reservation uses
+  M1 unknown/attention reconciliation and is never activated again; only a turn
+  with no start-operation link may reserve and activate freshly.
 - `command_results` is rebuilt transactionally in migration 2 with exactly the
   four M1 and four M2 command types; all M1 rows and replay semantics survive.
 - One planning launch coordinator arbitrates Abandon against reserve, bind, and
