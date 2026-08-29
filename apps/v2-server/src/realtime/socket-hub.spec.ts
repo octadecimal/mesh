@@ -102,6 +102,13 @@ class ThrowingSocket extends TestSocket {
   }
 }
 
+class ThrowingCloseSocket extends ThrowingSocket {
+  override close(code?: number, reason?: string): void {
+    super.close(code, reason);
+    throw new Error('socket close failed');
+  }
+}
+
 const gate = () => {
   let entered!: () => void;
   let release!: () => void;
@@ -256,6 +263,51 @@ describe('V2SocketHub', () => {
     publisher.runtime(runtimeEvent(1));
     expect(second.sent).toHaveLength(1);
     expect(second.closed).toHaveLength(1);
+  });
+
+  it('stops a blocked replay after an asynchronous socket error', async () => {
+    const publisher = new V2EventPublisher();
+    const replayGate = gate();
+    let domainReads = 0;
+    const hub = new V2SocketHub({
+      publisher,
+      projectExists: () => true,
+      events: {
+        domainAfter: async () => {
+          domainReads += 1;
+          if (domainReads === 1) {
+            replayGate.markEntered();
+            await replayGate.release;
+            return { lowWater: 1, highWater: 1, events: [domainEvent(1)] };
+          }
+          return { lowWater: 1, highWater: 0, events: [] };
+        },
+        runtimeAfter: () => ({ lowWater: 1, highWater: 0, events: [] }),
+      },
+    });
+    const broken = new ThrowingCloseSocket();
+    const healthy = new TestSocket();
+    hub.attach(broken);
+    broken.subscribe();
+    await replayGate.entered;
+
+    broken.emit('error', new Error('transport failed'));
+    hub.attach(healthy);
+    healthy.subscribe();
+    await healthy.waitFor((message) => message.type === 'v2.subscribed');
+    replayGate.open();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    publisher.domain(domainEvent(1));
+    broken.emit('error', new Error('transport failed again'));
+
+    expect(broken.closed).toEqual([
+      { code: 1011, reason: 'Socket connection failed' },
+    ]);
+    expect(broken.sent).toEqual([]);
+    expect(broken.sendAttempts).toBe(0);
+    expect(
+      healthy.sent.filter((message) => message.type === 'v2.domain_event'),
+    ).toHaveLength(1);
   });
 
   it('removes a socket whose send fails without disrupting other listeners', async () => {

@@ -45,8 +45,10 @@ type StreamState<T extends DomainEvent | RuntimeEvent> = {
 };
 
 type ActiveConnection = {
+  active: boolean;
   socket: V2SocketConnection;
   cleanup(): void;
+  fail(reason: string): void;
 };
 
 const textFrame = (data: unknown): string | undefined => {
@@ -64,22 +66,32 @@ export class V2SocketHub {
     const disposers: Array<() => void> = [];
     let cleaned = false;
     const connection: ActiveConnection = {
+      active: true,
       socket,
       cleanup: () => {
         if (cleaned) return;
         cleaned = true;
+        connection.active = false;
         for (const dispose of disposers.splice(0)) dispose();
         this.connections.delete(connection);
+      },
+      fail: (reason) => {
+        if (!connection.active) return;
+        connection.cleanup();
+        try {
+          socket.close(1011, reason);
+        } catch {
+          // Cleanup already made the failed connection inactive.
+        }
       },
     };
     this.connections.add(connection);
     socket.on('close', connection.cleanup);
-    socket.on('error', connection.cleanup);
+    socket.on('error', () => connection.fail('Socket connection failed'));
     socket.once('message', (data) => {
-      void this.subscribe(connection, disposers, data).catch(() => {
-        connection.cleanup();
-        socket.close(1011, 'Replay unavailable');
-      });
+      void this.subscribe(connection, disposers, data).catch(() =>
+        connection.fail('Replay unavailable'),
+      );
     });
   }
 
@@ -180,6 +192,7 @@ export class V2SocketHub {
       subscription.projectId,
       domain.cursor,
     );
+    if (!connection.active) return;
     if (
       !this.deliverReplay(
         connection,
@@ -193,6 +206,7 @@ export class V2SocketHub {
       subscription.projectId,
       runtime.cursor,
     );
+    if (!connection.active) return;
     if (
       !this.deliverReplay(
         connection,
@@ -204,6 +218,7 @@ export class V2SocketHub {
       return;
     if (!this.drain(connection, subscription.projectId, domain)) return;
     if (!this.drain(connection, subscription.projectId, runtime)) return;
+    if (!connection.active) return;
     this.send(connection, {
       type: 'v2.subscribed',
       protocolVersion: V2_PROTOCOL_VERSION,
@@ -218,17 +233,19 @@ export class V2SocketHub {
     state: StreamState<T>,
     window: { lowWater: number; highWater: number; events: readonly T[] },
   ): boolean {
+    if (!connection.active) return false;
     if (state.cursor < window.lowWater - 1 || state.cursor > window.highWater) {
       this.resync(connection, projectId, 'retained_gap');
       return false;
     }
     for (const event of window.events) {
+      if (!connection.active) return false;
       if (event.sequence <= state.cursor) continue;
       if (event.sequence !== state.cursor + 1) {
         this.resync(connection, projectId, 'retained_gap');
         return false;
       }
-      this.sendEvent(connection, event);
+      if (!this.sendEvent(connection, event)) return false;
       state.cursor = event.sequence;
     }
     if (state.cursor !== window.highWater) {
@@ -243,14 +260,16 @@ export class V2SocketHub {
     projectId: string,
     state: StreamState<T>,
   ): boolean {
+    if (!connection.active) return false;
     while (state.buffer.length > 0) {
       for (const event of state.buffer.splice(0)) {
+        if (!connection.active) return false;
         if (event.sequence <= state.cursor) continue;
         if (event.sequence !== state.cursor + 1) {
           this.resync(connection, projectId, 'non_contiguous_buffer');
           return false;
         }
-        this.sendEvent(connection, event);
+        if (!this.sendEvent(connection, event)) return false;
         state.cursor = event.sequence;
       }
     }
@@ -264,20 +283,21 @@ export class V2SocketHub {
     state: StreamState<T>,
     event: T,
   ): void {
+    if (!connection.active) return;
     if (event.sequence <= state.cursor) return;
     if (event.sequence !== state.cursor + 1) {
       this.resync(connection, projectId, 'non_contiguous_buffer');
       return;
     }
-    this.sendEvent(connection, event);
+    if (!this.sendEvent(connection, event)) return;
     state.cursor = event.sequence;
   }
 
   private sendEvent(
     connection: ActiveConnection,
     event: DomainEvent | RuntimeEvent,
-  ): void {
-    this.send(
+  ): boolean {
+    return this.send(
       connection,
       'diagnosticId' in event
         ? {
@@ -302,12 +322,7 @@ export class V2SocketHub {
     try {
       deliver();
     } catch {
-      connection.cleanup();
-      try {
-        connection.socket.close(1011, 'Socket delivery failed');
-      } catch {
-        // The listener is removed even when a broken transport cannot close.
-      }
+      connection.fail('Socket delivery failed');
     }
   }
 
@@ -319,20 +334,28 @@ export class V2SocketHub {
       { type: 'v2.resync_required' }
     >['reason'],
   ): void {
-    this.send(connection, {
-      type: 'v2.resync_required',
-      protocolVersion: V2_PROTOCOL_VERSION,
-      projectId,
-      reason,
-    });
+    if (
+      !this.send(connection, {
+        type: 'v2.resync_required',
+        protocolVersion: V2_PROTOCOL_VERSION,
+        projectId,
+        reason,
+      })
+    )
+      return;
     connection.cleanup();
     connection.socket.close(1008, 'Resynchronization required');
   }
 
-  private send(connection: ActiveConnection, message: ServerRealtimeMessage) {
+  private send(
+    connection: ActiveConnection,
+    message: ServerRealtimeMessage,
+  ): boolean {
+    if (!connection.active) return false;
     connection.socket.send(
       JSON.stringify(serverRealtimeMessageSchema.parse(message)),
     );
+    return connection.active;
   }
 }
 

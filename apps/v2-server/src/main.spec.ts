@@ -1,7 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  copyFileSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -16,9 +15,10 @@ import {
   V2_PROTOCOL_VERSION,
   serverRealtimeMessageSchema,
   v2ProjectSnapshotSchema,
+  type HarnessAdapter,
   type ServerRealtimeMessage,
 } from '@mesh/v2-contracts';
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { FakeHarnessAdapter } from './executions/fake-harness';
 import { startV2Server, type RunningV2Server } from './main';
@@ -55,40 +55,72 @@ const environment = async (root: string, databasePath: string) => {
   };
 };
 
+const immediatelyResolvingResumeAdapter = (
+  fake: FakeHarnessAdapter,
+): HarnessAdapter => ({
+  id: fake.id,
+  capabilities: () => fake.capabilities(),
+  resolveSkills: (requests) => fake.resolveSkills(requests),
+  start: (request) => fake.start(request),
+  probe: (nativeHandle) => fake.probe(nativeHandle),
+  resume: async (request) => {
+    const session = await fake.resume(request);
+    const events: unknown[] = [];
+    for await (const event of session.events(request.afterAdapterCursor)) {
+      events.push(event);
+    }
+    let index = 0;
+    return {
+      get nativeHandle() {
+        return session.nativeHandle;
+      },
+      events: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            Promise.resolve(
+              index < events.length
+                ? { done: false as const, value: events[index++] }
+                : { done: true as const, value: undefined },
+            ),
+        }),
+      }),
+      close: () => session.close(),
+    };
+  },
+  interrupt: (nativeHandle) => fake.interrupt(nativeHandle),
+});
+
 const buildProductionEntrypoint = () => {
   if (builtMain && builtSignalBridge) {
     return { main: builtMain, signalBridge: builtSignalBridge };
   }
   builtRoot = mkdtempSync(join(workspaceRoot, '.mesh-v2-entrypoint-test-'));
-  const migrations = join(builtRoot, 'migrations');
-  mkdirSync(migrations);
-  builtMain = join(builtRoot, 'main.js');
+  builtMain = join(workspaceRoot, 'dist', 'apps', 'v2-server', 'main.js');
   builtSignalBridge = join(builtRoot, 'signal-bridge.cjs');
+  const buildEnvironment = { ...process.env };
+  for (const name of Object.keys(buildEnvironment)) {
+    if (name.startsWith('NX_')) delete buildEnvironment[name];
+  }
   execFileSync(
     process.execPath,
     [
-      localRequire.resolve('esbuild/bin/esbuild'),
-      'apps/v2-server/src/main.ts',
-      '--bundle',
-      '--platform=node',
-      '--format=cjs',
-      '--external:better-sqlite3',
-      `--outfile=${builtMain}`,
-    ],
-    { cwd: workspaceRoot, shell: false, stdio: 'pipe' },
-  );
-  copyFileSync(
-    join(
-      workspaceRoot,
-      'apps',
+      localRequire.resolve('nx/bin/nx.js'),
+      'build',
       'v2-server',
-      'src',
-      'db',
-      'migrations',
-      '001_foundation.sql',
-    ),
-    join(migrations, '001_foundation.sql'),
+      '--configuration=production',
+      '--skip-nx-cache',
+    ],
+    {
+      cwd: workspaceRoot,
+      env: { ...buildEnvironment, NX_DAEMON: 'false' },
+      shell: false,
+      stdio: 'pipe',
+      timeout: 120_000,
+    },
   );
+  if (!existsSync(builtMain)) {
+    throw new Error(`Nx did not create the V2 server entrypoint: ${builtMain}`);
+  }
   writeFileSync(
     builtSignalBridge,
     `process.on('message', (message) => {
@@ -245,6 +277,8 @@ const connectProjectSocket = async (
   };
 };
 
+beforeAll(() => buildProductionEntrypoint(), 120_000);
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
   for (const directory of directories.splice(0)) {
@@ -400,6 +434,9 @@ describe('startV2Server', () => {
         ...(await environment(fixture.directory, fixture.path)),
         MESH_V2_WEB_ROOT: webRoot,
       });
+      expect(resolve(childServer.child.spawnargs.at(-1) ?? '')).toBe(
+        join(workspaceRoot, 'dist', 'apps', 'v2-server', 'main.js'),
+      );
       expect(childServer.ready).toEqual({
         type: 'mesh.v2.ready',
         origin: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+$/u),
@@ -534,7 +571,7 @@ describe('startV2Server', () => {
       const second = await startV2Server({
         environment: await environment(fixture.directory, fixture.path),
         test: {
-          adapter: restartedFake,
+          adapter: immediatelyResolvingResumeAdapter(restartedFake),
           onPublished: (message) => {
             publications.push({ message, beforeListen: !secondStarted });
             if (
@@ -569,6 +606,11 @@ describe('startV2Server', () => {
             : [],
         ),
       ).toEqual([3, 4, 5, 6]);
+      expect(
+        recoveredEvents.filter(
+          ({ message }) => message.type === 'v2.domain_event',
+        ),
+      ).toHaveLength(1);
       expect(recoveredEvents.every(({ beforeListen }) => beforeListen)).toBe(
         true,
       );

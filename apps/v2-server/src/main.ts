@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import type {
   HarnessAdapter,
@@ -74,7 +74,10 @@ const createFakeHoldController = (
   underlying: HarnessAdapter,
   holdAfterAdapterCursor: number | undefined,
 ): { adapter: HarnessAdapter; release(): void } => {
-  let released = holdAfterAdapterCursor === undefined;
+  if (holdAfterAdapterCursor === undefined) {
+    return { adapter: underlying, release: () => undefined };
+  }
+  let released = false;
   let releaseHold!: () => void;
   const hold = new Promise<void>((resolve) => (releaseHold = resolve));
   const wrapSession = (session: HarnessSession): HarnessSession => ({
@@ -219,13 +222,19 @@ export const startV2Server = async (
         .list()
         .map((project) => [project.id, events.cursors(project.id)] as const),
     );
+    const recoveredSessions: Array<{
+      executionId: string;
+      session: HarnessSession;
+    }> = [];
     await reconcileExecutions({
       executions,
       operations,
       adapter,
       events,
       barrier,
-      attach: (executionId, session) => runtime?.attach(executionId, session),
+      attach: (executionId, session) => {
+        recoveredSessions.push({ executionId, session });
+      },
     });
     publishCommittedSince(
       projectsRepository,
@@ -233,6 +242,9 @@ export const startV2Server = async (
       publisher,
       beforeReconciliation,
     );
+    for (const { executionId, session } of recoveredSessions) {
+      runtime.attach(executionId, session);
+    }
 
     const allowedOrigins = new Set<string>();
     if (config.developmentOrigin) allowedOrigins.add(config.developmentOrigin);
@@ -297,7 +309,11 @@ export const startV2Server = async (
   }
 };
 
-if (require.main === module) {
+const nxEntrypoint = join(__dirname, '..', '..', '..', 'main.js');
+if (
+  require.main === module ||
+  (module.parent === require.main && require.main?.filename === nxEntrypoint)
+) {
   void startV2Server()
     .then((server) => {
       const ready: V2ReadyLine = {
