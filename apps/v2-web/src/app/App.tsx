@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   V2_PROTOCOL_VERSION,
-  type RuntimeEvent,
   type V2CommandEnvelope,
   type V2ProjectSnapshot,
   type V2SystemSnapshot,
@@ -102,27 +101,13 @@ const activityProjection = (
     projections[event.executionId] = {
       childActivities,
       diagnosticId: event.diagnosticId,
+      runtimeActivity: [...(current.runtimeActivity ?? []), event],
     };
   }
   for (const execution of snapshot.executions) {
     projections[execution.id] ??= { childActivities: [] };
   }
   return projections;
-};
-
-const runtimeActivityText = (event: RuntimeEvent) => {
-  switch (event.type) {
-    case 'worker_execution.output':
-      return event.payload.text;
-    case 'worker_execution.child_started':
-      return `Child started: ${event.payload.title}`;
-    case 'worker_execution.child_finished':
-      return `Child finished: ${event.payload.childId} (${event.payload.outcome})`;
-    case 'worker_execution.adapter_failed':
-      return `Adapter failed: ${event.payload.code} — ${event.payload.message}`;
-    case 'worker_execution.completed':
-      return `Execution completed: ${event.payload.outcome}`;
-  }
 };
 
 function ProjectConnection({
@@ -169,16 +154,11 @@ function ProjectConnection({
         : undefined,
     [projection],
   );
-  const allRunning =
-    projection.executions.length > 0 &&
-    projection.executions.every(({ lifecycle }) => lifecycle === 'running');
   const interrupt = availability(
-    auditHealthy && !submitting && allRunning,
+    auditHealthy && !submitting,
     !auditHealthy
       ? 'Audit barrier is active.'
-      : submitting
-        ? 'An interruption request is in progress.'
-        : 'Only running executions can be interrupted.',
+      : 'An interruption request is in progress.',
   );
   const model: ProjectShellViewModel = !snapshot
     ? error
@@ -186,15 +166,17 @@ function ProjectConnection({
       : { status: 'loading', projectId }
     : resyncing || projection.connection.status === 'stale'
       ? { status: 'stale', snapshot, message: error ?? 'Resyncing project.' }
-      : projection.connection.status === 'disconnected'
-        ? { status: 'disconnected', snapshot, message: 'Connection lost.' }
-        : projection.connection.status === 'ready'
-          ? { status: 'ready', snapshot, interrupt }
-          : {
-              status: 'disconnected',
-              snapshot,
-              message: 'Connecting to project events.',
-            };
+      : projection.connection.status === 'loading'
+        ? {
+            status: 'stale',
+            snapshot,
+            message: 'Connecting to project events.',
+          }
+        : projection.connection.status === 'disconnected'
+          ? { status: 'disconnected', snapshot, message: 'Connection lost.' }
+          : projection.connection.status === 'ready'
+            ? { status: 'ready', snapshot, interrupt }
+            : { status: 'stale', snapshot, message: 'Project state is stale.' };
   const activityByExecutionId = useMemo(
     () => (snapshot ? activityProjection(snapshot, projection.activity) : {}),
     [projection.activity, snapshot],
@@ -277,19 +259,6 @@ function ProjectConnection({
         onInterrupt={interruptExecution}
         activityByExecutionId={activityByExecutionId}
       />
-      {projection.activity.length > 0 ? (
-        <section aria-label="Runtime activity">
-          <h2>Runtime activity</h2>
-          <ul aria-label="Runtime activity events">
-            {projection.activity.map((event) => (
-              <li key={event.id}>
-                <span>{runtimeActivityText(event)}</span>{' '}
-                <span>Diagnostic {event.diagnosticId}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
     </>
   );
 }
@@ -468,7 +437,7 @@ export function App({
       model={model}
       onAddAndSelectProject={register}
       onSelectProject={selectProject}
-      v1GuidanceHref="/docs/development/session-platform.md"
+      v1GuidanceHref="/guidance/v1-session-platform.md"
     />
   );
 

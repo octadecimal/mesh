@@ -228,6 +228,11 @@ const createApi = () => {
   const api: V2Api = {
     systemSnapshot: vi.fn(async () => systemSnapshot),
     projectSnapshot: vi.fn(async () => projectSnapshot),
+    runtimeReplay: vi.fn(async () => ({
+      lowWater: projectSnapshot.cursors.runtime + 1,
+      highWater: projectSnapshot.cursors.runtime,
+      events: [],
+    })),
     command: vi.fn(defaultCommand),
   };
   return api;
@@ -311,6 +316,66 @@ describe('App', () => {
     );
     expect(unknown.api.projectSnapshot).not.toHaveBeenCalled();
     expect(unknown.socketFactory).not.toHaveBeenCalled();
+  });
+
+  it('hydrates retained child, diagnostic, and completion activity on direct reload', async () => {
+    const retained = [
+      runtimeEventSchema.parse({
+        id: '44444444-4444-4444-8444-000000000003',
+        projectId,
+        executionId,
+        diagnosticId: '55555555-5555-4555-8555-555555555555',
+        sequence: 3,
+        adapterCursor: 3,
+        occurredAt: '2026-08-28T00:00:03.000Z',
+        type: 'worker_execution.child_started',
+        payload: { childId: 'todo-check', title: 'Todo check' },
+      }),
+      runtimeEventSchema.parse({
+        id: '44444444-4444-4444-8444-000000000004',
+        projectId,
+        executionId,
+        diagnosticId: '55555555-5555-4555-8555-555555555555',
+        sequence: 4,
+        adapterCursor: 4,
+        occurredAt: '2026-08-28T00:00:04.000Z',
+        type: 'worker_execution.child_finished',
+        payload: { childId: 'todo-check', outcome: 'completed' },
+      }),
+      runtimeEventSchema.parse({
+        id: '44444444-4444-4444-8444-000000000005',
+        projectId,
+        executionId,
+        diagnosticId: '55555555-5555-4555-8555-555555555555',
+        sequence: 5,
+        adapterCursor: 5,
+        occurredAt: '2026-08-28T00:00:05.000Z',
+        type: 'worker_execution.completed',
+        payload: { outcome: 'completed' },
+      }),
+    ];
+    const api = createApi();
+    vi.mocked(api.runtimeReplay).mockImplementation(async (_, after) => ({
+      lowWater: 3,
+      highWater: 5,
+      events: retained.filter(({ sequence }) => sequence > after),
+    }));
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+
+    expect(await screen.findByText('child.started')).toBeVisible();
+    const child = screen.getByRole('list', {
+      name: 'Child activity for Todo foundation worker',
+    });
+    expect(child).toHaveTextContent('Todo check completed');
+    expect(screen.getByText('Execution completed')).toBeVisible();
+    await userEvent.setup().click(screen.getByText('Diagnostics'));
+    expect(
+      screen.getByText('55555555-5555-4555-8555-555555555555'),
+    ).toBeVisible();
+    act(() => app.sockets[0]?.open());
+    expect(JSON.parse(app.sockets[0]?.sent[0] ?? '{}')).toMatchObject({
+      cursors: { domain: 3, runtime: 5 },
+    });
   });
 
   it('deselects and follows popstate without retaining the old project connection', async () => {
@@ -489,6 +554,10 @@ describe('App', () => {
       name: 'Interrupt execution',
     });
     expect(button).toBeDisabled();
+    expect(screen.getByText('Connecting to project events.')).toBeVisible();
+    expect(
+      screen.queryByText('Reconnect before interrupting an execution.'),
+    ).not.toBeInTheDocument();
 
     act(() => {
       disconnected.sockets[0]?.open();
@@ -583,7 +652,12 @@ describe('App', () => {
         },
       }),
     );
-    expect(await screen.findByText('Inspect package layout')).toBeVisible();
+    const childActivity = await screen.findByRole('list', {
+      name: 'Child activity for Todo foundation worker',
+    });
+    expect(
+      within(childActivity).getByText('Inspect package layout'),
+    ).toBeVisible();
     await user.click(screen.getByText('Diagnostics'));
     expect(
       screen.getByText('55555555-5555-4555-8555-555555555555'),
@@ -638,22 +712,17 @@ describe('App', () => {
     });
 
     const activity = await screen.findByRole('list', {
-      name: 'Runtime activity events',
+      name: 'Runtime activity for Todo foundation worker',
     });
-    expect(
-      within(activity).getByText('Child started: Todo check'),
-    ).toBeVisible();
+    expect(within(activity).getByText('child.started')).toBeVisible();
+    expect(within(activity).getByText('Todo check')).toBeVisible();
     expect(
       within(activity).getByText('Inspecting Todo repository.'),
     ).toBeVisible();
     expect(
-      within(activity).getByText(
-        'Adapter failed: fake_failure — Harness failed.',
-      ),
+      within(activity).getByText('Execution failed: Harness failed.'),
     ).toBeVisible();
-    expect(
-      within(activity).getByText('Execution completed: completed'),
-    ).toBeVisible();
+    expect(within(activity).getByText('Execution completed')).toBeVisible();
     const executionArticle = screen.getByRole('article', {
       name: 'Todo foundation worker',
     });
@@ -796,7 +865,8 @@ describe('App', () => {
     expect(submit).toBeDisabled();
   });
 
-  it('disables all interrupt controls when any projected execution is not running or audit health is unsafe', async () => {
+  it('enables only running execution interrupts and disables all controls when audit health is unsafe', async () => {
+    const user = userEvent.setup();
     const terminalApi = createApi();
     vi.mocked(terminalApi.projectSnapshot).mockResolvedValueOnce(
       v2ProjectSnapshotSchema.parse({
@@ -824,11 +894,15 @@ describe('App', () => {
       terminal.sockets[0]?.open();
       terminal.sockets[0]?.message(subscribed());
     });
-    expect(
-      screen
-        .getAllByRole('button', { name: 'Interrupt execution' })
-        .every((button) => button.hasAttribute('disabled')),
-    ).toBe(true);
+    const buttons = screen.getAllByRole('button', {
+      name: 'Interrupt execution',
+    });
+    expect(buttons[0]).toBeEnabled();
+    expect(buttons[1]).toBeDisabled();
+    await user.click(buttons[0]);
+    expect(apiInterruptEnvelope(terminalApi)).toMatchObject({
+      command: { expectedRevision: 4, executionId },
+    });
     terminal.unmount();
 
     const unsafeApi = createApi();
@@ -856,6 +930,13 @@ describe('App', () => {
     expect(
       screen.getByRole('button', { name: 'Interrupt execution' }),
     ).toBeDisabled();
+  });
+
+  it('uses the accepted production V1 guidance route', async () => {
+    renderApp();
+    expect(
+      await screen.findByRole('link', { name: 'V1 operating guidance' }),
+    ).toHaveAttribute('href', '/guidance/v1-session-platform.md');
   });
 });
 

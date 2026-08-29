@@ -43,12 +43,18 @@ export function useProjectConnection({
   useEffect(() => {
     let cancelled = false;
     let socket: V2Socket | undefined;
-    const controller = new AbortController();
     const coordinator = createResyncCoordinator(api, store.dispatch);
-    const dispatch = (action: ProjectionAction) => {
-      const requested = store.getState().resyncRequested;
-      store.dispatch(action);
-      if (requested || !store.getState().resyncRequested) return;
+    const connect = () => {
+      socket = createV2Socket({
+        url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/v2/realtime`,
+        projectId,
+        cursors: store.getCursors(),
+        cursorSource: store,
+        dispatch,
+        socketFactory,
+      });
+    };
+    const resync = () => {
       setResyncing(true);
       void coordinator
         .request(projectId)
@@ -64,22 +70,20 @@ export function useProjectConnection({
           setResyncing(false);
         });
     };
+    const dispatch = (action: ProjectionAction) => {
+      const requested = store.getState().resyncRequested;
+      store.dispatch(action);
+      if (requested || !store.getState().resyncRequested) return;
+      resync();
+    };
 
     setError(undefined);
     setResyncing(false);
-    void api
-      .projectSnapshot(projectId, controller.signal)
-      .then((snapshot) => {
+    void coordinator
+      .request(projectId)
+      .then(() => {
         if (cancelled) return;
-        store.dispatch({ type: 'snapshot.received', snapshot });
-        socket = createV2Socket({
-          url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/v2/realtime`,
-          projectId,
-          cursors: snapshot.cursors,
-          cursorSource: store,
-          dispatch,
-          socketFactory,
-        });
+        connect();
       })
       .catch((cause: unknown) => {
         if (!cancelled) setError(message(cause));
@@ -87,7 +91,6 @@ export function useProjectConnection({
 
     return () => {
       cancelled = true;
-      controller.abort();
       coordinator.cancel();
       socket?.close();
     };
