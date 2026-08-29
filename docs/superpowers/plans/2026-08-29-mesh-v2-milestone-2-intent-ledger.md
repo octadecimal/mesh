@@ -234,7 +234,7 @@ export type PmExecutionReservation = {
 export type PmExecutionLauncher = {
   findReserved(
     input: PmExecutionLaunchInput,
-  ): Promise<PmExecutionReservation | undefined>;
+  ): PmExecutionReservation | undefined;
   reserve(input: PmExecutionLaunchInput): Promise<PmExecutionReservation>;
   activate(executionId: WorkerExecutionId): Promise<void>;
   cancelReserved(executionId: WorkerExecutionId): Promise<WorkerExecution>;
@@ -302,6 +302,11 @@ export class ExecutionRuntime {
 
 `ReservedExecutionStart` and T02's `PmExecutionReservation` are deliberately
 structurally identical; the T05 adapter is the sole W1 composition point.
+`findReserved` and `ExecutionRuntime.findReservedStart` are synchronous,
+read-only SQLite lookups. Therefore `reconcilePendingReservations` remains
+synchronous and must return only after every existing reservation has been
+projected; startup cannot publish recovery, attach sessions, drain fresh turns,
+or accept commands before that return.
 `reserveStart` rejects with `ExecutionReservationError` before any write when
 project/profile lookup or adapter capability/skill probing cannot produce the
 required snapshots. The M1 `start` wrapper preserves its command-result behavior;
@@ -828,6 +833,17 @@ runtime or transport composition.
   its frozen typed failure. Assert the abandoned transaction is always the last
   durable step and no test models terminalization followed by reopening.
 
+  Abandon an already reconciled `attention_required` cycle whose exact start
+  operation is `unknown`. Assert the coordinator performs only the read-only
+  reservation/execution observation: it does not call `cancelReserved`,
+  `activate`, or adapter start; it preserves the operation ID, execution ID,
+  link, result, and raw diagnostics; then it commits the abandoned lifecycle,
+  complete event, and command result as the final durable step. Prove a new
+  cycle is accepted afterward. Inject cleanup/observation failure and each
+  final-transaction write failure; assert no successful command result/event or
+  abandoned lifecycle is stored, no new cycle is accepted, and no linked
+  operation or diagnostic is lost or rewritten.
+
   For malformed payloads and well-formed reports with wrong project/cycle/turn,
   revision, or schema binding, assert one immediate transaction stores a
   rejected durable receipt with stable reason, moves the complete cycle to
@@ -890,6 +906,13 @@ runtime or transport composition.
   the abandoned cycle transaction commits. Cleanup failure returns its stable
   failure without storing the Abandon result/event or lifecycle; cleanup success
   is followed by one immediate abandoned-cycle transaction as the final step.
+  For an already reconciled attention cycle, the coordinator instead uses the
+  synchronous read-only `findReserved` to observe the exact linked
+  attention-required execution and unknown operation. It neither cancels nor
+  activates that contained execution, preserves all operation/diagnostic rows,
+  and commits abandonment only after observation succeeds. Observation or final
+  transaction failure reports no Abandon success and leaves the cycle and audit
+  evidence unchanged.
 
   The consumer is invoked only for a `pm_discovery` assignment. It derives the
   authoritative cycle/turn from that frozen assignment, then performs parsing,
@@ -1166,7 +1189,8 @@ owning transport, reducer, lifecycle, or Board behavior.
 - Create: `apps/v2-web/src/components/RequirementsPane.spec.tsx`
 - Create: `apps/v2-web/src/components/intent-ledger.css`
 - Prohibited: existing files under `apps/v2-web/src/api`, `app`, `state`,
-  `FocusedProjectShell*`, `styles.css`, all server/contracts/e2e paths
+  `ExecutionActivity*`, `FocusedProjectShell*`, `styles.css`, all
+  server/contracts/e2e paths
 
 **Interfaces:**
 
@@ -1313,12 +1337,15 @@ placeholder.
 - Modify: `apps/v2-web/src/state/store.ts`
 - Modify: `apps/v2-web/src/app/App.tsx`
 - Modify: `apps/v2-web/src/app/App.spec.tsx`
+- Modify: `apps/v2-web/src/components/ExecutionActivity.tsx`
+- Modify: `apps/v2-web/src/components/ExecutionActivity.spec.tsx`
 - Modify: `apps/v2-web/src/components/FocusedProjectShell.tsx`
 - Modify: `apps/v2-web/src/components/FocusedProjectShell.spec.tsx`
 - Modify: `apps/v2-web/src/styles.css`
 - Prohibited: contracts, migration/SQL, planning repository/service/consumer,
   `apps/v2-server/src/executions/reconcile-executions.ts`, fake-harness
-  implementation, leaf component implementation, e2e, docs, V1
+  implementation, T04 `PlanningPane*`/`RequirementsPane*` implementation, e2e,
+  docs, V1
 
 **Interfaces:**
 
@@ -1326,7 +1353,8 @@ placeholder.
   structured runtime events/fake scenarios, T04 leaf component props.
 - Produces: existing `registerV2Routes`, snapshot/replay endpoints,
   `createV2Api`, `ProjectProjection`, `App`, and `FocusedProjectShell` extended
-  for M2; no new transport.
+  for M2; `ExecutionActivity` narrowed across both assignment kinds; no new
+  transport.
 
 - [ ] **Step 1: Write red server composition tests**
 
@@ -1357,7 +1385,10 @@ placeholder.
   publication; recovered-session attachment; fresh drain only for turns with no
   operation; then command acceptance. A valid replayed receipt wins over
   terminal attention. Terminal and unknown/attention reservations bind without
-  activation; only case (d) reserves/binds/activates freshly.
+  activation; only case (d) reserves/binds/activates freshly. Assert the
+  synchronous `reconcilePendingReservations()` call has returned with all
+  projections committed before the recovery-publication trace entry; no promise
+  or fire-and-forget reconciliation may cross that boundary.
 
   In `config.spec.ts`, add red cases proving
   `MESH_V2_TEST_FAKE_PM_SCENARIO=todo` is accepted only with `NODE_ENV=test`, is
@@ -1417,7 +1448,10 @@ placeholder.
   after M1 reconciliation, projects existing terminal/attention reservations,
   and never sends them to activation. Reconciliation must finish before
   recovered sessions can produce events, before never-reserved pending launches
-  activate, and before the server accepts commands. Extend the existing route switch and snapshot reader. Parse
+  activate, and before the server accepts commands. Call the synchronous
+  planning reconciliation methods directly in this sequence; never wrap or
+  launch them as unawaited work. Extend the existing route switch and snapshot
+  reader. Parse
   `MESH_V2_TEST_FAKE_PM_SCENARIO` only in explicit `NODE_ENV=test`, reject it in
   production or default configuration, reject unknown values, and pass it to
   `FakeHarnessAdapter`. Publish only events returned from committed operations.
@@ -1446,6 +1480,14 @@ placeholder.
   turn without optimistic transcript mutation, and keeps only Abandon enabled
   until binding or recovery changes server truth.
 
+  In `ExecutionActivity.spec.tsx`, retain the existing foundation execution
+  assertions and add a PM discovery execution. Prove
+  `FoundationCheckAssignment` renders its existing `.title` in the heading and
+  accessible child/runtime labels, while `PmDiscoveryAssignment` renders the
+  exact deterministic label `Project manager discovery` without reading or
+  requiring `.title`. Both kinds retain lifecycle, skills, diagnostics, and
+  activity rendering.
+
   ```ts
   const next = reduceProjectProjection(state, {
     type: 'domain.event',
@@ -1463,11 +1505,12 @@ placeholder.
   Run:
 
   ```powershell
-  corepack pnpm exec vitest run apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx --config apps/v2-web/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx --config apps/v2-web/vitest.config.ts
   ```
 
   Expected: FAIL because the existing projection and shell do not carry M2
-  state or commands.
+  state or commands, and `ExecutionActivity` has not narrowed the new assignment
+  union before reading the foundation-only `.title`.
 
 - [ ] **Step 7: Integrate API, reducer/resync, app, and shell**
 
@@ -1475,7 +1518,12 @@ placeholder.
   domain events in sequence; include planning/ledger in snapshot replacement;
   preserve existing cursor and resync behavior. Pass server truth and callbacks
   to T04 components. Import `intent-ledger.css` from the existing stylesheet or
-  component entry without copying rules. Keep Board markup unchanged.
+  component entry without copying rules. In `ExecutionActivity`, narrow
+  `execution.assignment.kind`: retain `assignment.title` only for
+  `foundation-check`, and use exactly `Project manager discovery` for
+  `pm_discovery` in the heading plus accessible child/runtime labels. Do not add
+  `title` to the PM contract or weaken the assignment union. Keep Board markup
+  unchanged.
 
 - [ ] **Step 8: Make web composition tests green and run the W2 gate**
 
@@ -1505,14 +1553,15 @@ placeholder.
 - [ ] **Step 9: Commit T05**
 
   ```powershell
-  git add -- apps/v2-server/src/planning/planning-runtime.ts apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/config.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/reconcile-executions.spec.ts apps/v2-server/src/http/routes.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/http/snapshots.ts apps/v2-server/src/main.ts apps/v2-server/src/main.spec.ts apps/v2-web/src/api/client.ts apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/state/store.ts apps/v2-web/src/app/App.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/FocusedProjectShell.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx apps/v2-web/src/styles.css
+  git add -- apps/v2-server/src/planning/planning-runtime.ts apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/config.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/reconcile-executions.spec.ts apps/v2-server/src/http/routes.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/http/snapshots.ts apps/v2-server/src/main.ts apps/v2-server/src/main.spec.ts apps/v2-web/src/api/client.ts apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/state/store.ts apps/v2-web/src/app/App.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/ExecutionActivity.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx apps/v2-web/src/components/FocusedProjectShell.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx apps/v2-web/src/styles.css
   git commit -m "feat(v2): compose intent ledger workflow"
   ```
 
 **Acceptance:** One existing command route and realtime connection carry M2;
 restart ordering is deterministic; UI state is a server projection; the Board
 and M3 domain remain untouched. No bound terminal cycle can remain
-`execution_active` across startup.
+`execution_active` across startup. Foundation and PM activity labels are
+deterministic without pretending the PM assignment has a foundation title.
 
 ---
 
