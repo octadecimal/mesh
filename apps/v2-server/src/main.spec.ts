@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -32,6 +33,7 @@ const localRequire = createRequire(__filename);
 let builtRoot: string | undefined;
 let builtMain: string | undefined;
 let builtSignalBridge: string | undefined;
+let builtWebRoot: string | undefined;
 
 const temporaryDirectory = () => {
   const directory = mkdtempSync(join(tmpdir(), 'mesh-v2-server-test-'));
@@ -131,6 +133,33 @@ const buildProductionEntrypoint = () => {
 });\n`,
   );
   return { main: builtMain, signalBridge: builtSignalBridge };
+};
+
+const buildProductionWebRoot = () => {
+  if (builtWebRoot) return builtWebRoot;
+  builtWebRoot = join(workspaceRoot, 'dist', 'apps', 'v2-web');
+  const buildEnvironment = { ...process.env };
+  for (const name of Object.keys(buildEnvironment)) {
+    if (name.startsWith('NX_')) delete buildEnvironment[name];
+  }
+  execFileSync(
+    process.execPath,
+    [
+      localRequire.resolve('nx/bin/nx.js'),
+      'build',
+      'v2-web',
+      '--configuration=production',
+      '--skip-nx-cache',
+    ],
+    {
+      cwd: workspaceRoot,
+      env: { ...buildEnvironment, NX_DAEMON: 'false' },
+      shell: false,
+      stdio: 'pipe',
+      timeout: 120_000,
+    },
+  );
+  return builtWebRoot;
 };
 
 const startBuiltServer = async (
@@ -277,7 +306,10 @@ const connectProjectSocket = async (
   };
 };
 
-beforeAll(() => buildProductionEntrypoint(), 120_000);
+beforeAll(() => {
+  buildProductionEntrypoint();
+  buildProductionWebRoot();
+}, 120_000);
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
@@ -328,6 +360,61 @@ describe('startV2Server', () => {
     ).toContain('V2 marker');
     expect((await fetch(`${server.origin}/api`)).status).toBe(404);
     expect(() => server.releaseFakeHold()).not.toThrow();
+  });
+
+  it('serves the packaged canonical V1 guidance without weakening SPA or API routing', async () => {
+    const root = temporaryDirectory();
+    const canonicalGuidance = readFileSync(
+      join(workspaceRoot, 'docs', 'development', 'session-platform.md'),
+      'utf8',
+    ).replaceAll('\r\n', '\n');
+    const publicGuidance = readFileSync(
+      join(
+        workspaceRoot,
+        'apps',
+        'v2-web',
+        'public',
+        'guidance',
+        'v1-session-platform.md',
+      ),
+      'utf8',
+    ).replaceAll('\r\n', '\n');
+    expect(publicGuidance).toBe(canonicalGuidance);
+
+    const server = await startV2Server({
+      environment: await environment(root, join(root, 'mesh-v2.sqlite')),
+      test: {
+        adapter: new FakeHarnessAdapter(),
+        webRoot: buildProductionWebRoot(),
+      },
+    });
+    servers.push(server);
+
+    const [guidanceResponse, rootResponse, directResponse, apiResponse] =
+      await Promise.all([
+        fetch(`${server.origin}/guidance/v1-session-platform.md`),
+        fetch(`${server.origin}/`),
+        fetch(`${server.origin}/projects/example`),
+        fetch(`${server.origin}/api`),
+      ]);
+    const [guidanceBody, rootBody, directBody, apiBody] = await Promise.all([
+      guidanceResponse.text(),
+      rootResponse.text(),
+      directResponse.text(),
+      apiResponse.text(),
+    ]);
+
+    expect(guidanceResponse.status).toBe(200);
+    expect(guidanceResponse.headers.get('content-type')).not.toContain(
+      'text/html',
+    );
+    expect(guidanceBody.replaceAll('\r\n', '\n')).toBe(canonicalGuidance);
+    expect(rootResponse.status).toBe(200);
+    expect(directResponse.status).toBe(200);
+    expect(directBody).toBe(rootBody);
+    expect(guidanceBody).not.toBe(rootBody);
+    expect(apiResponse.status).toBe(404);
+    expect(apiBody).not.toBe(rootBody);
   });
 
   it('releases a configured fake hold and completes the durable execution', async () => {
