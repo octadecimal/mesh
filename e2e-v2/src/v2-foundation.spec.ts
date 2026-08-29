@@ -127,6 +127,40 @@ test('mismatch probe cleans an unexpectedly ready server and listener', async ()
   }
 });
 
+test('partial spawn and concurrent close failures release exact ownership', async () => {
+  const fixture = await V2ProcessFixture.createTodo();
+  try {
+    const evidence = await fixture.probeCloseControlCleanup();
+    expect(evidence.partialStartup).toMatchObject({
+      pid: null,
+      signals: [],
+      ownershipReleased: true,
+      namedListenerCount: 0,
+    });
+    expect(evidence.partialStartup.elapsedMs).toBeLessThan(3_000);
+    expect(evidence.terminalDeadline).toMatchObject({
+      signals: ['SIGTERM', 'SIGKILL'],
+      closeWasShared: true,
+      deadlineRejected: true,
+      ownershipReleased: true,
+      namedListenerCount: 0,
+    });
+    await expectProcessAndListenerGone(evidence.terminalDeadline);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test('delayed second ready closes only the running exact child', async () => {
+  const fixture = await V2ProcessFixture.createTodo();
+  try {
+    const evidence = await fixture.probeDelayedDuplicateReadyCleanup();
+    await expectProcessAndListenerGone(evidence);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
 test('Todo foundation survives restart without V1 state', async ({ page }) => {
   const fixture = await V2ProcessFixture.createTodo();
   try {

@@ -53,9 +53,13 @@ type SpawnServerOptions = {
     | 'invalid-origin'
     | 'timeout'
     | 'blocked-sigterm'
-    | 'duplicate-ready';
+    | 'duplicate-ready'
+    | 'delayed-duplicate-ready';
   blockSigterm?: boolean;
+  ignoreClose?: boolean;
+  throwSignal?: NodeJS.Signals;
   onOwned?: (child: RunningChild) => void;
+  onDelayedReadyEmitter?: (emit: () => void) => void;
   onReadyObserved?: (ready: ReadyLine) => void;
   onSignal?: (signal: NodeJS.Signals) => void;
 };
@@ -121,8 +125,10 @@ const observeChild = (
   child: ChildProcess,
   options: {
     blockSigterm?: boolean;
+    ignoreClose?: boolean;
     onSignal?: (signal: NodeJS.Signals) => void;
     release: () => void;
+    throwSignal?: NodeJS.Signals;
   },
 ) => {
   const error = deferred<Error>();
@@ -138,6 +144,9 @@ const observeChild = (
     release: options.release,
     signalExact: (signal) => {
       options.onSignal?.(signal);
+      if (options.throwSignal === signal) {
+        throw new Error(`Injected ${signal} delivery failure`);
+      }
       if (options.blockSigterm && signal === 'SIGTERM') return true;
       return child.kill(signal);
     },
@@ -148,6 +157,7 @@ const observeChild = (
   const onExit = (code: number | null, signal: NodeJS.Signals | null) =>
     exited.resolve({ code, signal });
   const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (options.ignoreClose) return;
     owned.closeState = { code, signal };
     closed.resolve(owned.closeState);
   };
@@ -203,26 +213,32 @@ const closeExactChild = (
     let failure: Error | undefined;
     try {
       if (!child.closeState) {
-        if (!options.force) {
-          try {
-            child.signalExact('SIGTERM');
-          } catch {
-            // Continue to the exact-child SIGKILL fallback.
-          }
-        }
-        const gracefullyClosed =
-          !options.force &&
-          (await settlesWithin(child.closed, gracefulCloseMs));
-        if (!gracefullyClosed && !child.closeState) {
-          try {
-            child.signalExact('SIGKILL');
-          } catch {
-            // The bounded terminal wait below remains authoritative.
-          }
+        if (!child.process.pid) {
           if (!(await settlesWithin(child.closed, forcedCloseMs))) {
-            failure = new Error(
-              `Owned V2 server PID ${String(child.process.pid)} did not close after SIGKILL`,
-            );
+            failure = new Error('PID-less V2 child did not close');
+          }
+        } else {
+          if (!options.force) {
+            try {
+              child.signalExact('SIGTERM');
+            } catch {
+              // Continue to the exact-child SIGKILL fallback.
+            }
+          }
+          const gracefullyClosed =
+            !options.force &&
+            (await settlesWithin(child.closed, gracefulCloseMs));
+          if (!gracefullyClosed && !child.closeState) {
+            try {
+              child.signalExact('SIGKILL');
+            } catch {
+              // The bounded terminal wait below remains authoritative.
+            }
+            if (!(await settlesWithin(child.closed, forcedCloseMs))) {
+              failure = new Error(
+                `Owned V2 server PID ${String(child.process.pid)} did not close after SIGKILL`,
+              );
+            }
           }
         }
       }
@@ -338,10 +354,12 @@ export class V2ProcessFixture {
     let owned!: RunningChild;
     owned = observeChild(child, {
       blockSigterm: options.blockSigterm,
+      ignoreClose: options.ignoreClose,
       onSignal: options.onSignal,
       release: () => {
         if (this.child === owned) this.child = undefined;
       },
+      throwSignal: options.throwSignal,
     });
     this.child = owned;
     options.onOwned?.(owned);
@@ -368,6 +386,7 @@ export class V2ProcessFixture {
       }
       void closeExactChild(owned).catch(() => undefined);
     };
+    let delayedEmitterRegistered = false;
     const onStdout = (chunk: Buffer) => {
       stdoutBuffer += chunk.toString('utf8');
       const lines = stdoutBuffer.split(/\r?\n/u);
@@ -394,6 +413,14 @@ export class V2ProcessFixture {
         batch.push(candidate as ReadyLine);
       }
       if (batch.length === 0) return;
+      if (
+        options.readinessProbe === 'delayed-duplicate-ready' &&
+        !delayedEmitterRegistered
+      ) {
+        delayedEmitterRegistered = true;
+        const duplicate = Buffer.from(`${JSON.stringify(batch[0])}\n`);
+        options.onDelayedReadyEmitter?.(() => onStdout(duplicate));
+      }
       for (const observed of batch) options.onReadyObserved?.(observed);
       if (options.readinessProbe === 'duplicate-ready' && batch.length > 0) {
         batch.push(...batch);
@@ -541,6 +568,102 @@ export class V2ProcessFixture {
       throw new Error('No early-exit cleanup evidence');
     return {
       pid: observedChild.process.pid,
+      elapsedMs: Date.now() - startedAt,
+      namedListenerCount: observedChild.detachers.length,
+    };
+  }
+
+  async probeCloseControlCleanup() {
+    const partialStartedAt = Date.now();
+    const partialSignals: NodeJS.Signals[] = [];
+    const missingExecutable = assertContainedPath(
+      this.fixtureRoot,
+      join(this.fixtureRoot, 'missing-v2-server-executable'),
+    );
+    const partialProcess = spawn(missingExecutable, [], {
+      cwd: this.fixtureRoot,
+      env: minimalSystemEnvironment(),
+      shell: false,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    let partialChild!: RunningChild;
+    partialChild = observeChild(partialProcess, {
+      onSignal: (signal) => partialSignals.push(signal),
+      release: () => {
+        if (this.child === partialChild) this.child = undefined;
+      },
+    });
+    this.child = partialChild;
+    expect(await settlesWithin(partialChild.error, forcedCloseMs)).toBe(true);
+    await closeExactChild(partialChild);
+    const partialElapsedMs = Date.now() - partialStartedAt;
+
+    let terminalChild: RunningChild | undefined;
+    const terminalSignals: NodeJS.Signals[] = [];
+    const origin = await this.spawnServer(this.databasePath, {
+      ignoreClose: true,
+      throwSignal: 'SIGTERM',
+      onOwned: (child) => {
+        terminalChild = child;
+      },
+      onSignal: (signal) => terminalSignals.push(signal),
+    });
+    if (!terminalChild?.process.pid)
+      throw new Error('No terminal-deadline cleanup evidence');
+    const terminalStartedAt = Date.now();
+    const firstClose = closeExactChild(terminalChild);
+    const secondClose = closeExactChild(terminalChild);
+    const closeWasShared = firstClose === secondClose;
+    const results = await Promise.allSettled([firstClose, secondClose]);
+    const deadlineRejected = results.every(
+      (result) => result.status === 'rejected',
+    );
+
+    return {
+      partialStartup: {
+        pid: partialProcess.pid ?? null,
+        signals: partialSignals,
+        ownershipReleased: this.child !== partialChild,
+        elapsedMs: partialElapsedMs,
+        namedListenerCount: partialChild.detachers.length,
+      },
+      terminalDeadline: {
+        pid: terminalChild.process.pid,
+        origin,
+        signals: terminalSignals,
+        closeWasShared,
+        deadlineRejected,
+        ownershipReleased: this.child !== terminalChild,
+        elapsedMs: Date.now() - terminalStartedAt,
+        namedListenerCount: terminalChild.detachers.length,
+      },
+    };
+  }
+
+  async probeDelayedDuplicateReadyCleanup() {
+    let emitDuplicate: (() => void) | undefined;
+    let observedChild: RunningChild | undefined;
+    const origin = await this.spawnServer(this.databasePath, {
+      readinessProbe: 'delayed-duplicate-ready',
+      onDelayedReadyEmitter: (emit) => {
+        emitDuplicate = emit;
+      },
+      onOwned: (child) => {
+        observedChild = child;
+      },
+    });
+    if (!emitDuplicate || !observedChild?.process.pid)
+      throw new Error('No delayed-ready cleanup evidence');
+    const startedAt = Date.now();
+    emitDuplicate();
+    if (!observedChild.closing)
+      throw new Error('Delayed ready did not trigger the running guard');
+    await observedChild.closing;
+    expect(this.child).toBeUndefined();
+    return {
+      pid: observedChild.process.pid,
+      origin,
       elapsedMs: Date.now() - startedAt,
       namedListenerCount: observedChild.detachers.length,
     };
