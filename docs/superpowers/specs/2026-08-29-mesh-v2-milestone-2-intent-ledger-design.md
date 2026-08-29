@@ -586,16 +586,42 @@ then commit after observing that no locally controllable running execution
 exists.
 
 If activation claimed the execution interlock first, Abandon waits for
-activation to become durable. It then uses M1 interrupt when the execution is
-running, or accepts its terminal outcome, before committing the cycle,
+activation to become durable. For a running execution it calls the narrow
+runtime-owned `interruptForPlanning(executionId)` bridge; it does not call the
+public human interrupt command. Under the existing per-execution interlock the
+bridge captures the exact active entry (`HarnessSession` plus its consume task),
+marks that entry fenced, and durably starts the internal interrupt operation.
+The consume loop checks the fence after every iterator result and before every
+diagnostic, event, persistence, or publication boundary, so a result delivered
+after fencing is discarded rather than becoming durable planning output.
+
+The bridge then awaits `adapter.interrupt` with the existing audit-barrier
+checks, closes that exact `HarnessSession`, awaits settlement and removal of
+that exact consume task, checks the barrier again, and only then terminalizes
+the execution and finishes its durable internal operation consistently. Its
+promise resolves only after this quiescence fence proves that the captured
+session can produce no later observed, persisted, or published event. The
+bridge is called only by the external planning launch coordinator, never from
+inside the consume task; attempting a self-wait fails typed before fencing, so
+the implementation cannot deadlock on its own task. A replay of the same
+coordinator cleanup observes the already-terminal operation and is idempotent.
+
+Adapter rejection, barrier failure, session-close failure, or consume-task
+settlement/removal failure preserves the internal operation and audit
+diagnostics and throws a typed planning-cleanup failure. It never reports
+quiescence or permits the Abandon transaction; the execution remains
+nonterminal or moves to `attention_required` according to the safely persisted
+runtime failure. Abandon may instead accept an execution that was already
+terminal before cleanup began. Only after cancellation, this quiescent running
+cleanup, or observation of that terminal outcome may it commit the cycle,
 proposal, command result, and complete-cycle event as abandoned. Thus no
-adapter start can occur after the abandoned cycle commits. A successful
-Abandon leaves no starting execution or pending start operation; cancellation
-or interruption failure leaves the cycle non-abandoned/attention-required and
-auditable rather than falsely reporting success. A process crash before the
-Abandon command transaction commits has no stored successful Abandon result;
-startup reconciles the exact linked terminal/running execution before another
-human retry.
+adapter start or consumer write can occur after the abandoned cycle commits. A
+successful Abandon leaves no starting execution, active consumer, or pending
+start operation; cleanup failure leaves the cycle
+non-abandoned/attention-required and auditable rather than falsely reporting
+success. A process crash before the Abandon command transaction commits has no
+stored successful Abandon result; startup reconciles the exact linked
+terminal/running execution before another human retry.
 
 If the process crashes after a terminal reservation commits but before planning
 binding, startup finds the cycle and turn still `launch_pending`. The drain
@@ -806,12 +832,15 @@ and resync route. No new socket or transport is introduced.
 - **Approve/reject:** approval creates one new canonical snapshot; rejection
   creates none. Both target exact revisions and are idempotent.
 - **Abandon/restart:** the launch coordinator first cancels an unactivated exact
-  reservation or waits for and interrupts an activation it lost. Only then does
-  abandonment terminalize the cycle with no canonical mutation. No adapter may
-  start after that commit, no start operation remains pending, and a later cycle
-  starts independently. Cleanup failure commits no Abandon result/event and
-  leaves the cycle nonterminal or attention-required; it never creates a
-  terminal-then-reopen sequence.
+  reservation or waits for an activation it lost and invokes the internal
+  runtime quiescence bridge. For a running execution, that bridge fences the
+  exact active session, interrupts and closes it, and joins its consume task
+  before resolving. Only then does abandonment terminalize the cycle with no
+  canonical mutation. No adapter may start and no fenced consumer may write
+  after that commit, no start operation remains pending, and a later cycle
+  starts independently. Cleanup or quiescence failure commits no Abandon
+  result/event and leaves the cycle nonterminal or attention-required; it never
+  creates a terminal-then-reopen sequence.
 - **Ambiguous start after restart:** M1 finishes the pending start operation
   `unknown` and moves the execution to `attention_required` whether the crash
   preceded adapter invocation or followed adapter return but preceded durable
@@ -936,10 +965,16 @@ Controlled concurrency tests pause after reservation/before binding and after
 binding/before activation, signal Abandon, and prove cancellation prevents
 adapter start, terminalizes the exact linked execution/start operation, and
 commits one complete abandoned-cycle event with no canonical mutation. A third
-case lets activation claim first and proves Abandon waits, interrupts the one
-running execution, and commits only after no later start is possible. Injected
-cancellation/interruption persistence failure must not store a successful
-Abandon result.
+case lets activation claim first and proves Abandon waits for the exact running
+session to become quiescent before committing. Its fake session blocks in the
+event iterator, then attempts to yield a structured PM report and completion
+after interrupt. The bridge must fence the exact active entry, close the
+session, await that entry's consume-task settlement/removal without self-wait,
+and prove zero post-resolution diagnostic writes, domain events, receipt
+consumption, or publications. Adapter rejection, audit-barrier failure,
+session-close failure, consume-settlement failure, and injected cancellation or
+interruption persistence failure must preserve their diagnostics and must not
+store a successful Abandon result.
 
 ### Runtime and fake harness
 
@@ -1008,8 +1043,11 @@ smoke test is explicitly outside default verification.
 - `command_results` is rebuilt transactionally in migration 2 with exactly the
   four M1 and four M2 command types; all M1 rows and replay semantics survive.
 - One planning launch coordinator arbitrates Abandon against reserve, bind, and
-  activation; `cancelReserved` closes only an unactivated linked start while M1
-  interrupt remains running-only.
+  activation; `cancelReserved` closes only an unactivated linked start, while
+  the internal running-only `interruptForPlanning` bridge fences and closes the
+  exact active session and joins its consume task before it reports cleanup
+  success. The public M1 interrupt command remains unchanged and is not this
+  planning bridge.
 - `PmReportConsumer` is planning-specific; no generic consumer registry.
 - Proposals are complete desired snapshots and approval is all-or-nothing.
 - `ProjectIntent`, ledger, record revisions, memberships, edges, proposals,
