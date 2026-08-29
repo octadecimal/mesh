@@ -104,6 +104,18 @@ used by this design.
    A deterministic drain, invoked after the command and during startup, replays
    the derived execution reservation and follows its durable start-operation
    link to bind the exact same execution, including a terminal reservation.
+9. **How can migration 2 store planning command results?** It rebuilds only
+   `command_results` inside the migration transaction with the four M1 and four
+   M2 command types in its `CHECK`, copies every M1 row unchanged, recreates its
+   primary-key index, and then adds the planning schema. Migration 1 remains
+   byte-for-byte immutable.
+10. **What wins if Abandon races a reserved launch?** A single per-cycle launch
+    coordinator orders cancellation, binding, activation, and abandonment. An
+    Abandon request signals cancellation before waiting. If cancellation owns
+    the reserved-start boundary, the linked starting execution and operation
+    terminalize without adapter traffic; if activation already owns it,
+    Abandon waits for that outcome and interrupts a running execution before
+    committing the abandoned cycle.
 
 ## Approaches Considered
 
@@ -437,26 +449,33 @@ proposal-local records.
 
 ### Receipt consumption
 
-`PmReportConsumer.consume(execution, runtimeEvent)` is the only consumer. It:
+`PmReportConsumer.consume(execution, runtimeEvent)` is the only consumer. It
+computes the output digest, then opens one `BEGIN IMMEDIATE` transaction and:
 
-1. checks the event and execution project match;
-2. checks assignment kind and exact cycle, turn, cycle revision, proposal
-   revision, and schema bindings;
-3. parses the report strictly and resolves all record references;
+1. re-reads the execution and the authoritative cycle/turn from its frozen
+   `pm_discovery` assignment;
+2. checks event/execution project identity, exact cycle, turn, cycle revision,
+   proposal revision, and schema bindings inside that transaction;
+3. strictly parses the report and resolves all record references inside that
+   transaction;
 4. validates base membership, record types/revisions, provenance ownership,
-   relationship legality, and proposal completeness;
-5. in one `BEGIN IMMEDIATE` transaction inserts the immutable receipt, PM turn,
-   questions or proposal, updates the cycle, appends the ordered domain event,
-   and commits;
-6. publishes only the committed event.
+   relationship legality, and proposal completeness inside that transaction;
+5. on any parse, schema, binding, or semantic failure, inserts one immutable
+   rejected receipt with a stable reason, moves the complete cycle to
+   `attention_required`, appends `planning_cycle.changed`, and commits no PM
+   turn, question, proposal, record reservation, or canonical row;
+6. otherwise inserts the accepted receipt, PM turn, questions or proposal,
+   updates the cycle, appends the complete-cycle event, and commits;
+7. publishes only the committed event.
 
 The receipt key is the execution ID. Re-delivery of the same output digest is a
 no-op. A second different output for the same execution is rejected and cannot
 replace the first. Malformed or wrongly bound output stores a rejected receipt
-and moves only the planning cycle to `attention_required`; it cannot create a
-proposal or canonical revision. If any persistence write or event append fails,
-the whole receipt transaction rolls back and nothing is published. The central
-audit barrier still applies to raw runtime input before this consumer runs.
+and moves the complete planning cycle to `attention_required`; it cannot create
+a PM turn, question, proposal, record reservation, or canonical revision. A
+failure inserting that rejected receipt, updating attention, or appending its
+event rolls back all three writes and publishes nothing. The central audit
+barrier still applies to raw runtime input before this consumer runs.
 
 Completion without one accepted receipt is not planning success. When the
 execution ends, a planning-specific terminal check moves the cycle to
@@ -535,6 +554,33 @@ execution; adapter startup or attachment failure terminalizes the already-bound
 execution. These cases cover every start-failure boundary without inventing a
 second execution.
 
+Abandon and the pending-launch drain share one narrow per-cycle
+`PlanningLaunchCoordinator`; it is not a generic job framework. Abandon first
+sets the coordinator's cancellation signal, then waits for the current launch
+boundary to settle. The drain checks that signal immediately after
+`reserveStart`, immediately before binding, and under the same execution-level
+interlock used to claim `activateReserved`. Therefore a cancellation that wins
+before adapter start calls the runtime's idempotent
+`cancelReserved(executionId)` and never binds or activates late. That method
+accepts only an exact operation-linked `starting` execution with a pending start
+operation, transitions it to `failed` with the existing
+`startup_interrupted_before_start` evidence, finishes the same operation as
+failed with reason `planning_cycle_abandoned`, and preserves the operation link
+for replay/audit. Terminal replay is a no-op. M1 `interrupt` remains unchanged
+and continues to accept only `running`.
+
+If activation claimed the execution interlock first, Abandon waits for
+activation to become durable. It then uses M1 interrupt when the execution is
+running, or accepts its terminal outcome, before committing the cycle,
+proposal, command result, and complete-cycle event as abandoned. Thus no
+adapter start can occur after the abandoned cycle commits. A successful
+Abandon leaves no starting execution or pending start operation; cancellation
+or interruption failure leaves the cycle non-abandoned/attention-required and
+auditable rather than falsely reporting success. A process crash before the
+Abandon command transaction commits has no stored successful Abandon result;
+startup reconciles the exact linked terminal/running execution before another
+human retry.
+
 If the process crashes after a terminal reservation commits but before planning
 binding, startup finds the cycle and turn still `launch_pending`. The drain
 replays the same derived key, follows the finished start-operation link to the
@@ -547,7 +593,25 @@ reconciliation ownership, closing the start-before-running/attachment window.
 ## Persistence and Transaction Ordering
 
 Migration `002_intent_ledger.sql` is appended to the V2 migration ledger;
-`001_foundation.sql` is never edited. It adds:
+`001_foundation.sql` is never edited. Before adding planning tables, migration 2
+performs SQLite's compatibility-safe table-rebuild sequence for
+`command_results` inside the existing outer `BEGIN IMMEDIATE` transaction:
+
+1. create `command_results_v2` with the identical columns, nullability, hash and
+   JSON checks, and primary key, but a `command_type` check accepting exactly
+   the four M1 types plus `planning_cycle.submit_turn`,
+   `planning_proposal.approve`, `planning_proposal.reject`, and
+   `planning_cycle.abandon`;
+2. copy all five columns from `command_results` without transforming any value
+   and let the new table constraints validate the copy;
+3. drop the old table and rename `command_results_v2` to `command_results`,
+   recreating primary-key uniqueness while leaving every unrelated M1
+   table/index untouched;
+4. continue the remaining migration statements and ledger insert in the same
+   transaction, so any later failure restores the exact migration-1 table,
+   rows, schema, indices, and replay behavior.
+
+It then adds:
 
 - `planning_cycles`;
 - `planning_turns`;
@@ -595,6 +659,14 @@ Human turn acceptance orders writes as follows:
    attention in one planning transaction, then publish the complete-cycle
    event;
 9. call `activateReserved` only after the binding commit.
+
+At steps 7-9 the per-cycle coordinator's cancellation signal is authoritative.
+A signal after reservation but before binding cancels the exact linked
+reservation and suppresses binding; a signal after binding but before activation
+cancels it and suppresses activation. If activation already owns the execution
+interlock, Abandon waits for its durable outcome and follows the running/terminal
+path described above. Only after that cleanup does the Abandon transaction
+publish an abandoned cycle.
 
 Startup first runs M1 execution reconciliation while collecting recovered
 sessions without attaching them. It then runs idempotent planning
@@ -710,9 +782,11 @@ and resync route. No new socket or transport is introduced.
   `superseded` only when the new one is durably accepted.
 - **Approve/reject:** approval creates one new canonical snapshot; rejection
   creates none. Both target exact revisions and are idempotent.
-- **Abandon/restart:** abandonment terminalizes the cycle with no canonical
-  mutation, then requests interruption of any bound live execution. A later
-  cycle starts independently.
+- **Abandon/restart:** the launch coordinator first cancels an unactivated exact
+  reservation or waits for and interrupts an activation it lost. Only then does
+  abandonment terminalize the cycle with no canonical mutation. No adapter may
+  start after that commit, no start operation remains pending, and a later cycle
+  starts independently.
 - **Runtime failure:** a missing, failed, or interrupted execution leaves the
   turn and diagnostics visible and moves the cycle to `attention_required`.
   A new human retry turn creates a new execution; no native provider session is
@@ -804,12 +878,28 @@ removals, symmetric edge normalization, complete-cycle proposal
 supersede/reject events, and byte-equivalent incremental versus final-snapshot
 projection.
 
+Migration tests seed nonempty rows and replayable results for all four M1
+command types, then prove fresh and upgraded databases accept and replay all
+four planning commands. They compare every seeded M1 row/result and all M1
+tables/indices before and after upgrade. A forced failure after the table rebuild
+must roll the transaction back to the exact migration-1 schema, rows, indices,
+ledger, and replay behavior.
+
 Concurrency tests issue two distinct turns at the same acceptable cycle revision
 and prove exactly one commits `launch_pending`; the loser receives
 `planning_cycle_revision_conflict` with no write. Restart tests cover a pending
 turn before reservation, after nonterminal reservation, and after terminal
 capability/skill reservation, proving the same operation-linked execution binds
 once and activation starts at most once.
+
+Controlled concurrency tests pause after reservation/before binding and after
+binding/before activation, signal Abandon, and prove cancellation prevents
+adapter start, terminalizes the exact linked execution/start operation, and
+commits one complete abandoned-cycle event with no canonical mutation. A third
+case lets activation claim first and proves Abandon waits, interrupts the one
+running execution, and commits only after no later start is possible. Injected
+cancellation/interruption persistence failure must not store a successful
+Abandon result.
 
 ### Runtime and fake harness
 
@@ -866,6 +956,11 @@ smoke test is explicitly outside default verification.
   `activateReserved` runs only after the PM execution binding commits.
 - Every reservation, including terminal capability/skill failure, has one
   durable start-operation link to its exact execution and replay follows it.
+- `command_results` is rebuilt transactionally in migration 2 with exactly the
+  four M1 and four M2 command types; all M1 rows and replay semantics survive.
+- One planning launch coordinator arbitrates Abandon against reserve, bind, and
+  activation; `cancelReserved` closes only an unactivated linked start while M1
+  interrupt remains running-only.
 - `PmReportConsumer` is planning-specific; no generic consumer registry.
 - Proposals are complete desired snapshots and approval is all-or-nothing.
 - `ProjectIntent`, ledger, record revisions, memberships, edges, proposals,
