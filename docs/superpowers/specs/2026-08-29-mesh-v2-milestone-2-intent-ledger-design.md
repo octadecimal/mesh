@@ -659,14 +659,17 @@ becomes a planning pane with:
 - a proposal card showing intent changes, record create/revise/reuse counts,
   relationship changes, provenance, and the single complete approval boundary;
 - Approve, Request revision, and Reject actions;
+- an Abandon cycle action for any nonterminal cycle, including a cycle that has
+  reached its history limit;
 - a labeled multiline human-message field and send button;
 - explicit empty, loading, disconnected, stale, execution-active,
   attention-required, rejected, and approved states.
 
 Request revision sends a normal human turn; it never sends a partial approval.
-Approve and Reject remain disabled whenever the projection is disconnected,
-stale, not on the latest proposal, or already submitting. Errors are rendered
-in an `aria-live` region and focus returns to the relevant heading or input.
+Approve, Reject, and Abandon remain disabled whenever the projection is
+disconnected, stale, or already submitting; proposal actions also require the
+latest proposal. Errors are rendered in an `aria-live` region and focus returns
+to the relevant heading or input.
 
 The Requirements tab becomes a server-truth projection of the latest approved
 ledger. It groups the five record types, exposes requirement kind/status and
