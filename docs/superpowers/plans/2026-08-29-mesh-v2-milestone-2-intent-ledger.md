@@ -86,8 +86,11 @@ Testing Library, Playwright, Prettier.
 
 ## Settled Interface Map
 
-Task T01 owns every cross-process type below. Later tasks consume these exact
-names and may not change their signatures.
+Task T01 owns every T01-owned cross-process contract type and event below.
+Later tasks consume those exact names and may not change their signatures. T02
+implementation-local service types shown in this map—including
+`PmExecutionReservation`, `PmExecutionLaunchInput`, and
+`PmExecutionLauncher`—are explicitly excluded from T01 ownership.
 
 ```ts
 export const PM_DISCOVERY_REPORT_SCHEMA =
@@ -240,7 +243,7 @@ export type PmExecutionLauncher = {
   reserve(input: PmExecutionLaunchInput): Promise<PmExecutionReservation>;
   activate(executionId: WorkerExecutionId): Promise<void>;
   cancelReserved(executionId: WorkerExecutionId): Promise<WorkerExecution>;
-  interrupt(executionId: WorkerExecutionId): Promise<void>;
+  interruptForPlanning(executionId: WorkerExecutionId): Promise<void>;
 };
 
 export class PlanningService {
@@ -298,7 +301,15 @@ export class ExecutionRuntime {
   ): Promise<ReservedExecutionStart>;
   activateReserved(executionId: WorkerExecutionId): Promise<void>;
   cancelReserved(executionId: WorkerExecutionId): Promise<WorkerExecution>;
+  interruptForPlanning(executionId: WorkerExecutionId): Promise<void>;
   start(envelope: StartExecutionEnvelope): Promise<V2CommandResult>;
+}
+
+export class PlanningInterruptCleanupError extends Error {
+  readonly code:
+    | 'planning_interrupt_not_running'
+    | 'planning_interrupt_unproven'
+    | 'planning_interrupt_audit_failure';
 }
 ```
 
@@ -322,6 +333,30 @@ read-only SQLite lookups. Therefore `reconcilePendingReservations` remains
 synchronous and must return only after every existing reservation has been
 projected; startup cannot publish recovery, attach sessions, drain fresh turns,
 or accept commands before that return.
+`interruptForPlanning` is T03-owned and internal. It accepts only an execution
+ID, never synthesizes `InterruptExecutionEnvelope`, never traverses the public
+human command route, and never reads or writes `command_results`. On the first
+running call it asserts the audit barrier, transitions the exact execution to
+interrupting, creates an `execution_operations.kind = 'interrupt'` row whose
+request is tagged `mesh.v2.planning-interrupt/v1`, appends/publishes the durable
+lifecycle event, awaits the adapter interrupt, then transactionally records the
+proven interrupted or attention-required terminal state, operation proof, and
+terminal event before resolving. It preserves M1 audit-before-publish,
+containment, barrier, and diagnostic ordering.
+
+Calls for the same execution coalesce while live. After a successful prior
+planning-interrupt operation, replay against its already-terminal execution is
+an idempotent success; an unrelated terminal execution or any other non-running
+state throws `PlanningInterruptCleanupError` without adapter work. Adapter
+rejection/unproven interruption records attention plus the operation proof and
+throws `planning_interrupt_unproven`. Barrier or audit-write failure contains
+owned work, performs no later adapter/publication work, and throws
+`planning_interrupt_audit_failure`. The planning coordinator awaits this method
+and may commit Abandon only after it resolves; every typed failure occurs before
+the Abandon transaction and stores no successful Abandon result/event.
+The exact execution ID plus its first tagged planning-interrupt operation is the
+durable coordinator-attempt identity; replay never creates a second tagged
+operation for that execution.
 `reserveStart` rejects with `ExecutionReservationError` before any write when
 project/profile lookup or adapter capability/skill probing cannot produce the
 required snapshots. The M1 `start` wrapper preserves its command-result behavior;
@@ -360,10 +395,11 @@ linked starting execution and pending start operation with existing
 already owns it, cancellation waits and returns the running or terminal
 execution. Planning interrupts the running result before committing Abandon.
 No adapter start may occur after the abandoned-cycle commit, and M1's public
-running-only interrupt contract is unchanged. Cancellation or interruption
-failure stores no successful Abandon result/event and does not mark the cycle
-abandoned; cleanup succeeds first and the abandoned transaction always commits
-last.
+human interrupt contract is unchanged and is never called by planning. Planning
+instead awaits T03's internal `interruptForPlanning`; cancellation or internal
+interruption failure stores no successful Abandon result/event and does not mark
+the cycle abandoned. Cleanup succeeds first and the abandoned transaction
+always commits last.
 
 T01 freezes these planning result codes; T02 returns them and T05 may not
 reinterpret them:
@@ -519,11 +555,13 @@ snapshots, without introducing an M3 type.
 - Consumes: existing `V2CommandEnvelope`, `WorkerExecution`, `DomainEvent`,
   `RuntimeEvent`, `V2ProjectSnapshot`, ID-branding, timestamp, and strict Zod
   conventions.
-- Produces: every type and event in the Settled Interface Map; branded IDs for
-  planning cycles/turns/questions/proposals/intents/ledgers/records; strict
+- Produces: every T01-owned cross-process contract type and event in the
+  Settled Interface Map; branded IDs for planning
+  cycles/turns/questions/proposals/intents/ledgers/records; strict
   `ProjectIntentContent`, record discriminated unions, proposal members and
   relationships, complete-cycle events, PM-compatible profiles, command
-  results, and the exact stable error/status table above.
+  results, and the exact stable error/status table above. It does not produce
+  T02 implementation-local service aliases or launcher interfaces.
 
 - [ ] **Step 1: Add red contract cases for the exact domain vocabulary**
 
@@ -851,12 +889,15 @@ runtime or transport composition.
   Repeat after binding but before activation and prove the same cancellation,
   no late adapter start, no pending start operation, one complete abandoned
   cycle event, and no canonical mutation. Let activation win a third race and
-  prove Abandon waits for one running result, interrupts it, then commits; no
-  start occurs after that commit. Inject cancellation and interruption failures
-  and prove no successful Abandon command result/event or falsely abandoned
-  cycle is stored; the cycle remains nonterminal or reaches attention through
-  its frozen typed failure. Assert the abandoned transaction is always the last
-  durable step and no test models terminalization followed by reopening.
+  prove Abandon waits for one running result, awaits exactly one
+  `launcher.interruptForPlanning(executionId)`, observes its durable terminal
+  outcome, then commits; no start or cleanup work occurs after that commit.
+  Inject cancellation and a rejected `interruptForPlanning` Promise without
+  importing T03 implementation types; prove no successful Abandon command
+  result/event or falsely abandoned cycle is stored. The cycle remains
+  nonterminal or reaches attention through its frozen failure. Assert the
+  abandoned transaction is always the last durable step and no test models
+  terminalization followed by reopening.
 
   Abandon an already reconciled `attention_required` cycle whose exact start
   operation is `unknown`. Assert the coordinator performs only the read-only
@@ -935,9 +976,12 @@ runtime or transport composition.
   waits for the drain. The drain checks that signal after reserve, before bind,
   and inside the execution activation claim. Cancellation invokes
   `cancelReserved`; an activation-owned running result is interrupted before
-  the abandoned cycle transaction commits. Cleanup failure returns its stable
-  failure without storing the Abandon result/event or lifecycle; cleanup success
-  is followed by one immediate abandoned-cycle transaction as the final step.
+  the abandoned cycle transaction commits by awaiting
+  `interruptForPlanning(executionId)`. Do not construct an
+  `InterruptExecutionEnvelope` or invoke the public human command service.
+  Cleanup failure propagates its typed error without storing the Abandon
+  result/event or lifecycle; cleanup success is followed by one immediate
+  abandoned-cycle transaction as the final step.
   For an already reconciled attention cycle, the coordinator instead uses the
   synchronous read-only `findReserved` to observe the exact linked
   attention-required execution and unknown operation. It neither cancels nor
@@ -1042,9 +1086,10 @@ persistent planning session.
 - Produces: `FakePmScenario = 'todo' | 'malformed' | 'duplicate' |
   'missing_output'`; `FakeHarnessAdapter` constructor option
   `pmScenario?: FakePmScenario`; `ExecutionRuntime.reserveStart` and
-  read-only `findReservedStart`, `activateReserved`, and `cancelReserved`;
-  `OperationRepository.findStartReservation`; the existing `start` signature
-  and behavior preserved as their wrapper.
+  read-only `findReservedStart`, `activateReserved`, `cancelReserved`, and
+  internal `interruptForPlanning`; `PlanningInterruptCleanupError`;
+  `OperationRepository.findStartReservation`; the existing public `start` and
+  `interrupt` signatures and behavior preserved.
 
 - [ ] **Step 1: Add red runtime ordering and fake scenario tests**
 
@@ -1095,6 +1140,24 @@ persistent planning session.
   execution/operation/event persistence failure trips the audit barrier without
   reporting cancellation success.
 
+  Add focused `interruptForPlanning` cases. A running execution must transition
+  through interrupting, append/publish its event only after commit, create one
+  tagged internal interrupt operation, await adapter success, and durably finish
+  execution/operation/event as interrupted before resolving. Concurrent calls
+  coalesce; replay after that exact finished planning operation and terminal
+  execution is an idempotent no-op. An already-terminal execution without that
+  operation and every other non-running lifecycle throw
+  `planning_interrupt_not_running` with zero adapter, event, command-result, or
+  operation writes. Adapter rejection or unproven already-terminal probe records
+  attention plus exact proof and throws `planning_interrupt_unproven`.
+
+  Inject barrier trip, interrupt-operation insert failure, interrupting-event
+  insert failure, terminal execution/operation/event persistence failure, and
+  adapter rejection. Assert the existing barrier/containment path runs, the
+  typed `planning_interrupt_audit_failure` reaches the coordinator where
+  applicable, no `command_results` row is written, no uncommitted event is
+  published, and no adapter or publication work occurs after containment.
+
   ```ts
   const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });
   const events = await collect(fake.start(pmStartRequest({ turn: 1 })));
@@ -1118,8 +1181,8 @@ persistent planning session.
   corepack pnpm exec vitest run apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts --config apps/v2-server/vitest.config.ts
   ```
 
-  Expected: FAIL because the runtime event and PM fake scenarios are not
-  implemented and `reserveStart`/`activateReserved` do not exist.
+  Expected: FAIL because the runtime event, PM fake scenarios, reservation
+  split, and internal planning-interrupt bridge do not exist.
 
 - [ ] **Step 3: Split reservation from activation and extend the fake script**
 
@@ -1148,6 +1211,20 @@ persistent planning session.
   running/terminal result and return that execution without claiming it was
   cancelled. Do not modify M1 reconciliation or add a restart marker/retry in
   T03; its activation tests are live-process tests only.
+
+  Implement `interruptForPlanning(executionId)` beside the existing public
+  `interrupt` without calling it. Share only its proven low-level audit/barrier,
+  adapter-interrupt/probe, containment, execution-transition, operation, and
+  event helpers. The internal method has no actor/idempotency envelope and never
+  touches `command_results`; tag its durable operation request
+  `mesh.v2.planning-interrupt/v1`. Coalesce its live Promise by execution ID.
+  Treat a finished tagged operation plus its interrupted execution as replay
+  success; reject unrelated terminal/non-running state with
+  `PlanningInterruptCleanupError`. Resolve only after proven terminal writes;
+  record unproven adapter outcomes as attention then throw; convert audit/barrier
+  failures to the exact typed cleanup error only after containment has stopped
+  late work. Keep the public human interruption path byte-for-behavior
+  compatible.
 
   Branch the fake only on `assignment.kind`. Keep the existing foundation
   script intact. For `pm_discovery`, generate a fresh finite native handle and
@@ -1193,7 +1270,9 @@ persistent planning session.
   Terminal replay and concurrent activation retain one execution, operation,
   adapter session, and event consumer. Cancellation-first races retain the same
   auditable operation link with no adapter session, and an absent PM scenario
-  deterministically reaches completion-without-receipt attention.
+  deterministically reaches completion-without-receipt attention. Internal
+  running interruption is awaited, replay-safe for its exact operation, audit-
+  first, command-result-free, and leaves zero late work after typed failure.
 
 - [ ] **Step 5: Commit T03**
 
@@ -1205,7 +1284,9 @@ persistent planning session.
 **Acceptance:** PM behavior is finite and fake-only, structured output uses the
 existing audited runtime path, and no planning authority enters the adapter.
 The exact execution is reservable before consumption and M1 foundation start
-behavior remains compatible.
+behavior remains compatible. The internal running-cleanup bridge is audited,
+awaited, replay-safe, typed on failure, and does not create public command
+history.
 
 ---
 
@@ -1362,8 +1443,8 @@ placeholder.
 - Modify: `apps/v2-server/src/http/snapshots.ts`
 - Modify: `apps/v2-server/src/main.ts`
 - Modify: `apps/v2-server/src/main.spec.ts`
-- Modify: `apps/v2-web/src/api/client.ts`
 - Modify: `apps/v2-web/src/api/client.spec.ts`
+- Modify: `apps/v2-web/src/api/socket.spec.ts`
 - Modify: `apps/v2-web/src/state/reducer.ts`
 - Modify: `apps/v2-web/src/state/reducer.spec.ts`
 - Modify: `apps/v2-web/src/state/resync.ts`
@@ -1371,6 +1452,7 @@ placeholder.
 - Modify: `apps/v2-web/src/state/store.ts`
 - Modify: `apps/v2-web/src/app/App.tsx`
 - Modify: `apps/v2-web/src/app/App.spec.tsx`
+- Modify: `apps/v2-web/src/app/use-project-connection.spec.tsx`
 - Modify: `apps/v2-web/src/components/ExecutionActivity.tsx`
 - Modify: `apps/v2-web/src/components/ExecutionActivity.spec.tsx`
 - Modify: `apps/v2-web/src/components/FocusedProjectShell.tsx`
@@ -1379,7 +1461,7 @@ placeholder.
 - Prohibited: contracts, migration/SQL, planning repository/service/consumer,
   `apps/v2-server/src/executions/reconcile-executions.ts`, fake-harness
   implementation, T04 `PlanningPane*`/`RequirementsPane*` implementation, e2e,
-  docs, V1
+  docs, V1, `apps/v2-web/src/api/client.ts`
 
 **Interfaces:**
 
@@ -1387,9 +1469,9 @@ placeholder.
   `PmExecutionLaunchInput`, T03 structured runtime events/fake scenarios, T04
   leaf component props.
 - Produces: existing `registerV2Routes`, snapshot/replay endpoints,
-  `createV2Api`, `ProjectProjection`, `App`, and `FocusedProjectShell` extended
-  for M2; `ExecutionActivity` narrowed across both assignment kinds; no new
-  transport.
+  unchanged generic `V2Api.command`, `ProjectProjection`, `App`, and
+  `FocusedProjectShell` extended for M2; `ExecutionActivity` narrowed across
+  both assignment kinds; no new transport or API method.
 
 - [ ] **Step 1: Write red server composition tests**
 
@@ -1424,6 +1506,15 @@ placeholder.
   synchronous `reconcilePendingReservations()` call has returned with all
   projections committed before the recovery-publication trace entry; no promise
   or fire-and-forget reconciliation may cross that boundary.
+
+  Compose a running-execution Abandon through the real planning launcher adapter
+  and controlled runtime. Assert `interruptForPlanning` owns one internal tagged
+  operation, adapter cleanup and the durable interrupted/attention outcome are
+  awaited before the planning abandoned event/result transaction, and no public
+  interrupt envelope or command-result row is created. Inject each
+  `PlanningInterruptCleanupError`; assert no successful Abandon result/event or
+  abandoned lifecycle is stored and no cleanup/publication work occurs after
+  the failure.
 
   In `config.spec.ts`, add red cases proving
   `MESH_V2_TEST_FAKE_PM_SCENARIO=todo` is accepted only with `NODE_ENV=test`, is
@@ -1460,7 +1551,7 @@ placeholder.
 
   `planning-runtime.ts` adapts the planning launcher to
   `ExecutionRuntime.findReservedStart`, `reserveStart`, `activateReserved`,
-  `cancelReserved`, and the existing running-only interruption method,
+  `cancelReserved`, and internal `interruptForPlanning`,
   subscribes only to
   `worker_execution.structured_output` and terminal execution notifications,
   and calls T02's planning-specific methods. Add one explicit optional runtime
@@ -1473,12 +1564,16 @@ placeholder.
     executionRuntime.findReservedStart(input),
   reserve: (input: PmExecutionLaunchInput) =>
     executionRuntime.reserveStart(input),
+  interruptForPlanning: (executionId: WorkerExecutionId) =>
+    executionRuntime.interruptForPlanning(executionId),
   ```
 
   In `planning-runtime.spec.ts`, capture both runtime calls and assert the exact
   parsed object from T02 is forwarded by reference/value with no added, omitted,
   or recomputed field. Cover both an existing reservation lookup and a fresh
-  reservation.
+  reservation. Assert the interruption mapping passes only the execution ID and
+  awaits the exact runtime Promise; it never constructs a public command
+  envelope.
 
   ```ts
   export type ExecutionRuntimeObserver = {
@@ -1512,12 +1607,15 @@ placeholder.
 
   Expected: PASS, including both ambiguous-start crash windows with no duplicate
   adapter start, fresh drain only without an operation, duplicate receipt, stale
-  approval, and audit/persistence failure cases.
+  approval, awaited internal running-Abandon cleanup, and audit/persistence
+  failure cases.
 
 - [ ] **Step 5: Write red client, reducer, resync, app, and shell tests**
 
-  Prove all four commands serialize through the existing client; snapshot and
-  complete-cycle domain events update planning/ledger state; duplicates are
+  Prove all four commands serialize through the existing generic
+  `V2Api.command()` and `v2CommandEnvelopeSchema`; do not add planning-specific
+  API methods. Snapshot and complete-cycle domain events update planning/ledger
+  state; duplicates are
   ignored; gaps, project mismatch, incomplete projections, and invalid payloads
   request resync; refresh retains the human draft but replaces server truth;
   the shell renders T04 panes; tabs retain ArrowLeft/ArrowRight/Home/End; Board
@@ -1537,6 +1635,15 @@ placeholder.
   requiring `.title`. Both kinds retain lifecycle, skills, diagnostics, and
   activity rendering.
 
+  Update every `V2ProjectSnapshot` fixture in
+  `use-project-connection.spec.tsx` and `socket.spec.ts` with schema-valid
+  `planningCycles`, `planningHistoryTruncated`, and `intentLedger` fields. Use a
+  populated planning/ledger snapshot in the connection test to prove initial
+  hydration and resync replacement preserve server truth while retaining only
+  the local human draft. In the socket/store test, prove a schema-valid snapshot
+  with those fields survives runtime replay/live-event handling unchanged and
+  still requests resync for invalid or incomplete planning events.
+
   ```ts
   const next = reduceProjectProjection(state, {
     type: 'domain.event',
@@ -1554,20 +1661,23 @@ placeholder.
   Run:
 
   ```powershell
-  corepack pnpm exec vitest run apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx --config apps/v2-web/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-web/src/api/client.spec.ts apps/v2-web/src/api/socket.spec.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/app/use-project-connection.spec.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx --config apps/v2-web/vitest.config.ts
   ```
 
   Expected: FAIL because the existing projection and shell do not carry M2
   state or commands, and `ExecutionActivity` has not narrowed the new assignment
-  union before reading the foundation-only `.title`.
+  union before reading the foundation-only `.title`; the connection/socket
+  fixtures also lack the now-required snapshot planning fields.
 
 - [ ] **Step 7: Integrate API, reducer/resync, app, and shell**
 
-  Add typed client methods using `v2CommandEnvelopeSchema`; project the two new
-  domain events in sequence; include planning/ledger in snapshot replacement;
-  preserve existing cursor and resync behavior. Pass server truth and callbacks
-  to T04 components. Import `intent-ledger.css` from the existing stylesheet or
-  component entry without copying rules. In `ExecutionActivity`, narrow
+  Keep the existing generic `V2Api.command()` implementation and method set
+  unchanged; T01's envelope union is sufficient for all four planning commands.
+  Project the two new domain events in sequence; include planning/ledger in
+  snapshot replacement; preserve existing cursor and resync behavior. Pass
+  server truth and callbacks to T04 components. Import `intent-ledger.css` from
+  the existing stylesheet or component entry without copying rules. In
+  `ExecutionActivity`, narrow
   `execution.assignment.kind`: retain `assignment.title` only for
   `foundation-check`, and use exactly `Project manager discovery` for
   `pm_discovery` in the heading plus accessible child/runtime labels. Do not add
@@ -1597,12 +1707,14 @@ placeholder.
   Expected: all commands exit `0`; server and browser converge from snapshots,
   incremental events, replay, forced resync, and restart without a second
   transport or UI-owned lifecycle. `config.spec.ts` proves the fake PM option is
-  test-only and rejected by production/default modes.
+  test-only and rejected by production/default modes. The complete v2-web gate
+  includes schema-valid connection/socket fixtures and the unchanged generic
+  command API.
 
 - [ ] **Step 9: Commit T05**
 
   ```powershell
-  git add -- apps/v2-server/src/planning/planning-runtime.ts apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/config.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/reconcile-executions.spec.ts apps/v2-server/src/http/routes.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/http/snapshots.ts apps/v2-server/src/main.ts apps/v2-server/src/main.spec.ts apps/v2-web/src/api/client.ts apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/state/store.ts apps/v2-web/src/app/App.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/ExecutionActivity.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx apps/v2-web/src/components/FocusedProjectShell.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx apps/v2-web/src/styles.css
+  git add -- apps/v2-server/src/planning/planning-runtime.ts apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/config.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/reconcile-executions.spec.ts apps/v2-server/src/http/routes.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/http/snapshots.ts apps/v2-server/src/main.ts apps/v2-server/src/main.spec.ts apps/v2-web/src/api/client.spec.ts apps/v2-web/src/api/socket.spec.ts apps/v2-web/src/state/reducer.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/state/store.ts apps/v2-web/src/app/App.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/app/use-project-connection.spec.tsx apps/v2-web/src/components/ExecutionActivity.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx apps/v2-web/src/components/FocusedProjectShell.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx apps/v2-web/src/styles.css
   git commit -m "feat(v2): compose intent ledger workflow"
   ```
 
@@ -1612,7 +1724,8 @@ and M3 domain remain untouched. No bound terminal cycle can remain
 `execution_active` across startup. Foundation and PM activity labels are
 deterministic without pretending the PM assignment has a foundation title. The
 T02→T05 launch boundary exports one implementation-local alias to the validated
-M1 envelope and forwards it unchanged.
+M1 envelope and forwards it unchanged. Running Abandon awaits the internal
+command-result-free runtime interruption bridge before its final transaction.
 
 ---
 
@@ -1920,9 +2033,11 @@ following:
 - exact execution reservation and durable binding before activation, including
   a unique start-operation link for terminal capability/skill replay and
   adapter-start failures, plus cleanup-first/commit-last Abandon arbitration
-  that stores no success on cleanup failure and leaves no late adapter start,
-  orphan starting execution, or pending start operation, with no pre-binding
-  event consumption or duplicate execution/session;
+  whose running path awaits one internal command-result-free interrupt operation
+  before the final Abandon transaction, stores no success on cleanup failure,
+  and leaves no late adapter start, orphan starting execution, or pending start
+  operation, with no pre-binding event consumption or duplicate
+  execution/session;
 - fail-closed restart handling for both ambiguous adapter-start windows: M1
   operation `unknown`, execution/cycle attention, exact audit link preserved,
   and no automatic activation; only never-reserved turns launch freshly;
