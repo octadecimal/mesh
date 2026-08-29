@@ -57,8 +57,12 @@ export function ProjectSelector({
         <h1 id="project-selector-heading">Choose a project</h1>
         <p>Add a repository to focus its foundation activity.</p>
       </header>
-      {model.status === 'loading' ? <p role="status">Loading projects…</p> : null}
-      {model.status === 'disconnected' ? <p role="status">{model.message}</p> : null}
+      {model.status === 'loading' ? (
+        <p role="status">Loading projects…</p>
+      ) : null}
+      {model.status === 'disconnected' ? (
+        <p role="status">{model.message}</p>
+      ) : null}
       {model.status === 'error' ? <p role="alert">{model.message}</p> : null}
       {snapshot ? (
         <section aria-label="System health">
@@ -75,13 +79,17 @@ export function ProjectSelector({
           id="repository-path"
           value={repositoryPath}
           onChange={(event) => setRepositoryPath(event.target.value)}
-          aria-describedby={disabledReason ? 'repository-path-reason' : undefined}
+          aria-describedby={
+            disabledReason ? 'repository-path-reason' : undefined
+          }
           disabled={disabledReason !== undefined}
         />
         <button type="submit" disabled={disabledReason !== undefined}>
           Add and select project
         </button>
-        {disabledReason ? <p id="repository-path-reason">{disabledReason}</p> : null}
+        {disabledReason ? (
+          <p id="repository-path-reason">{disabledReason}</p>
+        ) : null}
         {validationMessage ? <p role="alert">{validationMessage}</p> : null}
       </form>
       <section aria-labelledby="known-projects-heading">
@@ -94,7 +102,10 @@ export function ProjectSelector({
               <li key={project.id}>
                 <strong>{project.displayName}</strong>
                 <span>{project.repositoryPath}</span>
-                <button type="button" onClick={() => onSelectProject(project.id)}>
+                <button
+                  type="button"
+                  onClick={() => onSelectProject(project.id)}
+                >
                   Select {project.displayName}
                 </button>
               </li>

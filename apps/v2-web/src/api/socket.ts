@@ -45,7 +45,8 @@ export const createV2Socket = (options: SocketOptions): V2Socket => {
     active = socket;
 
     socket.addEventListener('open', () => {
-      if (closed || socket !== active || socket.readyState !== socket.OPEN) return;
+      if (closed || socket !== active || socket.readyState !== socket.OPEN)
+        return;
       const subscription = clientRealtimeMessageSchema.parse({
         type: 'v2.subscribe',
         protocolVersion: V2_PROTOCOL_VERSION,
@@ -60,7 +61,8 @@ export const createV2Socket = (options: SocketOptions): V2Socket => {
       const event = rawEvent as MessageEvent<unknown>;
       let raw: unknown;
       try {
-        raw = typeof event.data === 'string' ? JSON.parse(event.data) : undefined;
+        raw =
+          typeof event.data === 'string' ? JSON.parse(event.data) : undefined;
       } catch {
         options.dispatch(invalidPayload);
         return;
@@ -72,7 +74,10 @@ export const createV2Socket = (options: SocketOptions): V2Socket => {
       }
       const message = parsed.data;
       if (message.projectId !== options.projectId) {
-        options.dispatch({ type: 'resync.required', reason: 'project_mismatch' });
+        options.dispatch({
+          type: 'resync.required',
+          reason: 'project_mismatch',
+        });
         return;
       }
       switch (message.type) {

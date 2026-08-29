@@ -73,10 +73,7 @@ describe('createV2Socket', () => {
       projectId,
       cursors: { domain: 4, runtime: 9 },
     });
-    expect(sockets.map(({ sent }) => sent)).toEqual([
-      [initial],
-      [reconnected],
-    ]);
+    expect(sockets.map(({ sent }) => sent)).toEqual([[initial], [reconnected]]);
     expect(sockets[0]?.close).toHaveBeenCalledOnce();
   });
 

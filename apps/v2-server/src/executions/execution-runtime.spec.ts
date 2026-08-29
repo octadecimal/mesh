@@ -160,7 +160,9 @@ const durableReservationState = (fixture: V2TestDatabase) => ({
   operations: fixture.database
     .prepare('SELECT * FROM execution_operations ORDER BY id')
     .all(),
-  domain: fixture.database.prepare('SELECT * FROM domain_events ORDER BY id').all(),
+  domain: fixture.database
+    .prepare('SELECT * FROM domain_events ORDER BY id')
+    .all(),
   commands: fixture.database
     .prepare('SELECT * FROM command_results ORDER BY idempotency_key')
     .all(),
@@ -314,9 +316,9 @@ describe('ExecutionRuntime', () => {
         { mode: 'required', resolution: { kind: 'unavailable' } },
       ],
     });
-    expect(context.fixture.commands.find(context.start.idempotencyKey)?.result).toEqual(
-      result,
-    );
+    expect(
+      context.fixture.commands.find(context.start.idempotencyKey)?.result,
+    ).toEqual(result);
     expect(context.operations.listForExecution(failed.id)).toEqual([]);
     expect(fake.startCount).toBe(0);
   });
@@ -510,9 +512,9 @@ describe('ExecutionRuntime', () => {
     fake.releaseCapabilities();
     const settled = await Promise.allSettled([first, conflict]);
 
-    expect(settled.filter((result) => result.status === 'fulfilled')).toHaveLength(
-      1,
-    );
+    expect(
+      settled.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
     const rejected = required(
       settled.find((result) => result.status === 'rejected'),
       'Expected one conflicting start',
@@ -617,7 +619,9 @@ describe('ExecutionRuntime', () => {
     expect(durableRuntimeState(context.fixture)).toEqual(before);
     expect(fake.interruptCalls).toEqual([]);
     expect(context.barrier.diagnostics).toEqual([
-      expect.objectContaining({ cause: 'blocked start rejection audit failure' }),
+      expect.objectContaining({
+        cause: 'blocked start rejection audit failure',
+      }),
     ]);
   });
 
@@ -733,7 +737,11 @@ describe('ExecutionRuntime', () => {
 
       expect(diagnostics).toHaveLength(1);
       expect(diagnostics[0]?.adapter_cursor).toBe(expectedCursor);
-      expect(JSON.parse(required(diagnostics[0], 'Expected audit input').payload_json)).toMatchObject({
+      expect(
+        JSON.parse(
+          required(diagnostics[0], 'Expected audit input').payload_json,
+        ),
+      ).toMatchObject({
         kind: 'mesh.v2.invalid-harness-input/v1',
         input: { raw: { case: name } },
       });
@@ -799,9 +807,7 @@ describe('ExecutionRuntime', () => {
       });
       expect(
         context.fixture.database
-          .prepare(
-            'SELECT * FROM raw_diagnostics WHERE execution_id = ?',
-          )
+          .prepare('SELECT * FROM raw_diagnostics WHERE execution_id = ?')
           .all(executionId),
       ).toEqual([]);
       expect(
@@ -973,7 +979,8 @@ describe('ExecutionRuntime', () => {
         { kind: 'start', state: 'succeeded' },
       ]);
       expect(
-        context.fixture.events.domainAfter(context.fixture.project.id, 0).events,
+        context.fixture.events.domainAfter(context.fixture.project.id, 0)
+          .events,
       ).toHaveLength(2);
       expect(context.barrier.status).toBe('healthy');
       expect(context.barrier.diagnostics).toEqual(
@@ -1314,7 +1321,9 @@ describe('ExecutionRuntime', () => {
           .listForExecution(running.id)
           .find((operation) => operation.kind === 'interrupt'),
       ).toMatchObject({ state: 'succeeded' });
-      expect(context.fixture.commands.find(interrupt.idempotencyKey)).toBeDefined();
+      expect(
+        context.fixture.commands.find(interrupt.idempotencyKey),
+      ).toBeDefined();
       expect(context.barrier.status).toBe('healthy');
       expect(context.barrier.diagnostics).toEqual(
         expect.arrayContaining([

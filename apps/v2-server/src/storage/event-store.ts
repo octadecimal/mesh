@@ -223,9 +223,8 @@ export class V2EventStore {
       );
     }
 
-    const storedDiagnostic = this.appendRawDiagnosticInTransaction(
-      parsedDiagnostic,
-    );
+    const storedDiagnostic =
+      this.appendRawDiagnosticInTransaction(parsedDiagnostic);
 
     const sequence = this.nextSequence(parsedProjectId, 'runtime');
     const event = runtimeEventSchema.parse({

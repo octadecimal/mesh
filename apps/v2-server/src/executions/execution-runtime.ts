@@ -219,68 +219,66 @@ export class ExecutionRuntime {
     let reservationWritesStarted = false;
     let acceptance: V2CommandResult;
     try {
-      acceptance = inImmediateTransaction(
-        this.dependencies.database,
-        () => {
-          const stored = this.dependencies.commands.find(
-            envelope.idempotencyKey,
-            requestHash,
-          );
-          if (stored) return stored.result;
-          this.dependencies.barrier.assertHealthy();
-          reservationWritesStarted = true;
-          const execution =
-            this.dependencies.executions.insertInTransaction(initial);
-          domainEvent = this.dependencies.events.appendDomainInTransaction(
-            execution.projectId,
-            lifecycleDraft(execution, occurredAt),
-          );
-          let result: V2CommandResult;
-          if (execution.lifecycle === 'failed') {
-            if (!execution.failure) {
-              throw new Error(
-                'Failed execution requires structured failure evidence',
-              );
-            }
-            result = {
-              ok: false,
-              commandType: 'worker_execution.start',
-              error: {
-                code: execution.failure.code,
-                message: execution.failure.message,
+      acceptance = inImmediateTransaction(this.dependencies.database, () => {
+        const stored = this.dependencies.commands.find(
+          envelope.idempotencyKey,
+          requestHash,
+        );
+        if (stored) return stored.result;
+        this.dependencies.barrier.assertHealthy();
+        reservationWritesStarted = true;
+        const execution =
+          this.dependencies.executions.insertInTransaction(initial);
+        domainEvent = this.dependencies.events.appendDomainInTransaction(
+          execution.projectId,
+          lifecycleDraft(execution, occurredAt),
+        );
+        let result: V2CommandResult;
+        if (execution.lifecycle === 'failed') {
+          if (!execution.failure) {
+            throw new Error(
+              'Failed execution requires structured failure evidence',
+            );
+          }
+          result = {
+            ok: false,
+            commandType: 'worker_execution.start',
+            error: {
+              code: execution.failure.code,
+              message: execution.failure.message,
+            },
+          };
+        } else {
+          result = {
+            ok: true,
+            commandType: 'worker_execution.start',
+            execution,
+          };
+        }
+        if (execution.lifecycle === 'starting') {
+          operationId = this.dependencies.operations.createPendingInTransaction(
+            {
+              executionId: execution.id,
+              kind: 'start',
+              request: {
+                version: 'mesh.v2.execution-start/v1',
+                idempotencyKey: envelope.idempotencyKey,
+                requestHash,
+                request: envelope.command,
               },
-            };
-          } else {
-            result = {
-              ok: true,
-              commandType: 'worker_execution.start',
-              execution,
-            };
-          }
-          if (execution.lifecycle === 'starting') {
-            operationId =
-              this.dependencies.operations.createPendingInTransaction({
-                executionId: execution.id,
-                kind: 'start',
-                request: {
-                  version: 'mesh.v2.execution-start/v1',
-                  idempotencyKey: envelope.idempotencyKey,
-                  requestHash,
-                  request: envelope.command,
-                },
-                createdAt: occurredAt,
-              }).id;
-          }
-          this.dependencies.commands.storeInTransaction({
-            idempotencyKey: envelope.idempotencyKey,
-            commandType: envelope.command.type,
-            requestHash,
-            result,
-            createdAt: occurredAt,
-          });
-          return result;
-        },
-      );
+              createdAt: occurredAt,
+            },
+          ).id;
+        }
+        this.dependencies.commands.storeInTransaction({
+          idempotencyKey: envelope.idempotencyKey,
+          commandType: envelope.command.type,
+          requestHash,
+          result,
+          createdAt: occurredAt,
+        });
+        return result;
+      });
     } catch (error) {
       if (reservationWritesStarted) {
         this.dependencies.barrier.trip(error, occurredAt);
@@ -305,43 +303,40 @@ export class ExecutionRuntime {
       const failedAt = this.dependencies.now();
       let failedEvent: DomainEvent;
       try {
-        failedEvent = inImmediateTransaction(
-          this.dependencies.database,
-          () => {
-            this.dependencies.barrier.assertHealthy();
-            const current = requireExecution(
-              this.dependencies.executions,
-              executionId,
-            );
-            const failed = this.dependencies.executions.transitionInTransaction(
-              executionId,
-              current.revision,
-              'failed',
-              failedAt,
-              {
-                failure: {
-                  code: 'adapter_unavailable',
-                  message:
-                    error instanceof Error
-                      ? error.message
-                      : 'Adapter start failed',
-                },
+        failedEvent = inImmediateTransaction(this.dependencies.database, () => {
+          this.dependencies.barrier.assertHealthy();
+          const current = requireExecution(
+            this.dependencies.executions,
+            executionId,
+          );
+          const failed = this.dependencies.executions.transitionInTransaction(
+            executionId,
+            current.revision,
+            'failed',
+            failedAt,
+            {
+              failure: {
+                code: 'adapter_unavailable',
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : 'Adapter start failed',
               },
-            );
-            this.dependencies.operations.finishInTransaction(
-              acceptedOperationId,
-              'failed',
-              {
-                reason: failed.failure?.message,
-              },
-              failedAt,
-            );
-            return this.dependencies.events.appendDomainInTransaction(
-              failed.projectId,
-              lifecycleDraft(failed, failedAt),
-            );
-          },
-        );
+            },
+          );
+          this.dependencies.operations.finishInTransaction(
+            acceptedOperationId,
+            'failed',
+            {
+              reason: failed.failure?.message,
+            },
+            failedAt,
+          );
+          return this.dependencies.events.appendDomainInTransaction(
+            failed.projectId,
+            lifecycleDraft(failed, failedAt),
+          );
+        });
       } catch (auditError) {
         if (this.dependencies.barrier.status === 'healthy') {
           this.dependencies.barrier.trip(auditError, failedAt);
@@ -356,35 +351,32 @@ export class ExecutionRuntime {
     const runningAt = this.dependencies.now();
     let runningEvent: DomainEvent;
     try {
-      runningEvent = inImmediateTransaction(
-        this.dependencies.database,
-        () => {
-          this.dependencies.barrier.assertHealthy();
-          const current = requireExecution(
-            this.dependencies.executions,
-            executionId,
-          );
-          const running = this.dependencies.executions.transitionInTransaction(
-            executionId,
-            current.revision,
-            'running',
-            runningAt,
-            { nativeHandle: session.nativeHandle },
-          );
-          this.dependencies.operations.finishInTransaction(
-            acceptedOperationId,
-            'succeeded',
-            {
-              nativeHandle: session.nativeHandle,
-            },
-            runningAt,
-          );
-          return this.dependencies.events.appendDomainInTransaction(
-            running.projectId,
-            lifecycleDraft(running, runningAt),
-          );
-        },
-      );
+      runningEvent = inImmediateTransaction(this.dependencies.database, () => {
+        this.dependencies.barrier.assertHealthy();
+        const current = requireExecution(
+          this.dependencies.executions,
+          executionId,
+        );
+        const running = this.dependencies.executions.transitionInTransaction(
+          executionId,
+          current.revision,
+          'running',
+          runningAt,
+          { nativeHandle: session.nativeHandle },
+        );
+        this.dependencies.operations.finishInTransaction(
+          acceptedOperationId,
+          'succeeded',
+          {
+            nativeHandle: session.nativeHandle,
+          },
+          runningAt,
+        );
+        return this.dependencies.events.appendDomainInTransaction(
+          running.projectId,
+          lifecycleDraft(running, runningAt),
+        );
+      });
     } catch (error) {
       if (this.dependencies.barrier.status === 'tripped') {
         await this.containAfterBarrier(session);
@@ -416,82 +408,78 @@ export class ExecutionRuntime {
     let reservationWritesStarted = false;
     let acceptance: V2CommandResult;
     try {
-      acceptance = inImmediateTransaction(
-        this.dependencies.database,
-        () => {
-          const stored = this.dependencies.commands.find(
-            envelope.idempotencyKey,
-            requestHash,
-          );
-          if (stored) return stored.result;
-          const current = this.dependencies.executions.get(
-            envelope.command.executionId,
-          );
-          if (!current) {
-            return {
-              ok: false,
-              commandType: 'worker_execution.interrupt',
-              error: {
-                code: 'execution_not_found',
-                message: 'Execution was not found',
-              },
-            } satisfies V2CommandResult;
-          }
-          if (
-            current.projectId !== envelope.command.projectId ||
-            current.revision !== envelope.command.expectedRevision ||
-            current.lifecycle !== 'running'
-          ) {
-            return {
-              ok: false,
-              commandType: 'worker_execution.interrupt',
-              error: {
-                code: 'execution_lifecycle_conflict',
-                message: 'Execution cannot be interrupted',
-              },
-            } satisfies V2CommandResult;
-          }
-          this.dependencies.barrier.assertHealthy();
-          reservationWritesStarted = true;
-          nativeHandle = current.nativeHandle;
-          const interrupting =
-            this.dependencies.executions.transitionInTransaction(
-              current.id,
-              current.revision,
-              'interrupting',
-              occurredAt,
-            );
-          operationId =
-            this.dependencies.operations.createPendingInTransaction({
-              executionId: current.id,
-              kind: 'interrupt',
-              request: {
-                version: 'mesh.v2.execution-interrupt/v1',
-                idempotencyKey: envelope.idempotencyKey,
-                requestHash,
-                request: envelope.command,
-              },
-              createdAt: occurredAt,
-            }).id;
-          domainEvent = this.dependencies.events.appendDomainInTransaction(
-            current.projectId,
-            lifecycleDraft(interrupting, occurredAt),
-          );
-          const result: V2CommandResult = {
-            ok: true,
+      acceptance = inImmediateTransaction(this.dependencies.database, () => {
+        const stored = this.dependencies.commands.find(
+          envelope.idempotencyKey,
+          requestHash,
+        );
+        if (stored) return stored.result;
+        const current = this.dependencies.executions.get(
+          envelope.command.executionId,
+        );
+        if (!current) {
+          return {
+            ok: false,
             commandType: 'worker_execution.interrupt',
-            execution: interrupting,
-          };
-          this.dependencies.commands.storeInTransaction({
+            error: {
+              code: 'execution_not_found',
+              message: 'Execution was not found',
+            },
+          } satisfies V2CommandResult;
+        }
+        if (
+          current.projectId !== envelope.command.projectId ||
+          current.revision !== envelope.command.expectedRevision ||
+          current.lifecycle !== 'running'
+        ) {
+          return {
+            ok: false,
+            commandType: 'worker_execution.interrupt',
+            error: {
+              code: 'execution_lifecycle_conflict',
+              message: 'Execution cannot be interrupted',
+            },
+          } satisfies V2CommandResult;
+        }
+        this.dependencies.barrier.assertHealthy();
+        reservationWritesStarted = true;
+        nativeHandle = current.nativeHandle;
+        const interrupting =
+          this.dependencies.executions.transitionInTransaction(
+            current.id,
+            current.revision,
+            'interrupting',
+            occurredAt,
+          );
+        operationId = this.dependencies.operations.createPendingInTransaction({
+          executionId: current.id,
+          kind: 'interrupt',
+          request: {
+            version: 'mesh.v2.execution-interrupt/v1',
             idempotencyKey: envelope.idempotencyKey,
-            commandType: envelope.command.type,
             requestHash,
-            result,
-            createdAt: occurredAt,
-          });
-          return result;
-        },
-      );
+            request: envelope.command,
+          },
+          createdAt: occurredAt,
+        }).id;
+        domainEvent = this.dependencies.events.appendDomainInTransaction(
+          current.projectId,
+          lifecycleDraft(interrupting, occurredAt),
+        );
+        const result: V2CommandResult = {
+          ok: true,
+          commandType: 'worker_execution.interrupt',
+          execution: interrupting,
+        };
+        this.dependencies.commands.storeInTransaction({
+          idempotencyKey: envelope.idempotencyKey,
+          commandType: envelope.command.type,
+          requestHash,
+          result,
+          createdAt: occurredAt,
+        });
+        return result;
+      });
     } catch (error) {
       if (reservationWritesStarted) {
         this.dependencies.barrier.trip(error, occurredAt);
@@ -740,57 +728,54 @@ export class ExecutionRuntime {
     const message = error instanceof Error ? error.message : String(error);
     let domainEvent: DomainEvent;
     try {
-      domainEvent = inImmediateTransaction(
-        this.dependencies.database,
-        () => {
-          this.dependencies.barrier.assertHealthy();
-          const current = requireExecution(
-            this.dependencies.executions,
-            executionId,
-          );
-          this.dependencies.events.appendRawDiagnosticInTransaction({
-            projectId: current.projectId,
-            executionId: current.id,
-            adapterId: current.adapterId,
-            adapterCursor: trustedNextAdapterCursor(
-              candidate,
-              current.lastAdapterCursor + 1,
-            ),
-            receivedAt: occurredAt,
-            payload: {
-              kind: 'mesh.v2.invalid-harness-input/v1',
-              input: candidate ?? null,
-              error: message,
-            },
-          });
-          for (const operation of this.dependencies.operations
-            .listPending()
-            .filter((pending) => pending.executionId === executionId)) {
-            this.dependencies.operations.finishInTransaction(
-              operation.id,
-              'unknown',
-              { reason: message },
-              occurredAt,
-            );
-          }
-          const failed = this.dependencies.executions.transitionInTransaction(
-            executionId,
-            current.revision,
-            'failed',
+      domainEvent = inImmediateTransaction(this.dependencies.database, () => {
+        this.dependencies.barrier.assertHealthy();
+        const current = requireExecution(
+          this.dependencies.executions,
+          executionId,
+        );
+        this.dependencies.events.appendRawDiagnosticInTransaction({
+          projectId: current.projectId,
+          executionId: current.id,
+          adapterId: current.adapterId,
+          adapterCursor: trustedNextAdapterCursor(
+            candidate,
+            current.lastAdapterCursor + 1,
+          ),
+          receivedAt: occurredAt,
+          payload: {
+            kind: 'mesh.v2.invalid-harness-input/v1',
+            input: candidate ?? null,
+            error: message,
+          },
+        });
+        for (const operation of this.dependencies.operations
+          .listPending()
+          .filter((pending) => pending.executionId === executionId)) {
+          this.dependencies.operations.finishInTransaction(
+            operation.id,
+            'unknown',
+            { reason: message },
             occurredAt,
-            {
-              failure: {
-                code: 'internal_error',
-                message,
-              },
+          );
+        }
+        const failed = this.dependencies.executions.transitionInTransaction(
+          executionId,
+          current.revision,
+          'failed',
+          occurredAt,
+          {
+            failure: {
+              code: 'internal_error',
+              message,
             },
-          );
-          return this.dependencies.events.appendDomainInTransaction(
-            current.projectId,
-            lifecycleDraft(failed, occurredAt),
-          );
-        },
-      );
+          },
+        );
+        return this.dependencies.events.appendDomainInTransaction(
+          current.projectId,
+          lifecycleDraft(failed, occurredAt),
+        );
+      });
     } catch (auditError) {
       await this.contain(session, auditError);
       return;

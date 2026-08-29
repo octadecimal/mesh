@@ -29,7 +29,8 @@ const storedCommandResultSchema = z
       context.addIssue({
         code: 'custom',
         path: ['result', 'commandType'],
-        message: 'Stored result command type must match its request command type',
+        message:
+          'Stored result command type must match its request command type',
       });
     }
   });
@@ -94,9 +95,7 @@ export class V2CommandRepository {
     idempotencyKey: string,
     expectedRequestHash?: string,
   ): StoredCommandResult | undefined {
-    const row = this.select.get(idempotencyKey) as
-      | CommandResultRow
-      | undefined;
+    const row = this.select.get(idempotencyKey) as CommandResultRow | undefined;
     if (!row) return undefined;
     const stored = toStoredResult(row);
     if (

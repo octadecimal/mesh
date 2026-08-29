@@ -119,7 +119,9 @@ const reconciliationState = (
   diagnostics: fixture.database
     .prepare('SELECT * FROM raw_diagnostics ORDER BY id')
     .all(),
-  domain: fixture.database.prepare('SELECT * FROM domain_events ORDER BY id').all(),
+  domain: fixture.database
+    .prepare('SELECT * FROM domain_events ORDER BY id')
+    .all(),
 });
 
 const collect = async <T>(source: AsyncIterable<T>): Promise<T[]> => {
@@ -439,7 +441,12 @@ describe('reconcileExecutions', () => {
       releaseProbe = resolve;
     });
     try {
-      const running = advance(context.fixture, context.executions, 'running', 2);
+      const running = advance(
+        context.fixture,
+        context.executions,
+        'running',
+        2,
+      );
       context.executions.transaction(() =>
         context.operations.createPendingInTransaction({
           executionId: running.id,
@@ -501,7 +508,12 @@ describe('reconcileExecutions', () => {
       releaseResume = resolve;
     });
     try {
-      const running = advance(context.fixture, context.executions, 'running', 2);
+      const running = advance(
+        context.fixture,
+        context.executions,
+        'running',
+        2,
+      );
       const before = reconciliationState(
         context.fixture,
         context.executions,
@@ -574,7 +586,12 @@ describe('reconcileExecutions', () => {
       releaseAttach = resolve;
     });
     try {
-      const running = advance(context.fixture, context.executions, 'running', 2);
+      const running = advance(
+        context.fixture,
+        context.executions,
+        'running',
+        2,
+      );
       const adapter = new FakeHarnessAdapter();
       let closeCount = 0;
       const recovered: HarnessSession = {
@@ -1016,8 +1033,10 @@ describe('reconcileExecutions', () => {
         execution: context.executions.get(starting.id),
         operation: context.operations.get(operation.id),
         diagnostics: diagnosticCount(context.fixture),
-        domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
-          .events,
+        domain: context.fixture.events.domainAfter(
+          context.fixture.project.id,
+          0,
+        ).events,
       };
       context.fixture.database.exec(`
         CREATE TRIGGER fail_reconciliation_domain BEFORE INSERT ON domain_events
@@ -1041,8 +1060,10 @@ describe('reconcileExecutions', () => {
         execution: context.executions.get(starting.id),
         operation: context.operations.get(operation.id),
         diagnostics: diagnosticCount(context.fixture),
-        domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
-          .events,
+        domain: context.fixture.events.domainAfter(
+          context.fixture.project.id,
+          0,
+        ).events,
       }).toEqual(before);
       expect(context.barrier.status).toBe('tripped');
       expect(attach).not.toHaveBeenCalled();
@@ -1065,7 +1086,12 @@ describe('reconcileExecutions', () => {
       rejectClose = reject;
     });
     try {
-      const running = advance(context.fixture, context.executions, 'running', 2);
+      const running = advance(
+        context.fixture,
+        context.executions,
+        'running',
+        2,
+      );
       const operation = context.executions.transaction(() =>
         context.operations.createPendingInTransaction({
           executionId: running.id,
@@ -1078,8 +1104,10 @@ describe('reconcileExecutions', () => {
         execution: context.executions.get(running.id),
         operation: context.operations.get(operation.id),
         diagnostics: diagnosticCount(context.fixture),
-        domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
-          .events,
+        domain: context.fixture.events.domainAfter(
+          context.fixture.project.id,
+          0,
+        ).events,
       };
       const adapter = new FakeHarnessAdapter();
       const recovered: HarnessSession = {
@@ -1117,14 +1145,17 @@ describe('reconcileExecutions', () => {
         execution: context.executions.get(running.id),
         operation: context.operations.get(operation.id),
         diagnostics: diagnosticCount(context.fixture),
-        domain: context.fixture.events.domainAfter(context.fixture.project.id, 0)
-          .events,
+        domain: context.fixture.events.domainAfter(
+          context.fixture.project.id,
+          0,
+        ).events,
       }).toEqual(before);
       expect(attach).not.toHaveBeenCalled();
       expect(context.barrier.diagnostics).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            message: 'Recovered session close failed after reconciliation audit failure',
+            message:
+              'Recovered session close failed after reconciliation audit failure',
             cause: 'recovered close failed',
           }),
         ]),
@@ -1137,7 +1168,12 @@ describe('reconcileExecutions', () => {
   it('persists attention when attach and recovered-session cleanup both fail', async () => {
     const context = setup();
     try {
-      const running = advance(context.fixture, context.executions, 'running', 2);
+      const running = advance(
+        context.fixture,
+        context.executions,
+        'running',
+        2,
+      );
       const adapter = new FakeHarnessAdapter();
       let closeCount = 0;
       const recovered: HarnessSession = {
@@ -1186,7 +1222,12 @@ describe('reconcileExecutions', () => {
   it('trips the barrier when attach-failure evidence cannot be persisted after cleanup rejects', async () => {
     const context = setup();
     try {
-      const running = advance(context.fixture, context.executions, 'running', 2);
+      const running = advance(
+        context.fixture,
+        context.executions,
+        'running',
+        2,
+      );
       const adapter = new FakeHarnessAdapter();
       const recovered: HarnessSession = {
         nativeHandle: running.nativeHandle as string,
