@@ -50,7 +50,10 @@
       "executor": "nx:run-commands",
       "dependsOn": ["v2-contracts:build", "build"],
       "options": {
-        "command": "node dist/apps/v2-server/main.js"
+        "command": "node dist/apps/v2-server/main.js",
+        "env": {
+          "MESH_V2_DEV_ORIGIN": "http://127.0.0.1:4300"
+        }
       }
     },
     "typecheck": {
