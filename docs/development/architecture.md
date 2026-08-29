@@ -11,6 +11,11 @@ session state and Claude driver processes. The browser sends validated commands
 over HTTP, receives snapshots over HTTP, and follows durable events plus
 transient streaming deltas over a WebSocket connection.
 
+This established session platform is V1. The implemented V2 Milestone 1
+foundation runs beside it with separate applications, contracts, settings, and
+storage; it does not replace or migrate V1. See
+[`v2-foundation.md`](v2-foundation.md) for operating instructions.
+
 The live-session server event flow is:
 
 ```text
@@ -32,6 +37,29 @@ and other server-backed session events are durable. Selection, filters, drafts,
 notifications, unread flags, and in-progress streaming text are intentionally
 local interaction state. A browser view is a projection, not the source of
 truth.
+
+### Parallel V2 foundation
+
+The V2 Milestone 1 request and event flow is:
+
+```text
+v2-web action
+  -> v2-contracts request schema
+  -> v2-server /api/v2 route
+  -> project, profile, or execution service
+  -> V2 SQLite repository transaction
+  -> persisted V2 event
+  -> WebSocket publication
+  -> v2-web snapshot projection
+```
+
+V2 clients begin from project, profile, and execution snapshots and continue
+from durable event cursors. The M1 execution path uses the fake harness adapter.
+On backend restart, V2 reopens only its own database, reconciles nonterminal
+execution evidence and publishes committed recovery events before accepting new
+requests, then allows the browser projection to converge from snapshots and
+replay. This is the implemented foundation-check flow only; the broader V2
+workflow domains in the architecture design are not implemented by M1.
 
 Project task-board state follows a parallel durable flow. Each imported project
 has its own ordered project-event sequence and cursor, separate from every
@@ -416,6 +444,16 @@ apps/web/                        React/Vite client
   src/sessions/                  session interaction and transcript UI
   src/workspace/                 workspace composition and layout
 packages/contracts/              shared schemas, commands, events, protocols
+apps/v2-server/                  M1 V2 HTTP, persistence, fake execution, replay
+  src/db/                        V2-only SQLite identity and migrations
+  src/executions/                foundation-check lifecycle and reconciliation
+  src/http/                      /api/v2 routes and snapshots
+  src/profiles/                  V2 profile discovery and approval
+  src/projects/                  V2 repository registration
+  src/realtime/                  V2 durable event publication and replay
+apps/v2-web/                     M1 V2 selector, focused shell, and projection
+packages/v2-contracts/           V2-only wire schemas and types
+e2e-v2/                         fake-only built-process Todo restart acceptance
 docs/development/                current contributor and operational guidance
 docs/superpowers/specs/          approved historical/product designs
 docs/superpowers/plans/          implementation plans, not runtime truth

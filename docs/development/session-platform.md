@@ -1,5 +1,9 @@
 # Session platform development
 
+This guide documents the established V1 session platform. Its `server`, `web`,
+and `e2e` commands and `MESH_*` settings do not apply to V2. For the parallel V2
+Milestone 1 foundation, see [V2 foundation development](v2-foundation.md).
+
 ## Prerequisites and local flow
 
 Install Node.js 22+, Corepack/pnpm, Git, and Chromium for Playwright. From the repository root:
