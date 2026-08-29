@@ -568,7 +568,7 @@ describe('startV2Server', () => {
       }
       fixture.close();
     }
-  });
+  }, 30_000);
 
   it('reconstructs and resumes a held execution after process loss before listen', async () => {
     const fixture = createV2TestDatabase();

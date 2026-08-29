@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { lstat, realpath } from 'node:fs/promises';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 
@@ -7,6 +6,7 @@ import type {
   GitProcessResult,
   GitProcessRunner,
 } from '../projects/repository-identity.js';
+import { nodeGitProcessRunner } from '../projects/repository-identity.js';
 import { isContainedPath } from './paths.js';
 
 export type TrustedV2GitExecutable = Readonly<{
@@ -97,41 +97,6 @@ export const createV2GitProcessRunner = (
         message: 'Approved Git executable changed after startup',
       };
     }
-    return new Promise((resolveResult) => {
-      let settled = false;
-      let stdout = '';
-      let stderr = '';
-      const child = spawn(trusted.path, [...call.args], {
-        cwd: call.cwd,
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      const finish = (result: GitProcessResult) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolveResult(result);
-      };
-      const timer = setTimeout(() => {
-        child.kill();
-        finish({ outcome: 'timeout', message: 'Git process timed out' });
-      }, call.timeoutMs);
-      child.stdout.setEncoding('utf8');
-      child.stderr.setEncoding('utf8');
-      child.stdout.on('data', (chunk: string) => (stdout += chunk));
-      child.stderr.on('data', (chunk: string) => (stderr += chunk));
-      child.once('error', (error) =>
-        finish({ outcome: 'spawn_failure', message: error.message }),
-      );
-      child.once('close', (exitCode) =>
-        finish({
-          outcome: 'completed',
-          exitCode: exitCode ?? 1,
-          stdout,
-          stderr,
-        }),
-      );
-    });
+    return nodeGitProcessRunner.run(call);
   },
 });

@@ -84,15 +84,26 @@ const requireContained = (
 export const nodeGitProcessRunner: GitProcessRunner = {
   run(call) {
     return new Promise((resolveResult) => {
+      const child = (() => {
+        try {
+          return spawn(call.executable, [...call.args], {
+            cwd: call.cwd,
+            shell: false,
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+        } catch (error) {
+          resolveResult({
+            outcome: 'spawn_failure',
+            message: error instanceof Error ? error.message : String(error),
+          });
+          return undefined;
+        }
+      })();
+      if (!child) return;
       let settled = false;
       let stdout = '';
       let stderr = '';
-      const child = spawn(call.executable, [...call.args], {
-        cwd: call.cwd,
-        shell: false,
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
       const finish = (result: GitProcessResult): void => {
         if (settled) return;
         settled = true;

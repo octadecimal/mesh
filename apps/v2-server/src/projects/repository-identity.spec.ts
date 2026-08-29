@@ -108,6 +108,17 @@ describe('repository identity', () => {
 
   afterEach(() => removeVerifiedDirectory(directory));
 
+  it('returns a spawn failure when Node rejects process creation synchronously', async () => {
+    await expect(
+      nodeGitProcessRunner.run({
+        executable: 'git',
+        args: ['--version'],
+        cwd: '\0',
+        timeoutMs: 1_000,
+      }),
+    ).resolves.toMatchObject({ outcome: 'spawn_failure' });
+  });
+
   it('resolves canonical top-level, common directory, and a separately verified commit without Git writes', async () => {
     const repository = createRepository(workspaceRoot, 'todo');
     const statusBefore = git(['status', '--porcelain=v1'], repository);
