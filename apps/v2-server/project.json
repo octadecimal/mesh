@@ -45,6 +45,14 @@
         }
       }
     },
+    "dev": {
+      "continuous": true,
+      "executor": "nx:run-commands",
+      "dependsOn": ["v2-contracts:build", "build"],
+      "options": {
+        "command": "node dist/apps/v2-server/main.js"
+      }
+    },
     "typecheck": {
       "cache": true,
       "inputs": ["default", "^production"],
