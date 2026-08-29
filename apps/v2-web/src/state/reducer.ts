@@ -1,6 +1,7 @@
 import type {
   DomainEvent,
   Project,
+  RetainedRuntimeWindow,
   ResolvedWorkerProfileSnapshot,
   RuntimeEvent,
   V2AttentionItem,
@@ -44,6 +45,11 @@ export type ProjectProjection = {
 
 export type ProjectionAction =
   | { type: 'snapshot.received'; snapshot: V2ProjectSnapshot }
+  | {
+      type: 'snapshot.runtime_replay_received';
+      snapshot: V2ProjectSnapshot;
+      runtimeWindow: RetainedRuntimeWindow;
+    }
   | { type: 'domain.event'; event: DomainEvent }
   | { type: 'runtime.event'; event: RuntimeEvent }
   | { type: 'transport.subscribed' }
@@ -73,7 +79,10 @@ export const createInitialProjectProjection = (
   local: { route: '', repositoryDraft: '', selectedTab: 'board' },
 });
 
-const stale = (state: ProjectProjection, reason: string): ProjectProjection => ({
+const stale = (
+  state: ProjectProjection,
+  reason: string,
+): ProjectProjection => ({
   ...state,
   connection: { status: 'stale', reason },
   resyncRequested: true,
@@ -95,7 +104,9 @@ const replaceProfile = (
   profiles: readonly ResolvedWorkerProfileSnapshot[],
   next: ResolvedWorkerProfileSnapshot,
 ) => {
-  const index = profiles.findIndex(({ profileId }) => profileId === next.profileId);
+  const index = profiles.findIndex(
+    ({ profileId }) => profileId === next.profileId,
+  );
   if (index < 0) return [...profiles, next];
   return profiles.map((profile, position) =>
     position === index ? next : profile,
@@ -169,10 +180,7 @@ const applyDomainEvent = (
     case 'worker_execution.lifecycle_changed':
       return {
         ...state,
-        executions: replaceExecution(
-          state.executions,
-          event.payload.execution,
-        ),
+        executions: replaceExecution(state.executions, event.payload.execution),
         attentionItems: replaceAttention(
           state.attentionItems,
           event.payload.execution,
@@ -192,7 +200,8 @@ const reduceEvent = (
   stream: 'domain' | 'runtime',
   event: DomainEvent | RuntimeEvent,
 ): ProjectProjection => {
-  if (event.projectId !== state.projectId) return stale(state, 'project_mismatch');
+  if (event.projectId !== state.projectId)
+    return stale(state, 'project_mismatch');
 
   const cursor = stream === 'domain' ? state.domainCursor : state.runtimeCursor;
   if (event.sequence === cursor) return state;
@@ -221,6 +230,58 @@ const reduceEvent = (
   };
 };
 
+const replaceSnapshot = (
+  state: ProjectProjection,
+  snapshot: V2ProjectSnapshot,
+  runtimeCursor: number,
+  activity: readonly RuntimeEvent[],
+): ProjectProjection => ({
+  ...state,
+  project: snapshot.project,
+  profiles: snapshot.profiles,
+  executions: snapshot.executions,
+  attentionItems: snapshot.attentionItems,
+  activity,
+  domainCursor: snapshot.cursors.domain,
+  runtimeCursor,
+  connection:
+    state.transport === 'subscribed'
+      ? { status: 'ready' }
+      : state.transport === 'disconnected'
+        ? { status: 'disconnected' }
+        : { status: 'loading' },
+  snapshotReady: true,
+  resyncRequested: false,
+  resyncReason: undefined,
+});
+
+const runtimeWindowError = (
+  projectId: string,
+  snapshotCursor: number,
+  window: RetainedRuntimeWindow,
+) => {
+  if (window.events.some((event) => event.projectId !== projectId)) {
+    return 'project_mismatch';
+  }
+  const expectedLength = window.highWater - window.lowWater + 1;
+  if (
+    expectedLength < 0 ||
+    window.events.length !== expectedLength ||
+    window.events.some(
+      (event, index) => event.sequence !== window.lowWater + index,
+    )
+  ) {
+    return 'runtime_window_non_contiguous';
+  }
+  if (
+    snapshotCursor < window.lowWater - 1 ||
+    snapshotCursor > window.highWater
+  ) {
+    return 'runtime_window_cursor_incoherent';
+  }
+  return undefined;
+};
+
 export const reduceProjectProjection = (
   state: ProjectProjection,
   action: ProjectionAction,
@@ -230,24 +291,29 @@ export const reduceProjectProjection = (
       if (action.snapshot.project.id !== state.projectId) {
         return stale(state, 'project_mismatch');
       }
-      return {
-        ...state,
-        project: action.snapshot.project,
-        profiles: action.snapshot.profiles,
-        executions: action.snapshot.executions,
-        attentionItems: action.snapshot.attentionItems,
-        domainCursor: action.snapshot.cursors.domain,
-        runtimeCursor: action.snapshot.cursors.runtime,
-        connection:
-          state.transport === 'subscribed'
-            ? { status: 'ready' }
-            : state.transport === 'disconnected'
-              ? { status: 'disconnected' }
-              : { status: 'loading' },
-        snapshotReady: true,
-        resyncRequested: false,
-        resyncReason: undefined,
-      };
+      return replaceSnapshot(
+        state,
+        action.snapshot,
+        action.snapshot.cursors.runtime,
+        state.activity,
+      );
+    case 'snapshot.runtime_replay_received': {
+      if (action.snapshot.project.id !== state.projectId) {
+        return stale(state, 'project_mismatch');
+      }
+      const error = runtimeWindowError(
+        state.projectId,
+        action.snapshot.cursors.runtime,
+        action.runtimeWindow,
+      );
+      if (error) return stale(state, error);
+      return replaceSnapshot(
+        state,
+        action.snapshot,
+        action.runtimeWindow.highWater,
+        action.runtimeWindow.events,
+      );
+    }
     case 'domain.event':
       if (state.resyncRequested) return state;
       return reduceEvent(state, 'domain', action.event);

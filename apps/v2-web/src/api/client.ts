@@ -4,6 +4,10 @@ import {
   v2ErrorCodeSchema,
   v2ProjectSnapshotSchema,
   v2SystemSnapshotSchema,
+  retainedRuntimeWindowSchema,
+  serverRealtimeMessageSchema,
+  type RetainedRuntimeWindow,
+  type ServerRealtimeMessage,
   type V2CommandEnvelope,
   type V2CommandResult,
   type V2ErrorCode,
@@ -18,6 +22,11 @@ export interface V2Api {
     projectId: string,
     signal?: AbortSignal,
   ): Promise<V2ProjectSnapshot>;
+  runtimeReplay(
+    projectId: string,
+    after: number,
+    signal?: AbortSignal,
+  ): Promise<RetainedRuntimeWindow>;
   command(
     envelope: V2CommandEnvelope,
     signal?: AbortSignal,
@@ -33,6 +42,22 @@ export class V2HttpError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+type ResyncRequired = Extract<
+  ServerRealtimeMessage,
+  { type: 'v2.resync_required' }
+>;
+
+export class V2ResyncRequiredError extends Error {
+  readonly name = 'V2ResyncRequiredError';
+
+  constructor(
+    readonly projectId: string,
+    readonly reason: ResyncRequired['reason'],
+  ) {
+    super(`Resynchronization required: ${reason}.`);
   }
 }
 
@@ -64,10 +89,24 @@ const request = async <T>(
   url: string,
   schema: z.ZodType<T>,
   init?: RequestInit,
+  replayProjectId?: string,
 ) => {
   const response = await fetcher(url, init);
   const body = await parseJson(response);
   if (!response.ok) {
+    const resync = serverRealtimeMessageSchema.safeParse(body);
+    if (
+      response.status === 409 &&
+      replayProjectId !== undefined &&
+      resync.success &&
+      resync.data.type === 'v2.resync_required' &&
+      resync.data.projectId === replayProjectId
+    ) {
+      throw new V2ResyncRequiredError(
+        resync.data.projectId,
+        resync.data.reason,
+      );
+    }
     const parsed = errorResponseSchema.safeParse(body);
     if (parsed.success) {
       throw new V2HttpError(
@@ -103,6 +142,19 @@ export const createV2Api = (options: V2ApiOptions = {}): V2Api => {
         v2ProjectSnapshotSchema,
         { signal },
       ),
+    runtimeReplay: async (projectId, after, signal) => {
+      const cursor = z.number().int().nonnegative().parse(after);
+      return request(
+        fetcher,
+        joinUrl(
+          baseUrl,
+          `/api/v2/projects/${encodeURIComponent(projectId)}/events?stream=runtime&after=${cursor}`,
+        ),
+        retainedRuntimeWindowSchema,
+        { signal },
+        projectId,
+      );
+    },
     command: (envelope, signal) => {
       const body = v2CommandEnvelopeSchema.parse(envelope);
       return request(

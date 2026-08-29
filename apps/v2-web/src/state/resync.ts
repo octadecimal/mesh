@@ -1,4 +1,4 @@
-import type { V2Api } from '../api/client';
+import { V2ResyncRequiredError, type V2Api } from '../api/client';
 import type { ProjectionDispatch } from './reducer';
 
 export type ResyncCoordinator = {
@@ -11,6 +11,40 @@ type ActiveRequest = {
   generation: number;
   controller: AbortController;
   promise: Promise<void>;
+};
+
+const MAX_HYDRATION_ATTEMPTS = 3;
+
+const hydrate = async (api: V2Api, projectId: string, signal: AbortSignal) => {
+  for (let attempt = 0; attempt < MAX_HYDRATION_ATTEMPTS; attempt += 1) {
+    if (signal.aborted) throw signal.reason;
+    const snapshot = await api.projectSnapshot(projectId, signal);
+    if (signal.aborted) throw signal.reason;
+    try {
+      const probe = await api.runtimeReplay(
+        projectId,
+        snapshot.cursors.runtime,
+        signal,
+      );
+      const runtimeWindow = await api.runtimeReplay(
+        projectId,
+        probe.lowWater - 1,
+        signal,
+      );
+      if (
+        runtimeWindow.lowWater !== probe.lowWater ||
+        runtimeWindow.highWater !== probe.highWater
+      ) {
+        continue;
+      }
+      return { snapshot, runtimeWindow };
+    } catch (error) {
+      if (!(error instanceof V2ResyncRequiredError)) throw error;
+    }
+  }
+  throw new Error(
+    `Runtime replay did not stabilize after ${MAX_HYDRATION_ATTEMPTS} attempts.`,
+  );
 };
 
 export const createResyncCoordinator = (
@@ -32,11 +66,14 @@ export const createResyncCoordinator = (
       cancel();
       const requestGeneration = generation;
       const controller = new AbortController();
-      const promise = api
-        .projectSnapshot(projectId, controller.signal)
-        .then((snapshot) => {
+      const promise = hydrate(api, projectId, controller.signal)
+        .then(({ snapshot, runtimeWindow }) => {
           if (requestGeneration === generation) {
-            dispatch({ type: 'snapshot.received', snapshot });
+            dispatch({
+              type: 'snapshot.runtime_replay_received',
+              snapshot,
+              runtimeWindow,
+            });
           }
         })
         .catch((error: unknown) => {
@@ -45,7 +82,12 @@ export const createResyncCoordinator = (
         .finally(() => {
           if (active?.generation === requestGeneration) active = undefined;
         });
-      active = { projectId, generation: requestGeneration, controller, promise };
+      active = {
+        projectId,
+        generation: requestGeneration,
+        controller,
+        promise,
+      };
       return promise;
     },
     cancel,

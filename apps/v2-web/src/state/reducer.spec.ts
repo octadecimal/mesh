@@ -1,6 +1,7 @@
 import {
   V2_PROTOCOL_VERSION,
   type DomainEvent,
+  type RetainedRuntimeWindow,
   type RuntimeEvent,
   type V2ProjectSnapshot,
 } from '@mesh/v2-contracts';
@@ -175,6 +176,112 @@ const independentProjectProfileApproved = {
 } satisfies DomainEvent;
 
 describe('reduceProjectProjection', () => {
+  it('atomically replaces old activity with the complete retained window', () => {
+    const withOldActivity = reduceProjectProjection(ready(), {
+      type: 'runtime.event',
+      event: completion,
+    });
+    const retainedCompletion = {
+      ...completion,
+      id: '00000000-0000-4000-8000-000000000012',
+      sequence: 7,
+      adapterCursor: 7,
+    } satisfies RuntimeEvent;
+
+    const result = reduceProjectProjection(withOldActivity, {
+      type: 'snapshot.runtime_replay_received',
+      snapshot: {
+        ...snapshot,
+        executions: [completedLifecycle.payload.execution],
+        cursors: { domain: 3, runtime: 7 },
+      },
+      runtimeWindow: {
+        lowWater: 7,
+        highWater: 7,
+        events: [retainedCompletion],
+      },
+    });
+
+    expect(result.activity).toEqual([retainedCompletion]);
+    expect(result.domainCursor).toBe(3);
+    expect(result.runtimeCursor).toBe(7);
+    expect(result.executions[0]?.lifecycle).toBe('completed');
+    expect(result.resyncRequested).toBe(false);
+  });
+
+  it('clears obsolete activity when the complete retained window is empty', () => {
+    const withActivity = reduceProjectProjection(ready(), {
+      type: 'runtime.event',
+      event: completion,
+    });
+
+    const result = reduceProjectProjection(withActivity, {
+      type: 'snapshot.runtime_replay_received',
+      snapshot: { ...snapshot, cursors: { domain: 4, runtime: 6 } },
+      runtimeWindow: { lowWater: 7, highWater: 6, events: [] },
+    });
+
+    expect(result.activity).toEqual([]);
+    expect(result.domainCursor).toBe(4);
+    expect(result.runtimeCursor).toBe(6);
+  });
+
+  it.each([
+    {
+      name: 'project mismatch',
+      window: {
+        lowWater: 6,
+        highWater: 6,
+        events: [{ ...completion, projectId: otherProjectId }],
+      },
+      reason: 'project_mismatch',
+    },
+    {
+      name: 'noncontiguous window',
+      window: { lowWater: 5, highWater: 6, events: [completion] },
+      reason: 'runtime_window_non_contiguous',
+    },
+    {
+      name: 'snapshot cursor before retained history',
+      window: {
+        lowWater: 7,
+        highWater: 7,
+        events: [{ ...completion, sequence: 7 }],
+      },
+      reason: 'runtime_window_cursor_incoherent',
+    },
+    {
+      name: 'snapshot cursor after replay high-water',
+      window: {
+        lowWater: 3,
+        highWater: 4,
+        events: [
+          { ...completion, sequence: 3 },
+          { ...completion, sequence: 4 },
+        ],
+      },
+      reason: 'runtime_window_cursor_incoherent',
+    },
+  ] satisfies ReadonlyArray<{
+    name: string;
+    window: RetainedRuntimeWindow;
+    reason: string;
+  }>)('fails closed for $name', ({ window, reason }) => {
+    const state = ready();
+    const result = reduceProjectProjection(state, {
+      type: 'snapshot.runtime_replay_received',
+      snapshot,
+      runtimeWindow: window,
+    });
+
+    expect(result.project).toBe(state.project);
+    expect(result.activity).toBe(state.activity);
+    expect(result.domainCursor).toBe(2);
+    expect(result.runtimeCursor).toBe(5);
+    expect(result.connection).toEqual({ status: 'stale', reason });
+    expect(result.resyncRequested).toBe(true);
+  });
+
   it('requests resync on a runtime gap without changing either cursor', () => {
     const result = reduceProjectProjection(ready(), {
       type: 'runtime.event',
@@ -299,8 +406,8 @@ describe('reduceProjectProjection', () => {
             displayName: 'Project Foundation',
             scope: 'project',
           },
-          spec: independentProjectProfileApproved.payload.profileRevision.document
-            .spec,
+          spec: independentProjectProfileApproved.payload.profileRevision
+            .document.spec,
         },
         digest: 'b'.repeat(64),
       },
@@ -314,7 +421,8 @@ describe('reduceProjectProjection', () => {
         profileRevision: {
           ...independentProjectProfileApproved.payload.profileRevision,
           document: {
-            ...independentProjectProfileApproved.payload.profileRevision.document,
+            ...independentProjectProfileApproved.payload.profileRevision
+              .document,
             extends: { profile: 'global/foundation' as const, revision: 1 },
             spec: { instructions: 'Project override.' },
           },
@@ -541,8 +649,14 @@ describe('reduceProjectProjection', () => {
 describe('createV2Store', () => {
   it('preserves route, draft, and tab state across replacement snapshots', () => {
     const store = createV2Store(projectId);
-    store.dispatch({ type: 'local.route_changed', route: `/projects/${projectId}` });
-    store.dispatch({ type: 'local.repository_draft_changed', draft: 'C:\\repo' });
+    store.dispatch({
+      type: 'local.route_changed',
+      route: `/projects/${projectId}`,
+    });
+    store.dispatch({
+      type: 'local.repository_draft_changed',
+      draft: 'C:\\repo',
+    });
     store.dispatch({ type: 'local.tab_changed', tab: 'requirements' });
 
     store.dispatch({ type: 'snapshot.received', snapshot });
