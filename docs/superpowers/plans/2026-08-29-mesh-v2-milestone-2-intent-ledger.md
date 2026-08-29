@@ -72,6 +72,14 @@ Testing Library, Playwright, Prettier.
 - Non-trivial behavior is test-driven: first run the focused test and observe
   the stated failure, implement only the described behavior, then rerun the
   same test and observe success.
+- Before every worker, reviewer, rework, integration, wave, final, or
+  post-rework command that invokes Nx or `pnpm verify`, set
+  `$env:NX_DAEMON='false'; $env:NX_SKIP_NX_CACHE='true'` in that PowerShell
+  process and record both values plus `git rev-parse HEAD` with the result.
+  This is mandatory campaign evidence: daemon state and cached artifacts can
+  outlive isolated worktrees and otherwise report a result produced from a
+  different branch or head. A cached or daemon-backed result is not an
+  acceptance gate.
 - No worker edits this design, this plan, another worker's handoff, or campaign
   scratch state. No worker delegates top-level ownership or launches parallel
   agents.
@@ -87,6 +95,7 @@ export const PM_DISCOVERY_REPORT_SCHEMA =
 
 export type PlanningCycleLifecycle =
   | 'discovering'
+  | 'launch_pending'
   | 'execution_active'
   | 'awaiting_human'
   | 'awaiting_approval'
@@ -287,6 +296,27 @@ project/profile lookup or adapter capability/skill probing cannot produce the
 required snapshots. The M1 `start` wrapper preserves its command-result behavior;
 T02 leaves the planning turn pending for retry or human abandonment.
 
+Every returned reservation is linked through exactly one existing
+`execution_operations` `kind: 'start'` row. Its request contains the
+idempotency key/request hash and its `execution_id` is authoritative. T03
+creates and immediately fails that operation for terminal capability/skill
+reservations, and replay resolves the exact execution through
+`OperationRepository.findStartReservation`; it never infers from assignments or
+the generic command result. Migration 2 uniquely indexes the normalized start
+key/hash. Missing or conflicting replay links trip the audit barrier.
+
+Pre-migration terminal foundation command results may legitimately lack an
+operation. The existing public `start` wrapper preserves its early stored-result
+replay for those commands and does not call `reserveStart`; planning calls only
+post-migration `reserveStart`, where an absent link is never accepted.
+
+Accepted turns atomically move the cycle and turn to `launch_pending`. That
+cycle lifecycle accepts only same-key command replay or human Abandon; a
+distinct turn returns `planning_cycle_revision_conflict` with no write.
+`drainPendingLaunches` coalesces by turn, and `activateReserved` coalesces by
+execution until durable start-operation reconciliation or terminal/running
+state owns it.
+
 T01 freezes these planning result codes; T02 returns them and T05 may not
 reinterpret them:
 
@@ -352,7 +382,9 @@ diff, owned/prohibited surfaces, this task's interfaces and acceptance criteria,
 focused tests, safety invariants, and overbuilding risk. The reviewer returns
 `accept`, `rework`, or `blocked` with file/line findings and verification
 evidence. Rework returns to the original worker and receives a new independent
-review. No task enters integration from its worker report alone.
+review. No task enters integration from its worker report alone. Reviewer gate
+evidence must show the exact reviewed HEAD and both mandatory Nx environment
+values; otherwise the result is unverified.
 
 Every reviewer returns:
 
@@ -374,8 +406,9 @@ Residual risks:
 Every wave integrator returns the frozen base, accepted commits in the declared
 order, integration-only commit if one was explicitly authorized, exact combined
 changed paths, every gate command/result, unexpected surfaces, and whether the
-wave stop condition is satisfied. The coordinator accepts a wave only after a
-separate review confirms that handoff against repository evidence.
+wave stop condition is satisfied. Every Nx/verify result includes its exact HEAD
+and daemon-disabled/cache-disabled environment. The coordinator accepts a wave
+only after a separate review confirms that handoff against repository evidence.
 
 ### Coordinator Campaign Ledger and Morning Handoff
 
@@ -386,6 +419,8 @@ base; branch; absolute worktree; worker commit; exact changed paths; review
 commit and verdict; every rework commit and fresh reviewer; integration order
 and resulting head; commands/results; decisions and assumptions; blockers; the
 observed `origin/master` SHA; and whether origin drifted from the campaign base.
+Every Nx/verify command entry records `NX_DAEMON=false`,
+`NX_SKIP_NX_CACHE=true`, and the exact tested HEAD.
 Origin drift is informational unless the coordinator explicitly replans; no
 worker rebases or absorbs it.
 
@@ -451,6 +486,8 @@ snapshots, without introducing an M3 type.
   directed kinds retain order. Include failures for an unknown kind, missing
   risk mitigation, invalid answered-question resolution, requirement-only
   fields on a decision, a self-edge, and an M3-shaped `taskId` field.
+  Include `launch_pending` in the cycle lifecycle and the turn launch-state
+  transition to `execution_bound`.
 
   ```ts
   it.each([
@@ -576,6 +613,9 @@ snapshots, without introducing an M3 type.
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
   corepack pnpm nx test v2-contracts
   corepack pnpm nx typecheck v2-contracts
   corepack pnpm nx build v2-contracts
@@ -637,8 +677,13 @@ runtime or transport composition.
   source is unchanged. Test immutable inserts, ordered turns/proposals,
   conversation-turn-only provenance ownership, proposal key-to-UUID
   reservations without canonical rows, exact ledger membership, the partial
-  unique index for one nonterminal cycle, symmetric edge normalization,
-  complete cycle-view reads, and restart reads.
+  unique indexes for one nonterminal cycle, one pending turn per cycle, and one
+  M1 start-operation key/hash link, symmetric edge normalization, complete
+  cycle-view reads, and restart reads. Seed a valid migration-1 start operation
+  and prove migration 2 indexes it; malformed or duplicate legacy start links
+  fail upgrade instead of becoming ambiguous. Also seed a terminal foundation
+  command/execution with no operation and prove upgrade preserves its legal M1
+  wrapper-replay compatibility.
 
   ```ts
   expect(migrationRows(database)).toEqual([
@@ -667,8 +712,10 @@ runtime or transport composition.
   every read through T01 schemas. Use canonical JSON for arrays/content and
   separate provenance, membership, and relationship rows for referential
   integrity. Include `planning_proposal_records`, the nonterminal-cycle partial
-  unique index, lexical storage constraints for symmetric edges, and no
-  provenance variant beyond durable conversation turns.
+  unique index, the pending-turn partial unique index, the exact unique
+  expression index over start-operation request idempotency key/request hash,
+  lexical storage constraints for symmetric edges, and no provenance variant
+  beyond durable conversation turns.
 
   ```ts
   const intentLedgerMigration = {
@@ -701,7 +748,17 @@ runtime or transport composition.
   command-result insert. Prove the nine exact planning failures, single-active
   conflict, 32/32/16 history limits, all five record lifecycle-only removals,
   proposal-time reserved IDs becoming canonical only on approval, and complete
-  cycle events for supersede/reject/abandon.
+  cycle events for supersede/reject/abandon/launch-pending.
+
+  Race two distinct submit commands from the same acceptable cycle revision.
+  Assert exactly one commits a turn and cycle as `launch_pending`; same-key
+  replay returns its stored success, while the distinct loser returns
+  `planning_cycle_revision_conflict` with no turn, reservation, event, or
+  activation. Restart with an unbound terminal reservation and prove the drain
+  binds the launcher's exact same execution once, moves the turn to
+  `execution_bound` and cycle to attention, and never activates it. Also cover a
+  nonterminal reservation crash before binding and single activation after
+  restart.
 
   T02 owns approved-profile validation. Using an injected
   `Pick<WorkerProfileService, 'resolveApproved'>`, prove the selected revision
@@ -744,6 +801,12 @@ runtime or transport composition.
   Reservation exceptions leave the turn pending, terminal capability/skill
   reservations bind then move the cycle to attention, and activation failures
   terminalize an already-bound execution.
+
+  Turn acceptance sets both the turn launch state and cycle lifecycle to
+  `launch_pending` inside its command transaction. The drain coalesces by turn
+  ID, re-reads before binding, and permits activation only after one committed
+  `execution_bound` transition. A distinct command cannot create another turn
+  while either launch-pending or execution-active.
   The consumer accepts only a matching `pm_discovery` assignment and performs
   one immediate transaction per report.
 
@@ -775,6 +838,9 @@ runtime or transport composition.
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
   corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-service.spec.ts apps/v2-server/src/planning/pm-report-consumer.spec.ts --config apps/v2-server/vitest.config.ts
   corepack pnpm nx typecheck v2-server
   git diff --check
@@ -813,6 +879,7 @@ persistent planning session.
 - Modify: `apps/v2-server/src/executions/fake-harness.ts`
 - Modify: `apps/v2-server/src/executions/fake-harness.spec.ts`
 - Modify: `apps/v2-server/src/executions/harness-adapter.ts`
+- Modify: `apps/v2-server/src/executions/operation-repository.ts`
 - Prohibited: database migrations, `apps/v2-server/src/planning/**`,
   `apps/v2-server/src/main.ts`, `apps/v2-server/src/http/**`, all web/e2e paths
 
@@ -824,8 +891,8 @@ persistent planning session.
 - Produces: `FakePmScenario = 'todo' | 'malformed' | 'duplicate' |
   'missing_output'`; `FakeHarnessAdapter` constructor option
   `pmScenario?: FakePmScenario`; `ExecutionRuntime.reserveStart` and
-  `activateReserved`; the existing `start` signature and behavior preserved as
-  their wrapper.
+  `activateReserved`; `OperationRepository.findStartReservation`; the existing
+  `start` signature and behavior preserved as their wrapper.
 
 - [ ] **Step 1: Add red runtime ordering and fake scenario tests**
 
@@ -844,6 +911,18 @@ persistent planning session.
   or event; only `activateReserved` may cross into adapter startup; terminal
   capability/skill reservations report `activationRequired: false`.
 
+  For successful and terminal capability/skill reservations, inspect the
+  transaction and assert exactly one start operation contains the idempotency
+  key/request hash and exact execution ID. Recreate `ExecutionRuntime` after a
+  terminal reservation but before planning binding, replay the same command,
+  and prove it returns that execution with no duplicate row. Delete or conflict
+  the link and assert fail-closed audit behavior. Race two
+  `activateReserved(executionId)` calls before running/attachment and assert one
+  adapter start, one running transition, and one attached consumer.
+  Separately seed a pre-migration terminal foundation command result without an
+  operation and prove public `start` still returns that stored result without
+  adapter work, while direct post-migration `reserveStart` never infers it.
+
   ```ts
   const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });
   const events = await collect(fake.start(pmStartRequest({ turn: 1 })));
@@ -861,6 +940,9 @@ persistent planning session.
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
   corepack pnpm exec vitest run apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts --config apps/v2-server/vitest.config.ts
   ```
 
@@ -876,6 +958,14 @@ persistent planning session.
   `start(envelope)` at its exact M1 signature as reserve, conditional activate,
   then `result`, mapping typed no-write reservation errors to the existing
   command result so foundation behavior and callers do not change.
+
+  Create one start operation for every inserted execution. Starting executions
+  leave it pending; terminal capability/skill executions finish it failed in
+  the same transaction. On command replay, resolve the operation by exact
+  idempotency key/request hash and load `execution_id`; never derive identity
+  from assignment fields. Coalesce activation promises by execution ID before
+  `adapter.start`, remove them only after durable running/terminal ownership,
+  and let startup reconciliation own an already-pending recovered operation.
 
   Branch the fake only on `assignment.kind`. Keep the existing foundation
   script intact. For `pm_discovery`, generate a fresh finite native handle and
@@ -904,6 +994,9 @@ persistent planning session.
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
   corepack pnpm exec vitest run apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts --config apps/v2-server/vitest.config.ts
   corepack pnpm nx typecheck v2-server
   git diff --check
@@ -913,11 +1006,13 @@ persistent planning session.
   structured event nor completion and trips the barrier. The reservation tests
   show no adapter event can precede the planning binding, while every expected
   or unexpected start failure leaves exactly one durable execution outcome.
+  Terminal replay and concurrent activation retain one execution, operation,
+  adapter session, and event consumer.
 
 - [ ] **Step 5: Commit T03**
 
   ```powershell
-  git add -- apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/fake-harness.ts apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/harness-adapter.ts
+  git add -- apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/fake-harness.ts apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/harness-adapter.ts apps/v2-server/src/executions/operation-repository.ts
   git commit -m "feat(v2): add finite fake pm reports"
   ```
 
@@ -961,6 +1056,11 @@ owning transport, reducer, lifecycle, or Board behavior.
   empty Requirements state, all five record groups, every record lifecycle
   status, provenance, and textual relationship endpoints.
 
+  Add a `launch_pending` case that preserves the accepted human turn, announces
+  “Starting project manager…” through the live status region, disables Send and
+  all proposal actions, and leaves only connected/current Abandon enabled. It
+  must not render another accepting message form or optimistic execution state.
+
   ```tsx
   render(
     <PlanningPane
@@ -985,6 +1085,9 @@ owning transport, reducer, lifecycle, or Board behavior.
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
   corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vitest.config.ts
   ```
 
@@ -1020,6 +1123,9 @@ owning transport, reducer, lifecycle, or Board behavior.
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
   corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vitest.config.ts
   corepack pnpm nx typecheck v2-web
   git diff --check
@@ -1088,16 +1194,23 @@ placeholder.
   Add route tests for submit/approve/reject/abandon parsing, all nine exact
   planning `ok: false` codes at HTTP 200, malformed/non-human 400, origin 403,
   transport 409, stopping/audit 503, unknown 500, idempotent replay, and human
-  actor. Add snapshot tests for absent/present ledger, one active plus 19 latest
+  actor. Race distinct submit requests at one acceptable revision and assert one
+  success, one `planning_cycle_revision_conflict`, one pending turn, and no
+  second launch. Add snapshot tests for absent/present ledger, one active plus 19 latest
   terminal cycle views, and truncation. Add runtime integration tests proving a
   structured output is audited/published, consumed once, and terminalized.
 
   Add startup cases for (a) a bound execution with durable unconsumed output and
-  (b) a bound execution terminalized immediately before process loss. Assert
+  (b) a bound execution terminalized immediately before process loss, (c) an
+  unbound terminal capability/skill reservation, and (d) an unbound starting
+  reservation. Assert
   exact order: M1 execution reconciliation without attachment, planning output
   replay and terminal reconciliation, recovery-window publication, recovered
   session attachment, pending-launch reserve/bind/activate drain, then command
   acceptance. Assert a valid replayed receipt wins over terminal attention.
+  The terminal reservation must bind the operation-linked execution without
+  activation; the starting reservation must bind once and then have exactly one
+  owner between M1 reconciliation and live activation.
 
   In `config.spec.ts`, add red cases proving
   `MESH_V2_TEST_FAKE_PM_SCENARIO=todo` is accepted only with `NODE_ENV=test`, is
@@ -1176,6 +1289,9 @@ placeholder.
   commands. Apply append, proposal supersede, reject, and abandon events to an
   earlier snapshot and assert the final projection is byte-equivalent to a
   fresh final snapshot.
+  Assert the shell visibly projects `launch_pending`, rejects a distinct second
+  turn without optimistic transcript mutation, and keeps only Abandon enabled
+  until binding or recovery changes server truth.
 
   ```ts
   const next = reduceProjectProjection(state, {
@@ -1213,6 +1329,9 @@ placeholder.
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
   corepack pnpm nx test v2-contracts
   corepack pnpm nx test v2-server
   corepack pnpm nx test v2-web
@@ -1272,24 +1391,15 @@ describe the implemented boundary without claiming M3.
 
 - [ ] **Step 1: Write the red built-process Todo scenario**
 
-  Extend the existing fixture rather than creating another server harness.
-  First change `createTodo` to accept and retain
-  `fakePmScenario?: 'todo'`; `spawnServer` emits
-  `MESH_V2_TEST_FAKE_PM_SCENARIO` only from that retained option, and
-  `restartWithFreshFake` reuses it automatically. No global process environment
-  mutation is allowed. Add `forceProjectResync(page)`: subscribe with a
-  deliberately non-contiguous cursor beyond the current high-water mark, assert
-  the existing `v2.resync_required`, reload through the ordinary app snapshot
-  path, and return the converged snapshot for assertions.
-
-  In the browser, register/select the temporary Todo repository, approve the
-  fake PM profile, send the initial description, assert structured questions,
-  restart the built server, and assert the question/transcript survives. Answer
-  after restart and assert the complete Todo proposal, which behaviorally proves
-  the retained fake PM option reached the replacement child. Assert no item
-  checkboxes, approve it, open Requirements, and assert all five record types,
-  requirement kind/status, `depends_on`, `constrains`, and provenance to both
-  turns.
+  Modify only `e2e-v2/src/v2-foundation.spec.ts`. Write the complete journey
+  with the fixture's existing compiling `V2ProcessFixture.createTodo()` API
+  before changing `v2-process.ts`, project configuration, or docs.
+  Register/select the temporary Todo repository, approve the fake PM profile,
+  send the initial description, assert structured questions, restart the built
+  server, and assert the question/transcript survives. Answer after restart and
+  assert the complete Todo proposal. Assert no item checkboxes, approve it, open
+  Requirements, and assert all five record types, requirement kind/status,
+  `depends_on`, `constrains`, and provenance to both turns.
 
   ```ts
   await page.getByLabel('Message to project manager').fill(
@@ -1306,27 +1416,47 @@ describe the implemented boundary without claiming M3.
   await expect(page.getByText('constrains')).toBeVisible();
   ```
 
-  Start with `createTodo({ fakePmScenario: 'todo' })`. After approval, restart
-  once more against the same temporary database, reload/reconnect, and assert
-  intent revision 1, ledger revision 1, transcript, provenance, and
-  relationships remain identical. Call `forceProjectResync(page)` and assert
-  the same result after ordinary snapshot refresh.
+  After approval, restart once more against the same temporary database,
+  reload/reconnect, and assert intent revision 1, ledger revision 1, transcript,
+  provenance, and relationships remain identical. The forced-resync assertion
+  is added only in Step 3 after this core journey has produced genuine red
+  evidence. Before the red run, `git diff --name-only` must list only the journey
+  spec and TypeScript compilation must succeed.
 
 - [ ] **Step 2: Run the Todo E2E and prove red**
 
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
+  git diff --name-only
   corepack pnpm nx e2e v2-e2e -- --grep "conversation becomes an approved intent ledger"
   ```
 
-  Expected: FAIL because the built-process fixture does not yet select the Todo
-  fake PM scenario, preserve it across restart, expose forced gap/resync
-  control, or contain the new journey.
+  Expected: the new test compiles, runs, and FAILS at the first structured PM
+  question/proposal assertion because the existing fixture cannot select the
+  Todo PM scenario. Record that assertion, exact HEAD, and clean process
+  evidence; a compiler failure, build contamination, or unrelated test failure
+  is not the required red evidence.
 
-- [ ] **Step 3: Make the Todo scenario green**
+- [ ] **Step 3: Implement only the owned fixture support and make the journey green**
 
-  Rerun Step 2.
+  Now modify `e2e-v2/src/fixtures/v2-process.ts`. Extend the existing fixture
+  rather than creating another server harness: `createTodo` accepts and retains
+  `fakePmScenario?: 'todo'`; `spawnServer` emits
+  `MESH_V2_TEST_FAKE_PM_SCENARIO` only from that retained option; and
+  `restartWithFreshFake` reuses it automatically. No global process environment
+  mutation is allowed. Add `forceProjectResync(page)`: subscribe with a
+  deliberately non-contiguous cursor beyond current high-water, assert existing
+  `v2.resync_required`, reload through the ordinary app snapshot path, and
+  return the converged snapshot. Modify `e2e-v2/project.json` only if the
+  existing target cannot preserve the explicit option. Update the journey to
+  create the fixture with `{ fakePmScenario: 'todo' }` and add the forced-resync
+  assertion. Do not edit production source to make the journey pass. Rerun the
+  exact Step 2 command with the same daemon/cache environment and exact-head
+  evidence.
 
   Expected: PASS using built server/web output, a temporary database/repository,
   port `0`, a fixture-owned fake PM option on both child processes, and no
@@ -1346,6 +1476,9 @@ describe the implemented boundary without claiming M3.
   Run:
 
   ```powershell
+  $env:NX_DAEMON='false'
+  $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
   corepack pnpm nx test v2-contracts
   corepack pnpm nx test v2-server
   corepack pnpm nx test v2-web
@@ -1371,6 +1504,8 @@ describe the implemented boundary without claiming M3.
   - two human turns each own one distinct finite PM execution;
   - each execution was durably bound before adapter activation and startup
     reconciliation leaves no bound terminal cycle `execution_active`;
+  - terminal reservation replay follows its unique start-operation link, and a
+    concurrent distinct turn cannot bypass non-accepting `launch_pending`;
   - questions and complete proposal history survive restart;
   - one human approval creates exactly intent revision 1 and ledger revision 1;
   - five record types, exact requirement vocabulary, provenance,
@@ -1381,7 +1516,9 @@ describe the implemented boundary without claiming M3.
     normalization, and incremental/final snapshot equivalence are proven by the
     accepted focused gates;
   - Requirements renders server truth and Board remains a placeholder;
-  - the combined diff defines no M3 object or behavior.
+  - the combined diff defines no M3 object or behavior;
+  - all Nx/verify evidence records the same audited HEAD with daemon and cache
+    disabled.
 
 - [ ] **Step 7: Commit T06**
 
@@ -1414,6 +1551,9 @@ interface pauses all dependent tasks and returns to planning.
 After W0, run the T01 green gate. After W1 integration, run:
 
 ```powershell
+$env:NX_DAEMON='false'
+$env:NX_SKIP_NX_CACHE='true'
+git rev-parse HEAD
 corepack pnpm nx test v2-contracts
 corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-service.spec.ts apps/v2-server/src/planning/pm-report-consumer.spec.ts apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts --config apps/v2-server/vitest.config.ts
 corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/RequirementsPane.spec.tsx --config apps/v2-web/vitest.config.ts
@@ -1436,6 +1576,10 @@ the campaign base, exact final head, design, this plan, campaign ledger, all tas
 and wave handoffs, and full-gate evidence. It independently inspects
 `<campaign-base>..<final-head>`, verifies every owned/prohibited surface and the
 Final Stop-Condition Proof against repository evidence, and returns:
+
+The reviewer rejects any Nx/verify evidence that does not record the reviewed
+HEAD with `NX_DAEMON=false` and `NX_SKIP_NX_CACHE=true`. Any reviewer-run Nx or
+verify command must set the same values and record its own exact HEAD.
 
 ```text
 MILESTONE REVIEW HANDOFF
@@ -1475,10 +1619,13 @@ following:
 - one finite fake PM execution per human turn and one strict, idempotent,
   binding-validated report receipt per accepted output;
 - exact execution reservation and durable binding before activation, including
-  capability/skill/adapter start failures, with no pre-binding event consumption;
+  a unique start-operation link for terminal capability/skill replay and
+  adapter-start failures, with no pre-binding event consumption or duplicate
+  execution/session;
 - one active nonterminal cycle per project, bounded assignment/snapshot history,
-  replay-complete proposal supersede/reject/abandon events, and incremental
-  projection equivalent to a fresh snapshot;
+  non-accepting single-flight `launch_pending`, replay-complete proposal
+  supersede/reject/abandon events, and incremental projection equivalent to a
+  fresh snapshot;
 - audit-before-publish, immediate atomic approval, stale/invalid/failure
   rollback, snapshot/replay/resync, and restart recovery that reconciles durable
   output/terminal executions before session attachment, pending launch, or
@@ -1486,6 +1633,8 @@ following:
 - accessible PM and Requirements UI with human-only all-or-nothing approval;
 - deterministic built-process Todo acceptance with no paid traffic,
   credentials, real repository, or operator state;
+- every Nx/verify acceptance result is uncached, daemon-disabled, and bound to
+  its recorded exact HEAD;
 - no milestone, task, dependency, readiness, coverage, scheduling, Board, real
   adapter, persistent provider session, or generic consumer implementation.
 
