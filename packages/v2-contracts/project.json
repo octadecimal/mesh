@@ -1,0 +1,25 @@
+{
+  "name": "v2-contracts",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/v2-contracts/src",
+  "projectType": "library",
+  "tags": ["type:contracts", "version:v2"],
+  "targets": {
+    "build": {
+      "executor": "@nx/js:tsc",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/packages/v2-contracts",
+        "main": "packages/v2-contracts/src/index.ts",
+        "tsConfig": "packages/v2-contracts/tsconfig.lib.json",
+        "assets": []
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p packages/v2-contracts/tsconfig.lib.json"
+      }
+    }
+  }
+}

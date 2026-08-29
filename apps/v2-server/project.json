@@ -1,0 +1,67 @@
+{
+  "name": "v2-server",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/v2-server/src",
+  "projectType": "application",
+  "tags": ["type:app", "version:v2"],
+  "targets": {
+    "build": {
+      "executor": "@nx/esbuild:esbuild",
+      "outputs": ["{options.outputPath}"],
+      "defaultConfiguration": "production",
+      "options": {
+        "platform": "node",
+        "outputPath": "dist/apps/v2-server",
+        "format": ["cjs"],
+        "bundle": false,
+        "main": "apps/v2-server/src/main.ts",
+        "additionalEntryPoints": ["apps/v2-server/src/db/database.ts"],
+        "tsConfig": "apps/v2-server/tsconfig.app.json",
+        "assets": [
+          {
+            "input": "apps/v2-server/src/db/migrations",
+            "glob": "**/*.sql",
+            "output": "db/migrations"
+          },
+          {
+            "input": "apps/v2-server/src/db/migrations",
+            "glob": "**/*.sql",
+            "output": "apps/v2-server/src/db/migrations"
+          }
+        ],
+        "generatePackageJson": true,
+        "esbuildOptions": {
+          "sourcemap": true,
+          "outExtension": { ".js": ".js" }
+        }
+      },
+      "configurations": {
+        "development": {},
+        "production": {
+          "esbuildOptions": {
+            "sourcemap": false,
+            "outExtension": { ".js": ".js" }
+          }
+        }
+      }
+    },
+    "dev": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["v2-contracts:build", "build"],
+      "options": {
+        "command": "node dist/apps/v2-server/main.js",
+        "env": {
+          "NODE_ENV": "development"
+        }
+      }
+    },
+    "typecheck": {
+      "cache": true,
+      "inputs": ["default", "^production"],
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p apps/v2-server/tsconfig.app.json"
+      }
+    }
+  }
+}

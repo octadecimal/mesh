@@ -1,0 +1,28 @@
+{
+  "name": "v2-web",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/v2-web/src",
+  "projectType": "application",
+  "tags": ["type:app", "version:v2"],
+  "targets": {
+    "build": {
+      "cache": true,
+      "inputs": ["production", "^production"],
+      "outputs": ["{workspaceRoot}/dist/apps/v2-web"]
+    },
+    "dev": {
+      "options": {
+        "host": "127.0.0.1",
+        "port": 4300
+      }
+    },
+    "typecheck": {
+      "cache": true,
+      "inputs": ["default", "^production"],
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "tsc --noEmit -p apps/v2-web/tsconfig.app.json"
+      }
+    }
+  }
+}
