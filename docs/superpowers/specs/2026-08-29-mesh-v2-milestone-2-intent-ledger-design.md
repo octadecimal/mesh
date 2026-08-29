@@ -100,9 +100,10 @@ used by this design.
    changing canonical intent. Continuing discovery starts a new cycle; revision
    feedback sent before rejection stays in the current cycle.
 8. **What happens after a crash between accepting a human turn and launching
-   its execution?** The turn remains `launch_pending`. A deterministic drain,
-   invoked after the command and during startup, replays the derived execution
-   start idempotently and binds the resulting execution.
+   its execution?** The turn and cycle remain non-accepting `launch_pending`.
+   A deterministic drain, invoked after the command and during startup, replays
+   the derived execution reservation and follows its durable start-operation
+   link to bind the exact same execution, including a terminal reservation.
 
 ## Approaches Considered
 
@@ -140,24 +141,36 @@ A `PlanningCycle` is the durable human-facing discovery boundary for one
 project. Its lifecycle is:
 
 ```text
-discovering -> execution_active -> awaiting_human
-           \-> execution_active -> awaiting_approval
-awaiting_approval -> execution_active     (revision request)
+discovering -> launch_pending -> execution_active -> awaiting_human
+                                      \-> awaiting_approval
+awaiting_human -> launch_pending           (answer)
+awaiting_approval -> launch_pending        (revision request)
+attention_required -> launch_pending       (human retry turn)
 awaiting_approval -> approved             (human only)
 awaiting_approval -> proposal_rejected    (human only)
 any nonterminal state -> abandoned        (human only)
 execution_active -> attention_required    (invalid/missing output or runtime failure)
-attention_required -> execution_active    (new human retry turn)
+launch_pending -> attention_required      (bound terminal reservation)
 ```
 
-`discovering`, `awaiting_human`, `awaiting_approval`, and
-`attention_required` accept another human turn. A turn increments the cycle
-revision, is persisted as `launch_pending`, and freezes the latest approved
-intent revision, ledger revision, next proposal revision, and prior conversation
-through IDs in its PM assignment. Creating a cycle also freezes an explicitly
-selected approved PM profile ID and revision; later turns reuse that snapshot
-and never silently follow a newer profile. Binding an execution moves it to
-`execution_active`. A valid question report moves it to `awaiting_human`; a
+Only `discovering`, `awaiting_human`, `awaiting_approval`, and
+`attention_required` accept another human turn. In the same immediate
+transaction, acceptance increments the cycle revision, appends one turn with
+launch state `launch_pending`, and moves the cycle itself to `launch_pending`.
+That committed lifecycle is non-accepting: a distinct submit command, even with
+the new revision, returns `planning_cycle_revision_conflict` at HTTP 200 with no
+turn, reservation, or event write. Replay of the same idempotency key returns
+the stored success. A partial unique index permits one `launch_pending` turn per
+cycle, and `BEGIN IMMEDIATE` plus the lifecycle re-read makes concurrent distinct
+submissions deterministic.
+
+The pending turn freezes the latest approved intent revision, ledger revision,
+next proposal revision, and prior conversation through IDs in its PM assignment.
+Creating a cycle also freezes an explicitly selected approved PM profile ID and
+revision; later turns reuse that snapshot and never silently follow a newer
+profile. Binding an execution changes the turn to `execution_bound` and moves
+the cycle to `execution_active`, or directly to `attention_required` for a
+terminal reservation. A valid question report moves it to `awaiting_human`; a
 valid proposal report moves it to `awaiting_approval`.
 
 `approved`, `proposal_rejected`, and `abandoned` are terminal. A partial unique
@@ -470,13 +483,25 @@ ExecutionRuntime.activateReserved(executionId: string): Promise<void>;
 ```
 
 `reserveStart` performs M1 capability/skill resolution and the existing
-immediate transaction that inserts the execution, pending start operation,
+immediate transaction that inserts the execution, durable start operation,
 ordered lifecycle event, and idempotent command result. It never calls
 `adapter.start`, attaches a session, or consumes events. It returns the exact
 execution even when missing capabilities or skills made reservation terminal;
 those expected start failures therefore remain bindable. The existing public
 `start` keeps its M1 signature and behavior as a wrapper that reserves, activates
 when `activationRequired`, and returns `result`, preserving foundation callers.
+
+The durable reservation-to-execution link is the existing M1
+`execution_operations` row, not the generic command result. Every execution
+reservation creates exactly one `kind: 'start'` operation whose request stores
+the idempotency key and request hash and whose `execution_id` points to the exact
+inserted execution. A starting reservation leaves it `pending`; a terminal
+capability/skill reservation creates and finishes it `failed` in the same
+transaction. Migration 2 adds a partial unique index for the normalized start
+request idempotency key and request hash. `reserveStart` replay reads the stored
+command result, resolves that unique operation link, loads its execution, and
+returns the same `ReservedExecutionStart`; a missing or conflicting link trips
+the audit barrier rather than guessing from planning assignment data.
 
 Project/profile lookup or an adapter capability/skill probe that cannot produce
 the snapshots required by `WorkerExecution` fails before reservation with a
@@ -501,6 +526,15 @@ execution; adapter startup or attachment failure terminalizes the already-bound
 execution. These cases cover every start-failure boundary without inventing a
 second execution.
 
+If the process crashes after a terminal reservation commits but before planning
+binding, startup finds the cycle and turn still `launch_pending`. The drain
+replays the same derived key, follows the finished start-operation link to the
+same terminal execution, binds it once, and moves the cycle to
+`attention_required`; no new execution or activation is permitted. In-process
+drains coalesce by turn ID. `activateReserved` separately coalesces concurrent
+calls by execution ID until the M1 start operation reaches running, terminal, or
+reconciliation ownership, closing the start-before-running/attachment window.
+
 ## Persistence and Transaction Ordering
 
 Migration `002_intent_ledger.sql` is appended to the V2 migration ledger;
@@ -519,26 +553,37 @@ Migration `002_intent_ledger.sql` is appended to the V2 migration ledger;
 - `ledger_revision_relationships`.
 
 Foreign keys preserve project, cycle, execution, turn, proposal, record, and
-revision ownership. Unique constraints enforce one turn sequence, one proposal
-revision, one output receipt per execution, one record revision, one project
-intent revision, one ledger revision, one record membership per ledger
-revision, one reserved ID per proposal key, and one normalized relationship per
-ledger revision. A partial unique index enforces one nonterminal planning cycle
-per project. JSON payloads are canonicalized before storage and parsed through
-shared contracts on read.
+revision ownership. Unique constraints enforce one turn sequence, one pending
+turn per cycle, one proposal revision, one output receipt per execution, one
+record revision, one project intent revision, one ledger revision, one record
+membership per ledger revision, one reserved ID per proposal key, and one
+normalized relationship per ledger revision. Partial unique indexes enforce one
+nonterminal planning cycle per project and one M1 start-operation link per
+idempotency-key/request-hash pair. JSON payloads are canonicalized before
+storage and parsed through shared contracts on read.
+
+The operation-link index is the expression index
+`UNIQUE(json_extract(request_json, '$.idempotencyKey'),
+json_extract(request_json, '$.requestHash')) WHERE kind = 'start'`. Migration
+tests first validate every existing start request against the M1 operation
+schema, so an absent key/hash fails the upgrade instead of creating an ambiguous
+index entry.
 
 Human turn acceptance orders writes as follows:
 
 1. reserve or replay the human command;
 2. validate the current cycle and canonical base;
-3. append the human turn and set `launch_pending`;
+3. append the `launch_pending` human turn and set the cycle lifecycle to
+   `launch_pending`;
 4. append the ordered `planning_cycle.changed` event;
 5. store the command result and commit;
 6. publish the event;
 7. drain the pending turn by calling `reserveStart` with the derived idempotency
    key;
-8. bind the returned exact execution in one planning transaction, moving a
-   terminal reservation to attention, and publish the complete-cycle event;
+8. idempotently bind the returned exact execution, change the turn to
+   `execution_bound`, and move the cycle to execution-active or terminal
+   attention in one planning transaction, then publish the complete-cycle
+   event;
 9. call `activateReserved` only after the binding commit.
 
 Startup first runs M1 execution reconciliation while collecting recovered
@@ -553,6 +598,14 @@ reservation/binding/activation sequence, and begin accepting commands. Thus a
 crash after execution terminalization but before the live terminal callback
 cannot strand `execution_active`, and a durable valid output is consumed before
 terminal attention is inferred.
+
+The pending drain claims/coalesces work by turn ID and processes one turn per
+cycle. Replaying a bound turn is a no-op; replaying an unbound turn must obtain
+the same operation-linked execution before binding. It calls activation only
+for a newly bound nonterminal reservation with `activationRequired: true`.
+Startup owns recovered starting operations before the pending drain, while live
+`activateReserved` coalesces by execution ID, so neither the pre-running nor
+pre-attachment window can start the same adapter session twice.
 
 Proposal approval uses one immediate transaction:
 
@@ -610,7 +663,8 @@ The domain event union adds:
 
 - `planning_cycle.changed`, carrying one complete bounded `PlanningCycleView`,
   including every proposal's current lifecycle, so append, supersede, reject,
-  abandon, binding, attention, and receipt transitions are replay-complete;
+  abandon, launch-pending, binding, attention, and receipt transitions are
+  replay-complete;
 - `intent_ledger.approved`, carrying the approved intent/ledger projection and
   terminal cycle/proposal state.
 
@@ -635,7 +689,9 @@ and resync route. No new socket or transport is introduced.
 
 - **Start/restart:** M1 reconciles execution truth without attachment; planning
   then replays unconsumed durable output and terminal-checks every bound cycle;
-  recovered sessions attach next; pending human turns drain last. A valid
+  recovered sessions attach next; pending human turns drain last. A terminal
+  reservation not yet bound is recovered through its unique finished start
+  operation, never by allocating or inferring an execution. A valid
   already-consumed receipt is not consumed again.
 - **Question/answer:** questions remain immutable when the next human turn is
   added. Answers are conversation turns, not in-place question edits.
@@ -674,13 +730,19 @@ becomes a planning pane with:
   reached its history limit;
 - a labeled multiline human-message field and send button;
 - explicit empty, loading, disconnected, stale, execution-active,
-  attention-required, rejected, and approved states.
+  launch-pending, attention-required, rejected, and approved states.
 
 Request revision sends a normal human turn; it never sends a partial approval.
 Approve, Reject, and Abandon remain disabled whenever the projection is
 disconnected, stale, or already submitting; proposal actions also require the
 latest proposal. Errors are rendered in an `aria-live` region and focus returns
 to the relevant heading or input.
+
+`launch_pending` renders a visible “Starting project manager…” status, preserves
+the accepted human turn, and disables Send plus every proposal action. Abandon
+remains the sole enabled lifecycle action when connected and current. The UI
+never optimistically returns the cycle to an accepting state while reservation,
+binding, activation, or restart drain is unresolved.
 
 The Requirements tab becomes a server-truth projection of the latest approved
 ledger. It groups the five record types, exposes requirement kind/status and
@@ -732,6 +794,13 @@ removals, symmetric edge normalization, complete-cycle proposal
 supersede/reject events, and byte-equivalent incremental versus final-snapshot
 projection.
 
+Concurrency tests issue two distinct turns at the same acceptable cycle revision
+and prove exactly one commits `launch_pending`; the loser receives
+`planning_cycle_revision_conflict` with no write. Restart tests cover a pending
+turn before reservation, after nonterminal reservation, and after terminal
+capability/skill reservation, proving the same operation-linked execution binds
+once and activation starts at most once.
+
 ### Runtime and fake harness
 
 Focused tests prove one finite PM execution per human turn, strict structured
@@ -740,8 +809,11 @@ native planning session, raw-diagnostic-before-runtime-event ordering, and
 completion-without-receipt attention. Reservation tests prove that capability
 and skill failures still return a bindable exact execution and that neither a
 successful nor failed reservation can start an adapter or consume an event
-before binding. Activation-failure tests prove the bound cycle reaches
-attention. Startup tests crash after durable output and after execution
+before binding. Replay tests prove every terminal and nonterminal reservation
+resolves its exact execution through the durable start-operation link, including
+a crash before planning binding. Activation-failure and concurrent-activation
+tests prove the bound cycle reaches attention or one running session without a
+duplicate. Startup tests crash after durable output and after execution
 terminalization, then prove output replay and terminal reconciliation happen
 before recovered-session attachment, pending-launch drain, and command
 acceptance.
@@ -782,6 +854,8 @@ smoke test is explicitly outside default verification.
 - Each human turn maps to exactly one finite `WorkerExecution` assignment.
 - `reserveStart` returns an exact non-consuming reservation;
   `activateReserved` runs only after the PM execution binding commits.
+- Every reservation, including terminal capability/skill failure, has one
+  durable start-operation link to its exact execution and replay follows it.
 - `PmReportConsumer` is planning-specific; no generic consumer registry.
 - Proposals are complete desired snapshots and approval is all-or-nothing.
 - `ProjectIntent`, ledger, record revisions, memberships, edges, proposals,
@@ -790,6 +864,8 @@ smoke test is explicitly outside default verification.
   canonical only if that exact proposal is approved.
 - One project has at most one nonterminal cycle; assignments contain at most 64
   bounded turns, and project snapshots contain at most 20 bounded cycle views.
+- Accepted turns commit the cycle as non-accepting `launch_pending`; drains and
+  activation coalesce by turn/execution, and only Abandon remains available.
 - `conflicts_with` and `duplicates` normalize lexically as symmetric edges; all
   other edges retain direction.
 - Only human command envelopes approve, reject, or abandon.
