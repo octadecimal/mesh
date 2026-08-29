@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   V2_PROTOCOL_VERSION,
+  type RuntimeEvent,
   type V2CommandEnvelope,
   type V2ProjectSnapshot,
   type V2SystemSnapshot,
   type WorkerExecution,
 } from '@mesh/v2-contracts';
 
-import type { V2Api } from '../api/client';
+import { V2HttpError, type V2Api } from '../api/client';
 import { FocusedProjectShell } from '../components/FocusedProjectShell';
 import type { ExecutionActivityProjection } from '../components/FocusedProjectShell';
 import { ProjectSelector } from '../components/ProjectSelector';
@@ -36,11 +37,17 @@ export type AppHistory = {
 type SystemState =
   | { status: 'loading' }
   | { status: 'ready'; snapshot: V2SystemSnapshot }
+  | { status: 'disconnected'; message: string }
   | { status: 'error'; message: string };
 
 type PendingCommand = {
   intent: string;
   envelope: V2CommandEnvelope;
+};
+
+type ActiveCommand = {
+  controller: AbortController;
+  token: symbol;
 };
 
 const errorMessage = (error: unknown) =>
@@ -103,12 +110,28 @@ const activityProjection = (
   return projections;
 };
 
+const runtimeActivityText = (event: RuntimeEvent) => {
+  switch (event.type) {
+    case 'worker_execution.output':
+      return event.payload.text;
+    case 'worker_execution.child_started':
+      return `Child started: ${event.payload.title}`;
+    case 'worker_execution.child_finished':
+      return `Child finished: ${event.payload.childId} (${event.payload.outcome})`;
+    case 'worker_execution.adapter_failed':
+      return `Adapter failed: ${event.payload.code} — ${event.payload.message}`;
+    case 'worker_execution.completed':
+      return `Execution completed: ${event.payload.outcome}`;
+  }
+};
+
 function ProjectConnection({
   api,
   projectId,
   socketFactory,
   location,
   auditHealthy,
+  onAuditBarrier,
   onDeselect,
 }: {
   api: V2Api;
@@ -116,6 +139,7 @@ function ProjectConnection({
   socketFactory: ProjectSocketFactory;
   location: AppLocation;
   auditHealthy: boolean;
+  onAuditBarrier: (message: string) => void;
   onDeselect: () => void;
 }) {
   const { projection, error, resyncing } = useProjectConnection({
@@ -125,6 +149,7 @@ function ProjectConnection({
     location,
   });
   const pending = useRef<PendingCommand | undefined>(undefined);
+  const activeCommand = useRef<ActiveCommand | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [commandError, setCommandError] = useState<string>();
   const snapshot = useMemo<V2ProjectSnapshot | undefined>(
@@ -175,9 +200,22 @@ function ProjectConnection({
     [projection.activity, snapshot],
   );
 
+  useEffect(
+    () => () => {
+      activeCommand.current?.controller.abort();
+      activeCommand.current = undefined;
+      pending.current = undefined;
+    },
+    [],
+  );
+
   const interruptExecution = useCallback(
     async (execution: WorkerExecution) => {
       const intent = `${execution.id}:${execution.revision}`;
+      activeCommand.current?.controller.abort();
+      if (pending.current && pending.current.intent !== intent) {
+        pending.current = undefined;
+      }
       const envelope =
         pending.current?.intent === intent
           ? pending.current.envelope
@@ -192,23 +230,40 @@ function ProjectConnection({
               },
             };
       pending.current = { intent, envelope };
+      const controller = new AbortController();
+      const token = Symbol('worker_execution.interrupt');
+      activeCommand.current = { controller, token };
       setSubmitting(true);
       setCommandError(undefined);
       try {
-        const result = await api.command(envelope);
+        const result = await api.command(envelope, controller.signal);
+        if (activeCommand.current?.token !== token) return;
         pending.current = undefined;
         if (!result.ok || result.commandType !== 'worker_execution.interrupt') {
+          if (!result.ok && result.error.code === 'audit_barrier_tripped') {
+            onAuditBarrier(result.error.message);
+          }
           setCommandError(
             result.ok ? 'Unexpected command result.' : result.error.message,
           );
         }
       } catch (cause) {
+        if (activeCommand.current?.token !== token) return;
+        if (cause instanceof V2HttpError) {
+          pending.current = undefined;
+          if (cause.code === 'audit_barrier_tripped') {
+            onAuditBarrier(cause.message);
+          }
+        }
         setCommandError(errorMessage(cause));
       } finally {
-        setSubmitting(false);
+        if (activeCommand.current?.token === token) {
+          activeCommand.current = undefined;
+          setSubmitting(false);
+        }
       }
     },
-    [api, projectId],
+    [api, onAuditBarrier, projectId],
   );
 
   return (
@@ -222,6 +277,19 @@ function ProjectConnection({
         onInterrupt={interruptExecution}
         activityByExecutionId={activityByExecutionId}
       />
+      {projection.activity.length > 0 ? (
+        <section aria-label="Runtime activity">
+          <h2>Runtime activity</h2>
+          <ul aria-label="Runtime activity events">
+            {projection.activity.map((event) => (
+              <li key={event.id}>
+                <span>{runtimeActivityText(event)}</span>{' '}
+                <span>Diagnostic {event.diagnosticId}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </>
   );
 }
@@ -242,6 +310,8 @@ export function App({
   const [registrationError, setRegistrationError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
   const pending = useRef<PendingCommand | undefined>(undefined);
+  const activeCommand = useRef<ActiveCommand | undefined>(undefined);
+  const routeGeneration = useRef(0);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -250,34 +320,72 @@ export function App({
       .then((snapshot) => setSystem({ status: 'ready', snapshot }))
       .catch((cause: unknown) => {
         if (!controller.signal.aborted) {
-          setSystem({ status: 'error', message: errorMessage(cause) });
+          setSystem({
+            status: cause instanceof TypeError ? 'disconnected' : 'error',
+            message: errorMessage(cause),
+          });
         }
       });
     return () => controller.abort();
   }, [api]);
 
+  const takeRouteOwnership = useCallback((next: string) => {
+    routeGeneration.current += 1;
+    activeCommand.current?.controller.abort();
+    activeCommand.current = undefined;
+    pending.current = undefined;
+    setSubmitting(false);
+    setRegistrationError(undefined);
+    setPathname(next);
+  }, []);
+
   useEffect(() => {
-    const popstate = () => setPathname(location.pathname);
+    const popstate = () => takeRouteOwnership(location.pathname);
     location.addEventListener('popstate', popstate);
-    return () => location.removeEventListener('popstate', popstate);
-  }, [location]);
+    return () => {
+      location.removeEventListener('popstate', popstate);
+      activeCommand.current?.controller.abort();
+      activeCommand.current = undefined;
+      pending.current = undefined;
+    };
+  }, [location, takeRouteOwnership]);
 
   const navigate = useCallback(
     (next: string) => {
       history.pushState(null, '', next);
-      setPathname(next);
+      takeRouteOwnership(next);
     },
-    [history],
+    [history, takeRouteOwnership],
   );
   const selectProject = useCallback(
     (projectId: string) =>
       navigate(`/projects/${encodeURIComponent(projectId)}`),
     [navigate],
   );
+  const tripAuditBarrier = useCallback((message: string) => {
+    setSystem((current) =>
+      current.status === 'ready'
+        ? {
+            status: 'ready',
+            snapshot: {
+              ...current.snapshot,
+              health: {
+                status: 'audit_barrier_tripped',
+                error: { code: 'audit_barrier_tripped', message },
+              },
+            },
+          }
+        : current,
+    );
+  }, []);
 
   const register = useCallback(
     async (repositoryPath: string) => {
       const intent = repositoryPath;
+      activeCommand.current?.controller.abort();
+      if (pending.current && pending.current.intent !== intent) {
+        pending.current = undefined;
+      }
       const envelope =
         pending.current?.intent === intent
           ? pending.current.envelope
@@ -287,12 +395,25 @@ export function App({
               command: { type: 'project.register' as const, repositoryPath },
             };
       pending.current = { intent, envelope };
+      const owner = routeGeneration.current;
+      const controller = new AbortController();
+      const token = Symbol('project.register');
+      activeCommand.current = { controller, token };
       setSubmitting(true);
       setRegistrationError(undefined);
       try {
-        const result = await api.command(envelope);
+        const result = await api.command(envelope, controller.signal);
+        if (
+          activeCommand.current?.token !== token ||
+          routeGeneration.current !== owner
+        ) {
+          return;
+        }
         pending.current = undefined;
         if (!result.ok || result.commandType !== 'project.register') {
+          if (!result.ok && result.error.code === 'audit_barrier_tripped') {
+            tripAuditBarrier(result.error.message);
+          }
           setRegistrationError(
             result.ok ? 'Unexpected command result.' : result.error.message,
           );
@@ -316,12 +437,30 @@ export function App({
         );
         selectProject(result.project.id);
       } catch (cause) {
+        if (
+          activeCommand.current?.token !== token ||
+          routeGeneration.current !== owner
+        ) {
+          return;
+        }
+        if (cause instanceof V2HttpError) {
+          pending.current = undefined;
+          if (cause.code === 'audit_barrier_tripped') {
+            tripAuditBarrier(cause.message);
+          }
+        }
         setRegistrationError(errorMessage(cause));
       } finally {
-        setSubmitting(false);
+        if (
+          activeCommand.current?.token === token &&
+          routeGeneration.current === owner
+        ) {
+          activeCommand.current = undefined;
+          setSubmitting(false);
+        }
       }
     },
-    [api, selectProject],
+    [api, selectProject, tripAuditBarrier],
   );
 
   const selector = (model: SelectorViewModel) => (
@@ -334,6 +473,9 @@ export function App({
   );
 
   if (system.status === 'loading') return selector({ status: 'loading' });
+  if (system.status === 'disconnected') {
+    return selector({ status: 'disconnected', message: system.message });
+  }
   if (system.status === 'error') {
     return selector({
       status: 'error',
@@ -386,6 +528,7 @@ export function App({
       socketFactory={socketFactory}
       location={location}
       auditHealthy={system.snapshot.health.status === 'ok'}
+      onAuditBarrier={tripAuditBarrier}
       onDeselect={() => navigate('/')}
     />
   );

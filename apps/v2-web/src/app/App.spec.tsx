@@ -1,7 +1,8 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   V2_PROTOCOL_VERSION,
+  runtimeEventSchema,
   v2ProjectSnapshotSchema,
   v2SystemSnapshotSchema,
   workerExecutionSchema,
@@ -10,7 +11,7 @@ import {
 } from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { V2Api } from '../api/client';
+import { V2HttpError, type V2Api } from '../api/client';
 import type { WebSocketLike } from '../api/socket';
 import { App, type AppHistory, type AppLocation } from './App';
 
@@ -335,6 +336,88 @@ describe('App', () => {
     expect(app.sockets[1]?.close).toHaveBeenCalledOnce();
   });
 
+  it('aborts a deferred registration when route ownership changes and ignores its late success', async () => {
+    const user = userEvent.setup();
+    let resolveCommand!: (
+      result: Awaited<ReturnType<V2Api['command']>>,
+    ) => void;
+    const api = createApi();
+    vi.mocked(api.command).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCommand = resolve;
+        }),
+    );
+    const app = renderApp({ api });
+
+    await user.type(
+      await screen.findByLabelText('Repository path'),
+      'C:\\repos\\deferred',
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Add and select project' }),
+    );
+    await waitFor(() => expect(api.command).toHaveBeenCalledOnce());
+    const signal = vi.mocked(api.command).mock.calls[0]?.[1];
+
+    await user.click(screen.getByRole('button', { name: 'Select Todo' }));
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(true);
+    await user.click(
+      await screen.findByRole('button', { name: 'Deselect project' }),
+    );
+
+    act(() =>
+      resolveCommand({
+        ok: true,
+        commandType: 'project.register',
+        project,
+      }),
+    );
+    await waitFor(() => expect(app.history.pushState).toHaveBeenCalledTimes(2));
+    expect(app.location.pathname).toBe('/');
+  });
+
+  it('aborts a deferred interrupt when its project route is deselected', async () => {
+    const user = userEvent.setup();
+    let resolveCommand!: (
+      result: Awaited<ReturnType<V2Api['command']>>,
+    ) => void;
+    const api = createApi();
+    vi.mocked(api.command).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCommand = resolve;
+        }),
+    );
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    const interrupt = await screen.findByRole('button', {
+      name: 'Interrupt execution',
+    });
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+    await user.click(interrupt);
+    const signal = vi.mocked(api.command).mock.calls[0]?.[1];
+
+    await user.click(screen.getByRole('button', { name: 'Deselect project' }));
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(true);
+    act(() =>
+      resolveCommand({
+        ok: true,
+        commandType: 'worker_execution.interrupt',
+        execution,
+      }),
+    );
+
+    expect(
+      await screen.findByRole('heading', { name: 'Choose a project' }),
+    ).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('renders selector loading, failure, and empty states with safe registration controls', async () => {
     let resolveSnapshot!: (snapshot: typeof systemSnapshot) => void;
     const api = createApi();
@@ -370,6 +453,33 @@ describe('App', () => {
     expect(
       screen.getByRole('button', { name: 'Add and select project' }),
     ).toBeDisabled();
+  });
+
+  it('renders root transport failure as disconnected and parsed HTTP failure as an error', async () => {
+    const offlineApi = createApi();
+    vi.mocked(offlineApi.systemSnapshot).mockRejectedValueOnce(
+      new TypeError('Network unavailable'),
+    );
+    const offline = renderApp({ api: offlineApi });
+    await waitFor(() =>
+      expect(screen.getByRole('status')).toHaveTextContent(
+        'Network unavailable',
+      ),
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Add and select project' }),
+    ).toBeDisabled();
+    offline.unmount();
+
+    const rejectedApi = createApi();
+    vi.mocked(rejectedApi.systemSnapshot).mockRejectedValueOnce(
+      new V2HttpError(503, 'internal_error', 'Snapshot rejected'),
+    );
+    renderApp({ api: rejectedApi });
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Snapshot rejected',
+    );
   });
 
   it('disables interruption while disconnected or stale and sends the exact running revision', async () => {
@@ -480,6 +590,109 @@ describe('App', () => {
     ).toBeVisible();
   });
 
+  it('shows runtime completion, output, child, and adapter diagnostics before domain lifecycle catches up', async () => {
+    const app = renderApp({ pathname: `/projects/${projectId}` });
+    expect(await screen.findByText('Todo foundation worker')).toBeVisible();
+
+    const runtimeEvent = (
+      sequence: number,
+      event: Pick<
+        Extract<ServerRealtimeMessage, { type: 'v2.runtime_event' }>['event'],
+        'type' | 'payload'
+      >,
+    ) => {
+      act(() =>
+        app.sockets[0]?.message({
+          type: 'v2.runtime_event',
+          protocolVersion: V2_PROTOCOL_VERSION,
+          projectId,
+          event: runtimeEventSchema.parse({
+            id: `44444444-4444-4444-8444-${String(sequence).padStart(12, '0')}`,
+            projectId,
+            executionId,
+            diagnosticId: '55555555-5555-4555-8555-555555555555',
+            sequence,
+            adapterCursor: sequence,
+            occurredAt: `2026-08-28T00:00:${String(sequence).padStart(2, '0')}.000Z`,
+            ...event,
+          }),
+        }),
+      );
+    };
+
+    runtimeEvent(6, {
+      type: 'worker_execution.child_started',
+      payload: { childId: 'todo-check', title: 'Todo check' },
+    });
+    runtimeEvent(7, {
+      type: 'worker_execution.output',
+      payload: { text: 'Inspecting Todo repository.' },
+    });
+    runtimeEvent(8, {
+      type: 'worker_execution.adapter_failed',
+      payload: { code: 'fake_failure', message: 'Harness failed.' },
+    });
+    runtimeEvent(9, {
+      type: 'worker_execution.completed',
+      payload: { outcome: 'completed' },
+    });
+
+    const activity = await screen.findByRole('list', {
+      name: 'Runtime activity events',
+    });
+    expect(
+      within(activity).getByText('Child started: Todo check'),
+    ).toBeVisible();
+    expect(
+      within(activity).getByText('Inspecting Todo repository.'),
+    ).toBeVisible();
+    expect(
+      within(activity).getByText(
+        'Adapter failed: fake_failure — Harness failed.',
+      ),
+    ).toBeVisible();
+    expect(
+      within(activity).getByText('Execution completed: completed'),
+    ).toBeVisible();
+    const executionArticle = screen.getByRole('article', {
+      name: 'Todo foundation worker',
+    });
+    expect(within(executionArticle).getByRole('status')).toHaveTextContent(
+      'running',
+    );
+
+    act(() =>
+      app.sockets[0]?.message({
+        type: 'v2.domain_event',
+        protocolVersion: V2_PROTOCOL_VERSION,
+        projectId,
+        event: {
+          id: '77777777-7777-4777-8777-777777777777',
+          projectId,
+          sequence: 4,
+          occurredAt: '2026-08-28T00:00:10.000Z',
+          type: 'worker_execution.lifecycle_changed',
+          payload: {
+            execution: {
+              ...execution,
+              lifecycle: 'completed',
+              revision: 5,
+              lastAdapterCursor: 9,
+              lastRuntimeSequence: 9,
+              updatedAt: '2026-08-28T00:00:10.000Z',
+              endedAt: '2026-08-28T00:00:10.000Z',
+            },
+          },
+        },
+      }),
+    );
+    await waitFor(() =>
+      expect(within(executionArticle).getByRole('status')).toHaveTextContent(
+        'completed',
+      ),
+    );
+  });
+
   it('retains a UUID for unknown transport retry, replaces it for changed intent, and retires parsed failures', async () => {
     const user = userEvent.setup();
     const ids = [
@@ -527,6 +740,7 @@ describe('App', () => {
     expect(api.command).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ idempotencyKey: idsForCalls(api)[0] }),
+      expect.any(AbortSignal),
     );
     expect(idsForCalls(api)[0]).toBe(idsForCalls(api)[1]);
 
@@ -541,6 +755,45 @@ describe('App', () => {
 
     await user.click(submit);
     expect(idsForCalls(api)[3]).not.toBe(idsForCalls(api)[2]);
+  });
+
+  it('retires a UUID after parsed HTTP rejection and disables mutations after an audit barrier response', async () => {
+    const user = userEvent.setup();
+    const ids = [
+      'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      'ffffffff-ffff-4fff-8fff-ffffffffffff',
+    ];
+    vi.spyOn(crypto, 'randomUUID').mockImplementation(() => {
+      const id = ids.shift();
+      if (!id) throw new Error('Unexpected UUID request.');
+      return id;
+    });
+    const api = createApi();
+    vi.mocked(api.command)
+      .mockRejectedValueOnce(
+        new V2HttpError(503, 'internal_error', 'Command service unavailable'),
+      )
+      .mockRejectedValueOnce(
+        new V2HttpError(503, 'audit_barrier_tripped', 'Audit writes failed.'),
+      );
+    renderApp({ api });
+    const input = await screen.findByLabelText('Repository path');
+    const submit = screen.getByRole('button', {
+      name: 'Add and select project',
+    });
+    await user.type(input, 'C:\\repos\\todo');
+
+    await user.click(submit);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Command service unavailable',
+    );
+    await user.click(submit);
+    expect(idsForCalls(api)[1]).not.toBe(idsForCalls(api)[0]);
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Audit writes failed.',
+    );
+    expect(submit).toBeDisabled();
   });
 
   it('disables all interrupt controls when any projected execution is not running or audit health is unsafe', async () => {
