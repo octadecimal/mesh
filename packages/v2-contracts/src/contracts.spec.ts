@@ -2,9 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
 import {
+  PM_DISCOVERY_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
   WORKER_PROFILE_API_VERSION,
+  abandonPlanningCycleEnvelopeSchema,
+  approvePlanningProposalEnvelopeSchema,
+  approvedIntentLedgerSchema,
   clientRealtimeMessageSchema,
+  decisionRecordContentSchema,
   domainEventDraftSchema,
   domainEventSchema,
   executionFailureSchema,
@@ -17,14 +22,24 @@ import {
   harnessSkillDescriptorSchema,
   harnessStartRequestSchema,
   interruptExecutionEnvelopeSchema,
+  ledgerRecordContentSchema,
+  ledgerRelationshipSchema,
   logicalSkillRequestSchema,
   parseWorkerProfileYaml,
+  planningCycleLifecycleSchema,
+  planningCycleViewSchema,
+  planningTurnLaunchStateSchema,
+  pmDiscoveryAssignmentSchema,
+  pmDiscoveryReportSchema,
   profileApprovalEnvelopeSchema,
   projectEventCursorsSchema,
   projectRegisterEnvelopeSchema,
   projectSchema,
   rawDiagnosticDraftSchema,
   rawDiagnosticSchema,
+  rejectPlanningProposalEnvelopeSchema,
+  requirementRecordContentSchema,
+  riskRecordContentSchema,
   resolvedWorkerProfileSnapshotSchema,
   resolvedSkillSnapshotSchema,
   retainedDomainWindowSchema,
@@ -33,6 +48,7 @@ import {
   runtimeEventSchema,
   serverRealtimeMessageSchema,
   startExecutionEnvelopeSchema,
+  submitPlanningTurnEnvelopeSchema,
   v2AttentionItemSchema,
   v2CommandSchema,
   v2CommandEnvelopeSchema,
@@ -393,6 +409,9 @@ describe('V2 foundation contracts', () => {
       profiles: [resolvedProfile],
       executions: [execution],
       attentionItems: [],
+      planningCycles: [],
+      planningHistoryTruncated: false,
+      intentLedger: null,
       cursors: { domain: 0, runtime: 0 },
     };
 
@@ -1093,6 +1112,9 @@ describe('V2 foundation contracts', () => {
       profiles: [resolvedProfile, resolvedProjectProfile],
       executions: [execution],
       attentionItems: [],
+      planningCycles: [],
+      planningHistoryTruncated: false,
+      intentLedger: null,
       cursors: { domain: 0, runtime: 0 },
     };
     expect(v2ProjectSnapshotSchema.parse(snapshot)).toEqual(snapshot);
@@ -1213,5 +1235,772 @@ describe('V2 foundation contracts', () => {
         execution,
       }).commandType,
     ).toBe('worker_execution.interrupt');
+  });
+});
+
+describe('V2 intent ledger contracts', () => {
+  const planningCycleId = randomUUID();
+  const humanTurnId = randomUUID();
+  const pmTurnId = randomUUID();
+  const proposalId = randomUUID();
+  const intentId = randomUUID();
+  const ledgerId = randomUUID();
+  const requirementId = randomUUID();
+  const decisionId = randomUUID();
+  const provenance = [
+    {
+      kind: 'conversation_turn' as const,
+      turnId: humanTurnId,
+      rationale: 'The operator explicitly requested Todo completion.',
+    },
+  ];
+  const projectIntent = {
+    goal: 'Let people track and complete Todos.',
+    targetUsers: ['People managing a short task list'],
+    desiredCapabilities: ['Create, complete, and inspect Todos'],
+    constraints: ['Use the deterministic local fixture'],
+    nonGoals: ['Team collaboration'],
+    successConditions: ['A Todo remains complete after restart'],
+    rationale: 'The requested product is a durable Todo application.',
+    provenance,
+  };
+  const requirementContent = {
+    type: 'requirement' as const,
+    statement: 'Users can complete a Todo item.',
+    rationale: 'Completion is core to the product.',
+    kind: 'functional' as const,
+    status: 'proposed' as const,
+    priority: 'must' as const,
+  };
+  const decisionContent = {
+    type: 'decision' as const,
+    statement: 'Persist Todo completion locally.',
+    rationale: 'Restart recovery is part of acceptance.',
+    status: 'active' as const,
+  };
+  const proposalResult = {
+    kind: 'proposal' as const,
+    summary: 'Define the complete Todo intent and requirement ledger.',
+    projectIntent,
+    records: [
+      {
+        operation: 'create' as const,
+        key: 'complete-todo',
+        content: requirementContent,
+        provenance,
+      },
+      {
+        operation: 'create' as const,
+        key: 'persist-locally',
+        content: decisionContent,
+        provenance,
+      },
+    ],
+    relationships: [
+      {
+        kind: 'constrains' as const,
+        from: { proposalKey: 'persist-locally' },
+        to: { proposalKey: 'complete-todo' },
+      },
+    ],
+  };
+  const proposal = {
+    id: proposalId,
+    projectId,
+    planningCycleId,
+    revision: 1,
+    lifecycle: 'awaiting_approval' as const,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    summary: proposalResult.summary,
+    projectIntent,
+    records: proposalResult.records,
+    relationships: proposalResult.relationships,
+    createdByTurnId: pmTurnId,
+    createdByExecutionId: executionId,
+    rejectionFeedback: null,
+    createdAt: now,
+    decidedAt: null,
+  };
+  const cycleView = {
+    cycle: {
+      id: planningCycleId,
+      projectId,
+      lifecycle: 'awaiting_approval' as const,
+      revision: 2,
+      profileId,
+      profileRevision: 1,
+      baseProjectIntentRevision: null,
+      baseLedgerRevision: null,
+      latestProposalRevision: 1,
+      activeExecutionId: null,
+      createdAt: now,
+      updatedAt: now,
+      endedAt: null,
+    },
+    turns: [
+      {
+        id: humanTurnId,
+        projectId,
+        planningCycleId,
+        ordinal: 1,
+        actor: 'human' as const,
+        message: 'Build a Todo app.',
+        launchState: 'execution_bound' as const,
+        executionId,
+        createdAt: now,
+      },
+      {
+        id: pmTurnId,
+        projectId,
+        planningCycleId,
+        ordinal: 2,
+        actor: 'pm' as const,
+        message: 'Here is the proposed intent and ledger.',
+        launchState: null,
+        executionId,
+        createdAt: now,
+      },
+    ],
+    questions: [],
+    proposals: [proposal],
+  };
+  const approvedIntentLedger = {
+    projectIntent: {
+      id: intentId,
+      projectId,
+      revision: 1,
+      content: projectIntent,
+      proposalId,
+      approvedBy: 'human' as const,
+      approvedAt: now,
+    },
+    ledger: {
+      id: ledgerId,
+      projectId,
+      revision: 1,
+      proposalId,
+      approvedBy: 'human' as const,
+      approvedAt: now,
+    },
+    records: [
+      {
+        recordId: requirementId,
+        projectId,
+        revision: 1,
+        content: { ...requirementContent, status: 'approved' as const },
+        provenance,
+        proposalId,
+        approvedBy: 'human' as const,
+        approvedAt: now,
+      },
+      {
+        recordId: decisionId,
+        projectId,
+        revision: 1,
+        content: decisionContent,
+        provenance,
+        proposalId,
+        approvedBy: 'human' as const,
+        approvedAt: now,
+      },
+    ],
+    relationships: [
+      {
+        kind: 'constrains' as const,
+        fromRecordId: decisionId,
+        toRecordId: requirementId,
+      },
+    ],
+  };
+
+  it.each([
+    'functional',
+    'quality',
+    'ux',
+    'safety',
+    'operational',
+    'constraint',
+  ])('accepts requirement kind %s', (kind) => {
+    expect(
+      requirementRecordContentSchema.parse({
+        ...requirementContent,
+        kind,
+      }).kind,
+    ).toBe(kind);
+  });
+
+  it('accepts the exact record lifecycle vocabulary and constrains edge', () => {
+    const recordCases = [
+      [
+        'requirement',
+        ['proposed', 'approved', 'superseded', 'rejected', 'retired'],
+      ],
+      ['decision', ['active', 'superseded', 'retired']],
+      ['assumption', ['active', 'confirmed', 'invalidated', 'retired']],
+      ['question', ['open', 'answered', 'retired']],
+      ['risk', ['open', 'mitigated', 'accepted', 'retired']],
+    ] as const;
+
+    for (const [type, statuses] of recordCases) {
+      for (const status of statuses) {
+        const base = {
+          type,
+          statement: `${type} statement`,
+          rationale: `${type} rationale`,
+          status,
+        };
+        const value =
+          type === 'requirement'
+            ? { ...base, kind: 'functional', priority: 'must' }
+            : type === 'assumption'
+              ? { ...base, confidence: 'medium' }
+              : type === 'question' && status === 'answered'
+                ? { ...base, resolution: 'Resolved by the operator.' }
+                : type === 'risk'
+                  ? { ...base, severity: 'medium', mitigation: 'Test restart.' }
+                  : base;
+        expect(ledgerRecordContentSchema.parse(value).status).toBe(status);
+      }
+    }
+
+    expect(
+      pmDiscoveryReportSchema.parse({
+        schema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId,
+        humanTurnId,
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        assistantMessage: 'Review the proposal.',
+        result: proposalResult,
+      }).result,
+    ).toEqual(proposalResult);
+  });
+
+  it('rejects invalid record shapes and all M3 vocabulary', () => {
+    expect(() =>
+      requirementRecordContentSchema.parse({
+        ...requirementContent,
+        kind: 'unknown',
+      }),
+    ).toThrow();
+    expect(() =>
+      riskRecordContentSchema.parse({
+        type: 'risk',
+        statement: 'Restart may lose data.',
+        rationale: 'Persistence can fail.',
+        status: 'open',
+        severity: 'high',
+      }),
+    ).toThrow();
+    expect(() =>
+      pmDiscoveryReportSchema.parse({
+        schema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId,
+        humanTurnId,
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        assistantMessage: 'Invalid question.',
+        result: {
+          ...proposalResult,
+          records: [
+            {
+              operation: 'create',
+              key: 'question',
+              content: {
+                type: 'question',
+                statement: 'Which storage?',
+                rationale: 'Storage affects recovery.',
+                status: 'answered',
+              },
+              provenance,
+            },
+          ],
+          relationships: [],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      pmDiscoveryReportSchema.parse({
+        schema: 'mesh.dev/pm-discovery-report/v2',
+        planningCycleId,
+        humanTurnId,
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        assistantMessage: 'Wrong schema.',
+        result: proposalResult,
+      }),
+    ).toThrow();
+    expect(() =>
+      decisionRecordContentSchema.parse({
+        ...decisionContent,
+        priority: 'must',
+      }),
+    ).toThrow();
+    expect(() =>
+      requirementRecordContentSchema.parse({
+        ...requirementContent,
+        taskId: randomUUID(),
+      }),
+    ).toThrow();
+  });
+
+  it('normalizes symmetric edges, preserves directed order, and rejects bad endpoints', () => {
+    const left = randomUUID();
+    const right = randomUUID();
+    const [first, second] = [left, right].sort();
+    for (const kind of ['conflicts_with', 'duplicates'] as const) {
+      expect(
+        ledgerRelationshipSchema.parse({
+          kind,
+          fromRecordId: right,
+          toRecordId: left,
+        }),
+      ).toEqual({ kind, fromRecordId: first, toRecordId: second });
+    }
+    expect(
+      ledgerRelationshipSchema.parse({
+        kind: 'depends_on',
+        fromRecordId: right,
+        toRecordId: left,
+      }),
+    ).toEqual({
+      kind: 'depends_on',
+      fromRecordId: right,
+      toRecordId: left,
+    });
+    for (const kind of [
+      'refines',
+      'depends_on',
+      'conflicts_with',
+      'supersedes',
+      'duplicates',
+    ] as const) {
+      expect(
+        ledgerRelationshipSchema.parse({
+          kind,
+          fromRecordId: left,
+          toRecordId: right,
+        }).kind,
+      ).toBe(kind);
+    }
+    expect(() =>
+      ledgerRelationshipSchema.parse({
+        kind: 'covers',
+        fromRecordId: left,
+        toRecordId: right,
+      }),
+    ).toThrow();
+    expect(() =>
+      ledgerRelationshipSchema.parse({
+        kind: 'depends_on',
+        fromRecordId: left,
+        toRecordId: left,
+      }),
+    ).toThrow();
+    expect(() =>
+      pmDiscoveryReportSchema.parse({
+        schema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId,
+        humanTurnId,
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        assistantMessage: 'Bad local key.',
+        result: {
+          ...proposalResult,
+          relationships: [
+            {
+              kind: 'depends_on',
+              from: { proposalKey: 'missing' },
+              to: { proposalKey: 'complete-todo' },
+            },
+          ],
+        },
+      }),
+    ).toThrow(/proposal|endpoint|key/i);
+  });
+
+  it('round-trips strict question and proposal reports and bounded lifecycle views', () => {
+    expect(PM_DISCOVERY_REPORT_SCHEMA).toBe('mesh.dev/pm-discovery-report/v1');
+    expect(
+      pmDiscoveryReportSchema.parse({
+        schema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId,
+        humanTurnId,
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        assistantMessage: 'Please clarify storage.',
+        result: {
+          kind: 'questions',
+          questions: [
+            {
+              key: 'storage',
+              prompt: 'Should Todos survive restart?',
+              rationale: 'This determines persistence requirements.',
+              choices: ['Yes', 'No'],
+            },
+          ],
+        },
+      }).result.kind,
+    ).toBe('questions');
+    expect(
+      pmDiscoveryReportSchema.parse({
+        schema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId,
+        humanTurnId,
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        assistantMessage: 'Review the proposal.',
+        result: proposalResult,
+      }).result,
+    ).toEqual(proposalResult);
+    expect(planningCycleViewSchema.parse(cycleView)).toEqual(cycleView);
+    expect(planningCycleLifecycleSchema.parse('launch_pending')).toBe(
+      'launch_pending',
+    );
+    expect(planningTurnLaunchStateSchema.parse('execution_bound')).toBe(
+      'execution_bound',
+    );
+    expect(() =>
+      pmDiscoveryReportSchema.parse({
+        schema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId,
+        humanTurnId,
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        assistantMessage: 'No authority.',
+        result: { kind: 'approve', proposalId },
+      }),
+    ).toThrow();
+    expect(() =>
+      pmDiscoveryReportSchema.parse({
+        schema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId,
+        humanTurnId,
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        assistantMessage: 'Unknown field.',
+        result: proposalResult,
+        approved: true,
+      }),
+    ).toThrow();
+  });
+
+  it('extends commands, results, events, snapshots, assignments, and profiles coherently', () => {
+    const pmProfile = {
+      ...resolvedProfile,
+      document: {
+        ...resolvedProfile.document,
+        metadata: {
+          ...resolvedProfile.document.metadata,
+          name: 'pm-discovery',
+          displayName: 'PM discovery',
+        },
+        spec: {
+          ...resolvedProfile.document.spec,
+          assignmentKinds: ['pm_discovery'] as const,
+          outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+        },
+      },
+    };
+    const assignment = {
+      kind: 'pm_discovery' as const,
+      projectId,
+      outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+      planningCycleId,
+      humanTurnId,
+      expectedCycleRevision: 1,
+      expectedProposalRevision: 1,
+      baseProjectIntentRevision: null,
+      baseLedgerRevision: null,
+      input: {
+        conversation: [
+          { turnId: humanTurnId, actor: 'human' as const, message: 'Todo app' },
+        ],
+        latestProposal: null,
+        approvedIntentLedger: null,
+      },
+    };
+    expect(pmDiscoveryAssignmentSchema.parse(assignment)).toEqual(assignment);
+    expect(
+      workerExecutionSchema.parse({
+        ...execution,
+        assignment,
+        profileSnapshot: pmProfile,
+      }).assignment.kind,
+    ).toBe('pm_discovery');
+    expect(() =>
+      workerExecutionSchema.parse({
+        ...execution,
+        assignment,
+        profileSnapshot: resolvedProfile,
+      }),
+    ).toThrow(/assignment|profile/i);
+    expect(() =>
+      workerExecutionSchema.parse({
+        ...execution,
+        assignment,
+        profileSnapshot: {
+          ...pmProfile,
+          document: {
+            ...pmProfile.document,
+            spec: {
+              ...pmProfile.document.spec,
+              outputSchema: 'mesh.dev/wrong/v1',
+            },
+          },
+        },
+      }),
+    ).toThrow(/schema|profile/i);
+
+    const envelopes = [
+      submitPlanningTurnEnvelopeSchema.parse({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.submit_turn',
+          projectId,
+          expectedCycleRevision: null,
+          profileId,
+          profileRevision: 1,
+          message: 'Build a Todo app.',
+        },
+      }),
+      approvePlanningProposalEnvelopeSchema.parse({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_proposal.approve',
+          projectId,
+          planningCycleId,
+          proposalId,
+          expectedCycleRevision: 2,
+          expectedProposalRevision: 1,
+          expectedProjectIntentRevision: null,
+          expectedLedgerRevision: null,
+        },
+      }),
+      rejectPlanningProposalEnvelopeSchema.parse({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_proposal.reject',
+          projectId,
+          planningCycleId,
+          proposalId,
+          expectedCycleRevision: 2,
+          expectedProposalRevision: 1,
+          feedback: 'Keep the scope smaller.',
+        },
+      }),
+      abandonPlanningCycleEnvelopeSchema.parse({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.abandon',
+          projectId,
+          planningCycleId,
+          expectedCycleRevision: 2,
+        },
+      }),
+    ];
+    expect(envelopes.map(({ command }) => command.type)).toEqual([
+      'planning_cycle.submit_turn',
+      'planning_proposal.approve',
+      'planning_proposal.reject',
+      'planning_cycle.abandon',
+    ]);
+    expect(() =>
+      approvePlanningProposalEnvelopeSchema.parse({
+        ...envelopes[1],
+        actor: { kind: 'pm' },
+      }),
+    ).toThrow();
+    expect(() =>
+      submitPlanningTurnEnvelopeSchema.parse({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.submit_turn',
+          projectId,
+          planningCycleId,
+          expectedCycleRevision: null,
+          message: 'This existing cycle needs its current revision.',
+        },
+      }),
+    ).toThrow();
+
+    const successResults = [
+      {
+        ok: true,
+        commandType: 'planning_cycle.submit_turn',
+        planningCycle: cycleView,
+      },
+      {
+        ok: true,
+        commandType: 'planning_proposal.approve',
+        planningCycle: {
+          ...cycleView,
+          cycle: {
+            ...cycleView.cycle,
+            lifecycle: 'approved',
+            endedAt: now,
+          },
+          proposals: [{ ...proposal, lifecycle: 'approved', decidedAt: now }],
+        },
+        intentLedger: approvedIntentLedger,
+      },
+      {
+        ok: true,
+        commandType: 'planning_proposal.reject',
+        planningCycle: {
+          ...cycleView,
+          cycle: {
+            ...cycleView.cycle,
+            lifecycle: 'proposal_rejected',
+            endedAt: now,
+          },
+          proposals: [
+            {
+              ...proposal,
+              lifecycle: 'rejected',
+              rejectionFeedback: 'Keep the scope smaller.',
+              decidedAt: now,
+            },
+          ],
+        },
+      },
+      {
+        ok: true,
+        commandType: 'planning_cycle.abandon',
+        planningCycle: {
+          ...cycleView,
+          cycle: {
+            ...cycleView.cycle,
+            lifecycle: 'abandoned',
+            endedAt: now,
+          },
+        },
+      },
+    ];
+    for (const result of successResults) {
+      expect(v2CommandResultSchema.parse(result).commandType).toBe(
+        result.commandType,
+      );
+    }
+    for (const code of [
+      'planning_cycle_not_found',
+      'planning_cycle_active_conflict',
+      'planning_cycle_revision_conflict',
+      'planning_cycle_history_limit',
+      'planning_proposal_not_found',
+      'planning_proposal_revision_conflict',
+      'planning_canonical_base_conflict',
+      'planning_profile_incompatible',
+      'planning_proposal_invalid',
+    ]) {
+      expect(v2ErrorCodeSchema.parse(code)).toBe(code);
+      expect(
+        v2CommandResultSchema.parse({
+          ok: false,
+          commandType: 'planning_cycle.submit_turn',
+          error: { code, message: 'Planning command rejected.' },
+        }).ok,
+      ).toBe(false);
+    }
+
+    const changed = {
+      projectId,
+      occurredAt: now,
+      type: 'planning_cycle.changed' as const,
+      payload: { planningCycle: cycleView },
+    };
+    const approved = {
+      projectId,
+      occurredAt: now,
+      type: 'intent_ledger.approved' as const,
+      payload: {
+        planningCycle: successResults[1].planningCycle,
+        intentLedger: approvedIntentLedger,
+      },
+    };
+    expect(domainEventDraftSchema.parse(changed)).toEqual(changed);
+    expect(domainEventDraftSchema.parse(approved)).toEqual(approved);
+    const secondProposal = {
+      ...proposal,
+      id: randomUUID(),
+      revision: 2,
+    };
+    const supersededView = {
+      ...cycleView,
+      cycle: { ...cycleView.cycle, latestProposalRevision: 2 },
+      proposals: [
+        { ...proposal, lifecycle: 'superseded' as const, decidedAt: now },
+        secondProposal,
+      ],
+    };
+    expect(
+      domainEventDraftSchema.parse({
+        ...changed,
+        payload: { planningCycle: supersededView },
+      }).payload.planningCycle.proposals[0].lifecycle,
+    ).toBe('superseded');
+    const rejectedView = {
+      ...supersededView,
+      cycle: {
+        ...supersededView.cycle,
+        lifecycle: 'proposal_rejected' as const,
+        endedAt: now,
+      },
+      proposals: [
+        supersededView.proposals[0],
+        {
+          ...secondProposal,
+          lifecycle: 'rejected' as const,
+          rejectionFeedback: 'Keep the scope smaller.',
+          decidedAt: now,
+        },
+      ],
+    };
+    expect(
+      domainEventDraftSchema.parse({
+        ...changed,
+        payload: { planningCycle: rejectedView },
+      }).payload.planningCycle.cycle.lifecycle,
+    ).toBe('proposal_rejected');
+    expect(
+      runtimeEventDraftSchema.parse({
+        projectId,
+        executionId,
+        adapterCursor: 1,
+        occurredAt: now,
+        type: 'worker_execution.structured_output',
+        payload: { schema: PM_DISCOVERY_REPORT_SCHEMA, value: {} },
+      }).type,
+    ).toBe('worker_execution.structured_output');
+
+    const snapshot = {
+      protocolVersion: V2_PROTOCOL_VERSION,
+      project,
+      profiles: [resolvedProfile, pmProfile],
+      executions: [execution],
+      attentionItems: [],
+      planningCycles: [cycleView],
+      planningHistoryTruncated: false,
+      intentLedger: approvedIntentLedger,
+      cursors: { domain: 1, runtime: 1 },
+    };
+    expect(v2ProjectSnapshotSchema.parse(snapshot)).toEqual(snapshot);
+    expect(() =>
+      v2ProjectSnapshotSchema.parse({
+        ...snapshot,
+        planningCycles: [
+          {
+            ...cycleView,
+            cycle: { ...cycleView.cycle, projectId: otherProjectId },
+          },
+        ],
+      }),
+    ).toThrow(/project/i);
   });
 });

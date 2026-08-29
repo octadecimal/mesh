@@ -8,6 +8,7 @@ import {
   workerExecutionIdSchema,
   workerProfileIdSchema,
 } from './ids';
+import { approvedIntentLedgerSchema, planningCycleViewSchema } from './intent';
 import { projectSchema } from './projects';
 import {
   profileNameSchema,
@@ -86,6 +87,9 @@ export const v2ProjectSnapshotSchema = z
     profiles: z.array(resolvedWorkerProfileSnapshotSchema).readonly(),
     executions: z.array(workerExecutionSchema).readonly(),
     attentionItems: z.array(v2AttentionItemSchema).readonly(),
+    planningCycles: z.array(planningCycleViewSchema).max(20).readonly(),
+    planningHistoryTruncated: z.boolean(),
+    intentLedger: approvedIntentLedgerSchema.nullable(),
     cursors: projectEventCursorsSchema,
   })
   .superRefine((value, context) => {
@@ -110,6 +114,25 @@ export const v2ProjectSnapshotSchema = z
         });
       }
     });
+    value.planningCycles.forEach((planningCycle, index) => {
+      if (planningCycle.cycle.projectId !== value.project.id) {
+        context.addIssue({
+          code: 'custom',
+          path: ['planningCycles', index, 'cycle', 'projectId'],
+          message: 'Planning cycle must match the snapshot project',
+        });
+      }
+    });
+    if (
+      value.intentLedger !== null &&
+      value.intentLedger.projectIntent.projectId !== value.project.id
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger', 'projectIntent', 'projectId'],
+        message: 'Intent ledger must match the snapshot project',
+      });
+    }
   });
 export type V2ProjectSnapshot = z.infer<typeof v2ProjectSnapshotSchema>;
 
@@ -142,6 +165,27 @@ export const v2CommandResultSchema = z.union([
     ok: z.literal(true),
     commandType: z.literal('worker_execution.interrupt'),
     execution: workerExecutionSchema,
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_cycle.submit_turn'),
+    planningCycle: planningCycleViewSchema,
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_proposal.approve'),
+    planningCycle: planningCycleViewSchema,
+    intentLedger: approvedIntentLedgerSchema,
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_proposal.reject'),
+    planningCycle: planningCycleViewSchema,
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_cycle.abandon'),
+    planningCycle: planningCycleViewSchema,
   }),
   commandFailureSchema,
 ]);

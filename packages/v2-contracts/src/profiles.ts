@@ -7,6 +7,7 @@ import {
   projectIdSchema,
   workerProfileIdSchema,
 } from './ids';
+import { PM_DISCOVERY_REPORT_SCHEMA } from './intent';
 
 export const WORKER_PROFILE_API_VERSION = 'mesh.dev/v1alpha1' as const;
 
@@ -49,8 +50,11 @@ export const runtimePreferenceSchema = z.strictObject({
 });
 export type RuntimePreference = z.infer<typeof runtimePreferenceSchema>;
 
-export const workerProfileSpecSchema = z.strictObject({
-  assignmentKinds: z.tuple([z.literal('foundation-check')]).readonly(),
+const workerProfileSpecShape = {
+  assignmentKinds: z.union([
+    z.tuple([z.literal('foundation-check')]).readonly(),
+    z.tuple([z.literal('pm_discovery')]).readonly(),
+  ]),
   preferredRuntime: runtimePreferenceSchema,
   alternatives: z.array(runtimePreferenceSchema).max(16).readonly(),
   requiredCapabilities: z
@@ -67,10 +71,44 @@ export const workerProfileSpecSchema = z.strictObject({
     .min(1)
     .max(32 * 1024),
   outputSchema: z.string().trim().min(1).max(256),
-});
+};
+
+const requirePmOutputSchema = (
+  value: {
+    assignmentKinds?: readonly ['foundation-check'] | readonly ['pm_discovery'];
+    outputSchema?: string;
+  },
+  context: z.RefinementCtx,
+) => {
+  if (
+    value.assignmentKinds?.[0] === 'pm_discovery' &&
+    value.outputSchema !== PM_DISCOVERY_REPORT_SCHEMA
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['outputSchema'],
+      message: `PM discovery profiles require ${PM_DISCOVERY_REPORT_SCHEMA}`,
+    });
+  }
+};
+
+export const workerProfileSpecSchema = z
+  .strictObject(workerProfileSpecShape)
+  .superRefine(requirePmOutputSchema);
 export type WorkerProfileSpec = z.infer<typeof workerProfileSpecSchema>;
 
-const partialWorkerProfileSpecSchema = workerProfileSpecSchema.partial();
+const partialWorkerProfileSpecSchema = z
+  .strictObject({
+    assignmentKinds: workerProfileSpecShape.assignmentKinds.optional(),
+    preferredRuntime: workerProfileSpecShape.preferredRuntime.optional(),
+    alternatives: workerProfileSpecShape.alternatives.optional(),
+    requiredCapabilities:
+      workerProfileSpecShape.requiredCapabilities.optional(),
+    skills: workerProfileSpecShape.skills.optional(),
+    instructions: workerProfileSpecShape.instructions.optional(),
+    outputSchema: workerProfileSpecShape.outputSchema.optional(),
+  })
+  .superRefine(requirePmOutputSchema);
 
 const duplicateSkillIds = (
   value: z.infer<typeof partialWorkerProfileSpecSchema>,

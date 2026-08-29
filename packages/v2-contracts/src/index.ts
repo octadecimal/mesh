@@ -3,6 +3,7 @@ export * from './events';
 export * from './executions';
 export * from './http';
 export * from './ids';
+export * from './intent';
 export * from './profiles';
 export * from './projects';
 export * from './realtime';
