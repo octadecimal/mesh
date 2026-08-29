@@ -1,3 +1,5 @@
+import type { RetainedRuntimeWindow } from '@mesh/v2-contracts';
+
 import { V2ResyncRequiredError, type V2Api } from '../api/client';
 import type { ProjectionDispatch } from './reducer';
 
@@ -15,23 +17,38 @@ type ActiveRequest = {
 
 const MAX_HYDRATION_ATTEMPTS = 3;
 
+const isCoherentWindow = (
+  projectId: string,
+  after: number,
+  window: RetainedRuntimeWindow,
+) =>
+  window.lowWater >= 1 &&
+  after >= window.lowWater - 1 &&
+  after <= window.highWater &&
+  window.events.length === window.highWater - after &&
+  window.events.every(
+    (event, index) =>
+      event.projectId === projectId && event.sequence === after + index + 1,
+  );
+
 const hydrate = async (api: V2Api, projectId: string, signal: AbortSignal) => {
   for (let attempt = 0; attempt < MAX_HYDRATION_ATTEMPTS; attempt += 1) {
     if (signal.aborted) throw signal.reason;
     const snapshot = await api.projectSnapshot(projectId, signal);
     if (signal.aborted) throw signal.reason;
+    if (snapshot.project.id !== projectId) continue;
     try {
-      const probe = await api.runtimeReplay(
-        projectId,
-        snapshot.cursors.runtime,
-        signal,
-      );
+      const probeAfter = snapshot.cursors.runtime;
+      const probe = await api.runtimeReplay(projectId, probeAfter, signal);
+      if (!isCoherentWindow(projectId, probeAfter, probe)) continue;
+      const fullAfter = probe.lowWater - 1;
       const runtimeWindow = await api.runtimeReplay(
         projectId,
-        probe.lowWater - 1,
+        fullAfter,
         signal,
       );
       if (
+        !isCoherentWindow(projectId, fullAfter, runtimeWindow) ||
         runtimeWindow.lowWater !== probe.lowWater ||
         runtimeWindow.highWater !== probe.highWater
       ) {

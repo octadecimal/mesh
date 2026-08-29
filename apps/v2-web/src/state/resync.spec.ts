@@ -6,6 +6,7 @@ import type {
 
 import { V2ResyncRequiredError, type V2Api } from '../api/client';
 import { createResyncCoordinator } from './resync';
+import { createV2Store } from './store';
 
 const projectOne = '00000000-0000-4000-8000-000000000001';
 const projectTwo = '00000000-0000-4000-8000-000000000002';
@@ -67,6 +68,47 @@ const retained = (
     runtimeEvent(projectId, firstSequence + index),
   ),
 });
+
+const validProbe = retained(projectOne, 3, 6, 6);
+const validFull = retained(projectOne, 3, 6, 3);
+const recoveredProbe = retained(projectOne, 4, 6, 7);
+const recoveredFull = retained(projectOne, 4, 6, 4);
+
+const invalidReplayCases = [
+  {
+    stage: 'probe',
+    defect: 'project mismatch',
+    invalid: {
+      ...validProbe,
+      events: [{ ...runtimeEvent(projectOne, 6), projectId: projectTwo }],
+    },
+  },
+  {
+    stage: 'full',
+    defect: 'project mismatch',
+    invalid: {
+      ...validFull,
+      events: validFull.events.map((event) => ({
+        ...event,
+        projectId: projectTwo,
+      })),
+    },
+  },
+  {
+    stage: 'probe',
+    defect: 'noncontiguous sequences',
+    invalid: { ...validProbe, events: [] },
+  },
+  {
+    stage: 'full',
+    defect: 'noncontiguous sequences',
+    invalid: { ...validFull, events: validFull.events.slice(1) },
+  },
+] satisfies ReadonlyArray<{
+  stage: 'probe' | 'full';
+  defect: string;
+  invalid: RetainedRuntimeWindow;
+}>;
 
 const apiWithProjectSnapshot = (
   projectSnapshot: V2Api['projectSnapshot'],
@@ -187,6 +229,138 @@ describe('createResyncCoordinator', () => {
       expect(dispatch).toHaveBeenCalledOnce();
     },
   );
+
+  it.each(invalidReplayCases)(
+    'restarts after a $stage window $defect and dispatches only recovered state',
+    async ({ stage, invalid }) => {
+      let snapshotRequests = 0;
+      const firstSnapshot = snapshot(projectOne, 2, 5);
+      const freshSnapshot = snapshot(projectOne, 3, 6);
+      const api = apiWithProjectSnapshot(
+        vi.fn(async () =>
+          snapshotRequests++ === 0 ? firstSnapshot : freshSnapshot,
+        ),
+        vi.fn(async (_projectId, after) => {
+          if (snapshotRequests === 1) {
+            if (stage === 'probe' || after === 2) return invalid;
+            return validProbe;
+          }
+          return after === 6 ? recoveredProbe : recoveredFull;
+        }),
+      );
+      const dispatch = vi.fn();
+
+      await createResyncCoordinator(api, dispatch).request(projectOne);
+
+      expect(api.projectSnapshot).toHaveBeenCalledTimes(2);
+      expect(dispatch).toHaveBeenCalledOnce();
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'snapshot.runtime_replay_received',
+        snapshot: freshSnapshot,
+        runtimeWindow: recoveredFull,
+      });
+    },
+  );
+
+  it.each(invalidReplayCases)(
+    'rejects after three $stage window $defect cycles without making the store stale',
+    async ({ stage, invalid }) => {
+      const store = createV2Store(projectOne);
+      const dispatch = vi.fn(store.dispatch);
+      const api = apiWithProjectSnapshot(
+        vi.fn(async () => snapshot(projectOne, 2, 5)),
+        vi.fn(async (_projectId, after) => {
+          if (stage === 'probe' || after === 2) return invalid;
+          return validProbe;
+        }),
+      );
+
+      await expect(
+        createResyncCoordinator(api, dispatch).request(projectOne),
+      ).rejects.toThrow('Runtime replay did not stabilize after 3 attempts.');
+
+      expect(api.projectSnapshot).toHaveBeenCalledTimes(3);
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(store.getState().connection).toEqual({ status: 'loading' });
+      expect(store.getCursors()).toEqual({ domain: 0, runtime: 0 });
+    },
+  );
+
+  it('retries a snapshot project mismatch before requesting replay', async () => {
+    let snapshotRequests = 0;
+    const freshSnapshot = snapshot(projectOne, 3, 6);
+    const runtimeReplay = vi.fn(async (_projectId, after) =>
+      after === 6 ? recoveredProbe : recoveredFull,
+    );
+    const api = apiWithProjectSnapshot(
+      vi.fn(async () =>
+        snapshotRequests++ === 0 ? snapshot(projectTwo, 2, 5) : freshSnapshot,
+      ),
+      runtimeReplay,
+    );
+    const dispatch = vi.fn();
+
+    await createResyncCoordinator(api, dispatch).request(projectOne);
+
+    expect(api.projectSnapshot).toHaveBeenCalledTimes(2);
+    expect(runtimeReplay).toHaveBeenCalledTimes(2);
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'snapshot.runtime_replay_received',
+      snapshot: freshSnapshot,
+      runtimeWindow: recoveredFull,
+    });
+  });
+
+  it('rejects repeated snapshot project mismatches without dispatch', async () => {
+    const store = createV2Store(projectOne);
+    const dispatch = vi.fn(store.dispatch);
+    const api = apiWithProjectSnapshot(
+      vi.fn(async () => snapshot(projectTwo, 2, 5)),
+    );
+
+    await expect(
+      createResyncCoordinator(api, dispatch).request(projectOne),
+    ).rejects.toThrow('Runtime replay did not stabilize after 3 attempts.');
+
+    expect(api.projectSnapshot).toHaveBeenCalledTimes(3);
+    expect(api.runtimeReplay).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(store.getState().connection).toEqual({ status: 'loading' });
+  });
+
+  it('retries a probe whose requested cursor is above its high-water', async () => {
+    let snapshotRequests = 0;
+    const freshSnapshot = snapshot(projectOne, 3, 6);
+    const cursorIncoherentProbe: RetainedRuntimeWindow = {
+      lowWater: 3,
+      highWater: 4,
+      events: [],
+    };
+    const matchingFull = retained(projectOne, 3, 4, 3);
+    const api = apiWithProjectSnapshot(
+      vi.fn(async () =>
+        snapshotRequests++ === 0 ? snapshot(projectOne, 2, 5) : freshSnapshot,
+      ),
+      vi.fn(async (_projectId, after) => {
+        if (snapshotRequests === 1) {
+          return after === 5 ? cursorIncoherentProbe : matchingFull;
+        }
+        return after === 6 ? recoveredProbe : recoveredFull;
+      }),
+    );
+    const dispatch = vi.fn();
+
+    await createResyncCoordinator(api, dispatch).request(projectOne);
+
+    expect(api.projectSnapshot).toHaveBeenCalledTimes(2);
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledWith({
+      type: 'snapshot.runtime_replay_received',
+      snapshot: freshSnapshot,
+      runtimeWindow: recoveredFull,
+    });
+  });
 
   it('rejects visibly after three unstable hydration attempts', async () => {
     const api = apiWithProjectSnapshot(
