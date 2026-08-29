@@ -8,7 +8,11 @@ import {
   workerExecutionIdSchema,
   workerProfileIdSchema,
 } from './ids';
-import { approvedIntentLedgerSchema, planningCycleViewSchema } from './intent';
+import {
+  approvedIntentLedgerSchema,
+  approvedPlanningOutcomeSchema,
+  planningCycleViewSchema,
+} from './intent';
 import { projectSchema } from './projects';
 import {
   profileNameSchema,
@@ -123,6 +127,20 @@ export const v2ProjectSnapshotSchema = z
         });
       }
     });
+    const nonterminalCycles = value.planningCycles.filter(
+      ({ cycle }) =>
+        cycle.lifecycle !== 'approved' &&
+        cycle.lifecycle !== 'proposal_rejected' &&
+        cycle.lifecycle !== 'abandoned',
+    );
+    if (nonterminalCycles.length > 1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['planningCycles'],
+        message:
+          'A snapshot can contain at most one nonterminal planning cycle',
+      });
+    }
     if (
       value.intentLedger !== null &&
       value.intentLedger.projectIntent.projectId !== value.project.id
@@ -144,6 +162,25 @@ const commandFailureSchema = z.strictObject({
     message: z.string().trim().min(1).max(4096),
   }),
 });
+
+const planningProposalApproveResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_proposal.approve'),
+    planningCycle: planningCycleViewSchema,
+    intentLedger: approvedIntentLedgerSchema,
+  })
+  .superRefine((value, context) => {
+    const result = approvedPlanningOutcomeSchema.safeParse({
+      planningCycle: value.planningCycle,
+      intentLedger: value.intentLedger,
+    });
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        context.addIssue({ ...issue, path: issue.path });
+      }
+    }
+  });
 
 export const v2CommandResultSchema = z.union([
   z.strictObject({
@@ -171,12 +208,7 @@ export const v2CommandResultSchema = z.union([
     commandType: z.literal('planning_cycle.submit_turn'),
     planningCycle: planningCycleViewSchema,
   }),
-  z.strictObject({
-    ok: z.literal(true),
-    commandType: z.literal('planning_proposal.approve'),
-    planningCycle: planningCycleViewSchema,
-    intentLedger: approvedIntentLedgerSchema,
-  }),
+  planningProposalApproveResultSchema,
   z.strictObject({
     ok: z.literal(true),
     commandType: z.literal('planning_proposal.reject'),

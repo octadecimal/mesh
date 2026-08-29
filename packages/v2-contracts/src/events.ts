@@ -10,7 +10,10 @@ import {
   workerExecutionIdSchema,
 } from './ids';
 import { workerExecutionSchema } from './executions';
-import { approvedIntentLedgerSchema, planningCycleViewSchema } from './intent';
+import {
+  approvedPlanningOutcomeSchema,
+  planningCycleViewSchema,
+} from './intent';
 import { projectSchema } from './projects';
 import { workerProfileRevisionSchema } from './profiles';
 
@@ -42,10 +45,7 @@ const planningCycleChangedDraftSchema = z.strictObject({
 const intentLedgerApprovedDraftSchema = z.strictObject({
   ...domainEventBase,
   type: z.literal('intent_ledger.approved'),
-  payload: z.strictObject({
-    planningCycle: planningCycleViewSchema,
-    intentLedger: approvedIntentLedgerSchema,
-  }),
+  payload: approvedPlanningOutcomeSchema,
 });
 
 const requireDomainEventProjectCoherence = (
