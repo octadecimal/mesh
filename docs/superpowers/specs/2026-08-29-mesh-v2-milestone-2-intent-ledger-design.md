@@ -310,6 +310,7 @@ The existing `WorkerExecution.assignment` union gains
 ```ts
 type PmDiscoveryAssignment = {
   kind: 'pm_discovery';
+  projectId: string;
   outputSchema: 'mesh.dev/pm-discovery-report/v1';
   planningCycleId: string;
   humanTurnId: string;
@@ -341,7 +342,9 @@ profile. Its resolved scope must be global or this project, its
 `mesh.dev/pm-discovery-report/v1`; otherwise the turn returns
 `planning_profile_incompatible` without creating a turn or execution. The
 profile contract adds `pm_discovery` without weakening existing
-`foundation-check` validation.
+`foundation-check` validation: it accepts exactly either single-kind tuple and
+requires the discovery schema for the PM tuple, while the existing foundation
+tuple retains its current bounded output-schema behavior.
 
 ### `mesh.dev/pm-discovery-report/v1`
 
