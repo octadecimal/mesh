@@ -309,7 +309,7 @@ The existing `WorkerExecution.assignment` union gains
 
 ```ts
 type PmDiscoveryAssignment = {
-  kind: 'pm-discovery';
+  kind: 'pm_discovery';
   outputSchema: 'mesh.dev/pm-discovery-report/v1';
   planningCycleId: string;
   humanTurnId: string;
@@ -337,10 +337,10 @@ grants no approval authority.
 
 The planning service, not the route or adapter, validates the frozen approved
 profile. Its resolved scope must be global or this project, its
-`assignmentKinds` must include `pm-discovery`, and `outputSchema` must equal
+`assignmentKinds` must include `pm_discovery`, and `outputSchema` must equal
 `mesh.dev/pm-discovery-report/v1`; otherwise the turn returns
 `planning_profile_incompatible` without creating a turn or execution. The
-profile contract adds `pm-discovery` without weakening existing
+profile contract adds `pm_discovery` without weakening existing
 `foundation-check` validation.
 
 ### `mesh.dev/pm-discovery-report/v1`
@@ -703,7 +703,7 @@ code remains under `packages/v2-contracts`, `apps/v2-server`, `apps/v2-web`, and
 Contract tests prove strict successful parsing, unknown-field rejection,
 collection bounds, record discrimination, exact enums, endpoint references,
 human-only envelopes, event coherence, and snapshot round trips. They also
-prove that an approved PM profile accepts the `pm-discovery` assignment only
+prove that an approved PM profile accepts the `pm_discovery` assignment only
 with the exact discovery output schema while the existing `foundation-check`
 profile behavior remains unchanged.
 
