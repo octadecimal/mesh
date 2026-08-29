@@ -154,7 +154,7 @@ export class ExecutionRepository {
     return (
       this.database
         .prepare(
-          "SELECT * FROM worker_executions WHERE lifecycle IN ('created','starting','running','interrupting','attention_required') ORDER BY created_at, id",
+          "SELECT * FROM worker_executions WHERE lifecycle IN ('created','starting','running','interrupting') ORDER BY created_at, id",
         )
         .all() as ExecutionRow[]
     ).map(toExecution);

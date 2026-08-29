@@ -44,7 +44,12 @@ const requiredExecution = (
 const advance = (
   fixture: V2TestDatabase,
   executions: ExecutionRepository,
-  target: 'starting' | 'running' | 'interrupting' | 'completed',
+  target:
+    | 'starting'
+    | 'running'
+    | 'interrupting'
+    | 'attention_required'
+    | 'completed',
   checkpointCursor = 0,
 ): WorkerExecution =>
   executions.transaction(() => {
@@ -70,6 +75,14 @@ const advance = (
       current.revision,
     );
     if (target === 'running') return current;
+    if (target === 'attention_required') {
+      return executions.transitionInTransaction(
+        current.id,
+        current.revision,
+        'attention_required',
+        '2026-08-28T02:00:02.000Z',
+      );
+    }
     if (target === 'interrupting') {
       return executions.transitionInTransaction(
         current.id,
@@ -224,6 +237,113 @@ describe('reconcileExecutions', () => {
       expect(context.operations.get(operation.id)?.state).toBe('unknown');
       expect(result.attentionRequired).toEqual([completed.id]);
       expect(diagnosticCount(context.fixture)).toBe(1);
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('skips an attention-required execution without a pending operation', async () => {
+    const context = setup();
+    try {
+      const attention = advance(
+        context.fixture,
+        context.executions,
+        'attention_required',
+        2,
+      );
+      const adapter = new FakeHarnessAdapter();
+      const probe = vi.spyOn(adapter, 'probe');
+      const before = reconciliationState(
+        context.fixture,
+        context.executions,
+        context.operations,
+        attention.id,
+      );
+
+      const result = await reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach: () => undefined,
+      });
+
+      expect(result).toEqual({
+        resumed: [],
+        terminalized: [],
+        attentionRequired: [],
+      });
+      expect(probe).not.toHaveBeenCalled();
+      expect(
+        reconciliationState(
+          context.fixture,
+          context.executions,
+          context.operations,
+          attention.id,
+        ),
+      ).toEqual(before);
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('reconciles attention through a pending operation exactly once', async () => {
+    const context = setup();
+    try {
+      const attention = advance(
+        context.fixture,
+        context.executions,
+        'attention_required',
+        2,
+      );
+      const operation = context.executions.transaction(() =>
+        context.operations.createPendingInTransaction({
+          executionId: attention.id,
+          kind: 'start',
+          request: { version: 'mesh.v2.execution-start/v1' },
+          createdAt: '2026-08-28T02:00:03.000Z',
+        }),
+      );
+      const adapter = new FakeHarnessAdapter();
+      const probe = vi.spyOn(adapter, 'probe');
+
+      const first = await reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach: () => undefined,
+      });
+      const afterFirst = reconciliationState(
+        context.fixture,
+        context.executions,
+        context.operations,
+        attention.id,
+      );
+      const second = await reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach: () => undefined,
+      });
+
+      expect(first.attentionRequired).toEqual([attention.id]);
+      expect(second.attentionRequired).toEqual([]);
+      expect(probe).toHaveBeenCalledOnce();
+      expect(context.operations.get(operation.id)?.state).toBe('succeeded');
+      expect(diagnosticCount(context.fixture)).toBe(1);
+      expect(
+        reconciliationState(
+          context.fixture,
+          context.executions,
+          context.operations,
+          attention.id,
+        ),
+      ).toEqual(afterFirst);
     } finally {
       context.fixture.close();
     }
