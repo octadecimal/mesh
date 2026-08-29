@@ -56,9 +56,15 @@ Testing Library, Playwright, Prettier.
 - Every human turn creates exactly one finite PM `WorkerExecution` with output
   schema `mesh.dev/pm-discovery-report/v1`. Do not add a persistent provider
   session, real adapter behavior, or a generic output-consumer framework.
-- Only `actor: { kind: 'human' }` may approve or reject a complete proposal.
-  Agent output, process completion, and partial item selection never mutate
-  canonical intent.
+- Reserve and durably bind the exact PM execution before activation can start
+  an adapter or consume events. Reconcile bound cycles before recovered-session
+  attachment, pending-launch drain, or command acceptance after restart.
+- Permit at most one nonterminal planning cycle per project. Bound each cycle
+  to 32 human turns, 32 PM turns, and 16 proposals; project snapshots carry the
+  active cycle plus at most 19 terminal cycle views.
+- Only `actor: { kind: 'human' }` may approve, reject, or abandon. Approval is
+  one complete proposal revision; agent output, process completion, and partial
+  item selection never mutate canonical intent.
 - M2 ends at approved intent and ledger recovery. Do not add milestones, tasks,
   task dependencies, readiness, requirement coverage, scheduling, workspaces,
   Developer/QA attempts, evidence, Board cards, or any other M3 behavior. Leave
@@ -86,7 +92,8 @@ export type PlanningCycleLifecycle =
   | 'awaiting_approval'
   | 'attention_required'
   | 'approved'
-  | 'proposal_rejected';
+  | 'proposal_rejected'
+  | 'abandoned';
 
 export type PlanningProposalLifecycle =
   | 'awaiting_approval'
@@ -113,9 +120,18 @@ export type RequirementRelationshipKind =
   | 'conflicts_with'
   | 'supersedes'
   | 'duplicates';
+export type DecisionStatus = 'active' | 'superseded' | 'retired';
+export type AssumptionStatus =
+  | 'active'
+  | 'confirmed'
+  | 'invalidated'
+  | 'retired';
+export type QuestionStatus = 'open' | 'answered' | 'retired';
+export type RiskStatus = 'open' | 'mitigated' | 'accepted' | 'retired';
 
 export type PmDiscoveryAssignment = {
   kind: 'pm_discovery';
+  projectId: string;
   outputSchema: typeof PM_DISCOVERY_REPORT_SCHEMA;
   planningCycleId: string;
   humanTurnId: string;
@@ -155,6 +171,9 @@ export type ApprovePlanningProposalEnvelope = V2CommandEnvelope & {
 export type RejectPlanningProposalEnvelope = V2CommandEnvelope & {
   command: Extract<V2Command, { type: 'planning_proposal.reject' }>;
 };
+export type AbandonPlanningCycleEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'planning_cycle.abandon' }>;
+};
 
 export type PlanningCycleView = {
   cycle: PlanningCycle;
@@ -190,15 +209,24 @@ type WorkerExecutionStructuredOutputRuntimeEventDraft = {
 
 ```ts
 planningCycles: readonly PlanningCycleView[];
+planningHistoryTruncated: boolean;
 intentLedger: ApprovedIntentLedger | null;
 ```
 
 The planning service boundary produced by T02 and consumed by T05 is:
 
 ```ts
-export type PmExecutionLauncher = (
-  input: PmExecutionLaunchInput,
-) => Promise<WorkerExecution>;
+export type PmExecutionReservation = {
+  execution: WorkerExecution;
+  result: V2CommandResult;
+  activationRequired: boolean;
+};
+
+export type PmExecutionLauncher = {
+  reserve(input: PmExecutionLaunchInput): Promise<PmExecutionReservation>;
+  activate(executionId: WorkerExecutionId): Promise<void>;
+  interrupt(executionId: WorkerExecutionId): Promise<void>;
+};
 
 export class PlanningService {
   submitTurn(
@@ -210,7 +238,11 @@ export class PlanningService {
   rejectProposal(
     envelope: RejectPlanningProposalEnvelope,
   ): V2CommandResult;
+  abandonCycle(
+    envelope: AbandonPlanningCycleEnvelope,
+  ): Promise<V2CommandResult>;
   drainPendingLaunches(): Promise<void>;
+  reconcileBoundCycles(): void;
   reconcileTerminalExecution(executionId: string): void;
 }
 
@@ -222,9 +254,57 @@ export class PmReportConsumer {
 }
 ```
 
-The T05 launcher calls existing M1 `ExecutionRuntime.start` with a deterministic
-idempotency key `planning-turn:<humanTurnId>` and the cycle's frozen PM profile.
-It does not duplicate execution lifecycle code.
+T03 adds `ExecutionRuntime.reserveStart` and `activateReserved` while preserving
+the existing `start` signature as a reserve/activate wrapper. T05 adapts those
+methods to `PmExecutionLauncher`; T02 reserves with deterministic idempotency
+key `planning-turn:<humanTurnId>`, commits the exact execution binding, and only
+then activates it. No layer duplicates execution lifecycle code.
+
+```ts
+export type ReservedExecutionStart = {
+  execution: WorkerExecution;
+  result: V2CommandResult;
+  activationRequired: boolean;
+};
+
+export class ExecutionReservationError extends Error {
+  readonly result: V2CommandResult;
+}
+
+export class ExecutionRuntime {
+  reserveStart(
+    envelope: StartExecutionEnvelope,
+  ): Promise<ReservedExecutionStart>;
+  activateReserved(executionId: WorkerExecutionId): Promise<void>;
+  start(envelope: StartExecutionEnvelope): Promise<V2CommandResult>;
+}
+```
+
+`ReservedExecutionStart` and T02's `PmExecutionReservation` are deliberately
+structurally identical; the T05 adapter is the sole W1 composition point.
+`reserveStart` rejects with `ExecutionReservationError` before any write when
+project/profile lookup or adapter capability/skill probing cannot produce the
+required snapshots. The M1 `start` wrapper preserves its command-result behavior;
+T02 leaves the planning turn pending for retry or human abandonment.
+
+T01 freezes these planning result codes; T02 returns them and T05 may not
+reinterpret them:
+
+| Code | HTTP status from `/api/v2/commands` |
+| --- | --- |
+| `planning_cycle_not_found` | `200` with `ok: false` |
+| `planning_cycle_active_conflict` | `200` with `ok: false` |
+| `planning_cycle_revision_conflict` | `200` with `ok: false` |
+| `planning_cycle_history_limit` | `200` with `ok: false` |
+| `planning_proposal_not_found` | `200` with `ok: false` |
+| `planning_proposal_revision_conflict` | `200` with `ok: false` |
+| `planning_canonical_base_conflict` | `200` with `ok: false` |
+| `planning_profile_incompatible` | `200` with `ok: false` |
+| `planning_proposal_invalid` | `200` with `ok: false` |
+
+Malformed/non-human envelopes remain `invalid_request`/`400`; origin rejection
+is `403`; retained-gap/stable transport conflicts are `409`; stopping/audit
+failures are `503`; unknown exceptions are `500`.
 
 ## Dependency Waves and Ownership Audit
 
@@ -297,6 +377,39 @@ changed paths, every gate command/result, unexpected surfaces, and whether the
 wave stop condition is satisfied. The coordinator accepts a wave only after a
 separate review confirms that handoff against repository evidence.
 
+### Coordinator Campaign Ledger and Morning Handoff
+
+The coordinator maintains one campaign ledger outside worker-owned commits and
+updates it at worker launch, handoff, review, rework, integration, and gate
+boundaries. Each task row records: task ID and wave; worker/reviewer IDs; frozen
+base; branch; absolute worktree; worker commit; exact changed paths; review
+commit and verdict; every rework commit and fresh reviewer; integration order
+and resulting head; commands/results; decisions and assumptions; blockers; the
+observed `origin/master` SHA; and whether origin drifted from the campaign base.
+Origin drift is informational unless the coordinator explicitly replans; no
+worker rebases or absorbs it.
+
+At the end of the unattended run, the coordinator returns exactly this
+operator-facing packet, populated from repository evidence rather than worker
+claims:
+
+```text
+MORNING HANDOFF
+Status: ready_for_milestone_review | ready_for_hands_on_test | blocked
+Campaign base: <full SHA>
+Origin/master observed: <full SHA and drift yes/no>
+Integration head: <full SHA or none>
+Tasks: <each ID, branch, worktree, worker commit, review ID/verdict, rework commits>
+Integration: <ordered commits, integration commits, resulting heads>
+Decisions and assumptions: <settled items or none>
+Verification: <exact commands, exit codes, concise results, and head tested>
+Stop-condition proof: <each final criterion satisfied/unproved with evidence>
+Blockers: <owner and bounded next action, or none>
+Review: <final independent reviewer ID, exact head, verdict, findings>
+Changed surfaces: <exact base-to-head paths>
+Unverified and risks: <items or none>
+```
+
 ---
 
 ### Task T01: Intent, Planning, and Realtime Contracts
@@ -312,6 +425,7 @@ snapshots, without introducing an M3 type.
 - Modify: `packages/v2-contracts/src/commands.ts`
 - Modify: `packages/v2-contracts/src/events.ts`
 - Modify: `packages/v2-contracts/src/executions.ts`
+- Modify: `packages/v2-contracts/src/profiles.ts`
 - Modify: `packages/v2-contracts/src/http.ts`
 - Modify: `packages/v2-contracts/src/index.ts`
 - Test: `packages/v2-contracts/src/contracts.spec.ts`
@@ -325,15 +439,18 @@ snapshots, without introducing an M3 type.
 - Produces: every type and event in the Settled Interface Map; branded IDs for
   planning cycles/turns/questions/proposals/intents/ledgers/records; strict
   `ProjectIntentContent`, record discriminated unions, proposal members and
-  relationships, command results, and stable error codes.
+  relationships, complete-cycle events, PM-compatible profiles, command
+  results, and the exact stable error/status table above.
 
 - [ ] **Step 1: Add red contract cases for the exact domain vocabulary**
 
   Add table-driven parsing cases that assert all six requirement kinds, all
   five requirement statuses, all five requirement relationship kinds, the five
-  record types, and `constrains`. Include failures for an unknown kind, missing
-  risk mitigation, requirement-only fields on a decision, a self-edge, and an
-  M3-shaped `taskId` field.
+  record types and their settled lifecycle statuses, and `constrains`. Assert
+  reversed `conflicts_with`/`duplicates` normalize to one lexical pair while
+  directed kinds retain order. Include failures for an unknown kind, missing
+  risk mitigation, invalid answered-question resolution, requirement-only
+  fields on a decision, a self-edge, and an M3-shaped `taskId` field.
 
   ```ts
   it.each([
@@ -381,9 +498,11 @@ snapshots, without introducing an M3 type.
   Implement the settled types with `z.strictObject`, branded UUID IDs,
   nonempty trimmed strings, maximum 4,096 characters per narrative field,
   maximum 100 records, 200 relationships, 20 questions, and 20 provenance
-  references per record. Add `superRefine` rules for unique keys, structurally
-  resolvable proposal-local endpoint references, and no self-edge. T02 performs
-  semantic endpoint-type validation against reused canonical records.
+  references per record. Bound assignment conversation to 64 turns, each human
+  or PM message to 16 KiB, proposal history to 16 revisions, and snapshot cycle
+  views to 20. Add `superRefine` rules for unique keys, structurally resolvable
+  proposal-local endpoint references, and no self-edge. T02 performs semantic
+  endpoint-type validation against reused canonical records.
 
   ```ts
   export const PM_DISCOVERY_REPORT_SCHEMA =
@@ -413,11 +532,13 @@ snapshots, without introducing an M3 type.
 
 - [ ] **Step 4: Extend execution, command, event, result, and snapshot unions**
 
-  Add the three human commands and envelopes, planning-specific success result
-  variants, `PmDiscoveryAssignment`, structured-output runtime event,
-  `planning_cycle.changed`, `intent_ledger.approved`, and the two snapshot
-  fields. Keep every union strict and add project/embedded-record coherence
-  refinements.
+  Add the four human commands and envelopes, the nine exact planning failure
+  codes, planning-specific success result variants, `PmDiscoveryAssignment`,
+  structured-output runtime event, replay-complete `planning_cycle.changed`,
+  `intent_ledger.approved`, and the three snapshot fields. The cycle event
+  carries one complete bounded `PlanningCycleView`; snapshots carry at most 20
+  cycle views and an explicit truncation flag. Keep every union strict and add
+  project/embedded-record coherence refinements.
 
   ```ts
   export const submitPlanningTurnCommandSchema = z
@@ -433,13 +554,22 @@ snapshots, without introducing an M3 type.
     .superRefine(requireProfileOnlyForNewCycle);
   ```
 
+  Extend `profiles.ts` with exactly two allowed single-kind tuples:
+  `['foundation-check']` retains its current bounded output-schema behavior,
+  while `['pm_discovery']` requires
+  `mesh.dev/pm-discovery-report/v1`. Refine execution/start-request parsing so
+  assignment `projectId`, selected project, approved profile scope/revision,
+  assignment kind, and PM output schema are coherent.
+
 - [ ] **Step 5: Add round-trip, strictness, and authority tests**
 
-  Parse valid question/proposal reports, planning events, complete snapshots,
-  and all three command results. Assert unknown fields fail, the output schema
-  literal is exact, all proposal-local keys resolve, snapshot children match
-  the project, command actors are human, and no approval command is representable
-  inside `PmDiscoveryReport`.
+  Parse valid question/proposal reports, complete-cycle supersede/reject events,
+  complete snapshots, and all four command results. Assert unknown fields fail,
+  the output schema literal is exact, all proposal-local keys resolve, snapshot
+  children match the project, command actors are human, and no approval command
+  is representable inside `PmDiscoveryReport`. Add compatibility cases proving
+  existing foundation profiles still parse, exact PM profiles/assignments parse,
+  and a PM profile with the wrong assignment kind or output schema fails.
 
 - [ ] **Step 6: Run the T01 green gate**
 
@@ -453,12 +583,13 @@ snapshots, without introducing an M3 type.
   ```
 
   Expected: all commands exit `0`; contract tests include explicit failures for
-  `taskId`, `covers`, unknown fields, and non-human command envelopes.
+  `taskId`, `covers`, unknown fields, non-human command envelopes, and
+  incompatible PM profile/output bindings.
 
 - [ ] **Step 7: Commit T01**
 
   ```powershell
-  git add -- packages/v2-contracts
+  git add -- packages/v2-contracts/src/intent.ts packages/v2-contracts/src/ids.ts packages/v2-contracts/src/commands.ts packages/v2-contracts/src/events.ts packages/v2-contracts/src/executions.ts packages/v2-contracts/src/profiles.ts packages/v2-contracts/src/http.ts packages/v2-contracts/src/index.ts packages/v2-contracts/src/contracts.spec.ts
   git commit -m "feat(v2): define intent ledger contracts"
   ```
 
@@ -493,7 +624,8 @@ runtime or transport composition.
 **Interfaces:**
 
 - Consumes: T01 contracts; M1 `V2CommandRepository`, `V2EventStore`,
-  `ExecutionRepository`, `inImmediateTransaction`, `AuditBarrier`, and test DB.
+  `ExecutionRepository`, `WorkerProfileService.resolveApproved`,
+  `inImmediateTransaction`, `AuditBarrier`, and test DB.
 - Produces: `PlanningRepository`, `PlanningService`, `PmReportConsumer`,
   `PmExecutionLauncher`, `planningSnapshot(projectId)`,
   `approvedIntentLedger(projectId)`, and durable pending-launch reads.
@@ -503,8 +635,10 @@ runtime or transport composition.
   Prove a fresh database and an exact migration-1 database both reach migration
   2; capture the SHA-256 of `001_foundation.sql` before the test and assert the
   source is unchanged. Test immutable inserts, ordered turns/proposals,
-  provenance ownership, exact ledger membership, edge uniqueness, and restart
-  reads.
+  conversation-turn-only provenance ownership, proposal key-to-UUID
+  reservations without canonical rows, exact ledger membership, the partial
+  unique index for one nonterminal cycle, symmetric edge normalization,
+  complete cycle-view reads, and restart reads.
 
   ```ts
   expect(migrationRows(database)).toEqual([
@@ -532,7 +666,9 @@ runtime or transport composition.
   after migration 1 in `migrate.ts`. Keep SQL inside the repository and parse
   every read through T01 schemas. Use canonical JSON for arrays/content and
   separate provenance, membership, and relationship rows for referential
-  integrity.
+  integrity. Include `planning_proposal_records`, the nonterminal-cycle partial
+  unique index, lexical storage constraints for symmetric edges, and no
+  provenance variant beyond durable conversation turns.
 
   ```ts
   const intentLedgerMigration = {
@@ -558,14 +694,26 @@ runtime or transport composition.
   Cover new-cycle PM profile freezing, later-turn profile reuse, one pending
   launch per human turn, exact command replay, question receipt, complete
   proposal receipt, proposal supersession, revision request, rejection,
-  approval, stale cycle/base/record failures, agent self-approval, malformed and
-  duplicate output, completion without receipt, and injected failures at
-  receipt insert, canonical insert, event append, and command-result insert.
+  abandonment/interruption (including interruption failure that cannot reopen
+  the cycle), approval, stale cycle/base/record failures, agent self-approval,
+  malformed and duplicate output, completion without receipt,
+  and injected failures at receipt insert, canonical insert, event append, and
+  command-result insert. Prove the nine exact planning failures, single-active
+  conflict, 32/32/16 history limits, all five record lifecycle-only removals,
+  proposal-time reserved IDs becoming canonical only on approval, and complete
+  cycle events for supersede/reject/abandon.
+
+  T02 owns approved-profile validation. Using an injected
+  `Pick<WorkerProfileService, 'resolveApproved'>`, prove the selected revision
+  is approved, global or scoped to the same project, includes `pm_discovery`,
+  and has exactly `mesh.dev/pm-discovery-report/v1`; wrong scope/kind/schema
+  returns `planning_profile_incompatible` before any turn or execution write.
 
   ```ts
   await service.submitTurn(firstTurnEnvelope);
   await service.submitTurn(firstTurnEnvelope);
-  expect(launcher).toHaveBeenCalledTimes(1);
+  expect(launcher.reserve).toHaveBeenCalledTimes(1);
+  expect(launchTrace).toEqual(['reserve', 'bind', 'publish', 'activate']);
 
   expect(() =>
     approvePlanningProposalEnvelopeSchema.parse(agentEnvelope),
@@ -590,9 +738,14 @@ runtime or transport composition.
 
   Use the exact interfaces in the Settled Interface Map. `submitTurn` commits
   the turn/event/result before invoking a launcher. `drainPendingLaunches`
-  derives `planning-turn:<turnId>`, binds the returned execution in a second
-  transaction, and is safe after restart. The consumer accepts only a matching
-  `pm_discovery` assignment and performs one immediate transaction per report.
+  derives `planning-turn:<turnId>`, calls `reserve`, binds its returned exact
+  execution and complete cycle event in a second transaction, publishes that
+  committed event, then calls `activate`; it is idempotent after restart.
+  Reservation exceptions leave the turn pending, terminal capability/skill
+  reservations bind then move the cycle to attention, and activation failures
+  terminalize an already-bound execution.
+  The consumer accepts only a matching `pm_discovery` assignment and performs
+  one immediate transaction per report.
 
   ```ts
   const launchKey = (turnId: string) => `planning-turn:${turnId}`;
@@ -612,6 +765,11 @@ runtime or transport composition.
   }
   ```
 
+  `reconcileBoundCycles` first consumes any durable unconsumed structured output
+  for each bound nonterminal cycle, then re-reads it and terminalizes an
+  `execution_active` cycle whose execution is terminal without an accepted
+  receipt. It is idempotent and does not attach sessions or drain pending turns.
+
 - [ ] **Step 8: Make service tests green and run the T02 gate**
 
   Run:
@@ -623,18 +781,21 @@ runtime or transport composition.
   ```
 
   Expected: all commands exit `0`; injected persistence failures leave no
-  partial canonical, receipt, command-result, or event rows.
+  partial canonical, receipt, command-result, or event rows. Accepted,
+  superseded, rejected, and abandoned reservations have the exact canonical or
+  noncanonical semantics defined by the design.
 
 - [ ] **Step 9: Commit T02**
 
   ```powershell
-  git add -- apps/v2-server/src/db apps/v2-server/src/planning apps/v2-server/src/test/create-v2-test-database.ts
+  git add -- apps/v2-server/src/db/migrations/002_intent_ledger.sql apps/v2-server/src/db/migrate.ts apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-service.ts apps/v2-server/src/planning/planning-service.spec.ts apps/v2-server/src/planning/pm-report-consumer.ts apps/v2-server/src/planning/pm-report-consumer.spec.ts apps/v2-server/src/test/create-v2-test-database.ts
   git commit -m "feat(v2): persist intent ledger planning"
   ```
 
 **Acceptance:** Migration 2 is forward-only; all planning and canonical history
 survives reopen; human approval is exact and atomic; invalid/duplicate worker
-output cannot partially mutate canonical intent.
+output cannot partially mutate canonical intent; profile incompatibility and
+every lifecycle limit fail before unauthorized writes.
 
 ---
 
@@ -662,7 +823,9 @@ persistent planning session.
   `V2EventStore.appendRuntimeWithDiagnosticInTransaction`.
 - Produces: `FakePmScenario = 'todo' | 'malformed' | 'duplicate' |
   'missing_output'`; `FakeHarnessAdapter` constructor option
-  `pmScenario?: FakePmScenario`; unchanged adapter/runtime public signatures.
+  `pmScenario?: FakePmScenario`; `ExecutionRuntime.reserveStart` and
+  `activateReserved`; the existing `start` signature and behavior preserved as
+  their wrapper.
 
 - [ ] **Step 1: Add red runtime ordering and fake scenario tests**
 
@@ -671,6 +834,15 @@ persistent planning session.
   event has a raw diagnostic committed first; malformed emits unparseable
   value; duplicate emits two output envelopes; missing-output emits only
   completion. Assert no second call reuses a native PM handle.
+
+  Add runtime boundary cases proving `reserveStart` returns the exact execution
+  and command result without calling `adapter.start`, attaching, or consuming
+  events. Cover successful reservation, missing capabilities, missing skills,
+  project/profile lookup failure, adapter capability/skill probe failure,
+  reservation persistence failure, adapter-start failure, attachment failure,
+  and idempotent replay. Lookup/probe/reservation exceptions write no execution
+  or event; only `activateReserved` may cross into adapter startup; terminal
+  capability/skill reservations report `activationRequired: false`.
 
   ```ts
   const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });
@@ -693,16 +865,24 @@ persistent planning session.
   ```
 
   Expected: FAIL because the runtime event and PM fake scenarios are not
-  implemented.
+  implemented and `reserveStart`/`activateReserved` do not exist.
 
-- [ ] **Step 3: Extend the fake script and runtime event persistence**
+- [ ] **Step 3: Split reservation from activation and extend the fake script**
 
-  Branch only on `assignment.kind`. Keep the existing foundation script intact.
-  For `pm_discovery`, generate a fresh finite native handle and the deterministic
-  report bound to assignment IDs/revisions. The Todo proposal must include the
-  design's five record types, three requirements, `depends_on`, `constrains`,
-  and provenance to both turns. Do not add an adapter session cache or provider
-  resume concept.
+  Extract the reservation transaction already at the front of M1 `start` into
+  `reserveStart`. It returns `{ execution, result, activationRequired }` and
+  never calls `adapter.start`, attaches a session, or launches an event loop.
+  Move those effects to idempotent `activateReserved(executionId)`. Keep
+  `start(envelope)` at its exact M1 signature as reserve, conditional activate,
+  then `result`, mapping typed no-write reservation errors to the existing
+  command result so foundation behavior and callers do not change.
+
+  Branch the fake only on `assignment.kind`. Keep the existing foundation
+  script intact. For `pm_discovery`, generate a fresh finite native handle and
+  the deterministic report bound to assignment IDs/revisions. The Todo proposal
+  must include the design's five record types, three requirements, `depends_on`,
+  `constrains`, and provenance to both turns. Do not add an adapter session cache
+  or provider resume concept.
 
   ```ts
   const scriptEnvelope = (
@@ -730,17 +910,21 @@ persistent planning session.
   ```
 
   Expected: all commands exit `0`; the audit-failure test publishes neither the
-  structured event nor completion and trips the barrier.
+  structured event nor completion and trips the barrier. The reservation tests
+  show no adapter event can precede the planning binding, while every expected
+  or unexpected start failure leaves exactly one durable execution outcome.
 
 - [ ] **Step 5: Commit T03**
 
   ```powershell
-  git add -- apps/v2-server/src/executions
+  git add -- apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/fake-harness.ts apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/harness-adapter.ts
   git commit -m "feat(v2): add finite fake pm reports"
   ```
 
 **Acceptance:** PM behavior is finite and fake-only, structured output uses the
 existing audited runtime path, and no planning authority enters the adapter.
+The exact execution is reservable before consumption and M1 foundation start
+behavior remains compatible.
 
 ---
 
@@ -764,8 +948,8 @@ owning transport, reducer, lifecycle, or Board behavior.
 
 - Consumes: T01 `PlanningCycleView`, `PlanningProposal`,
   `ApprovedIntentLedger`, `WorkerProfileSummary`, and `WorkerExecution`.
-- Produces: `PlanningPane` callbacks `onSubmitTurn`, `onApprove`, `onReject`;
-  `RequirementsPane({ intentLedger })`; no local canonical state.
+- Produces: `PlanningPane` callbacks `onSubmitTurn`, `onApprove`, `onReject`,
+  `onAbandon`; `RequirementsPane({ intentLedger })`; no local canonical state.
 
 - [ ] **Step 1: Write red component tests for all visible states**
 
@@ -773,8 +957,9 @@ owning transport, reducer, lifecycle, or Board behavior.
   and choice draft population, execution-active state, complete proposal
   summary/diff/provenance, Approve/Request revision/Reject callbacks, disabled
   disconnected/stale/submitting authority, live error, focus return, approved
-  state, empty Requirements state, all five record groups, requirement
-  kind/status, provenance, and textual relationship endpoints.
+  state, rejected/abandoned history, history-limit guidance and Abandon action,
+  empty Requirements state, all five record groups, every record lifecycle
+  status, provenance, and textual relationship endpoints.
 
   ```tsx
   render(
@@ -787,6 +972,7 @@ owning transport, reducer, lifecycle, or Board behavior.
       onSubmitTurn={onSubmitTurn}
       onApprove={onApprove}
       onReject={onReject}
+      onAbandon={onAbandon}
     />,
   );
   await user.click(screen.getByRole('button', { name: 'Approve proposal' }));
@@ -811,6 +997,9 @@ owning transport, reducer, lifecycle, or Board behavior.
   status/errors, and standard buttons for question choices. Request revision
   exposes the same human-turn textarea and callback; it never exposes per-item
   approval controls.
+
+  Render Abandon cycle for a nonterminal cycle, including history-limit state;
+  keep it disabled under the same disconnected/stale/submitting authority gate.
 
   ```tsx
   <section aria-labelledby="pm-chat-heading">
@@ -896,12 +1085,24 @@ placeholder.
 
 - [ ] **Step 1: Write red server composition tests**
 
-  Add route tests for submit/approve/reject parsing, stable status/error mapping,
-  idempotent replay, and human actor. Add snapshot tests for absent/present
-  ledger and complete planning history. Add runtime integration tests proving a
-  structured output is audited/published, consumed once, and terminalized; add
-  startup tests proving pending turns drain after execution reconciliation and
-  before command acceptance.
+  Add route tests for submit/approve/reject/abandon parsing, all nine exact
+  planning `ok: false` codes at HTTP 200, malformed/non-human 400, origin 403,
+  transport 409, stopping/audit 503, unknown 500, idempotent replay, and human
+  actor. Add snapshot tests for absent/present ledger, one active plus 19 latest
+  terminal cycle views, and truncation. Add runtime integration tests proving a
+  structured output is audited/published, consumed once, and terminalized.
+
+  Add startup cases for (a) a bound execution with durable unconsumed output and
+  (b) a bound execution terminalized immediately before process loss. Assert
+  exact order: M1 execution reconciliation without attachment, planning output
+  replay and terminal reconciliation, recovery-window publication, recovered
+  session attachment, pending-launch reserve/bind/activate drain, then command
+  acceptance. Assert a valid replayed receipt wins over terminal attention.
+
+  In `config.spec.ts`, add red cases proving
+  `MESH_V2_TEST_FAKE_PM_SCENARIO=todo` is accepted only with `NODE_ENV=test`, is
+  absent by default, and returns `invalid_v2_test_option` in production and when
+  `NODE_ENV` is unset. Reject unknown scenario values.
 
   ```ts
   const response = await app.inject({
@@ -922,15 +1123,18 @@ placeholder.
 
   ```powershell
   corepack pnpm exec vitest run apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/main.spec.ts --config apps/v2-server/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-server/src/config.spec.ts --config apps/v2-server/vitest.config.ts
   ```
 
   Expected: FAIL because planning dependencies are not composed into runtime,
-  routes, snapshots, or startup.
+  routes, snapshots, or startup, and config does not recognize the test-only PM
+  scenario.
 
 - [ ] **Step 3: Compose the planning runtime without a generic framework**
 
   `planning-runtime.ts` adapts the planning launcher to
-  `ExecutionRuntime.start`, subscribes only to
+  `ExecutionRuntime.reserveStart`, `activateReserved`, and the existing
+  interruption method, subscribes only to
   `worker_execution.structured_output` and terminal execution notifications,
   and calls T02's planning-specific methods. Add one explicit optional runtime
   observer dependency rather than a registry.
@@ -945,28 +1149,33 @@ placeholder.
   };
   ```
 
-  Wire repositories/services in `main.ts`, reconcile M1 executions, then drain
-  planning launches, then begin accepting commands. Extend the existing route
-  switch and snapshot reader. Parse `MESH_V2_TEST_FAKE_PM_SCENARIO` only in
-  explicit fake test mode, reject it in production/default configuration, and
-  pass it to `FakeHarnessAdapter`. Publish only events returned from committed
-  operations.
+  Wire repositories/services in `main.ts` and implement the exact startup order
+  asserted in Step 1. Reconciliation must finish before recovered sessions can
+  produce events, before pending launches activate, and before the server
+  accepts commands. Extend the existing route switch and snapshot reader. Parse
+  `MESH_V2_TEST_FAKE_PM_SCENARIO` only in explicit `NODE_ENV=test`, reject it in
+  production or default configuration, reject unknown values, and pass it to
+  `FakeHarnessAdapter`. Publish only events returned from committed operations.
 
 - [ ] **Step 4: Make server composition tests green**
 
-  Rerun Step 2.
+  Rerun both commands from Step 2, including the focused `config.spec.ts`
+  command.
 
   Expected: PASS, including restart drain, duplicate receipt, stale approval,
   and audit/persistence failure cases.
 
 - [ ] **Step 5: Write red client, reducer, resync, app, and shell tests**
 
-  Prove all three commands serialize through the existing client; snapshot and
-  domain events update planning/ledger state; duplicates are ignored; gaps,
-  project mismatch, incomplete projections, and invalid payloads request
-  resync; refresh retains the human draft but replaces server truth; the shell
-  renders T04 panes; tabs retain ArrowLeft/ArrowRight/Home/End; Board still says
-  `Available in a later milestone`; disconnected/stale state disables commands.
+  Prove all four commands serialize through the existing client; snapshot and
+  complete-cycle domain events update planning/ledger state; duplicates are
+  ignored; gaps, project mismatch, incomplete projections, and invalid payloads
+  request resync; refresh retains the human draft but replaces server truth;
+  the shell renders T04 panes; tabs retain ArrowLeft/ArrowRight/Home/End; Board
+  still says `Available in a later milestone`; disconnected/stale state disables
+  commands. Apply append, proposal supersede, reject, and abandon events to an
+  earlier snapshot and assert the final projection is byte-equivalent to a
+  fresh final snapshot.
 
   ```ts
   const next = reduceProjectProjection(state, {
@@ -1018,18 +1227,20 @@ placeholder.
 
   Expected: all commands exit `0`; server and browser converge from snapshots,
   incremental events, replay, forced resync, and restart without a second
-  transport or UI-owned lifecycle.
+  transport or UI-owned lifecycle. `config.spec.ts` proves the fake PM option is
+  test-only and rejected by production/default modes.
 
 - [ ] **Step 9: Commit T05**
 
   ```powershell
-  git add -- apps/v2-server/src/planning/planning-runtime.ts apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/config.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/http apps/v2-server/src/main.ts apps/v2-server/src/main.spec.ts apps/v2-web/src
+  git add -- apps/v2-server/src/planning/planning-runtime.ts apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/config.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/http/routes.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/http/snapshots.ts apps/v2-server/src/main.ts apps/v2-server/src/main.spec.ts apps/v2-web/src/api/client.ts apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/state/store.ts apps/v2-web/src/app/App.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/FocusedProjectShell.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx apps/v2-web/src/styles.css
   git commit -m "feat(v2): compose intent ledger workflow"
   ```
 
 **Acceptance:** One existing command route and realtime connection carry M2;
 restart ordering is deterministic; UI state is a server projection; the Board
-and M3 domain remain untouched.
+and M3 domain remain untouched. No bound terminal cycle can remain
+`execution_active` across startup.
 
 ---
 
@@ -1042,6 +1253,7 @@ describe the implemented boundary without claiming M3.
 **Files:**
 
 - Modify: `e2e-v2/src/v2-foundation.spec.ts`
+- Modify: `e2e-v2/src/fixtures/v2-process.ts`
 - Modify: `e2e-v2/project.json` only if the existing target cannot pass the
   test-only fake PM setting through unchanged
 - Modify: `docs/development/architecture.md`
@@ -1052,19 +1264,32 @@ describe the implemented boundary without claiming M3.
 **Interfaces:**
 
 - Consumes: the built W2 server/web, existing `v2-e2e` Playwright harness,
-  temporary Todo repository/database setup, and T03 `FakePmScenario`.
-- Produces: existing test-only `MESH_V2_TEST_FAKE_PM_SCENARIO=todo`
-  configuration in the built fixture; updated current architecture/operation
-  docs.
+  temporary Todo repository/database setup, and T05's test-only fake PM config.
+- Produces: `V2ProcessFixture.createTodo({ fakePmScenario: 'todo' })`, preserving
+  that explicit test-only selection for every owned server spawn and restart;
+  `forceProjectResync(page)` using the existing subscription/gap protocol; and
+  updated current architecture/operation docs.
 
 - [ ] **Step 1: Write the red built-process Todo scenario**
 
-  Extend the existing fixture rather than creating another server harness. In
-  the browser, register/select the temporary Todo repository, approve the fake
-  PM profile, send the initial description, assert structured questions, answer
-  them, assert the complete proposal and no item checkboxes, approve it, open
-  Requirements, and assert all five record types, requirement kind/status,
-  `depends_on`, `constrains`, and provenance to both turns.
+  Extend the existing fixture rather than creating another server harness.
+  First change `createTodo` to accept and retain
+  `fakePmScenario?: 'todo'`; `spawnServer` emits
+  `MESH_V2_TEST_FAKE_PM_SCENARIO` only from that retained option, and
+  `restartWithFreshFake` reuses it automatically. No global process environment
+  mutation is allowed. Add `forceProjectResync(page)`: subscribe with a
+  deliberately non-contiguous cursor beyond the current high-water mark, assert
+  the existing `v2.resync_required`, reload through the ordinary app snapshot
+  path, and return the converged snapshot for assertions.
+
+  In the browser, register/select the temporary Todo repository, approve the
+  fake PM profile, send the initial description, assert structured questions,
+  restart the built server, and assert the question/transcript survives. Answer
+  after restart and assert the complete Todo proposal, which behaviorally proves
+  the retained fake PM option reached the replacement child. Assert no item
+  checkboxes, approve it, open Requirements, and assert all five record types,
+  requirement kind/status, `depends_on`, `constrains`, and provenance to both
+  turns.
 
   ```ts
   await page.getByLabel('Message to project manager').fill(
@@ -1081,10 +1306,11 @@ describe the implemented boundary without claiming M3.
   await expect(page.getByText('constrains')).toBeVisible();
   ```
 
-  Restart the built server against the same temporary database, reload/reconnect,
-  and assert intent revision 1, ledger revision 1, transcript, provenance, and
-  relationships remain identical. Force one cursor gap using the fixture's
-  existing resync mechanism and assert the same result after snapshot refresh.
+  Start with `createTodo({ fakePmScenario: 'todo' })`. After approval, restart
+  once more against the same temporary database, reload/reconnect, and assert
+  intent revision 1, ledger revision 1, transcript, provenance, and
+  relationships remain identical. Call `forceProjectResync(page)` and assert
+  the same result after ordinary snapshot refresh.
 
 - [ ] **Step 2: Run the Todo E2E and prove red**
 
@@ -1095,14 +1321,16 @@ describe the implemented boundary without claiming M3.
   ```
 
   Expected: FAIL because the built-process fixture does not yet select the Todo
-  fake PM scenario and the new journey is absent.
+  fake PM scenario, preserve it across restart, expose forced gap/resync
+  control, or contain the new journey.
 
 - [ ] **Step 3: Make the Todo scenario green**
 
   Rerun Step 2.
 
   Expected: PASS using built server/web output, a temporary database/repository,
-  port `0`, and no external agent process.
+  port `0`, a fixture-owned fake PM option on both child processes, and no
+  external agent process.
 
 - [ ] **Step 4: Update current architecture and operating guidance**
 
@@ -1141,19 +1369,25 @@ describe the implemented boundary without claiming M3.
   Inspect repository evidence, not handoffs, and record all as satisfied:
 
   - two human turns each own one distinct finite PM execution;
+  - each execution was durably bound before adapter activation and startup
+    reconciliation leaves no bound terminal cycle `execution_active`;
   - questions and complete proposal history survive restart;
   - one human approval creates exactly intent revision 1 and ledger revision 1;
   - five record types, exact requirement vocabulary, provenance,
     `depends_on`, and `constrains` survive replay/resync/restart;
   - stale base, partial approval, agent self-approval, malformed/duplicate
     output, and injected persistence failure create no partial canonical state;
+  - one-active-cycle/history limits, lifecycle-only retirement, symmetric edge
+    normalization, and incremental/final snapshot equivalence are proven by the
+    accepted focused gates;
   - Requirements renders server truth and Board remains a placeholder;
   - the combined diff defines no M3 object or behavior.
 
 - [ ] **Step 7: Commit T06**
 
   ```powershell
-  git add -- e2e-v2 docs/development/architecture.md docs/development/v2-foundation.md
+  git add -- e2e-v2/src/v2-foundation.spec.ts e2e-v2/src/fixtures/v2-process.ts docs/development/architecture.md docs/development/v2-foundation.md
+  git add -- e2e-v2/project.json # No-op unless the conditional owned edit was necessary.
   git commit -m "test(v2): prove intent ledger milestone"
   ```
 
@@ -1192,6 +1426,39 @@ After W2, run the T05 W2 gate. After W3, run the T06 final gate and
 stop-condition audit. A green worker test without accepted review and clean
 integration evidence is insufficient.
 
+### Final Independent Milestone Review
+
+After W3 is integrated, the coordinator records the exact final integration
+head and reruns the complete T06 Step 5 gate on that head. Only after that gate
+passes, dispatch a fresh read-only milestone reviewer who was neither a task
+reviewer for the latest rework nor the final integrator. The reviewer receives
+the campaign base, exact final head, design, this plan, campaign ledger, all task
+and wave handoffs, and full-gate evidence. It independently inspects
+`<campaign-base>..<final-head>`, verifies every owned/prohibited surface and the
+Final Stop-Condition Proof against repository evidence, and returns:
+
+```text
+MILESTONE REVIEW HANDOFF
+Reviewer: <fresh reviewer ID>
+Base: <full campaign-base SHA>
+Integration head: <full reviewed SHA>
+Verdict: accept | rework | blocked
+Findings: <severity, path:line, impact, required correction; or none>
+Ownership and exclusions: <exact changed paths and M3/real-traffic audit>
+Stop-condition proof: <each criterion satisfied, unsatisfied, or unverified>
+Verification: <exact commands/evidence and the head to which each applies>
+Residual risks: <items or none>
+```
+
+`accept` is valid only for that exact head after the full gate. On `rework`, the
+coordinator sends each bounded finding to its owning task, records the new
+worker commit and a fresh task review, integrates accepted corrections in task
+order, reruns the complete full gate on the new head, and dispatches a different
+fresh milestone reviewer. The prior reviewer does not approve its own rework,
+and stale review evidence never transfers to a new head. On `blocked`, record
+the exact missing authority or external condition in the campaign ledger and
+MORNING HANDOFF. No hands-on-test handoff is ready before an `accept` verdict.
+
 ## Final Stop-Condition Proof
 
 Milestone 2 is complete only when one exact integrated commit proves all of the
@@ -1200,13 +1467,22 @@ following:
 - conversation -> structured questions -> answer -> complete proposed
   `ProjectIntent`/ledger diff -> human atomic approval;
 - immutable approved intent, stable record identities, immutable record and
-  ledger revisions, complete membership/edge snapshots, and provenance;
+  ledger revisions, complete membership/edge snapshots, proposal-reserved IDs
+  becoming canonical only on exact approval, and conversation-turn provenance;
 - exact requirement kinds/statuses/relationships and decision `constrains`
-  traceability;
+  traceability, lifecycle-only removal for all five record types, and normalized
+  symmetric conflict/duplicate edges;
 - one finite fake PM execution per human turn and one strict, idempotent,
   binding-validated report receipt per accepted output;
+- exact execution reservation and durable binding before activation, including
+  capability/skill/adapter start failures, with no pre-binding event consumption;
+- one active nonterminal cycle per project, bounded assignment/snapshot history,
+  replay-complete proposal supersede/reject/abandon events, and incremental
+  projection equivalent to a fresh snapshot;
 - audit-before-publish, immediate atomic approval, stale/invalid/failure
-  rollback, snapshot/replay/resync, and restart recovery;
+  rollback, snapshot/replay/resync, and restart recovery that reconciles durable
+  output/terminal executions before session attachment, pending launch, or
+  command acceptance;
 - accessible PM and Requirements UI with human-only all-or-nothing approval;
 - deterministic built-process Todo acceptance with no paid traffic,
   credentials, real repository, or operator state;
