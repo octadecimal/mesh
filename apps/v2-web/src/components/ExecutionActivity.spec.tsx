@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import type { WorkerExecution } from '@mesh/v2-contracts';
+import type { RuntimeEvent, WorkerExecution } from '@mesh/v2-contracts';
 import { describe, expect, it } from 'vitest';
 
 import { ExecutionActivity, type ChildActivity } from './ExecutionActivity';
@@ -25,7 +25,11 @@ const execution: WorkerExecution = {
     document: {
       apiVersion: 'mesh.dev/v1alpha1',
       kind: 'WorkerProfile',
-      metadata: { name: 'todo-worker', displayName: 'Todo worker', scope: 'global' },
+      metadata: {
+        name: 'todo-worker',
+        displayName: 'Todo worker',
+        scope: 'global',
+      },
       spec: {
         assignmentKinds: ['foundation-check'],
         preferredRuntime: { harness: 'fake', model: 'deterministic' },
@@ -38,12 +42,18 @@ const execution: WorkerExecution = {
     },
     digest: 'b'.repeat(64),
   },
-  skillRequests: { preferred: [{ id: 'test-driven-development' }], required: [{ id: 'verification-before-completion' }] },
+  skillRequests: {
+    preferred: [{ id: 'test-driven-development' }],
+    required: [{ id: 'verification-before-completion' }],
+  },
   resolvedSkills: [
     {
       requested: { id: 'test-driven-development' },
       mode: 'preferred',
-      resolution: { kind: 'mesh-native-fallback', workflow: 'mesh.foundation-check/v1' },
+      resolution: {
+        kind: 'mesh-native-fallback',
+        workflow: 'mesh.foundation-check/v1',
+      },
     },
     {
       requested: { id: 'verification-before-completion' },
@@ -51,7 +61,12 @@ const execution: WorkerExecution = {
       resolution: { kind: 'unavailable', reason: 'Not installed' },
     },
   ],
-  capabilitySnapshot: { adapterId: 'fake', capabilities: ['execution.stream'], skills: [], exactResume: true },
+  capabilitySnapshot: {
+    adapterId: 'fake',
+    capabilities: ['execution.stream'],
+    skills: [],
+    exactResume: true,
+  },
   adapterId: 'fake',
   model: 'deterministic',
   nativeHandle: 'opaque-handle',
@@ -77,19 +92,36 @@ const children: readonly ChildActivity[] = [
 
 describe('ExecutionActivity', () => {
   it('renders skill outcomes and nested child activity without provider details by default', () => {
-    render(<ExecutionActivity execution={execution} childActivities={children} projectCursors={{ domain: 4, runtime: 12 }} />);
+    render(
+      <ExecutionActivity
+        execution={execution}
+        childActivities={children}
+        projectCursors={{ domain: 4, runtime: 12 }}
+      />,
+    );
 
-    expect(screen.getByRole('article', { name: 'Todo foundation worker' })).toBeVisible();
+    expect(
+      screen.getByRole('article', { name: 'Todo foundation worker' }),
+    ).toBeVisible();
     expect(screen.getByText('Preferred skill fallback')).toBeVisible();
     expect(screen.getByText('Required skill unavailable')).toBeVisible();
-    const childActivity = screen.getByRole('list', { name: 'Child activity for Todo foundation worker' });
+    const childActivity = screen.getByRole('list', {
+      name: 'Child activity for Todo foundation worker',
+    });
     expect(childActivity).toHaveTextContent('Inspect package layout');
     expect(childActivity).toHaveTextContent('Read package.json');
     expect(screen.getByText('opaque-handle')).not.toBeVisible();
   });
 
   it('keeps provider-specific details inside the diagnostics disclosure', () => {
-    render(<ExecutionActivity execution={execution} childActivities={[]} diagnosticId="raw-1" projectCursors={{ domain: 23, runtime: 29 }} />);
+    render(
+      <ExecutionActivity
+        execution={execution}
+        childActivities={[]}
+        diagnosticId="raw-1"
+        projectCursors={{ domain: 23, runtime: 29 }}
+      />,
+    );
 
     expect(screen.getByText('Adapter ID')).not.toBeVisible();
     screen.getByText('Diagnostics').click();
@@ -101,6 +133,49 @@ describe('ExecutionActivity', () => {
     expect(screen.getByText('8')).toBeVisible();
     expect(screen.getByText('23')).toBeVisible();
     expect(screen.getByText('29')).toBeVisible();
+  });
+
+  it('shows normalized completion and child activity without changing lifecycle', () => {
+    const runtimeActivity: readonly RuntimeEvent[] = [
+      {
+        id: '55555555-5555-4555-8555-555555555555',
+        projectId: execution.projectId,
+        executionId: execution.id,
+        diagnosticId: '66666666-6666-4666-8666-666666666666',
+        sequence: 12,
+        adapterCursor: 5,
+        occurredAt: '2026-08-28T00:00:05.000Z',
+        type: 'worker_execution.child_started',
+        payload: { childId: 'child-1', title: 'child.started' },
+      },
+      {
+        id: '77777777-7777-4777-8777-777777777777',
+        projectId: execution.projectId,
+        executionId: execution.id,
+        diagnosticId: '88888888-8888-4888-8888-888888888888',
+        sequence: 13,
+        adapterCursor: 6,
+        occurredAt: '2026-08-28T00:00:06.000Z',
+        type: 'worker_execution.completed',
+        payload: { outcome: 'completed' },
+      },
+    ];
+
+    render(
+      <ExecutionActivity
+        execution={execution}
+        runtimeActivity={runtimeActivity}
+        projectCursors={{ domain: 4, runtime: 13 }}
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent('running');
+    const activity = screen.getByRole('list', {
+      name: 'Runtime activity for Todo foundation worker',
+    });
+    expect(activity).toHaveTextContent('child.started');
+    expect(activity).toHaveTextContent('Execution completed');
+    expect(activity).not.toHaveTextContent(runtimeActivity[0].diagnosticId);
   });
 });
 
