@@ -87,6 +87,7 @@ const trustedNextAdapterCursor = (
 
 export class ExecutionRuntime {
   private readonly active = new Map<string, ActiveSession>();
+  private readonly contained = new WeakSet<HarnessSession>();
 
   constructor(private readonly dependencies: Dependencies) {}
 
@@ -300,12 +301,14 @@ export class ExecutionRuntime {
         resolvedSkills,
       });
     } catch (error) {
+      if (await this.stopIfBarrierTripped()) return acceptance;
       const failedAt = this.dependencies.now();
       let failedEvent: DomainEvent;
       try {
         failedEvent = inImmediateTransaction(
           this.dependencies.database,
           () => {
+            this.dependencies.barrier.assertHealthy();
             const current = requireExecution(
               this.dependencies.executions,
               executionId,
@@ -340,12 +343,15 @@ export class ExecutionRuntime {
           },
         );
       } catch (auditError) {
-        this.dependencies.barrier.trip(auditError, failedAt);
+        if (this.dependencies.barrier.status === 'healthy') {
+          this.dependencies.barrier.trip(auditError, failedAt);
+        }
         return acceptance;
       }
       this.publishDomain(failedEvent);
       return acceptance;
     }
+    if (await this.stopIfBarrierTripped(session)) return acceptance;
 
     const runningAt = this.dependencies.now();
     let runningEvent: DomainEvent;
@@ -353,6 +359,7 @@ export class ExecutionRuntime {
       runningEvent = inImmediateTransaction(
         this.dependencies.database,
         () => {
+          this.dependencies.barrier.assertHealthy();
           const current = requireExecution(
             this.dependencies.executions,
             executionId,
@@ -379,7 +386,11 @@ export class ExecutionRuntime {
         },
       );
     } catch (error) {
-      await this.contain(session, error);
+      if (this.dependencies.barrier.status === 'tripped') {
+        await this.containAfterBarrier(session);
+      } else {
+        await this.contain(session, error);
+      }
       return acceptance;
     }
     this.publishDomain(runningEvent);
@@ -497,20 +508,24 @@ export class ExecutionRuntime {
     try {
       const interrupted =
         await this.dependencies.adapter.interrupt(nativeHandle);
+      if (await this.stopIfBarrierTripped()) return acceptance;
       proof = interrupted;
       if (interrupted.status === 'succeeded') proven = true;
       else if (interrupted.status === 'already_terminal') {
         const probe = await this.dependencies.adapter.probe(nativeHandle);
+        if (await this.stopIfBarrierTripped()) return acceptance;
         proof = { interrupted, probe };
         proven = probe.status === 'terminal' && probe.outcome === 'interrupted';
       }
     } catch (error) {
+      if (await this.stopIfBarrierTripped()) return acceptance;
       proof = { error: error instanceof Error ? error.message : String(error) };
     }
     const completedAt = this.dependencies.now();
     let proofEvent: DomainEvent;
     try {
       proofEvent = inImmediateTransaction(this.dependencies.database, () => {
+        this.dependencies.barrier.assertHealthy();
         const current = requireExecution(
           this.dependencies.executions,
           envelope.command.executionId,
@@ -535,8 +550,12 @@ export class ExecutionRuntime {
     } catch (error) {
       const owned = this.active.get(envelope.command.executionId);
       if (owned) {
-        await this.contain(owned.session, error);
-      } else {
+        if (this.dependencies.barrier.status === 'tripped') {
+          await this.containAfterBarrier(owned.session);
+        } else {
+          await this.contain(owned.session, error);
+        }
+      } else if (this.dependencies.barrier.status === 'healthy') {
         this.dependencies.barrier.trip(error, completedAt);
       }
       return acceptance;
@@ -591,7 +610,30 @@ export class ExecutionRuntime {
       const input: AsyncIterable<unknown> = session.events(
         starting.lastAdapterCursor,
       );
-      for await (const candidate of input) {
+      const iterator = input[Symbol.asyncIterator]();
+      while (true) {
+        let next: IteratorResult<unknown>;
+        try {
+          next = await iterator.next();
+        } catch (error) {
+          if (await this.stopIfBarrierTripped(session)) return;
+          await this.persistAdapterFailure(
+            executionId,
+            undefined,
+            error,
+            session,
+          );
+          return;
+        }
+        if (await this.stopIfBarrierTripped(session)) return;
+        if (next.done) {
+          await this.closeAfterSuccess(
+            session,
+            'Session close failed after stream exhaustion',
+          );
+          return;
+        }
+        const candidate = next.value;
         let envelope: HarnessEventEnvelope;
         try {
           envelope = harnessEventEnvelopeSchema.parse(candidate);
@@ -623,6 +665,7 @@ export class ExecutionRuntime {
           ({ runtimeEvent, domainEvent } = inImmediateTransaction(
             this.dependencies.database,
             () => {
+              this.dependencies.barrier.assertHealthy();
               const current = requireExecution(
                 this.dependencies.executions,
                 executionId,
@@ -681,11 +724,8 @@ export class ExecutionRuntime {
           return;
         }
       }
-      await this.closeAfterSuccess(
-        session,
-        'Session close failed after stream exhaustion',
-      );
     } catch (error) {
+      if (await this.stopIfBarrierTripped(session)) return;
       await this.persistAdapterFailure(executionId, undefined, error, session);
     }
   }
@@ -703,6 +743,7 @@ export class ExecutionRuntime {
       domainEvent = inImmediateTransaction(
         this.dependencies.database,
         () => {
+          this.dependencies.barrier.assertHealthy();
           const current = requireExecution(
             this.dependencies.executions,
             executionId,
@@ -792,7 +833,27 @@ export class ExecutionRuntime {
     session: HarnessSession,
     error: unknown,
   ): Promise<void> {
-    this.dependencies.barrier.trip(error, this.dependencies.now());
+    if (this.dependencies.barrier.status === 'healthy') {
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+    }
+    await this.containAfterBarrier(session);
+  }
+
+  private async stopIfBarrierTripped(
+    session?: HarnessSession,
+  ): Promise<boolean> {
+    try {
+      this.dependencies.barrier.assertHealthy();
+      return false;
+    } catch {
+      if (session) await this.containAfterBarrier(session);
+      return true;
+    }
+  }
+
+  private async containAfterBarrier(session: HarnessSession): Promise<void> {
+    if (this.contained.has(session)) return;
+    this.contained.add(session);
     try {
       await this.dependencies.adapter.interrupt(session.nativeHandle);
     } catch (interruptError) {

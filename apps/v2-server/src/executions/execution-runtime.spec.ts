@@ -166,6 +166,16 @@ const durableReservationState = (fixture: V2TestDatabase) => ({
     .all(),
 });
 
+const durableRuntimeState = (fixture: V2TestDatabase) => ({
+  ...durableReservationState(fixture),
+  diagnostics: fixture.database
+    .prepare('SELECT * FROM raw_diagnostics ORDER BY id')
+    .all(),
+  runtime: fixture.database
+    .prepare('SELECT * FROM runtime_events ORDER BY id')
+    .all(),
+});
+
 describe('ExecutionRuntime', () => {
   it('durably rejects missing required capabilities before operation or adapter start', async () => {
     const fake = new FakeHarnessAdapter();
@@ -477,6 +487,58 @@ describe('ExecutionRuntime', () => {
     expect(fake.resolveSkillsCount).toBe(1);
     expect(fake.startCount).toBe(0);
     expect(fake.interruptCalls).toEqual([]);
+  });
+
+  it('does not attach or persist a session returned after the barrier trips', async () => {
+    const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
+    fake.blockStart();
+    const context = createRuntime({ fake });
+    const pending = context.runtime.start(context.start);
+    await fake.waitUntilStartCalled();
+    const before = durableRuntimeState(context.fixture);
+
+    context.barrier.trip(new Error('blocked start audit failure'));
+    fake.releaseStart();
+    await pending;
+    await context.runtime.drain();
+
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+    expect(fake.sessions[0]?.consumedAdapterCursors).toEqual([]);
+    expect(fake.sessions[0]?.closeCount).toBe(1);
+    expect(fake.interruptCalls).toEqual([fake.sessions[0]?.nativeHandle]);
+    expect(context.barrier.diagnostics).toEqual([
+      expect.objectContaining({ cause: 'blocked start audit failure' }),
+    ]);
+  });
+
+  it('does not persist a start rejection returned after the barrier trips', async () => {
+    const fake = new FakeHarnessAdapter();
+    let startCalledResolve: (() => void) | undefined;
+    const startCalled = new Promise<void>((resolve) => {
+      startCalledResolve = resolve;
+    });
+    let rejectStart: ((error: Error) => void) | undefined;
+    const blockedStart = new Promise<never>((_resolve, reject) => {
+      rejectStart = reject;
+    });
+    vi.spyOn(fake, 'start').mockImplementation(async () => {
+      startCalledResolve?.();
+      return blockedStart;
+    });
+    const context = createRuntime({ fake });
+    const pending = context.runtime.start(context.start);
+    await startCalled;
+    const before = durableRuntimeState(context.fixture);
+
+    context.barrier.trip(new Error('blocked start rejection audit failure'));
+    rejectStart?.(new Error('blocked start rejected'));
+    await pending;
+
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+    expect(fake.interruptCalls).toEqual([]);
+    expect(context.barrier.diagnostics).toEqual([
+      expect.objectContaining({ cause: 'blocked start rejection audit failure' }),
+    ]);
   });
 
   it.each([
@@ -1006,6 +1068,91 @@ describe('ExecutionRuntime', () => {
     expect(context.executions.get(running.id)?.lifecycle).toBe('interrupted');
   });
 
+  it('does not persist interrupt proof returned after the barrier trips', async () => {
+    const context = createRuntime();
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const interrupt: InterruptExecutionEnvelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.interrupt',
+        projectId: running.projectId,
+        executionId: running.id,
+        expectedRevision: running.revision,
+      },
+    };
+    context.fake.blockInterrupt();
+    const pending = context.runtime.interrupt(interrupt);
+    await context.fake.waitUntilInterruptCalled();
+    const before = durableRuntimeState(context.fixture);
+
+    context.barrier.trip(new Error('blocked interrupt audit failure'));
+    context.fake.releaseInterrupt({ status: 'succeeded' });
+    await pending;
+
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+    expect(context.barrier.diagnostics).toEqual([
+      expect.objectContaining({ cause: 'blocked interrupt audit failure' }),
+    ]);
+  });
+
+  it('does not persist follow-up probe proof returned after the barrier trips', async () => {
+    const context = createRuntime();
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const interrupt: InterruptExecutionEnvelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.interrupt',
+        projectId: running.projectId,
+        executionId: running.id,
+        expectedRevision: running.revision,
+      },
+    };
+    let probeCalledResolve: (() => void) | undefined;
+    const probeCalled = new Promise<void>((resolve) => {
+      probeCalledResolve = resolve;
+    });
+    let releaseProbe: (() => void) | undefined;
+    const blockedProbe = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    vi.spyOn(context.fake, 'probe').mockImplementation(async () => {
+      probeCalledResolve?.();
+      await blockedProbe;
+      return { status: 'terminal', outcome: 'interrupted' };
+    });
+    context.fake.blockInterrupt();
+    const pending = context.runtime.interrupt(interrupt);
+    await context.fake.waitUntilInterruptCalled();
+    context.fake.releaseInterrupt({ status: 'already_terminal' });
+    await probeCalled;
+    const before = durableRuntimeState(context.fixture);
+
+    context.barrier.trip(new Error('blocked probe audit failure'));
+    releaseProbe?.();
+    await pending;
+
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+    expect(context.barrier.diagnostics).toEqual([
+      expect.objectContaining({ cause: 'blocked probe audit failure' }),
+    ]);
+  });
+
   it('keeps the barrier healthy for a fast interrupt idempotency conflict', async () => {
     const context = createRuntime();
     const started = await context.runtime.start(context.start);
@@ -1333,6 +1480,78 @@ describe('ExecutionRuntime', () => {
     }).toEqual(before);
     expect(context.published.runtime).toHaveLength(publishedBefore);
     expect(resumed.consumedAdapterCursors).toEqual([2]);
+  });
+
+  it('does not persist an envelope returned after the barrier trips during next', async () => {
+    const context = createRuntime({
+      fake: new FakeHarnessAdapter({ holdAfterAdapterCursor: 1 }),
+    });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    let nextCalledResolve: (() => void) | undefined;
+    const nextCalled = new Promise<void>((resolve) => {
+      nextCalledResolve = resolve;
+    });
+    let releaseNext: (() => void) | undefined;
+    const blockedNext = new Promise<void>((resolve) => {
+      releaseNext = resolve;
+    });
+    let nextCount = 0;
+    let closeCount = 0;
+    const session: HarnessSession = {
+      nativeHandle: required(running.nativeHandle, 'Expected native handle'),
+      events: () => ({
+        [Symbol.asyncIterator]() {
+          return {
+            async next(): Promise<IteratorResult<HarnessEventEnvelope>> {
+              nextCount += 1;
+              if (nextCount > 1) return { done: true, value: undefined };
+              nextCalledResolve?.();
+              await blockedNext;
+              return {
+                done: false,
+                value: {
+                  adapterCursor: 2,
+                  raw: { source: 'blocked next' },
+                  normalized: {
+                    projectId: running.projectId,
+                    executionId: running.id,
+                    adapterCursor: 2,
+                    occurredAt: '2026-08-28T01:00:02.000Z',
+                    type: 'worker_execution.output',
+                    payload: { text: 'must not persist' },
+                  },
+                },
+              };
+            },
+          };
+        },
+      }),
+      async close() {
+        closeCount += 1;
+      },
+    };
+    const before = durableRuntimeState(context.fixture);
+    context.runtime.attach(running.id, session);
+    await nextCalled;
+
+    context.barrier.trip(new Error('blocked next audit failure'));
+    releaseNext?.();
+    await context.runtime.drain();
+
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+    expect(nextCount).toBe(1);
+    expect(closeCount).toBe(1);
+    expect(context.fake.interruptCalls).toContain(session.nativeHandle);
+    expect(context.barrier.diagnostics).toEqual([
+      expect.objectContaining({ cause: 'blocked next audit failure' }),
+    ]);
   });
 
   it('still closes and stops consumption when containment interrupt throws', async () => {
