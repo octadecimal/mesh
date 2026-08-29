@@ -232,6 +232,9 @@ export type PmExecutionReservation = {
 };
 
 export type PmExecutionLauncher = {
+  findReserved(
+    input: PmExecutionLaunchInput,
+  ): Promise<PmExecutionReservation | undefined>;
   reserve(input: PmExecutionLaunchInput): Promise<PmExecutionReservation>;
   activate(executionId: WorkerExecutionId): Promise<void>;
   cancelReserved(executionId: WorkerExecutionId): Promise<WorkerExecution>;
@@ -251,6 +254,7 @@ export class PlanningService {
   abandonCycle(
     envelope: AbandonPlanningCycleEnvelope,
   ): Promise<V2CommandResult>;
+  reconcilePendingReservations(): void;
   drainPendingLaunches(): Promise<void>;
   reconcileBoundCycles(): void;
   reconcileTerminalExecution(executionId: string): void;
@@ -264,9 +268,10 @@ export class PmReportConsumer {
 }
 ```
 
-T03 adds `ExecutionRuntime.reserveStart`, `activateReserved`, and
-`cancelReserved` while preserving the existing `start` signature as a
-reserve/activate wrapper. T05 adapts those methods to `PmExecutionLauncher`;
+T03 adds read-only `ExecutionRuntime.findReservedStart`, plus `reserveStart`,
+`activateReserved`, and `cancelReserved` while preserving the existing `start`
+signature as a reserve/activate wrapper. T05 adapts those methods to
+`PmExecutionLauncher`;
 T02 reserves with deterministic idempotency key
 `planning-turn:<humanTurnId>`, commits the exact execution binding, and only
 then activates it. No layer duplicates execution lifecycle code.
@@ -283,6 +288,9 @@ export class ExecutionReservationError extends Error {
 }
 
 export class ExecutionRuntime {
+  findReservedStart(
+    envelope: StartExecutionEnvelope,
+  ): ReservedExecutionStart | undefined;
   reserveStart(
     envelope: StartExecutionEnvelope,
   ): Promise<ReservedExecutionStart>;
@@ -317,8 +325,12 @@ Accepted turns atomically move the cycle and turn to `launch_pending`. That
 cycle lifecycle accepts only same-key command replay or human Abandon; a
 distinct turn returns `planning_cycle_revision_conflict` with no write.
 `drainPendingLaunches` coalesces by turn, and `activateReserved` coalesces by
-execution until durable start-operation reconciliation or terminal/running
-state owns it.
+execution only inside the live process until terminal/running state owns it.
+After process loss, an existing starting/pending/no-handle reservation is never
+activated: M1 finishes its operation `unknown` and moves its execution to
+attention, then `reconcilePendingReservations` binds/projects that exact truth
+to the complete cycle. Only a pending turn with no start-operation link may make
+one fresh reservation and live activation.
 
 One per-cycle `PlanningLaunchCoordinator` arbitrates drain and Abandon. Abandon
 signals cancellation before waiting. `cancelReserved` shares the execution
@@ -328,7 +340,10 @@ linked starting execution and pending start operation with existing
 already owns it, cancellation waits and returns the running or terminal
 execution. Planning interrupts the running result before committing Abandon.
 No adapter start may occur after the abandoned-cycle commit, and M1's public
-running-only interrupt contract is unchanged.
+running-only interrupt contract is unchanged. Cancellation or interruption
+failure stores no successful Abandon result/event and does not mark the cycle
+abandoned; cleanup succeeds first and the abandoned transaction always commits
+last.
 
 T01 freezes these planning result codes; T02 returns them and T05 may not
 reinterpret them:
@@ -777,8 +792,9 @@ runtime or transport composition.
   Cover new-cycle PM profile freezing, later-turn profile reuse, one pending
   launch per human turn, exact command replay, question receipt, complete
   proposal receipt, proposal supersession, revision request, rejection,
-  abandonment/interruption (including interruption failure that cannot reopen
-  the cycle), approval, stale cycle/base/record failures, agent self-approval,
+  cleanup-first abandonment/interruption (including cancellation/interruption
+  failure that stores no abandoned cycle/event/result), approval, stale
+  cycle/base/record failures, agent self-approval,
   malformed and duplicate output, completion without receipt,
   and injected failures at receipt insert, canonical insert, event append, and
   command-result insert. Prove the nine exact planning failures, single-active
@@ -792,9 +808,11 @@ runtime or transport composition.
   `planning_cycle_revision_conflict` with no turn, reservation, event, or
   activation. Restart with an unbound terminal reservation and prove the drain
   binds the launcher's exact same execution once, moves the turn to
-  `execution_bound` and cycle to attention, and never activates it. Also cover a
-  nonterminal reservation crash before binding and single activation after
-  restart.
+  `execution_bound` and cycle to attention, and never activates it. For a
+  reconciled unbound starting reservation, prove the existing operation is
+  `unknown`, its exact execution is `attention_required`, planning binds that
+  truth and completes the cycle view as attention, and reserve/activate are not
+  called. A pending turn with no operation may reserve and activate freshly.
 
   Use controlled launcher barriers for both Abandon races. Pause after
   `reserve` commits but before bind, signal Abandon, release the barrier, and
@@ -805,8 +823,10 @@ runtime or transport composition.
   cycle event, and no canonical mutation. Let activation win a third race and
   prove Abandon waits for one running result, interrupts it, then commits; no
   start occurs after that commit. Inject cancellation and interruption failures
-  and prove no successful Abandon command result or falsely abandoned cycle is
-  stored.
+  and prove no successful Abandon command result/event or falsely abandoned
+  cycle is stored; the cycle remains nonterminal or reaches attention through
+  its frozen typed failure. Assert the abandoned transaction is always the last
+  durable step and no test models terminalization followed by reopening.
 
   For malformed payloads and well-formed reports with wrong project/cycle/turn,
   revision, or schema binding, assert one immediate transaction stores a
@@ -851,9 +871,9 @@ runtime or transport composition.
 
   Use the exact interfaces in the Settled Interface Map. `submitTurn` commits
   the turn/event/result before invoking a launcher. `drainPendingLaunches`
-  derives `planning-turn:<turnId>`, calls `reserve`, binds its returned exact
-  execution and complete cycle event in a second transaction, publishes that
-  committed event, then calls `activate`; it is idempotent after restart.
+  derives `planning-turn:<turnId>` and first checks the durable operation link.
+  It may call `reserve`, bind, publish, and activate only when no link exists. A
+  live-process reserve result follows the normal bind-then-activate sequence.
   Reservation exceptions leave the turn pending, terminal capability/skill
   reservations bind then move the cycle to attention, and activation failures
   terminalize an already-bound execution.
@@ -867,7 +887,9 @@ runtime or transport composition.
   waits for the drain. The drain checks that signal after reserve, before bind,
   and inside the execution activation claim. Cancellation invokes
   `cancelReserved`; an activation-owned running result is interrupted before
-  the abandoned cycle transaction commits.
+  the abandoned cycle transaction commits. Cleanup failure returns its stable
+  failure without storing the Abandon result/event or lifecycle; cleanup success
+  is followed by one immediate abandoned-cycle transaction as the final step.
 
   The consumer is invoked only for a `pm_discovery` assignment. It derives the
   authoritative cycle/turn from that frozen assignment, then performs parsing,
@@ -894,9 +916,15 @@ runtime or transport composition.
   ```
 
   `reconcileBoundCycles` first consumes any durable unconsumed structured output
-  for each bound nonterminal cycle, then re-reads it and terminalizes an
-  `execution_active` cycle whose execution is terminal without an accepted
-  receipt. It is idempotent and does not attach sessions or drain pending turns.
+  for each bound nonterminal cycle, then re-reads it and moves an
+  `execution_active` cycle whose execution is terminal or attention-required
+  without an accepted receipt to cycle attention. Next,
+  `reconcilePendingReservations` checks unbound turns through only the
+  launcher's read-only `findReserved`: an existing start-operation link binds
+  its exact already-reconciled terminal/attention execution and moves the
+  complete cycle view to attention; no link leaves the turn for the later fresh
+  drain. Both methods are idempotent and do not attach sessions or activate
+  executions.
 
 - [ ] **Step 8: Make service tests green and run the T02 gate**
 
@@ -957,7 +985,7 @@ persistent planning session.
 - Produces: `FakePmScenario = 'todo' | 'malformed' | 'duplicate' |
   'missing_output'`; `FakeHarnessAdapter` constructor option
   `pmScenario?: FakePmScenario`; `ExecutionRuntime.reserveStart` and
-  `activateReserved` and `cancelReserved`;
+  read-only `findReservedStart`, `activateReserved`, and `cancelReserved`;
   `OperationRepository.findStartReservation`; the existing `start` signature
   and behavior preserved as their wrapper.
 
@@ -988,10 +1016,11 @@ persistent planning session.
 
   For successful and terminal capability/skill reservations, inspect the
   transaction and assert exactly one start operation contains the idempotency
-  key/request hash and exact execution ID. Recreate `ExecutionRuntime` after a
-  terminal reservation but before planning binding, replay the same command,
-  and prove it returns that execution with no duplicate row. Delete or conflict
-  the link and assert fail-closed audit behavior. Race two
+  key/request hash and exact execution ID. In the same live runtime, replay a
+  terminal reservation and prove it returns that execution with no duplicate
+  row. Assert read-only `findReservedStart` returns that same linked current
+  execution and returns undefined without a command/operation; delete or
+  conflict the link and assert fail-closed audit behavior. Race two
   `activateReserved(executionId)` calls before running/attachment and assert one
   adapter start, one running transition, and one attached consumer.
   Separately seed a pre-migration terminal foundation command result without an
@@ -1051,14 +1080,17 @@ persistent planning session.
   idempotency key/request hash and load `execution_id`; never derive identity
   from assignment fields. Coalesce activation promises by execution ID before
   `adapter.start`, remove them only after durable running/terminal ownership,
-  and let startup reconciliation own an already-pending recovered operation.
+  and limit that ownership to the live process. `findReservedStart` performs
+  only the exact command/operation/execution read used by T05 after M1
+  reconciliation; it creates nothing and never grants activation authority.
   Implement `cancelReserved` under that same per-execution interlock. It may
   close only an exact operation-linked `starting` execution with a pending start
   operation, using the existing `starting -> failed` transition and
   `startup_interrupted_before_start` failure code; it never calls or broadens M1
   `interrupt`. If activation already owns the interlock, await its durable
   running/terminal result and return that execution without claiming it was
-  cancelled.
+  cancelled. Do not modify M1 reconciliation or add a restart marker/retry in
+  T03; its activation tests are live-process tests only.
 
   Branch the fake only on `assignment.kind`. Keep the existing foundation
   script intact. For `pm_discovery`, generate a fresh finite native handle and
@@ -1158,6 +1190,12 @@ owning transport, reducer, lifecycle, or Board behavior.
   all proposal actions, and leaves only connected/current Abandon enabled. It
   must not render another accepting message form or optimistic execution state.
 
+  Add an ambiguous-start `attention_required` case that says Mesh did not retry
+  the execution after restart, keeps execution/operation diagnostics visible,
+  and guides “Abandon this cycle to start a new one.” Connected/current Abandon
+  is enabled; after the server projects successful abandonment, the ordinary
+  new-cycle form returns. Never label the unknown execution retrying or running.
+
   ```tsx
   render(
     <PlanningPane
@@ -1200,6 +1238,8 @@ owning transport, reducer, lifecycle, or Board behavior.
 
   Render Abandon cycle for a nonterminal cycle, including history-limit state;
   keep it disabled under the same disconnected/stale/submitting authority gate.
+  For ambiguous-start attention, render the frozen recovery guidance and do not
+  synthesize activation progress.
 
   ```tsx
   <section aria-labelledby="pm-chat-heading">
@@ -1258,6 +1298,7 @@ placeholder.
 - Modify: `apps/v2-server/src/config.spec.ts`
 - Modify: `apps/v2-server/src/executions/execution-runtime.ts`
 - Modify: `apps/v2-server/src/executions/execution-runtime.spec.ts`
+- Modify: `apps/v2-server/src/executions/reconcile-executions.spec.ts`
 - Modify: `apps/v2-server/src/http/routes.ts`
 - Modify: `apps/v2-server/src/http/routes.spec.ts`
 - Modify: `apps/v2-server/src/http/snapshots.ts`
@@ -1276,7 +1317,8 @@ placeholder.
 - Modify: `apps/v2-web/src/components/FocusedProjectShell.spec.tsx`
 - Modify: `apps/v2-web/src/styles.css`
 - Prohibited: contracts, migration/SQL, planning repository/service/consumer,
-  fake-harness implementation, leaf component implementation, e2e, docs, V1
+  `apps/v2-server/src/executions/reconcile-executions.ts`, fake-harness
+  implementation, leaf component implementation, e2e, docs, V1
 
 **Interfaces:**
 
@@ -1297,17 +1339,25 @@ placeholder.
   terminal cycle views, and truncation. Add runtime integration tests proving a
   structured output is audited/published, consumed once, and terminalized.
 
-  Add startup cases for (a) a bound execution with durable unconsumed output and
+  Add startup cases for (a) a bound execution with durable unconsumed output,
   (b) a bound execution terminalized immediately before process loss, (c) an
-  unbound terminal capability/skill reservation, and (d) an unbound starting
-  reservation. Assert
-  exact order: M1 execution reconciliation without attachment, planning output
-  replay and terminal reconciliation, recovery-window publication, recovered
-  session attachment, pending-launch reserve/bind/activate drain, then command
-  acceptance. Assert a valid replayed receipt wins over terminal attention.
-  The terminal reservation must bind the operation-linked execution without
-  activation; the starting reservation must bind once and then have exactly one
-  owner between M1 reconciliation and live activation.
+  unbound terminal capability/skill reservation, (d) a pending turn with no
+  operation, and both physically distinct but durably identical starting states:
+  (e) crash after reservation/binding but before `adapter.start`, and (f) crash
+  after `adapter.start` returns but before native-handle/running persistence.
+
+  In `reconcile-executions.spec.ts`, exercise the existing unmodified M1
+  `reconcileExecutions`: for (e) and (f), assert no restarted call to
+  `adapter.start` or `resume`, the pending start operation finishes `unknown`,
+  the exact execution becomes `attention_required`, and raw reconciliation
+  evidence retains the operation/execution link. In planning-runtime tests,
+  assert the exact order: M1 reconciliation without attachment; planning output
+  replay and bound-cycle terminal/attention reconciliation; unbound existing-
+  reservation reconciliation to a complete attention cycle; recovery-window
+  publication; recovered-session attachment; fresh drain only for turns with no
+  operation; then command acceptance. A valid replayed receipt wins over
+  terminal attention. Terminal and unknown/attention reservations bind without
+  activation; only case (d) reserves/binds/activates freshly.
 
   In `config.spec.ts`, add red cases proving
   `MESH_V2_TEST_FAKE_PM_SCENARIO=todo` is accepted only with `NODE_ENV=test`, is
@@ -1332,7 +1382,7 @@ placeholder.
   Run:
 
   ```powershell
-  corepack pnpm exec vitest run apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/main.spec.ts --config apps/v2-server/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/reconcile-executions.spec.ts apps/v2-server/src/main.spec.ts --config apps/v2-server/vitest.config.ts
   corepack pnpm exec vitest run apps/v2-server/src/config.spec.ts --config apps/v2-server/vitest.config.ts
   ```
 
@@ -1343,8 +1393,9 @@ placeholder.
 - [ ] **Step 3: Compose the planning runtime without a generic framework**
 
   `planning-runtime.ts` adapts the planning launcher to
-  `ExecutionRuntime.reserveStart`, `activateReserved`, `cancelReserved`, and the
-  existing running-only interruption method, subscribes only to
+  `ExecutionRuntime.findReservedStart`, `reserveStart`, `activateReserved`,
+  `cancelReserved`, and the existing running-only interruption method,
+  subscribes only to
   `worker_execution.structured_output` and terminal execution notifications,
   and calls T02's planning-specific methods. Add one explicit optional runtime
   observer dependency rather than a registry.
@@ -1360,9 +1411,13 @@ placeholder.
   ```
 
   Wire repositories/services in `main.ts` and implement the exact startup order
-  asserted in Step 1. Reconciliation must finish before recovered sessions can
-  produce events, before pending launches activate, and before the server
-  accepts commands. Extend the existing route switch and snapshot reader. Parse
+  asserted in Step 1. Preserve `reconcile-executions.ts` unchanged: its
+  unknown/attention result, not a new marker, is the authority for every
+  persisted starting reservation. Planning calls read-only `findReservedStart`
+  after M1 reconciliation, projects existing terminal/attention reservations,
+  and never sends them to activation. Reconciliation must finish before
+  recovered sessions can produce events, before never-reserved pending launches
+  activate, and before the server accepts commands. Extend the existing route switch and snapshot reader. Parse
   `MESH_V2_TEST_FAKE_PM_SCENARIO` only in explicit `NODE_ENV=test`, reject it in
   production or default configuration, reject unknown values, and pass it to
   `FakeHarnessAdapter`. Publish only events returned from committed operations.
@@ -1372,8 +1427,9 @@ placeholder.
   Rerun both commands from Step 2, including the focused `config.spec.ts`
   command.
 
-  Expected: PASS, including restart drain, duplicate receipt, stale approval,
-  and audit/persistence failure cases.
+  Expected: PASS, including both ambiguous-start crash windows with no duplicate
+  adapter start, fresh drain only without an operation, duplicate receipt, stale
+  approval, and audit/persistence failure cases.
 
 - [ ] **Step 5: Write red client, reducer, resync, app, and shell tests**
 
@@ -1449,7 +1505,7 @@ placeholder.
 - [ ] **Step 9: Commit T05**
 
   ```powershell
-  git add -- apps/v2-server/src/planning/planning-runtime.ts apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/config.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/http/routes.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/http/snapshots.ts apps/v2-server/src/main.ts apps/v2-server/src/main.spec.ts apps/v2-web/src/api/client.ts apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/state/store.ts apps/v2-web/src/app/App.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/FocusedProjectShell.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx apps/v2-web/src/styles.css
+  git add -- apps/v2-server/src/planning/planning-runtime.ts apps/v2-server/src/planning/planning-runtime.spec.ts apps/v2-server/src/config.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/execution-runtime.ts apps/v2-server/src/executions/execution-runtime.spec.ts apps/v2-server/src/executions/reconcile-executions.spec.ts apps/v2-server/src/http/routes.ts apps/v2-server/src/http/routes.spec.ts apps/v2-server/src/http/snapshots.ts apps/v2-server/src/main.ts apps/v2-server/src/main.spec.ts apps/v2-web/src/api/client.ts apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/state/store.ts apps/v2-web/src/app/App.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/FocusedProjectShell.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx apps/v2-web/src/styles.css
   git commit -m "feat(v2): compose intent ledger workflow"
   ```
 
@@ -1605,7 +1661,9 @@ describe the implemented boundary without claiming M3.
 
   - two human turns each own one distinct finite PM execution;
   - each execution was durably bound before adapter activation and startup
-    reconciliation leaves no bound terminal cycle `execution_active`;
+    reconciliation leaves no bound terminal/attention cycle `execution_active`;
+  - both starting/pending/no-handle crash windows finish the operation unknown
+    and project execution/cycle attention without a restarted adapter call;
   - terminal reservation replay follows its unique start-operation link, and a
     concurrent distinct turn cannot bypass non-accepting `launch_pending`;
   - questions and complete proposal history survive restart;
@@ -1761,9 +1819,13 @@ following:
   upgrade and rollback;
 - exact execution reservation and durable binding before activation, including
   a unique start-operation link for terminal capability/skill replay and
-  adapter-start failures, plus Abandon arbitration that leaves no late adapter
-  start, orphan starting execution, or pending start operation, with no
-  pre-binding event consumption or duplicate execution/session;
+  adapter-start failures, plus cleanup-first/commit-last Abandon arbitration
+  that stores no success on cleanup failure and leaves no late adapter start,
+  orphan starting execution, or pending start operation, with no pre-binding
+  event consumption or duplicate execution/session;
+- fail-closed restart handling for both ambiguous adapter-start windows: M1
+  operation `unknown`, execution/cycle attention, exact audit link preserved,
+  and no automatic activation; only never-reserved turns launch freshly;
 - one active nonterminal cycle per project, bounded assignment/snapshot history,
   non-accepting single-flight `launch_pending`, replay-complete proposal
   supersede/reject/abandon events, and incremental projection equivalent to a
@@ -1771,8 +1833,8 @@ following:
 - audit-before-publish, immediate atomic approval, stale/invalid/failure
   rollback, transactional rejected receipts plus complete-cycle attention for
   malformed/wrongly-bound output, snapshot/replay/resync, and restart recovery
-  that reconciles durable output/terminal executions before session attachment,
-  pending launch, or command acceptance;
+  that reconciles durable output and terminal/attention executions before
+  session attachment, fresh pending launch, or command acceptance;
 - accessible PM and Requirements UI with human-only all-or-nothing approval;
 - deterministic built-process Todo acceptance with no paid traffic,
   credentials, real repository, or operator state;
