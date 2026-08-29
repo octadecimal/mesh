@@ -255,6 +255,16 @@ const endpointKey = (endpoint: ProposedLedgerEndpoint) =>
     ? `record:${endpoint.recordId}`
     : `proposal:${endpoint.proposalKey}`;
 
+const proposedRelationshipKey = (relationship: ProposedLedgerRelationship) => {
+  const from = endpointKey(relationship.from);
+  const to = endpointKey(relationship.to);
+  const symmetric =
+    relationship.kind === 'conflicts_with' ||
+    relationship.kind === 'duplicates';
+  const [first, second] = symmetric && from > to ? [to, from] : [from, to];
+  return `${relationship.kind}:${first}:${second}`;
+};
+
 export const pmQuestionResultSchema = z
   .strictObject({
     kind: z.literal('questions'),
@@ -354,11 +364,7 @@ export const pmProposalResultSchema = z
           });
         }
       }
-      const symmetric =
-        relationship.kind === 'conflicts_with' ||
-        relationship.kind === 'duplicates';
-      const [first, second] = symmetric && from > to ? [to, from] : [from, to];
-      const edge = `${relationship.kind}:${first}:${second}`;
+      const edge = proposedRelationshipKey(relationship);
       if (edges.has(edge)) {
         context.addIssue({
           code: 'custom',
@@ -557,8 +563,8 @@ export const planningProposalDiffSchema = z
       reuse: nonNegativeIntegerSchema.max(100),
     }),
     relationshipChanges: z.strictObject({
-      added: nonNegativeIntegerSchema.max(200),
-      removed: nonNegativeIntegerSchema.max(200),
+      added: z.array(proposedLedgerRelationshipSchema).max(200).readonly(),
+      removed: z.array(proposedLedgerRelationshipSchema).max(200).readonly(),
     }),
   })
   .superRefine((value, context) => {
@@ -568,6 +574,23 @@ export const planningProposalDiffSchema = z
         code: 'custom',
         path: ['intentChanges'],
         message: 'Intent change fields must be unique',
+      });
+    }
+    const relationships = new Set<string>();
+    for (const [change, entries] of [
+      ['added', value.relationshipChanges.added],
+      ['removed', value.relationshipChanges.removed],
+    ] as const) {
+      entries.forEach((relationship, index) => {
+        const key = proposedRelationshipKey(relationship);
+        if (relationships.has(key)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['relationshipChanges', change, index],
+            message: 'Relationship changes must be unique',
+          });
+        }
+        relationships.add(key);
       });
     }
   });
@@ -609,6 +632,72 @@ export const planningProposalSchema = z
         context.addIssue({ ...issue, path: issue.path.slice(1) });
       }
     }
+    const recordChanges = { create: 0, revise: 0, reuse: 0 };
+    value.records.forEach((record) => {
+      recordChanges[record.operation] += 1;
+    });
+    if (
+      recordChanges.create !== value.diff.recordChanges.create ||
+      recordChanges.revise !== value.diff.recordChanges.revise ||
+      recordChanges.reuse !== value.diff.recordChanges.reuse
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['diff', 'recordChanges'],
+        message: 'Record change counts must match proposal operations',
+      });
+    }
+    const addedCount = value.diff.relationshipChanges.added.length;
+    const diffRelationships = [
+      ...value.diff.relationshipChanges.added,
+      ...value.diff.relationshipChanges.removed,
+    ];
+    const diffResult = pmProposalResultSchema.safeParse({
+      kind: 'proposal',
+      summary: value.summary,
+      projectIntent: value.projectIntent,
+      records: value.records,
+      relationships: diffRelationships,
+    });
+    if (!diffResult.success) {
+      for (const issue of diffResult.error.issues) {
+        if (issue.path[0] !== 'relationships') continue;
+        const index = Number(issue.path[1]);
+        const change = index < addedCount ? 'added' : 'removed';
+        const changeIndex = index < addedCount ? index : index - addedCount;
+        context.addIssue({
+          ...issue,
+          path: [
+            'diff',
+            'relationshipChanges',
+            change,
+            changeIndex,
+            ...issue.path.slice(2),
+          ],
+        });
+      }
+    }
+    const finalRelationships = new Set(
+      value.relationships.map(proposedRelationshipKey),
+    );
+    value.diff.relationshipChanges.added.forEach((relationship, index) => {
+      if (!finalRelationships.has(proposedRelationshipKey(relationship))) {
+        context.addIssue({
+          code: 'custom',
+          path: ['diff', 'relationshipChanges', 'added', index],
+          message: 'Added relationships must appear in the proposal',
+        });
+      }
+    });
+    value.diff.relationshipChanges.removed.forEach((relationship, index) => {
+      if (finalRelationships.has(proposedRelationshipKey(relationship))) {
+        context.addIssue({
+          code: 'custom',
+          path: ['diff', 'relationshipChanges', 'removed', index],
+          message: 'Removed relationships cannot remain in the proposal',
+        });
+      }
+    });
     const awaiting = value.lifecycle === 'awaiting_approval';
     const rejected = value.lifecycle === 'rejected';
     if (
@@ -656,22 +745,38 @@ export const planningCycleViewSchema = z
     const projectId = value.cycle.projectId;
     const cycleId = value.cycle.id;
     const turnIds = new Set(value.turns.map((turn) => turn.id));
-    const turnOrdinals = new Set<number>();
     value.turns.forEach((turn, index) => {
-      if (turnOrdinals.has(turn.ordinal)) {
+      if (turn.ordinal !== index + 1) {
         context.addIssue({
           code: 'custom',
           path: ['turns', index, 'ordinal'],
-          message: 'Planning turn ordinals must be unique',
+          message: 'Planning turn ordinals must be ordered and contiguous',
         });
       }
-      turnOrdinals.add(turn.ordinal);
     });
     if (turnIds.size !== value.turns.length) {
       context.addIssue({
         code: 'custom',
         path: ['turns'],
         message: 'Planning turn IDs must be unique',
+      });
+    }
+    const humanTurnCount = value.turns.filter(
+      (turn) => turn.actor === 'human',
+    ).length;
+    const pmTurnCount = value.turns.length - humanTurnCount;
+    if (humanTurnCount > 32) {
+      context.addIssue({
+        code: 'custom',
+        path: ['turns'],
+        message: 'Planning cycles allow at most 32 human turns',
+      });
+    }
+    if (pmTurnCount > 32) {
+      context.addIssue({
+        code: 'custom',
+        path: ['turns'],
+        message: 'Planning cycles allow at most 32 PM turns',
       });
     }
     for (const [collection, records] of [
@@ -744,6 +849,39 @@ export const planningCycleViewSchema = z
           : latest,
       null,
     );
+    const latestTurn = value.turns.at(-1);
+    if (
+      value.cycle.lifecycle === 'launch_pending' &&
+      (latestTurn?.actor !== 'human' ||
+        latestTurn.launchState !== 'launch_pending')
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['turns'],
+        message:
+          'Launch-pending cycles require the latest turn to be a launch-pending human turn',
+      });
+    }
+    const awaitingProposals = value.proposals.filter(
+      (proposal) => proposal.lifecycle === 'awaiting_approval',
+    );
+    if (awaitingProposals.length > 1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['proposals'],
+        message: 'At most one proposal can await approval',
+      });
+    }
+    if (
+      awaitingProposals.length === 1 &&
+      awaitingProposals[0].id !== latestProposal?.id
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['proposals'],
+        message: 'The awaiting proposal must be latest',
+      });
+    }
     if (
       value.cycle.latestProposalRevision !== (latestProposal?.revision ?? 0)
     ) {
@@ -875,13 +1013,6 @@ export const approvedIntentLedgerSchema = z
           message: 'Ledger records must match the intent project',
         });
       }
-      if (record.proposalId !== value.projectIntent.proposalId) {
-        context.addIssue({
-          code: 'custom',
-          path: ['records', index, 'proposalId'],
-          message: 'Ledger record proposal must match the approved intent',
-        });
-      }
     });
     const relationshipKeys = new Set<string>();
     value.relationships.forEach((relationship, index) => {
@@ -973,25 +1104,92 @@ export const approvedPlanningOutcomeSchema = z
           'Approved intent and ledger proposal IDs must match the cycle proposal',
       });
     }
+    if (
+      latestProposal !== null &&
+      JSON.stringify(latestProposal.projectIntent) !==
+        JSON.stringify(value.intentLedger.projectIntent.content)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger', 'projectIntent', 'content'],
+        message: 'Canonical intent content must match the approved proposal',
+      });
+    }
+    if (
+      latestProposal !== null &&
+      (latestProposal.baseProjectIntentRevision !==
+        value.planningCycle.cycle.baseProjectIntentRevision ||
+        latestProposal.baseLedgerRevision !==
+          value.planningCycle.cycle.baseLedgerRevision)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['planningCycle', 'proposals'],
+        message: 'Approved proposal base must match the cycle base',
+      });
+    }
+    if (
+      latestProposal !== null &&
+      value.intentLedger.projectIntent.revision !==
+        (latestProposal.baseProjectIntentRevision ?? 0) + 1
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger', 'projectIntent', 'revision'],
+        message: 'Intent revision must advance from the proposal base',
+      });
+    }
+    if (
+      latestProposal !== null &&
+      value.intentLedger.ledger.revision !==
+        (latestProposal.baseLedgerRevision ?? 0) + 1
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger', 'ledger', 'revision'],
+        message: 'Ledger revision must advance from the proposal base',
+      });
+    }
   });
 export type ApprovedPlanningOutcome = z.infer<
   typeof approvedPlanningOutcomeSchema
 >;
 
-export const pmDiscoveryInputSchema = z.strictObject({
-  conversation: z
-    .array(
-      z.strictObject({
-        turnId: planningTurnIdSchema,
-        actor: z.enum(['human', 'pm']),
-        message: boundedMessageSchema,
-      }),
-    )
-    .max(64)
-    .readonly(),
-  latestProposal: planningProposalSchema.nullable(),
-  approvedIntentLedger: approvedIntentLedgerSchema.nullable(),
-});
+export const pmDiscoveryInputSchema = z
+  .strictObject({
+    conversation: z
+      .array(
+        z.strictObject({
+          turnId: planningTurnIdSchema,
+          actor: z.enum(['human', 'pm']),
+          message: boundedMessageSchema,
+        }),
+      )
+      .max(64)
+      .readonly(),
+    latestProposal: planningProposalSchema.nullable(),
+    approvedIntentLedger: approvedIntentLedgerSchema.nullable(),
+  })
+  .superRefine((value, context) => {
+    const humanTurnCount = value.conversation.filter(
+      (turn) => turn.actor === 'human',
+    ).length;
+    const pmTurnCount = value.conversation.length - humanTurnCount;
+    if (humanTurnCount > 32) {
+      context.addIssue({
+        code: 'custom',
+        path: ['conversation'],
+        message: 'Assignments allow at most 32 human turns',
+      });
+    }
+    if (pmTurnCount > 32) {
+      context.addIssue({
+        code: 'custom',
+        path: ['conversation'],
+        message: 'Assignments allow at most 32 PM turns',
+      });
+    }
+  });
 export type PmDiscoveryInput = z.infer<typeof pmDiscoveryInputSchema>;
 
 export const pmDiscoveryAssignmentSchema = z

@@ -28,6 +28,7 @@ import {
   parseWorkerProfileYaml,
   planningCycleLifecycleSchema,
   planningCycleViewSchema,
+  planningProposalDiffSchema,
   planningProposalSchema,
   planningTurnSchema,
   planningTurnLaunchStateSchema,
@@ -1311,7 +1312,10 @@ describe('V2 intent ledger contracts', () => {
   const proposalDiff = {
     intentChanges: ['goal', 'desiredCapabilities'] as const,
     recordChanges: { create: 2, revise: 0, reuse: 0 },
-    relationshipChanges: { added: 1, removed: 0 },
+    relationshipChanges: {
+      added: proposalResult.relationships,
+      removed: [],
+    },
   };
   const proposal = {
     id: proposalId,
@@ -1436,6 +1440,93 @@ describe('V2 intent ledger contracts', () => {
     ],
   };
 
+  const laterPlanningCycleId = randomUUID();
+  const laterHumanTurnId = randomUUID();
+  const laterPmTurnId = randomUUID();
+  const laterProposalId = randomUUID();
+  const laterExecutionId = randomUUID();
+  const laterProjectIntent = {
+    ...projectIntent,
+    goal: 'Let people reliably track and complete Todos.',
+  };
+  const laterProposal = {
+    ...proposal,
+    id: laterProposalId,
+    planningCycleId: laterPlanningCycleId,
+    lifecycle: 'approved' as const,
+    baseProjectIntentRevision: 1,
+    baseLedgerRevision: 1,
+    projectIntent: laterProjectIntent,
+    records: [
+      {
+        operation: 'reuse' as const,
+        recordId: requirementId,
+        expectedRevision: 1,
+      },
+      {
+        operation: 'reuse' as const,
+        recordId: decisionId,
+        expectedRevision: 1,
+      },
+    ],
+    relationships: [
+      {
+        kind: 'constrains' as const,
+        from: { recordId: decisionId },
+        to: { recordId: requirementId },
+      },
+    ],
+    diff: {
+      intentChanges: ['goal'] as const,
+      recordChanges: { create: 0, revise: 0, reuse: 2 },
+      relationshipChanges: { added: [], removed: [] },
+    },
+    createdByTurnId: laterPmTurnId,
+    createdByExecutionId: laterExecutionId,
+    decidedAt: now,
+  };
+  const laterApprovedCycleView = {
+    cycle: {
+      ...cycleView.cycle,
+      id: laterPlanningCycleId,
+      lifecycle: 'approved' as const,
+      baseProjectIntentRevision: 1,
+      baseLedgerRevision: 1,
+      endedAt: now,
+    },
+    turns: [
+      {
+        ...cycleView.turns[0],
+        id: laterHumanTurnId,
+        planningCycleId: laterPlanningCycleId,
+        executionId: laterExecutionId,
+      },
+      {
+        ...cycleView.turns[1],
+        id: laterPmTurnId,
+        planningCycleId: laterPlanningCycleId,
+        executionId: laterExecutionId,
+      },
+    ],
+    questions: [],
+    proposals: [laterProposal],
+  };
+  const laterApprovedIntentLedger = {
+    projectIntent: {
+      ...approvedIntentLedger.projectIntent,
+      revision: 2,
+      content: laterProjectIntent,
+      proposalId: laterProposalId,
+    },
+    ledger: {
+      ...approvedIntentLedger.ledger,
+      revision: 2,
+      proposalId: laterProposalId,
+    },
+    records: approvedIntentLedger.records,
+    relationships: approvedIntentLedger.relationships,
+  };
+
   const issueText = (result: {
     success: boolean;
     error?: { issues: unknown[] };
@@ -1527,6 +1618,56 @@ describe('V2 intent ledger contracts', () => {
         approvedIntentLedger,
         /latest proposal revision must match/i,
       ],
+      [
+        'mutated canonical intent',
+        approvedCycleView,
+        {
+          ...approvedIntentLedger,
+          projectIntent: {
+            ...approvedIntentLedger.projectIntent,
+            content: {
+              ...approvedIntentLedger.projectIntent.content,
+              goal: 'Different from the approved proposal.',
+            },
+          },
+        },
+        /canonical intent content must match/i,
+      ],
+      [
+        'invalid intent revision progression',
+        approvedCycleView,
+        {
+          ...approvedIntentLedger,
+          projectIntent: {
+            ...approvedIntentLedger.projectIntent,
+            revision: 2,
+          },
+        },
+        /intent revision must advance from the proposal base/i,
+      ],
+      [
+        'invalid ledger revision progression',
+        approvedCycleView,
+        {
+          ...approvedIntentLedger,
+          ledger: { ...approvedIntentLedger.ledger, revision: 2 },
+        },
+        /ledger revision must advance from the proposal base/i,
+      ],
+      [
+        'proposal base differs from cycle base',
+        {
+          ...laterApprovedCycleView,
+          proposals: [
+            {
+              ...laterProposal,
+              baseProjectIntentRevision: 2,
+            },
+          ],
+        },
+        laterApprovedIntentLedger,
+        /proposal base must match the cycle base/i,
+      ],
     ] as const) {
       const eventIssues = issueText(
         domainEventDraftSchema.safeParse({
@@ -1544,6 +1685,67 @@ describe('V2 intent ledger contracts', () => {
       expect(eventIssues, label).toMatch(expected);
       expect(resultIssues, label).toMatch(expected);
     }
+  });
+
+  it('preserves reused immutable record revisions through every approved projection', () => {
+    const nextPlanningCycleId = randomUUID();
+    const nextHumanTurnId = randomUUID();
+    const assignment = {
+      kind: 'pm_discovery' as const,
+      projectId,
+      outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+      planningCycleId: nextPlanningCycleId,
+      humanTurnId: nextHumanTurnId,
+      expectedCycleRevision: 1,
+      expectedProposalRevision: 1,
+      baseProjectIntentRevision: 2,
+      baseLedgerRevision: 2,
+      input: {
+        conversation: [
+          {
+            turnId: nextHumanTurnId,
+            actor: 'human' as const,
+            message: 'Plan the next revision.',
+          },
+        ],
+        latestProposal: null,
+        approvedIntentLedger: laterApprovedIntentLedger,
+      },
+    };
+    const approvedEvent = {
+      projectId,
+      occurredAt: now,
+      type: 'intent_ledger.approved' as const,
+      payload: {
+        planningCycle: laterApprovedCycleView,
+        intentLedger: laterApprovedIntentLedger,
+      },
+    };
+    const approvedResult = {
+      ok: true,
+      commandType: 'planning_proposal.approve' as const,
+      planningCycle: laterApprovedCycleView,
+      intentLedger: laterApprovedIntentLedger,
+    };
+    const snapshot = {
+      protocolVersion: V2_PROTOCOL_VERSION,
+      project,
+      profiles: [],
+      executions: [],
+      attentionItems: [],
+      planningCycles: [laterApprovedCycleView],
+      planningHistoryTruncated: false,
+      intentLedger: laterApprovedIntentLedger,
+      cursors: { domain: 2, runtime: 2 },
+    };
+
+    expect(approvedIntentLedgerSchema.parse(laterApprovedIntentLedger)).toEqual(
+      laterApprovedIntentLedger,
+    );
+    expect(pmDiscoveryAssignmentSchema.parse(assignment)).toEqual(assignment);
+    expect(v2ProjectSnapshotSchema.parse(snapshot)).toEqual(snapshot);
+    expect(domainEventDraftSchema.parse(approvedEvent)).toEqual(approvedEvent);
+    expect(v2CommandResultSchema.parse(approvedResult)).toEqual(approvedResult);
   });
 
   it('rejects non-canonical approved ledger memberships and relationships', () => {
@@ -1740,6 +1942,110 @@ describe('V2 intent ledger contracts', () => {
     );
   });
 
+  it('enforces pending-turn, proposal-awaiting, and contiguous-order lifecycle rules', () => {
+    const pendingTurn = {
+      ...cycleView.turns[0],
+      id: randomUUID(),
+      ordinal: 3,
+      message: 'Revise the proposal.',
+      launchState: 'launch_pending' as const,
+      executionId: null,
+    };
+    const pendingView = {
+      ...cycleView,
+      cycle: { ...cycleView.cycle, lifecycle: 'launch_pending' as const },
+      turns: [...cycleView.turns, pendingTurn],
+    };
+    expect(planningCycleViewSchema.parse(pendingView)).toEqual(pendingView);
+
+    const laterSupersededProposal = {
+      ...proposal,
+      id: randomUUID(),
+      revision: 2,
+      lifecycle: 'superseded' as const,
+      decidedAt: now,
+    };
+    for (const [label, candidate, expected] of [
+      [
+        'launch pending without pending human turn',
+        {
+          ...cycleView,
+          cycle: { ...cycleView.cycle, lifecycle: 'launch_pending' },
+        },
+        /launch-pending cycles require the latest turn/i,
+      ],
+      [
+        'pending human turn is not latest',
+        {
+          ...pendingView,
+          turns: [pendingTurn, ...cycleView.turns].map((turn, index) => ({
+            ...turn,
+            ordinal: index + 1,
+          })),
+        },
+        /launch-pending cycles require the latest turn/i,
+      ],
+      [
+        'turn ordinals out of order',
+        { ...cycleView, turns: [...cycleView.turns].reverse() },
+        /turn ordinals must be ordered and contiguous/i,
+      ],
+      [
+        'turn ordinal gap',
+        {
+          ...cycleView,
+          turns: [cycleView.turns[0], { ...cycleView.turns[1], ordinal: 3 }],
+        },
+        /turn ordinals must be ordered and contiguous/i,
+      ],
+      [
+        'multiple awaiting proposals',
+        {
+          ...cycleView,
+          cycle: { ...cycleView.cycle, latestProposalRevision: 2 },
+          proposals: [proposal, { ...proposal, id: randomUUID(), revision: 2 }],
+        },
+        /at most one proposal can await approval/i,
+      ],
+      [
+        'awaiting proposal is not latest',
+        {
+          ...pendingView,
+          cycle: { ...pendingView.cycle, latestProposalRevision: 2 },
+          proposals: [proposal, laterSupersededProposal],
+        },
+        /awaiting proposal must be latest/i,
+      ],
+    ] as const) {
+      expect(
+        issueText(planningCycleViewSchema.safeParse(candidate)),
+        label,
+      ).toMatch(expected);
+    }
+  });
+
+  it('requires exact projected lifecycles in planning command successes', () => {
+    for (const [commandType, expected] of [
+      [
+        'planning_cycle.submit_turn',
+        /submit-turn success must be launch-pending/i,
+      ],
+      ['planning_proposal.reject', /reject success must be proposal-rejected/i],
+      ['planning_cycle.abandon', /abandon success must be abandoned/i],
+    ] as const) {
+      expect(
+        issueText(
+          v2CommandResultSchema.safeParse({
+            ok: true,
+            commandType,
+            planningCycle: cycleView,
+          }),
+        ),
+        commandType,
+      ).toMatch(expected);
+    }
+  });
+
   it('requires assignment base and next-proposal revision coherence', () => {
     const assignment = {
       kind: 'pm_discovery' as const,
@@ -1816,6 +2122,72 @@ describe('V2 intent ledger contracts', () => {
     }
   });
 
+  it('bounds human and PM turns separately at 32 in assignments and cycle views', () => {
+    const conversation = (humanCount: number, pmCount: number) => [
+      ...Array.from({ length: humanCount }, (_, index) => ({
+        turnId: index === 0 ? humanTurnId : randomUUID(),
+        actor: 'human' as const,
+        message: `Human ${index}`,
+      })),
+      ...Array.from({ length: pmCount }, (_, index) => ({
+        turnId: randomUUID(),
+        actor: 'pm' as const,
+        message: `PM ${index}`,
+      })),
+    ];
+    const turns = (humanCount: number, pmCount: number) =>
+      conversation(humanCount, pmCount).map(({ turnId, ...turn }, index) => ({
+        ...turn,
+        id: turnId,
+        projectId,
+        planningCycleId,
+        ordinal: index + 1,
+        launchState:
+          turn.actor === 'human' ? ('execution_bound' as const) : null,
+        executionId,
+        createdAt: now,
+      }));
+    const assignment = (humanCount: number, pmCount: number) => ({
+      kind: 'pm_discovery' as const,
+      projectId,
+      outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+      planningCycleId,
+      humanTurnId,
+      expectedCycleRevision: 1,
+      expectedProposalRevision: 1,
+      baseProjectIntentRevision: null,
+      baseLedgerRevision: null,
+      input: {
+        conversation: conversation(humanCount, pmCount),
+        latestProposal: null,
+        approvedIntentLedger: null,
+      },
+    });
+    const view = (humanCount: number, pmCount: number) => ({
+      ...cycleView,
+      cycle: {
+        ...cycleView.cycle,
+        lifecycle: 'awaiting_human' as const,
+        latestProposalRevision: 0,
+      },
+      turns: turns(humanCount, pmCount),
+      proposals: [],
+    });
+
+    expect(
+      pmDiscoveryAssignmentSchema.safeParse(assignment(32, 32)).success,
+    ).toBe(true);
+    expect(
+      pmDiscoveryAssignmentSchema.safeParse(assignment(33, 0)).success,
+    ).toBe(false);
+    expect(
+      pmDiscoveryAssignmentSchema.safeParse(assignment(1, 33)).success,
+    ).toBe(false);
+    expect(issueText(planningCycleViewSchema.safeParse(view(32, 32)))).toBe('');
+    expect(planningCycleViewSchema.safeParse(view(33, 0)).success).toBe(false);
+    expect(planningCycleViewSchema.safeParse(view(1, 33)).success).toBe(false);
+  });
+
   it('round-trips a strict bounded server-computed proposal diff', () => {
     expect(planningProposalSchema.parse(proposal).diff).toEqual(proposalDiff);
     expect(() =>
@@ -1838,10 +2210,70 @@ describe('V2 intent ledger contracts', () => {
         ...proposal,
         diff: {
           ...proposalDiff,
-          relationshipChanges: { added: 201, removed: 0 },
+          recordChanges: { ...proposalDiff.recordChanges, create: 1 },
         },
       }),
-    ).toThrow();
+    ).toThrow(/record change counts must match/i);
+    expect(() =>
+      planningProposalSchema.parse({
+        ...proposal,
+        diff: {
+          ...proposalDiff,
+          relationshipChanges: {
+            added: [],
+            removed: proposalResult.relationships,
+          },
+        },
+      }),
+    ).toThrow(/removed relationships cannot remain/i);
+    expect(() =>
+      planningProposalSchema.parse({
+        ...proposal,
+        records: [
+          ...proposal.records,
+          {
+            operation: 'create',
+            key: 'archive-todo',
+            content: requirementContent,
+            provenance,
+          },
+        ],
+        diff: {
+          ...proposalDiff,
+          recordChanges: { create: 3, revise: 0, reuse: 0 },
+          relationshipChanges: {
+            added: [
+              {
+                kind: 'depends_on',
+                from: { proposalKey: 'complete-todo' },
+                to: { proposalKey: 'archive-todo' },
+              },
+            ],
+            removed: [],
+          },
+        },
+      }),
+    ).toThrow(/added relationships must appear in the proposal/i);
+    expect(() =>
+      planningProposalDiffSchema.parse({
+        ...proposalDiff,
+        relationshipChanges: {
+          added: [
+            {
+              kind: 'duplicates',
+              from: { proposalKey: 'left' },
+              to: { proposalKey: 'right' },
+            },
+            {
+              kind: 'duplicates',
+              from: { proposalKey: 'right' },
+              to: { proposalKey: 'left' },
+            },
+          ],
+          removed: [],
+        },
+      }),
+    ).toThrow(/relationship changes must be unique/i);
   });
 
   it('enforces all planning collection boundaries at the limit plus one', () => {
@@ -1868,22 +2300,6 @@ describe('V2 intent ledger contracts', () => {
       key: `question-${index}`,
       prompt: `Question ${index}`,
       rationale: `Rationale ${index}`,
-    }));
-    const conversation = Array.from({ length: 65 }, (_, index) => ({
-      turnId: index === 0 ? humanTurnId : randomUUID(),
-      actor: index === 0 ? ('human' as const) : ('pm' as const),
-      message: `Turn ${index}`,
-    }));
-    const planningTurns = Array.from({ length: 65 }, (_, index) => ({
-      id: index === 0 ? humanTurnId : randomUUID(),
-      projectId,
-      planningCycleId,
-      ordinal: index + 1,
-      actor: index === 0 ? ('human' as const) : ('pm' as const),
-      message: `Turn ${index}`,
-      launchState: index === 0 ? ('execution_bound' as const) : null,
-      executionId,
-      createdAt: now,
     }));
     const planningQuestions = Array.from({ length: 21 }, (_, index) => ({
       id: randomUUID(),
@@ -2027,42 +2443,6 @@ describe('V2 intent ledger contracts', () => {
           }).success,
       },
       {
-        name: 'assignment conversation',
-        limit: 64,
-        parse: (count: number) =>
-          pmDiscoveryAssignmentSchema.safeParse({
-            kind: 'pm_discovery',
-            projectId,
-            outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
-            planningCycleId,
-            humanTurnId,
-            expectedCycleRevision: 1,
-            expectedProposalRevision: 1,
-            baseProjectIntentRevision: null,
-            baseLedgerRevision: null,
-            input: {
-              conversation: conversation.slice(0, count),
-              latestProposal: null,
-              approvedIntentLedger: null,
-            },
-          }).success,
-      },
-      {
-        name: 'cycle turns',
-        limit: 64,
-        parse: (count: number) =>
-          planningCycleViewSchema.safeParse({
-            ...cycleView,
-            cycle: {
-              ...cycleView.cycle,
-              lifecycle: 'awaiting_human',
-              latestProposalRevision: 0,
-            },
-            turns: planningTurns.slice(0, count),
-            proposals: [],
-          }).success,
-      },
-      {
         name: 'cycle questions',
         limit: 20,
         parse: (count: number) =>
@@ -2120,26 +2500,20 @@ describe('V2 intent ledger contracts', () => {
         name: 'proposal diff record count',
         limit: 100,
         parse: (count: number) =>
-          planningProposalSchema.safeParse({
-            ...proposal,
-            diff: {
-              ...proposalDiff,
-              recordChanges: { ...proposalDiff.recordChanges, create: count },
-            },
+          planningProposalDiffSchema.safeParse({
+            ...proposalDiff,
+            recordChanges: { ...proposalDiff.recordChanges, create: count },
           }).success,
       },
       {
-        name: 'proposal diff relationship count',
+        name: 'proposal diff relationship changes',
         limit: 200,
         parse: (count: number) =>
-          planningProposalSchema.safeParse({
-            ...proposal,
-            diff: {
-              ...proposalDiff,
-              relationshipChanges: {
-                ...proposalDiff.relationshipChanges,
-                added: count,
-              },
+          planningProposalDiffSchema.safeParse({
+            ...proposalDiff,
+            relationshipChanges: {
+              added: relationshipPairs.slice(0, count),
+              removed: [],
             },
           }).success,
       },
@@ -2677,7 +3051,21 @@ describe('V2 intent ledger contracts', () => {
       {
         ok: true,
         commandType: 'planning_cycle.submit_turn',
-        planningCycle: cycleView,
+        planningCycle: {
+          ...cycleView,
+          cycle: { ...cycleView.cycle, lifecycle: 'launch_pending' },
+          turns: [
+            ...cycleView.turns,
+            {
+              ...cycleView.turns[0],
+              id: randomUUID(),
+              ordinal: 3,
+              message: 'Revise the proposal.',
+              launchState: 'launch_pending',
+              executionId: null,
+            },
+          ],
+        },
       },
       {
         ok: true,

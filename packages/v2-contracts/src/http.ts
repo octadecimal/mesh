@@ -182,6 +182,42 @@ const planningProposalApproveResultSchema = z
     }
   });
 
+const planningTurnSubmitResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_cycle.submit_turn'),
+    planningCycle: planningCycleViewSchema,
+  })
+  .refine((value) => value.planningCycle.cycle.lifecycle === 'launch_pending', {
+    path: ['planningCycle', 'cycle', 'lifecycle'],
+    message: 'Submit-turn success must be launch-pending',
+  });
+
+const planningProposalRejectResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_proposal.reject'),
+    planningCycle: planningCycleViewSchema,
+  })
+  .refine(
+    (value) => value.planningCycle.cycle.lifecycle === 'proposal_rejected',
+    {
+      path: ['planningCycle', 'cycle', 'lifecycle'],
+      message: 'Reject success must be proposal-rejected',
+    },
+  );
+
+const planningCycleAbandonResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_cycle.abandon'),
+    planningCycle: planningCycleViewSchema,
+  })
+  .refine((value) => value.planningCycle.cycle.lifecycle === 'abandoned', {
+    path: ['planningCycle', 'cycle', 'lifecycle'],
+    message: 'Abandon success must be abandoned',
+  });
+
 export const v2CommandResultSchema = z.union([
   z.strictObject({
     ok: z.literal(true),
@@ -203,22 +239,10 @@ export const v2CommandResultSchema = z.union([
     commandType: z.literal('worker_execution.interrupt'),
     execution: workerExecutionSchema,
   }),
-  z.strictObject({
-    ok: z.literal(true),
-    commandType: z.literal('planning_cycle.submit_turn'),
-    planningCycle: planningCycleViewSchema,
-  }),
+  planningTurnSubmitResultSchema,
   planningProposalApproveResultSchema,
-  z.strictObject({
-    ok: z.literal(true),
-    commandType: z.literal('planning_proposal.reject'),
-    planningCycle: planningCycleViewSchema,
-  }),
-  z.strictObject({
-    ok: z.literal(true),
-    commandType: z.literal('planning_cycle.abandon'),
-    planningCycle: planningCycleViewSchema,
-  }),
+  planningProposalRejectResultSchema,
+  planningCycleAbandonResultSchema,
   commandFailureSchema,
 ]);
 export type V2CommandResult = z.infer<typeof v2CommandResultSchema>;
