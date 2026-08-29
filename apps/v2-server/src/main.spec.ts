@@ -552,6 +552,7 @@ describe('startV2Server', () => {
         childServer.child.send({ type: 'mesh.v2.test.sigterm' });
       } else {
         childServer.child.kill('SIGTERM');
+        if (childServer.child.connected) childServer.child.disconnect();
       }
       const exit = await childServer.exited;
       expect(exit).toEqual({ code: 0, signal: null });
