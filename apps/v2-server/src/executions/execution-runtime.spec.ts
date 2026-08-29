@@ -241,6 +241,86 @@ describe('ExecutionRuntime', () => {
     expect(context.fake.startCount).toBe(0);
   });
 
+  it('durably rejects ambiguous required skills while preferred ambiguity falls back', async () => {
+    const fake = new FakeHarnessAdapter();
+    fake.capabilitiesValue = {
+      ...fake.capabilitiesValue,
+      skills: [
+        {
+          logicalId: 'mesh.preferred',
+          nativeId: 'fake.preferred-a',
+          version: '1.3.0',
+          digest: 'a'.repeat(64),
+        },
+        {
+          logicalId: 'mesh.preferred',
+          nativeId: 'fake.preferred-b',
+          version: '1.9.0',
+          digest: 'b'.repeat(64),
+        },
+        {
+          logicalId: 'mesh.required',
+          nativeId: 'fake.required-a',
+          version: '0.2.4',
+          digest: 'c'.repeat(64),
+        },
+        {
+          logicalId: 'mesh.required',
+          nativeId: 'fake.required-b',
+          version: '0.2.9',
+          digest: 'd'.repeat(64),
+        },
+      ],
+    };
+    const context = createRuntime({
+      fake,
+      profile: (profile) => ({
+        ...profile,
+        document: {
+          ...profile.document,
+          spec: {
+            ...profile.document.spec,
+            skills: {
+              preferred: [
+                { id: 'mesh.preferred', constraint: { version: '^1.2.3' } },
+              ],
+              required: [
+                { id: 'mesh.required', constraint: { version: '^0.2.3' } },
+              ],
+            },
+          },
+        },
+      }),
+    });
+
+    const result = await context.runtime.start(context.start);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'required_skill_unavailable' },
+    });
+    const failed = required(
+      context.executions.list(context.fixture.project.id).at(-1),
+      'Expected a failed execution',
+    );
+    expect(failed).toMatchObject({
+      lifecycle: 'failed',
+      failure: {
+        code: 'required_skill_unavailable',
+        missing: ['mesh.required'],
+      },
+      resolvedSkills: [
+        { mode: 'preferred', resolution: { kind: 'mesh-native-fallback' } },
+        { mode: 'required', resolution: { kind: 'unavailable' } },
+      ],
+    });
+    expect(context.fixture.commands.find(context.start.idempotencyKey)?.result).toEqual(
+      result,
+    );
+    expect(context.operations.listForExecution(failed.id)).toEqual([]);
+    expect(fake.startCount).toBe(0);
+  });
+
   it('stores one immutable starting receipt and pending-operation lineage before start', async () => {
     const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
     fake.blockStart();

@@ -87,14 +87,16 @@ export const satisfiesSkillVersion = (
 export const matchingSkill = (
   request: LogicalSkillRequest,
   descriptors: readonly HarnessSkillDescriptor[],
-): HarnessSkillDescriptor | undefined =>
-  descriptors.find(
+): HarnessSkillDescriptor | undefined => {
+  const compatible = descriptors.filter(
     (descriptor) =>
       descriptor.logicalId === request.id &&
       satisfiesSkillVersion(descriptor.version, request.constraint?.version) &&
       (request.constraint?.digest === undefined ||
         descriptor.digest === request.constraint.digest),
   );
+  return compatible.length === 1 ? compatible[0] : undefined;
+};
 
 export const resolveSkillSnapshots = (
   capabilities: HarnessCapabilities,

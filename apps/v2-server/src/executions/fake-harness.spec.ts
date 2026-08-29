@@ -84,6 +84,33 @@ describe('FakeHarnessAdapter', () => {
     ]);
   });
 
+  it('treats duplicate compatible skill descriptors as unavailable', async () => {
+    const fake = new FakeHarnessAdapter();
+    fake.capabilitiesValue = {
+      ...fake.capabilitiesValue,
+      skills: [
+        {
+          logicalId: 'mesh.foundation-check',
+          nativeId: 'fake.foundation-check-a',
+          version: '1.3.0',
+          digest: 'a'.repeat(64),
+        },
+        {
+          logicalId: 'mesh.foundation-check',
+          nativeId: 'fake.foundation-check-b',
+          version: '1.9.0',
+          digest: 'b'.repeat(64),
+        },
+      ],
+    };
+
+    await expect(
+      fake.resolveSkills([
+        { id: 'mesh.foundation-check', constraint: { version: '^1.2.3' } },
+      ]),
+    ).resolves.toEqual([]);
+  });
+
   it.each([
     ['^1.2.3', true],
     ['^2.0.0', false],
