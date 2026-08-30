@@ -373,6 +373,11 @@ export class PlanningService {
 
     let event: DomainEvent | undefined;
     const result = this.auditTransaction(() => {
+      const replay = this.dependencies.commands.find(
+        envelope.idempotencyKey,
+        requestHash,
+      );
+      if (replay) return replay.result;
       const at = this.now();
       const current = this.dependencies.repository.cycle(cycle.id);
       if (!current || current.projectId !== envelope.command.projectId) {

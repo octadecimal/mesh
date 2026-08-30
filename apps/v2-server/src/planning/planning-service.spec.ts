@@ -697,6 +697,64 @@ describe('PlanningService', () => {
     ).toHaveLength(1);
   });
 
+  it('replays one success for identical concurrent abandonment envelopes', async () => {
+    const context = setup();
+    vi.spyOn(context.launcher, 'reserve').mockRejectedValueOnce(
+      new Error('reservation transport stopped'),
+    );
+    await expect(
+      context.service.submitTurn(firstTurn(context.fixture)),
+    ).rejects.toThrow('reservation transport stopped');
+    const cycle = context.repository.activeCycle(context.fixture.project.id)!;
+    const beforeCursor = context.fixture.events.cursors(cycle.projectId).domain;
+    const beforePublish = context.publish.mock.calls.length;
+    const envelope = {
+      idempotencyKey: 'abandon-race-replay',
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'planning_cycle.abandon' as const,
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+      },
+    };
+
+    const results = await Promise.all([
+      context.service.abandonCycle(envelope),
+      context.service.abandonCycle(envelope),
+    ]);
+
+    expect(results[0]).toMatchObject({
+      ok: true,
+      planningCycle: { cycle: { lifecycle: 'abandoned' } },
+    });
+    expect(results[1]).toEqual(results[0]);
+    expect(
+      context.fixture.commands.find(
+        envelope.idempotencyKey,
+        hashV2Command(envelope.command),
+      )?.result,
+    ).toEqual(results[0]);
+    expect(context.fixture.events.cursors(cycle.projectId).domain).toBe(
+      beforeCursor + 1,
+    );
+    expect(context.publish).toHaveBeenCalledTimes(beforePublish + 1);
+    expect(() => context.barrier.assertHealthy()).not.toThrow();
+
+    await expect(
+      context.service.abandonCycle({
+        ...envelope,
+        command: {
+          ...envelope.command,
+          expectedCycleRevision: cycle.revision + 1,
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: 'V2IdempotencyConflictError',
+      code: 'idempotency_conflict',
+    });
+  });
+
   it('does not reopen a failed launch after abandonment and restart', async () => {
     const context = setup();
     vi.spyOn(context.launcher, 'reserve').mockRejectedValueOnce(
