@@ -240,6 +240,80 @@ const durableRuntimeState = (fixture: V2TestDatabase) => ({
     .all(),
 });
 
+const recordPlanningMigration = (
+  fixture: V2TestDatabase,
+  appliedAt: string,
+): void => {
+  fixture.database
+    .prepare(
+      `INSERT INTO v2_schema_migrations (version, name, applied_at)
+       VALUES (2, '002_intent_ledger', ?)`,
+    )
+    .run(appliedAt);
+};
+
+const seedLegacyTerminalFoundationStart = (
+  context: ReturnType<typeof createRuntime>,
+) => {
+  const requestHash = hashV2Command(context.start.command);
+  const occurredAt = '2026-08-28T01:00:00.000Z';
+  const failure = {
+    code: 'required_capability_unavailable' as const,
+    message: 'Required adapter capabilities are unavailable',
+    missing: ['execution.stream'],
+  };
+  const execution: WorkerExecution = {
+    id: randomUUID(),
+    projectId: context.fixture.project.id,
+    profileId: context.fixture.profileRevision.profileId,
+    profileRevision: context.fixture.profileRevision.revision,
+    assignment: context.start.command.assignment,
+    profileSnapshot: {
+      profileId: context.fixture.profileRevision.profileId,
+      projectId: context.fixture.profileRevision.projectId,
+      profileRevision: context.fixture.profileRevision.revision,
+      baseProfileId: context.fixture.profileRevision.baseProfileId,
+      baseRevision: context.fixture.profileRevision.baseRevision,
+      document: context.fixture.profileRevision.document,
+      digest: context.fixture.profileRevision.digest,
+    },
+    skillRequests: { preferred: [], required: [] },
+    resolvedSkills: [],
+    capabilitySnapshot: context.fake.capabilitiesValue,
+    adapterId: context.fake.capabilitiesValue.adapterId,
+    model: context.fixture.profileRevision.document.spec.preferredRuntime.model,
+    nativeHandle: null,
+    lifecycle: 'failed',
+    revision: 1,
+    lastAdapterCursor: 0,
+    lastRuntimeSequence: 0,
+    replacementForExecutionId: null,
+    failure,
+    createdAt: occurredAt,
+    updatedAt: occurredAt,
+    endedAt: occurredAt,
+  };
+  const result = {
+    ok: false,
+    commandType: 'worker_execution.start',
+    error: {
+      code: 'required_capability_unavailable',
+      message: failure.message,
+    },
+  } as const;
+  inImmediateTransaction(context.fixture.database, () => {
+    context.executions.insertInTransaction(execution);
+    context.fixture.commands.storeInTransaction({
+      idempotencyKey: context.start.idempotencyKey,
+      commandType: context.start.command.type,
+      requestHash,
+      result,
+      createdAt: occurredAt,
+    });
+  });
+  return { execution, result };
+};
+
 const attachBlockedPlanningSession = async (
   context: ReturnType<typeof createPmRuntime>,
   running: WorkerExecution,
@@ -481,63 +555,8 @@ describe('ExecutionRuntime', () => {
     const fake = new FakeHarnessAdapter();
     fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
     const context = createRuntime({ fake });
-    const requestHash = hashV2Command(context.start.command);
-    const occurredAt = '2026-08-28T01:00:00.000Z';
-    const failure = {
-      code: 'required_capability_unavailable' as const,
-      message: 'Required adapter capabilities are unavailable',
-      missing: ['execution.stream'],
-    };
-    const legacyExecution: WorkerExecution = {
-      id: randomUUID(),
-      projectId: context.fixture.project.id,
-      profileId: context.fixture.profileRevision.profileId,
-      profileRevision: context.fixture.profileRevision.revision,
-      assignment: context.start.command.assignment,
-      profileSnapshot: {
-        profileId: context.fixture.profileRevision.profileId,
-        projectId: context.fixture.profileRevision.projectId,
-        profileRevision: context.fixture.profileRevision.revision,
-        baseProfileId: context.fixture.profileRevision.baseProfileId,
-        baseRevision: context.fixture.profileRevision.baseRevision,
-        document: context.fixture.profileRevision.document,
-        digest: context.fixture.profileRevision.digest,
-      },
-      skillRequests: { preferred: [], required: [] },
-      resolvedSkills: [],
-      capabilitySnapshot: fake.capabilitiesValue,
-      adapterId: fake.capabilitiesValue.adapterId,
-      model:
-        context.fixture.profileRevision.document.spec.preferredRuntime.model,
-      nativeHandle: null,
-      lifecycle: 'failed',
-      revision: 1,
-      lastAdapterCursor: 0,
-      lastRuntimeSequence: 0,
-      replacementForExecutionId: null,
-      failure,
-      createdAt: occurredAt,
-      updatedAt: occurredAt,
-      endedAt: occurredAt,
-    };
-    const storedResult = {
-      ok: false,
-      commandType: 'worker_execution.start',
-      error: {
-        code: 'required_capability_unavailable',
-        message: failure.message,
-      },
-    } as const;
-    inImmediateTransaction(context.fixture.database, () => {
-      context.executions.insertInTransaction(legacyExecution);
-      context.fixture.commands.storeInTransaction({
-        idempotencyKey: context.start.idempotencyKey,
-        commandType: context.start.command.type,
-        requestHash,
-        result: storedResult,
-        createdAt: occurredAt,
-      });
-    });
+    const { result: storedResult } = seedLegacyTerminalFoundationStart(context);
+    recordPlanningMigration(context.fixture, '2026-08-28T01:00:00.001Z');
 
     await expect(context.runtime.start(context.start)).resolves.toEqual(
       storedResult,
@@ -553,6 +572,52 @@ describe('ExecutionRuntime', () => {
     );
     expect(context.barrier.status).toBe('tripped');
   });
+
+  it('fails terminal-shaped legacy replay closed without migration authority', async () => {
+    const fake = new FakeHarnessAdapter();
+    fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
+    const context = createRuntime({ fake });
+    seedLegacyTerminalFoundationStart(context);
+    const before = durableReservationState(context.fixture);
+
+    await expect(context.runtime.start(context.start)).rejects.toThrow(
+      'Reserved start operation was not found',
+    );
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(fake.startCount).toBe(0);
+  });
+
+  it.each([
+    ['after', '2026-08-28T00:59:59.999Z'],
+    ['at', '2026-08-28T01:00:00.000Z'],
+  ] as const)(
+    'fails terminal-shaped reservation created %s migration 2 closed',
+    async (_relation, appliedAt) => {
+      const fake = new FakeHarnessAdapter();
+      fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
+      const context = createRuntime({ fake });
+      recordPlanningMigration(context.fixture, appliedAt);
+      const reservation = await context.runtime.reserveStart(context.start);
+      const operation = required(
+        context.operations.listForExecution(reservation.execution.id)[0],
+        'Expected failed start operation',
+      );
+      context.fixture.database
+        .prepare('DELETE FROM execution_operations WHERE id = ?')
+        .run(operation.id);
+      const before = durableReservationState(context.fixture);
+
+      await expect(context.runtime.start(context.start)).rejects.toThrow(
+        'Reserved start operation was not found',
+      );
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(fake.startCount).toBe(0);
+    },
+  );
 
   it('fails unproven legacy terminal replay closed', async () => {
     const context = createRuntime();
@@ -624,6 +689,26 @@ describe('ExecutionRuntime', () => {
     );
     expect(context.barrier.status).toBe('tripped');
     expect(context.fake.startCount).toBe(0);
+  });
+
+  it('fails exact reservation replay closed for a forged receipt timestamp', async () => {
+    const context = createRuntime();
+    const reservation = await context.runtime.reserveStart(context.start);
+    context.fixture.database
+      .prepare(
+        'UPDATE command_results SET created_at = ? WHERE idempotency_key = ?',
+      )
+      .run('2026-08-28T01:00:00.001Z', context.start.idempotencyKey);
+    const before = durableReservationState(context.fixture);
+
+    expect(() => context.runtime.findReservedStart(context.start)).toThrow(
+      'Reserved start operation authority is inconsistent',
+    );
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(context.fake.startCount).toBe(0);
+    expect(reservation.execution.createdAt).toBe('2026-08-28T01:00:00.000Z');
   });
 
   it.each(['version', 'embedded-request', 'receipt'] as const)(
@@ -1801,6 +1886,7 @@ describe('ExecutionRuntime', () => {
     'succeeded-interrupted',
     'unknown-attention',
     'untagged-completed',
+    'untagged-attention',
     'native-handle-mismatch',
   ] as const)(
     'contains any runtime-owned session before rejecting %s planning audit state',
@@ -1820,11 +1906,16 @@ describe('ExecutionRuntime', () => {
             context.executions.get(running.id),
             'Expected durable execution',
           );
-          if (fault === 'untagged-completed') {
+          if (
+            fault === 'untagged-completed' ||
+            fault === 'untagged-attention'
+          ) {
             context.executions.transitionInTransaction(
               exact.id,
               exact.revision,
-              'completed',
+              fault === 'untagged-completed'
+                ? 'completed'
+                : 'attention_required',
               '2026-08-28T01:00:01.000Z',
             );
             return;
@@ -2326,6 +2417,85 @@ describe('ExecutionRuntime', () => {
     expect(durableRuntimeState(context.fixture)).toEqual(before);
     expect(context.fake.interruptCalls).toEqual([]);
   });
+
+  it.each([
+    'completed',
+    'failed',
+    'interrupted',
+    'attention_required',
+  ] as const)(
+    'rejects untagged %s PM execution as unrelated non-running state',
+    async (lifecycle) => {
+      const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const running = required(
+        context.executions.get(
+          started.ok && 'execution' in started ? started.execution.id : '',
+        ),
+        'Expected running PM execution',
+      );
+      inImmediateTransaction(context.fixture.database, () => {
+        const exact = required(
+          context.executions.get(running.id),
+          'Expected durable PM execution',
+        );
+        if (lifecycle === 'interrupted') {
+          const interrupting = context.executions.transitionInTransaction(
+            exact.id,
+            exact.revision,
+            'interrupting',
+            '2026-08-28T01:00:01.000Z',
+          );
+          context.executions.transitionInTransaction(
+            interrupting.id,
+            interrupting.revision,
+            lifecycle,
+            '2026-08-28T01:00:02.000Z',
+          );
+          return;
+        }
+        context.executions.transitionInTransaction(
+          exact.id,
+          exact.revision,
+          lifecycle,
+          '2026-08-28T01:00:01.000Z',
+          lifecycle === 'failed'
+            ? {
+                failure: {
+                  code: 'internal_error',
+                  message: 'Untagged terminal PM fixture',
+                },
+              }
+            : {},
+        );
+      });
+      expect(
+        context.operations
+          .listForExecution(running.id)
+          .filter((operation) => operation.kind === 'interrupt'),
+      ).toEqual([]);
+      const before = durableRuntimeState(context.fixture);
+      const publishedBefore = {
+        domain: context.published.domain.length,
+        runtime: context.published.runtime.length,
+      };
+
+      await expect(
+        context.runtime.interruptForPlanning(running.id),
+      ).rejects.toMatchObject({
+        name: PlanningInterruptCleanupError.name,
+        code: 'planning_interrupt_not_running',
+        diagnostics: [],
+      });
+
+      expect(context.barrier.status).toBe('healthy');
+      expect(durableRuntimeState(context.fixture)).toEqual(before);
+      expect(context.published.domain).toHaveLength(publishedBefore.domain);
+      expect(context.published.runtime).toHaveLength(publishedBefore.runtime);
+      expect(context.fake.interruptCalls).toEqual([]);
+    },
+  );
 
   it('durably rejects missing required capabilities before operation or adapter start', async () => {
     const fake = new FakeHarnessAdapter();

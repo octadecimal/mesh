@@ -225,6 +225,14 @@ export class ExecutionRuntime {
       return false;
     }
     if (stored.result.ok) return false;
+    const migrationAppliedAt =
+      this.dependencies.operations.migrationAppliedAt(2);
+    if (
+      migrationAppliedAt === undefined ||
+      Date.parse(stored.createdAt) >= Date.parse(migrationAppliedAt)
+    ) {
+      return false;
+    }
     const terminalResult = stored.result;
     const candidates = this.dependencies.executions
       .list(envelope.command.projectId)
@@ -381,6 +389,8 @@ export class ExecutionRuntime {
       executionId,
     );
     if (
+      stored.createdAt !== execution.createdAt ||
+      operation.createdAt !== execution.createdAt ||
       embeddedRequest.data.projectId !== execution.projectId ||
       embeddedRequest.data.profileId !== execution.profileId ||
       embeddedRequest.data.profileRevision !== execution.profileRevision ||
@@ -1198,6 +1208,16 @@ export class ExecutionRuntime {
         executionId,
         'Planning interrupt operation does not match execution lifecycle',
         owned,
+      );
+    }
+    if (
+      prior === undefined &&
+      current.lifecycle === 'attention_required' &&
+      !owned
+    ) {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_not_running',
+        'Execution is not an active planning runtime',
       );
     }
     if (

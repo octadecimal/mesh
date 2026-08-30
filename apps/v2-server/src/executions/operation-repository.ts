@@ -43,6 +43,13 @@ const toOperation = (row: OperationRow): ExecutionOperation =>
 export class OperationRepository {
   constructor(private readonly database: V2Database) {}
 
+  migrationAppliedAt(version: number): string | undefined {
+    const row = this.database
+      .prepare('SELECT applied_at FROM v2_schema_migrations WHERE version = ?')
+      .get(version) as { applied_at: string } | undefined;
+    return row ? z.string().datetime().parse(row.applied_at) : undefined;
+  }
+
   get(id: string): ExecutionOperation | undefined {
     const row = this.database
       .prepare('SELECT * FROM execution_operations WHERE id = ?')
