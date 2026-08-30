@@ -285,6 +285,27 @@ describe('PmReportConsumer', () => {
     expect(context.publish).toHaveBeenCalledTimes(1);
   });
 
+  it('does not consume a durable report when its audit barrier is already tripped', async () => {
+    const context = await setup();
+    const assignment = context.execution.assignment as PmDiscoveryAssignment;
+    const event = runtimeEvent(context, {
+      ...reportBase(context),
+      result: { kind: 'questions' as const, questions: [] },
+    });
+    const cycle = context.repository.cycle(assignment.planningCycleId)!;
+    const cursor = context.fixture.events.cursors(cycle.projectId).domain;
+    context.consumerBarrier.trip(new Error('audit unavailable'), now);
+
+    expect(() => context.consumer.consume(context.execution, event)).toThrow(
+      'Audit barrier is tripped',
+    );
+
+    expect(context.repository.receipt(context.execution.id)).toBeUndefined();
+    expect(context.repository.cycle(cycle.id)).toEqual(cycle);
+    expect(context.fixture.events.cursors(cycle.projectId).domain).toBe(cursor);
+    expect(context.publish).not.toHaveBeenCalled();
+  });
+
   it('rejects a different output digest without replacing the first receipt', async () => {
     const context = await setup();
     const firstReport = {
@@ -478,6 +499,149 @@ describe('PmReportConsumer', () => {
         (context.execution.assignment as PmDiscoveryAssignment).planningCycleId,
       )?.lifecycle,
     ).toBe('awaiting_human');
+  });
+
+  it('consumes every durable structured output in sequence before terminal reconciliation', async () => {
+    const context = await setup();
+    const first = runtimeEvent(context, {
+      ...reportBase(context),
+      assistantMessage: 'The first durable report.',
+      result: {
+        kind: 'questions' as const,
+        questions: [
+          {
+            key: 'first-report',
+            prompt: 'Is this the first report?',
+            rationale: 'Recovery must consume sequence order.',
+          },
+        ],
+      },
+    });
+    const currentExecution = context.executions.get(context.execution.id)!;
+    runtimeEventFor(context, currentExecution, {
+      ...reportBase(context),
+      assistantMessage: 'A conflicting later durable report.',
+      result: {
+        kind: 'questions' as const,
+        questions: [
+          {
+            key: 'later-report',
+            prompt: 'Is this a later report?',
+            rationale: 'The second digest is ambiguous.',
+          },
+        ],
+      },
+    });
+    const latestExecution = context.executions.get(context.execution.id)!;
+    inImmediateTransaction(context.fixture.database, () => {
+      context.executions.transitionInTransaction(
+        latestExecution.id,
+        latestExecution.revision,
+        'completed',
+        now,
+      );
+    });
+    const reconciler = new PlanningService({
+      database: context.fixture.database,
+      repository: context.repository,
+      commands: context.fixture.commands,
+      events: context.fixture.events,
+      executions: context.executions,
+      profiles: {
+        resolveApproved: () => ({
+          profileId: context.fixture.pmProfileRevision.profileId,
+          projectId: null,
+          profileRevision: context.fixture.pmProfileRevision.revision,
+          baseProfileId: null,
+          baseRevision: null,
+          document: context.fixture.pmProfileRevision.document,
+          digest: context.fixture.pmProfileRevision.digest,
+        }),
+      },
+      launcher: context.launcher,
+      barrier: context.consumerBarrier,
+      reportConsumer: context.consumer,
+      now: () => now,
+      publishDomain: vi.fn(),
+    });
+
+    expect(() => reconciler.reconcileBoundCycles()).toThrow(
+      'Conflicting PM output receipt',
+    );
+
+    expect(context.repository.receipt(context.execution.id)).toMatchObject({
+      runtimeEventId: first.id,
+      status: 'accepted',
+    });
+    expect(context.consumerBarrier.status).toBe('tripped');
+    expect(context.publish).toHaveBeenCalledTimes(1);
+    expect(
+      context.repository.cycle(
+        (context.execution.assignment as PmDiscoveryAssignment).planningCycleId,
+      )?.lifecycle,
+    ).toBe('awaiting_human');
+  });
+
+  it('does not consume or terminally reconcile when shared recovery starts unhealthy', async () => {
+    const context = await setup();
+    const assignment = context.execution.assignment as PmDiscoveryAssignment;
+    runtimeEvent(context, {
+      ...reportBase(context),
+      result: { kind: 'questions' as const, questions: [] },
+    });
+    const running = context.executions.get(context.execution.id)!;
+    inImmediateTransaction(context.fixture.database, () => {
+      context.executions.transitionInTransaction(
+        running.id,
+        running.revision,
+        'completed',
+        now,
+      );
+    });
+    const barrier = new AuditBarrier();
+    const publish = vi.fn();
+    const consumer = new PmReportConsumer({
+      database: context.fixture.database,
+      repository: context.repository,
+      events: context.fixture.events,
+      barrier,
+      publishDomain: publish,
+    });
+    const reconciler = new PlanningService({
+      database: context.fixture.database,
+      repository: context.repository,
+      commands: context.fixture.commands,
+      events: context.fixture.events,
+      executions: context.executions,
+      profiles: {
+        resolveApproved: () => ({
+          profileId: context.fixture.pmProfileRevision.profileId,
+          projectId: null,
+          profileRevision: context.fixture.pmProfileRevision.revision,
+          baseProfileId: null,
+          baseRevision: null,
+          document: context.fixture.pmProfileRevision.document,
+          digest: context.fixture.pmProfileRevision.digest,
+        }),
+      },
+      launcher: context.launcher,
+      barrier,
+      reportConsumer: consumer,
+      now: () => now,
+      publishDomain: publish,
+    });
+    const cycle = context.repository.cycle(assignment.planningCycleId)!;
+    const cursor = context.fixture.events.cursors(cycle.projectId).domain;
+    barrier.trip(new Error('audit unavailable'), now);
+
+    expect(() => reconciler.reconcileBoundCycles()).toThrow(
+      'Audit barrier is tripped',
+    );
+
+    expect(context.repository.receipt(context.execution.id)).toBeUndefined();
+    expect(context.repository.cycle(cycle.id)).toEqual(cycle);
+    expect(context.fixture.events.cursors(cycle.projectId).domain).toBe(cursor);
+    expect(publish).not.toHaveBeenCalled();
   });
 
   it('persists a complete proposal with server record reservations but no canonical rows', async () => {

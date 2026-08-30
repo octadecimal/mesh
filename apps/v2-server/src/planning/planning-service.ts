@@ -314,6 +314,7 @@ export class PlanningService {
     const coordinator = this.coordinator(cycle.id);
     coordinator.cancelled = true;
     await coordinator.active;
+    this.dependencies.barrier.assertHealthy();
     const refreshed = this.dependencies.repository.cycle(cycle.id)!;
     const turns = this.dependencies.repository.cycleView(cycle.id)?.turns ?? [];
     const pendingTurn = [...turns]
@@ -340,6 +341,7 @@ export class PlanningService {
     if (pendingLaunch && pendingReservation) {
       this.assertReservation(pendingLaunch, pendingReservation);
       await this.containExecution(pendingReservation.execution.id);
+      this.dependencies.barrier.assertHealthy();
     }
     if (refreshed.lifecycle === 'attention_required' && boundTurn) {
       const launch = this.launchInput(boundTurn);
@@ -354,6 +356,7 @@ export class PlanningService {
     }
     if (executionId) {
       await this.containExecution(executionId);
+      this.dependencies.barrier.assertHealthy();
     }
     if (pendingLaunch) {
       const observed = this.dependencies.launcher.findReserved(pendingLaunch);
@@ -370,8 +373,31 @@ export class PlanningService {
 
     let event: DomainEvent | undefined;
     const result = this.auditTransaction(() => {
-      const current = this.dependencies.repository.cycle(cycle.id)!;
       const at = this.now();
+      const current = this.dependencies.repository.cycle(cycle.id);
+      if (!current || current.projectId !== envelope.command.projectId) {
+        return this.storeFailure(
+          envelope,
+          requestHash,
+          'planning_cycle_not_found',
+          'Planning cycle was not found',
+          at,
+        );
+      }
+      if (
+        current.revision !== envelope.command.expectedCycleRevision ||
+        ['approved', 'proposal_rejected', 'abandoned'].includes(
+          current.lifecycle,
+        )
+      ) {
+        return this.storeFailure(
+          envelope,
+          requestHash,
+          'planning_cycle_revision_conflict',
+          'Planning cycle revision does not match',
+          at,
+        );
+      }
       const view = this.dependencies.repository.cycleView(cycle.id)!;
       const latest = view.proposals.at(-1);
       if (latest?.lifecycle === 'awaiting_approval') {
@@ -421,7 +447,9 @@ export class PlanningService {
   }
 
   reconcilePendingReservations(): void {
+    this.dependencies.barrier.assertHealthy();
     for (const turn of this.dependencies.repository.pendingLaunchTurns()) {
+      this.dependencies.barrier.assertHealthy();
       const coordinator = this.coordinator(turn.planningCycleId);
       if (!this.isLaunchable(turn, coordinator)) continue;
       const input = this.launchInput(turn);
@@ -434,6 +462,7 @@ export class PlanningService {
   }
 
   async drainPendingLaunches(): Promise<void> {
+    this.dependencies.barrier.assertHealthy();
     await Promise.all(
       this.dependencies.repository
         .pendingLaunchTurns()
@@ -442,25 +471,31 @@ export class PlanningService {
   }
 
   reconcileBoundCycles(): void {
+    this.dependencies.barrier.assertHealthy();
     for (const turn of this.dependencies.repository.boundOpenTurns()) {
+      this.dependencies.barrier.assertHealthy();
       const execution = this.dependencies.executions.get(turn.executionId!);
-      if (execution && !this.dependencies.repository.receipt(execution.id)) {
-        const output = this.dependencies.events
+      if (execution) {
+        const outputs = this.dependencies.events
           .runtimeAfter(turn.projectId, 0)
-          .events.find(
+          .events.filter(
             (event) =>
               event.executionId === execution.id &&
               event.type === 'worker_execution.structured_output',
           );
-        if (output?.type === 'worker_execution.structured_output') {
+        for (const output of outputs) {
+          this.dependencies.barrier.assertHealthy();
+          if (output.type !== 'worker_execution.structured_output') continue;
           this.dependencies.reportConsumer.consume(execution, output);
         }
       }
+      this.dependencies.barrier.assertHealthy();
       this.reconcileTerminalExecution(turn.executionId!);
     }
   }
 
   reconcileTerminalExecution(executionId: WorkerExecutionId): void {
+    this.dependencies.barrier.assertHealthy();
     const execution = this.dependencies.executions.get(executionId);
     if (!execution || !terminalExecution.has(execution.lifecycle)) return;
     const turn = this.dependencies.repository
@@ -666,6 +701,7 @@ export class PlanningService {
     const coordinator = this.coordinator(turn.planningCycleId);
     if (coordinator.active) return coordinator.active;
     coordinator.active = (async () => {
+      this.dependencies.barrier.assertHealthy();
       if (!this.isLaunchable(turn, coordinator)) return;
       const input = this.launchInput(turn);
       const existing = this.dependencies.launcher.findReserved(input);
@@ -679,7 +715,9 @@ export class PlanningService {
         return;
       }
       if (!this.isLaunchable(turn, coordinator)) return;
+      this.dependencies.barrier.assertHealthy();
       const reservation = await this.dependencies.launcher.reserve(input);
+      this.dependencies.barrier.assertHealthy();
       this.assertReservation(input, reservation);
       if (!this.isLaunchable(turn, coordinator)) {
         await this.cancelStartingReservation(reservation);
@@ -690,16 +728,13 @@ export class PlanningService {
         return;
       }
       if (coordinator.cancelled) {
-        const execution = this.dependencies.executions.get(
-          reservation.execution.id,
-        );
-        if (execution?.lifecycle === 'starting') {
-          await this.dependencies.launcher.cancelReserved(execution.id);
-        }
+        await this.cancelStartingReservation(reservation);
         return;
       }
       if (reservation.activationRequired) {
+        this.dependencies.barrier.assertHealthy();
         await this.dependencies.launcher.activate(reservation.execution.id);
+        this.dependencies.barrier.assertHealthy();
       }
     })();
     try {
@@ -791,7 +826,9 @@ export class PlanningService {
       this.dependencies.executions.get(reservation.execution.id) ??
       reservation.execution;
     if (execution.lifecycle === 'starting') {
+      this.dependencies.barrier.assertHealthy();
       await this.dependencies.launcher.cancelReserved(execution.id);
+      this.dependencies.barrier.assertHealthy();
     }
   }
 
@@ -801,14 +838,18 @@ export class PlanningService {
     let execution = this.dependencies.executions.get(executionId);
     if (!execution) throw new Error('Planning execution was not found');
     if (execution.lifecycle === 'starting') {
+      this.dependencies.barrier.assertHealthy();
       await this.dependencies.launcher.cancelReserved(execution.id);
+      this.dependencies.barrier.assertHealthy();
       execution = this.dependencies.executions.get(executionId);
     }
     if (
       execution?.lifecycle === 'running' ||
       execution?.lifecycle === 'interrupting'
     ) {
+      this.dependencies.barrier.assertHealthy();
       await this.dependencies.launcher.interruptForPlanning(execution.id);
+      this.dependencies.barrier.assertHealthy();
       execution = this.dependencies.executions.get(executionId);
     }
     if (!execution || !terminalExecution.has(execution.lifecycle)) {
@@ -945,6 +986,7 @@ export class PlanningService {
   }
 
   private auditTransaction<T>(work: () => T): T {
+    this.dependencies.barrier.assertHealthy();
     try {
       return inImmediateTransaction(this.dependencies.database, work);
     } catch (error) {

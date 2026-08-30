@@ -82,6 +82,7 @@ export class PmReportConsumer {
     execution: WorkerExecution,
     event: WorkerExecutionStructuredOutputRuntimeEvent,
   ): void {
+    this.dependencies.barrier.assertHealthy();
     const outputDigest = digest(event.payload.value);
     const existing = this.dependencies.repository.receipt(execution.id);
     if (existing) {

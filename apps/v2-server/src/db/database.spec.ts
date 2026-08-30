@@ -67,6 +67,7 @@ const legacyStartOperationRequest = (input: {
   profileId: string;
   idempotencyKey: string;
   requestHash: string;
+  assignment?: Record<string, unknown>;
 }) => ({
   version: 'mesh.v2.execution-start/v1',
   idempotencyKey: input.idempotencyKey,
@@ -76,7 +77,7 @@ const legacyStartOperationRequest = (input: {
     projectId: input.projectId,
     profileId: input.profileId,
     profileRevision: 1,
-    assignment: {
+    assignment: input.assignment ?? {
       kind: 'foundation-check',
       projectId: input.projectId,
       title: 'Check',
@@ -85,6 +86,33 @@ const legacyStartOperationRequest = (input: {
     },
   },
 });
+
+const pmDiscoveryAssignment = (projectId: string) => {
+  const planningCycleId = randomUUID();
+  const humanTurnId = randomUUID();
+  return {
+    kind: 'pm_discovery',
+    projectId,
+    outputSchema: 'mesh.dev/pm-discovery-report/v1',
+    planningCycleId,
+    humanTurnId,
+    expectedCycleRevision: 1,
+    expectedProposalRevision: 1,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    input: {
+      conversation: [
+        {
+          turnId: humanTurnId,
+          actor: 'human',
+          message: 'Plan the project.',
+        },
+      ],
+      latestProposal: null,
+      approvedIntentLedger: null,
+    },
+  };
+};
 
 const schemaRows = (database: V2Database) =>
   database
@@ -633,9 +661,11 @@ describe('V2 database identity and migration', () => {
   it('indexes valid start-operation links and rejects malformed or duplicate legacy links', () => {
     const validPath = join(temporaryDirectory(), 'valid-link.sqlite');
     const valid = createMigration1Database(validPath);
-    const projectId = randomUUID();
-    const profileId = randomUUID();
+    openDatabases.push(valid);
+    const projectId = '00000000-0000-0000-0000-000000000000';
+    const profileId = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
     const executionId = randomUUID();
+    const pmExecutionId = randomUUID();
     const at = '2026-08-28T00:00:00.000Z';
     valid.exec(`
       INSERT INTO projects VALUES (
@@ -672,6 +702,23 @@ describe('V2 database identity and migration', () => {
         at,
         at,
       );
+    const pmAssignment = pmDiscoveryAssignment(projectId);
+    valid
+      .prepare(
+        `INSERT INTO worker_executions VALUES (
+          ?, ?, ?, 1, ?, ?, '{}', '[]', ?, 'fake', 'deterministic', NULL,
+          'starting', 0, 0, 0, NULL, NULL, ?, ?, NULL)`,
+      )
+      .run(
+        pmExecutionId,
+        projectId,
+        profileId,
+        JSON.stringify(pmAssignment),
+        JSON.stringify({}),
+        JSON.stringify({ adapterId: 'fake' }),
+        at,
+        at,
+      );
     valid
       .prepare(
         `INSERT INTO execution_operations VALUES (?, ?, 'start', 'pending', ?, NULL, ?, ?)`,
@@ -690,8 +737,26 @@ describe('V2 database identity and migration', () => {
         at,
         at,
       );
+    valid
+      .prepare(
+        `INSERT INTO execution_operations VALUES (?, ?, 'start', 'pending', ?, NULL, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        pmExecutionId,
+        JSON.stringify(
+          legacyStartOperationRequest({
+            projectId,
+            profileId,
+            idempotencyKey: 'pm-start-key',
+            requestHash: 'd'.repeat(64),
+            assignment: pmAssignment,
+          }),
+        ),
+        at,
+        at,
+      );
     migrateV2Database(valid);
-    openDatabases.push(valid);
     expect(
       valid
         .prepare(
@@ -707,6 +772,8 @@ describe('V2 database identity and migration', () => {
       'extra',
       'wrong-type',
       'nested',
+      'pm-extra',
+      'pm-malformed',
     ] as const) {
       const path = join(temporaryDirectory(), `${mode}-link.sqlite`);
       const database = createMigration1Database(path);
@@ -796,6 +863,32 @@ describe('V2 database identity and migration', () => {
                       assignment: {
                         ...validRequest.request.assignment,
                         extra: true,
+                      },
+                    },
+                  };
+                }
+                if (mode === 'pm-extra') {
+                  const assignment = pmDiscoveryAssignment(project);
+                  return {
+                    ...validRequest,
+                    request: {
+                      ...validRequest.request,
+                      assignment: {
+                        ...assignment,
+                        input: { ...assignment.input, extra: true },
+                      },
+                    },
+                  };
+                }
+                if (mode === 'pm-malformed') {
+                  const assignment = pmDiscoveryAssignment(project);
+                  return {
+                    ...validRequest,
+                    request: {
+                      ...validRequest.request,
+                      assignment: {
+                        ...assignment,
+                        input: { ...assignment.input, conversation: [] },
                       },
                     },
                   };

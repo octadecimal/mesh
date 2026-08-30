@@ -536,6 +536,31 @@ describe('PlanningService', () => {
     });
   });
 
+  it('stops after reserve when the audit barrier trips across the await', async () => {
+    const context = setup();
+    let release!: () => void;
+    context.launcher.reserveBarrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const submit = context.service.submitTurn(firstTurn(context.fixture));
+    while (!context.launcher.trace.includes('reserve')) await Promise.resolve();
+    const cycle = context.repository.activeCycle(context.fixture.project.id)!;
+    const turn = context.repository.cycleView(cycle.id)!.turns[0];
+
+    context.barrier.trip(new Error('audit failed while reserving'), now);
+    release();
+
+    await expect(submit).rejects.toThrow('Audit barrier is tripped');
+    expect(context.repository.cycle(cycle.id)?.lifecycle).toBe(
+      'launch_pending',
+    );
+    expect(context.repository.turn(turn.id)).toMatchObject({
+      launchState: 'launch_pending',
+      executionId: null,
+    });
+    expect(context.launcher.trace).toEqual(['reserve']);
+  });
+
   it('does not store abandonment when cleanup fails', async () => {
     const { fixture, repository, launcher, service } = setup();
     await service.submitTurn(firstTurn(fixture));
@@ -615,6 +640,61 @@ describe('PlanningService', () => {
       context.operations.listForExecution(reservation.execution.id)[0].state,
     ).toBe('failed');
     expect(context.launcher.trace).toEqual(['reserve', 'cancel', 'cancel']);
+  });
+
+  it('allows only one distinct same-revision abandonment to commit after awaiting', async () => {
+    const context = setup();
+    vi.spyOn(context.launcher, 'reserve').mockRejectedValueOnce(
+      new Error('reservation transport stopped'),
+    );
+    await expect(
+      context.service.submitTurn(firstTurn(context.fixture)),
+    ).rejects.toThrow('reservation transport stopped');
+    const cycle = context.repository.activeCycle(context.fixture.project.id)!;
+    const beforeCursor = context.fixture.events.cursors(cycle.projectId).domain;
+    const beforePublish = context.publish.mock.calls.length;
+    const command = {
+      type: 'planning_cycle.abandon' as const,
+      projectId: cycle.projectId,
+      planningCycleId: cycle.id,
+      expectedCycleRevision: cycle.revision,
+    };
+
+    const results = await Promise.all([
+      context.service.abandonCycle({
+        idempotencyKey: 'abandon-race-first',
+        actor: { kind: 'human' },
+        command,
+      }),
+      context.service.abandonCycle({
+        idempotencyKey: 'abandon-race-second',
+        actor: { kind: 'human' },
+        command,
+      }),
+    ]);
+
+    expect(results.filter(({ ok }) => ok)).toHaveLength(1);
+    expect(results.filter(({ ok }) => !ok)).toEqual([
+      expect.objectContaining({
+        error: {
+          code: 'planning_cycle_revision_conflict',
+          message: expect.any(String),
+        },
+      }),
+    ]);
+    expect(context.repository.cycle(cycle.id)).toMatchObject({
+      lifecycle: 'abandoned',
+      revision: cycle.revision + 1,
+    });
+    expect(context.fixture.events.cursors(cycle.projectId).domain).toBe(
+      beforeCursor + 1,
+    );
+    expect(context.publish).toHaveBeenCalledTimes(beforePublish + 1);
+    expect(
+      ['abandon-race-first', 'abandon-race-second']
+        .map((key) => context.fixture.commands.find(key)?.result)
+        .filter((result) => result?.ok),
+    ).toHaveLength(1);
   });
 
   it('does not reopen a failed launch after abandonment and restart', async () => {
@@ -754,5 +834,42 @@ describe('PlanningService', () => {
     expect(operations.listForExecution(starting.id)[0]).toEqual(
       operationBefore,
     );
+  });
+
+  it('does not observe or bind a pending reservation when reconciliation starts unhealthy', async () => {
+    const context = setup();
+    const reserveFailure = vi
+      .spyOn(context.launcher, 'reserve')
+      .mockRejectedValueOnce(new Error('reservation transport stopped'));
+    await expect(
+      context.service.submitTurn(firstTurn(context.fixture)),
+    ).rejects.toThrow('reservation transport stopped');
+    reserveFailure.mockRestore();
+    const turn = context.repository.pendingLaunchTurns()[0];
+    const launch = context.launcher.inputs.at(-1)!;
+    const reservation = await context.launcher.reserve(launch);
+    context.launcher.trace.splice(0);
+    const inputCount = context.launcher.inputs.length;
+    context.barrier.trip(new Error('audit unavailable'), now);
+
+    expect(() => context.service.reconcilePendingReservations()).toThrow(
+      'Audit barrier is tripped',
+    );
+    await expect(context.service.drainPendingLaunches()).rejects.toThrow(
+      'Audit barrier is tripped',
+    );
+
+    expect(context.repository.turn(turn.id)).toMatchObject({
+      launchState: 'launch_pending',
+      executionId: null,
+    });
+    expect(context.repository.cycle(turn.planningCycleId)?.lifecycle).toBe(
+      'launch_pending',
+    );
+    expect(context.executions.get(reservation.execution.id)?.lifecycle).toBe(
+      'starting',
+    );
+    expect(context.launcher.inputs).toHaveLength(inputCount);
+    expect(context.launcher.trace).toEqual([]);
   });
 });
