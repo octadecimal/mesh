@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import {
   PM_DISCOVERY_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
+  planningCycleViewSchema,
   resolvedWorkerProfileSnapshotSchema,
   runtimeEventSchema,
   v2ProjectSnapshotSchema,
@@ -166,6 +167,104 @@ const projectSnapshot = v2ProjectSnapshotSchema.parse({
   cursors: { domain: 3, runtime: 5 },
 });
 
+const terminalPlanningCycle = planningCycleViewSchema.parse({
+  cycle: {
+    id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    projectId,
+    lifecycle: 'abandoned',
+    revision: 2,
+    profileId: pmProfile.profileId,
+    profileRevision: pmProfile.profileRevision,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    latestProposalRevision: 0,
+    activeExecutionId: null,
+    createdAt: '2026-08-28T00:00:00.000Z',
+    updatedAt: '2026-08-28T00:00:01.000Z',
+    endedAt: '2026-08-28T00:00:01.000Z',
+  },
+  turns: [],
+  questions: [],
+  proposals: [],
+});
+
+const activePlanningCycle = planningCycleViewSchema.parse({
+  cycle: {
+    ...terminalPlanningCycle.cycle,
+    id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    lifecycle: 'awaiting_approval',
+    revision: 4,
+    latestProposalRevision: 1,
+    updatedAt: '2026-08-28T00:00:04.000Z',
+    endedAt: null,
+  },
+  turns: [
+    {
+      id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      projectId,
+      planningCycleId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      ordinal: 1,
+      actor: 'human',
+      message: 'Plan Todo.',
+      launchState: 'execution_bound',
+      executionId,
+      createdAt: '2026-08-28T00:00:02.000Z',
+    },
+    {
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      projectId,
+      planningCycleId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      ordinal: 2,
+      actor: 'pm',
+      message: 'Approve this proposal.',
+      launchState: null,
+      executionId,
+      createdAt: '2026-08-28T00:00:03.000Z',
+    },
+  ],
+  questions: [],
+  proposals: [
+    {
+      id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      projectId,
+      planningCycleId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      revision: 1,
+      lifecycle: 'awaiting_approval',
+      baseProjectIntentRevision: null,
+      baseLedgerRevision: null,
+      summary: 'A durable Todo product.',
+      projectIntent: {
+        goal: 'Track Todo items.',
+        targetUsers: ['Individuals'],
+        desiredCapabilities: ['Add Todo items'],
+        constraints: [],
+        nonGoals: [],
+        successConditions: ['Todo items can be completed'],
+        rationale: 'The operator requested Todo.',
+        provenance: [
+          {
+            kind: 'conversation_turn',
+            turnId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+            rationale: 'Initial request.',
+          },
+        ],
+      },
+      records: [],
+      relationships: [],
+      diff: {
+        intentChanges: [],
+        recordChanges: { create: 0, revise: 0, reuse: 0 },
+        relationshipChanges: { added: [], removed: [] },
+      },
+      createdByTurnId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      createdByExecutionId: executionId,
+      rejectionFeedback: null,
+      createdAt: '2026-08-28T00:00:03.000Z',
+      decidedAt: null,
+    },
+  ],
+});
+
 class FakeLocation extends EventTarget implements AppLocation {
   constructor(
     public pathname = '/',
@@ -292,12 +391,60 @@ const subscribed = (): ServerRealtimeMessage => ({
 afterEach(() => vi.restoreAllMocks());
 
 describe('App', () => {
+  it('targets only the actual active cycle when terminal history is newer', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () =>
+      v2ProjectSnapshotSchema.parse({
+        ...projectSnapshot,
+        profiles: [...projectSnapshot.profiles, pmProfile],
+        planningCycles: [terminalPlanningCycle, activePlanningCycle],
+      }),
+    );
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Approve proposal' }));
+    await waitFor(() => expect(api.command).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.command).mock.calls[0]?.[0].command).toMatchObject({
+      type: 'planning_proposal.approve',
+      planningCycleId: activePlanningCycle.cycle.id,
+      expectedCycleRevision: activePlanningCycle.cycle.revision,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
+    await user.type(
+      screen.getByLabelText('Rejection feedback'),
+      'Keep it small.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
+    await waitFor(() => expect(api.command).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.command).mock.calls[1]?.[0].command).toMatchObject({
+      type: 'planning_proposal.reject',
+      planningCycleId: activePlanningCycle.cycle.id,
+      expectedCycleRevision: activePlanningCycle.cycle.revision,
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Abandon cycle' }));
+    await waitFor(() => expect(api.command).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(api.command).mock.calls[2]?.[0].command).toMatchObject({
+      type: 'planning_cycle.abandon',
+      planningCycleId: activePlanningCycle.cycle.id,
+      expectedCycleRevision: activePlanningCycle.cycle.revision,
+    });
+  });
+
   it('submits planning through the generic command API without optimistic transcript changes', async () => {
     const user = userEvent.setup();
     const api = createApi();
     api.projectSnapshot = vi.fn(async () => ({
       ...projectSnapshot,
       profiles: [...projectSnapshot.profiles, pmProfile],
+      planningCycles: [terminalPlanningCycle],
     }));
     const app = renderApp({ pathname: `/projects/${projectId}`, api });
     expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();

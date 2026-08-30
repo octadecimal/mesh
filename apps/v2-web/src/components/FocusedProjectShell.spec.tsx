@@ -1,6 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type {
+  PlanningCycleView,
   V2ProjectSnapshot,
   WorkerExecution,
   WorkerExecutionLifecycle,
@@ -51,7 +52,258 @@ const snapshot: V2ProjectSnapshot = {
   cursors: { domain: 4, runtime: 12 },
 };
 
+const pmProfile = {
+  profileId: '33333333-3333-4333-8333-333333333333',
+  projectId: snapshot.project.id,
+  profileRevision: 1,
+  baseProfileId: null,
+  baseRevision: null,
+  document: {
+    apiVersion: 'mesh.dev/v1alpha1',
+    kind: 'WorkerProfile',
+    metadata: {
+      name: 'project-manager',
+      displayName: 'Project manager',
+      scope: 'project',
+    },
+    spec: {
+      assignmentKinds: ['pm_discovery'],
+      preferredRuntime: { harness: 'fake', model: 'deterministic' },
+      alternatives: [],
+      requiredCapabilities: [],
+      skills: { preferred: [], required: [] },
+      instructions: 'Discover intent.',
+      outputSchema: 'mesh.pm-discovery-report/v1',
+    },
+  },
+  digest: 'a'.repeat(64),
+} as V2ProjectSnapshot['profiles'][number];
+
+const planningCycle = {
+  cycle: {
+    id: '44444444-4444-4444-8444-444444444444',
+    projectId: snapshot.project.id,
+    lifecycle: 'awaiting_human',
+    revision: 2,
+    profileId: pmProfile.profileId,
+    profileRevision: 1,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    latestProposalRevision: 0,
+    activeExecutionId: null,
+    createdAt: '2026-08-28T00:00:00.000Z',
+    updatedAt: '2026-08-28T00:00:01.000Z',
+    endedAt: null,
+  },
+  turns: [],
+  questions: [],
+  proposals: [],
+} as PlanningCycleView;
+
 describe('FocusedProjectShell', () => {
+  it('keeps terminal history while presenting the ordinary new-cycle form', () => {
+    const terminalCycle = {
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'approved' as const,
+        revision: 3,
+        endedAt: '2026-08-28T00:00:02.000Z',
+      },
+    };
+    const planningCycles = [terminalCycle];
+
+    render(
+      <FocusedProjectShell
+        model={{
+          status: 'ready',
+          interrupt: { enabled: true },
+          snapshot: { ...snapshot, profiles: [pmProfile], planningCycles },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText('Describe the outcome you want to discover.'),
+    ).toBeVisible();
+    expect(screen.getByLabelText('Project manager profile')).toBeVisible();
+    expect(planningCycles).toEqual([terminalCycle]);
+  });
+
+  it('derives history-limit guidance from the active cycle', () => {
+    const boundedCycle = {
+      ...planningCycle,
+      turns: Array.from({ length: 32 }, (_, index) => ({
+        id: `55555555-5555-4555-8555-${String(index).padStart(12, '0')}`,
+        projectId: snapshot.project.id,
+        planningCycleId: planningCycle.cycle.id,
+        ordinal: index + 1,
+        actor: 'human' as const,
+        message: `Turn ${index + 1}`,
+        launchState: 'consumed' as const,
+        executionId: null,
+        createdAt: '2026-08-28T00:00:01.000Z',
+      })),
+    };
+
+    render(
+      <FocusedProjectShell
+        model={{
+          status: 'ready',
+          interrupt: { enabled: true },
+          snapshot: {
+            ...snapshot,
+            profiles: [pmProfile],
+            planningCycles: [boundedCycle],
+          },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        'This cycle reached its history limit. Abandon it to begin a new cycle.',
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByLabelText('Project manager profile'),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Abandon cycle' })).toBeVisible();
+  });
+
+  it.each([
+    ['failed', 'Project manager runtime failed.'],
+    ['completed', 'Project manager output was missing.'],
+    ['completed', 'Project manager output was malformed.'],
+    ['completed', 'Project manager output belonged to another execution.'],
+  ] as const)(
+    'offers a human retry after %s recovery attention: %s',
+    (lifecycle, message) => {
+      const attentionCycle = {
+        ...planningCycle,
+        cycle: {
+          ...planningCycle.cycle,
+          lifecycle: 'attention_required' as const,
+        },
+        turns: [
+          {
+            id: '66666666-6666-4666-8666-666666666666',
+            projectId: snapshot.project.id,
+            planningCycleId: planningCycle.cycle.id,
+            ordinal: 1,
+            actor: 'human' as const,
+            message: 'Plan Todo.',
+            launchState: 'execution_bound' as const,
+            executionId: executionFixture.id,
+            createdAt: '2026-08-28T00:00:01.000Z',
+          },
+        ],
+      };
+      const recoveredExecution = {
+        ...executionFixture,
+        lifecycle,
+        failure:
+          lifecycle === 'failed' ? { code: 'internal_error', message } : null,
+      } as WorkerExecution;
+
+      render(
+        <FocusedProjectShell
+          model={{
+            status: 'ready',
+            interrupt: { enabled: true },
+            snapshot: {
+              ...snapshot,
+              profiles: [pmProfile],
+              executions: [recoveredExecution],
+              attentionItems: [
+                {
+                  executionId: executionFixture.id,
+                  code: 'internal_error',
+                  message,
+                },
+              ],
+              planningCycles: [attentionCycle],
+            },
+          }}
+          onDeselect={vi.fn()}
+          onInterrupt={vi.fn()}
+        />,
+      );
+
+      expect(screen.getAllByText(message)[0]).toBeVisible();
+      expect(screen.getByLabelText('Message to project manager')).toBeVisible();
+      expect(
+        screen.queryByText('Abandon this cycle to start a new one.'),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it('keeps ambiguous execution authority abandon-only with its durable diagnostic', () => {
+    const diagnostic = 'Start outcome is unknown for operation op-17.';
+    const attentionCycle = {
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'attention_required' as const,
+      },
+      turns: [
+        {
+          id: '77777777-7777-4777-8777-777777777777',
+          projectId: snapshot.project.id,
+          planningCycleId: planningCycle.cycle.id,
+          ordinal: 1,
+          actor: 'human' as const,
+          message: 'Plan Todo.',
+          launchState: 'execution_bound' as const,
+          executionId: executionFixture.id,
+          createdAt: '2026-08-28T00:00:01.000Z',
+        },
+      ],
+    };
+
+    render(
+      <FocusedProjectShell
+        model={{
+          status: 'ready',
+          interrupt: { enabled: true },
+          snapshot: {
+            ...snapshot,
+            profiles: [pmProfile],
+            executions: [
+              {
+                ...executionFixture,
+                lifecycle: 'attention_required',
+                failure: null,
+              } as WorkerExecution,
+            ],
+            attentionItems: [
+              {
+                executionId: executionFixture.id,
+                code: 'internal_error',
+                message: diagnostic,
+              },
+            ],
+            planningCycles: [attentionCycle],
+          },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(`Operation ${diagnostic}`)).toBeVisible();
+    expect(
+      screen.queryByLabelText('Message to project manager'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Abandon this cycle to start a new one.'),
+    ).toBeVisible();
+  });
+
   it('shows future panes, handles keyboard tabs, and calls deselect and interrupt callbacks', async () => {
     const user = userEvent.setup();
     const onDeselect = vi.fn();

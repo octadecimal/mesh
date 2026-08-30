@@ -49,6 +49,12 @@ const inertPlanning: PlanningCommandProjection = {
   onAbandon: () => undefined,
 };
 
+const terminalPlanningLifecycles = new Set([
+  'approved',
+  'proposal_rejected',
+  'abandoned',
+]);
+
 function disabledInterruptReason(status: ProjectShellViewModel['status']) {
   if (status === 'stale')
     return 'Wait for a fresh project snapshot before interrupting.';
@@ -134,6 +140,37 @@ export function FocusedProjectShell({
       displayName: profile.document.metadata.displayName,
       approvedRevision: profile.profileRevision,
     }));
+  const activePlanningCycle = snapshot.planningCycles.find(
+    ({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle),
+  );
+  const latestPlanningExecutionId =
+    activePlanningCycle?.turns.at(-1)?.executionId;
+  const latestPlanningExecution = snapshot.executions.find(
+    ({ id }) => id === latestPlanningExecutionId,
+  );
+  const planningAttention = snapshot.attentionItems.find(
+    ({ executionId }) => executionId === latestPlanningExecutionId,
+  );
+  const planningRecovery =
+    activePlanningCycle?.cycle.lifecycle === 'attention_required'
+      ? latestPlanningExecution?.lifecycle === 'attention_required'
+        ? ({
+            kind: 'ambiguous_start' as const,
+            operation: planningAttention?.message ?? 'unknown',
+          } as const)
+        : ({
+            kind: 'retryable' as const,
+            message:
+              planningAttention?.message ??
+              latestPlanningExecution?.failure?.message ??
+              'The project manager did not produce a usable planning response. Send another message to retry.',
+          } as const)
+      : undefined;
+  const planningHistoryLimitReached =
+    activePlanningCycle !== undefined &&
+    (activePlanningCycle.turns.filter(({ actor }) => actor === 'human')
+      .length >= 32 ||
+      activePlanningCycle.proposals.length >= 16);
   function activatePane(pane: FuturePane) {
     setActivePane(pane.slug);
     tabRefs.current[pane.slug]?.focus();
@@ -176,12 +213,14 @@ export function FocusedProjectShell({
       <div className="v2-project-layout">
         <aside className="v2-pm-pane" aria-label="PM Chat">
           <PlanningPane
-            cycle={snapshot.planningCycles[0]}
+            cycle={activePlanningCycle}
             connection={planningConnection}
             profiles={planningProfiles}
             submitting={planning.submitting}
             error={planning.error}
             historyTruncated={snapshot.planningHistoryTruncated}
+            historyLimitReached={planningHistoryLimitReached}
+            recovery={planningRecovery}
             executions={snapshot.executions}
             approvedIntentLedger={snapshot.intentLedger}
             onSubmitTurn={planning.onSubmitTurn}

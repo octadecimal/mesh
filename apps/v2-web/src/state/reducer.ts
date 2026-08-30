@@ -123,10 +123,35 @@ const replaceProfile = (
   );
 };
 
+const terminalPlanningLifecycles = new Set([
+  'approved',
+  'proposal_rejected',
+  'abandoned',
+]);
+
 const replacePlanningCycle = (
   cycles: readonly PlanningCycleView[],
   next: PlanningCycleView,
-) => [next, ...cycles.filter(({ cycle }) => cycle.id !== next.cycle.id)];
+  historyTruncated: boolean,
+) => {
+  const candidates = [
+    next,
+    ...cycles.filter(({ cycle }) => cycle.id !== next.cycle.id),
+  ];
+  const active = candidates.find(
+    ({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle),
+  );
+  const ordered = [
+    ...(active ? [active] : []),
+    ...candidates.filter(({ cycle }) =>
+      terminalPlanningLifecycles.has(cycle.lifecycle),
+    ),
+  ];
+  return {
+    planningCycles: ordered.slice(0, 20),
+    planningHistoryTruncated: historyTruncated || ordered.length > 20,
+  };
+};
 
 const projectApprovedProfile = (
   event: Extract<DomainEvent, { type: 'worker_profile.revision_approved' }>,
@@ -214,9 +239,10 @@ const applyDomainEvent = (
       return planningCycle.success
         ? {
             ...state,
-            planningCycles: replacePlanningCycle(
+            ...replacePlanningCycle(
               state.planningCycles,
               planningCycle.data,
+              state.planningHistoryTruncated,
             ),
           }
         : undefined;
@@ -226,9 +252,10 @@ const applyDomainEvent = (
       return outcome.success
         ? {
             ...state,
-            planningCycles: replacePlanningCycle(
+            ...replacePlanningCycle(
               state.planningCycles,
               outcome.data.planningCycle,
+              state.planningHistoryTruncated,
             ),
             intentLedger: outcome.data.intentLedger,
           }

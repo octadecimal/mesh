@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   V2_PROTOCOL_VERSION,
+  type PlanningCycleView,
   type V2CommandEnvelope,
   type V2ProjectSnapshot,
   type V2SystemSnapshot,
@@ -51,6 +52,15 @@ type ActiveCommand = {
 
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : 'Request failed.';
+
+const terminalPlanningLifecycles = new Set([
+  'approved',
+  'proposal_rejected',
+  'abandoned',
+]);
+
+const activePlanningCycle = (cycles?: readonly PlanningCycleView[]) =>
+  cycles?.find(({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle));
 
 const routeProjectId = (pathname: string) => {
   const match = /^\/projects\/([^/]+)$/.exec(pathname);
@@ -270,7 +280,7 @@ function ProjectConnection({
       message: string,
       profile?: { profileId: string; profileRevision: number },
     ) => {
-      const cycle = snapshot?.planningCycles[0];
+      const cycle = activePlanningCycle(snapshot?.planningCycles);
       const command = profile
         ? {
             type: 'planning_cycle.submit_turn' as const,
@@ -308,7 +318,7 @@ function ProjectConnection({
 
   const approvePlanningProposal = useCallback(
     (proposalId: string) => {
-      const cycle = snapshot?.planningCycles[0];
+      const cycle = activePlanningCycle(snapshot?.planningCycles);
       const proposal = cycle?.proposals.find(({ id }) => id === proposalId);
       if (!cycle || !proposal) return;
       void runCommand(
@@ -335,7 +345,7 @@ function ProjectConnection({
 
   const rejectPlanningProposal = useCallback(
     (proposalId: string, feedback: string) => {
-      const cycle = snapshot?.planningCycles[0];
+      const cycle = activePlanningCycle(snapshot?.planningCycles);
       const proposal = cycle?.proposals.find(({ id }) => id === proposalId);
       if (!cycle || !proposal) return;
       void runCommand(
@@ -361,10 +371,8 @@ function ProjectConnection({
 
   const abandonPlanningCycle = useCallback(
     (planningCycleId: string) => {
-      const cycle = snapshot?.planningCycles.find(
-        ({ cycle }) => cycle.id === planningCycleId,
-      );
-      if (!cycle) return;
+      const cycle = activePlanningCycle(snapshot?.planningCycles);
+      if (!cycle || cycle.cycle.id !== planningCycleId) return;
       void runCommand(
         `planning_cycle.abandon:${cycle.cycle.id}:${cycle.cycle.revision}`,
         {

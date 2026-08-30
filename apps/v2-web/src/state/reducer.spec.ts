@@ -159,6 +159,24 @@ const approvedOutcome = approvedPlanningOutcomeSchema.parse({
   },
 });
 
+const terminalPlanningCycles = Array.from({ length: 20 }, (_, index) =>
+  planningCycleViewSchema.parse({
+    cycle: {
+      ...planningCycle.cycle,
+      id: `00000000-0000-4000-8000-${String(100 + index).padStart(12, '0')}`,
+      lifecycle: 'abandoned',
+      revision: 3,
+      activeExecutionId: null,
+      createdAt: `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`,
+      updatedAt: `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`,
+      endedAt: `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`,
+    },
+    turns: [],
+    questions: [],
+    proposals: [],
+  }),
+);
+
 const execution = {
   id: executionId,
   projectId,
@@ -355,6 +373,121 @@ describe('reduceProjectProjection', () => {
     expect(next.local.repositoryDraft).toBe('human draft');
     expect(next.domainCursor).toBe(3);
     expect(next.resyncRequested).toBe(false);
+  });
+
+  it('converges an active cycle over exactly twenty terminal cycles with the authoritative bound', () => {
+    const hydrated = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'snapshot.received',
+        snapshot: {
+          ...snapshot,
+          planningCycles: terminalPlanningCycles,
+          planningHistoryTruncated: false,
+        },
+      },
+    );
+    const incremental = reduceProjectProjection(hydrated, {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000120',
+        projectId,
+        sequence: 3,
+        occurredAt: '2026-08-28T00:01:00.000Z',
+        type: 'planning_cycle.changed',
+        payload: { planningCycle },
+      } as DomainEvent,
+    });
+    const refreshed = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'snapshot.received',
+        snapshot: {
+          ...snapshot,
+          planningCycles: [
+            planningCycle,
+            ...terminalPlanningCycles.slice(0, 19),
+          ],
+          planningHistoryTruncated: true,
+          cursors: { ...snapshot.cursors, domain: 3 },
+        },
+      },
+    );
+
+    expect(incremental).toEqual(refreshed);
+
+    const abandoned = planningCycleViewSchema.parse({
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'abandoned',
+        revision: 3,
+        activeExecutionId: null,
+        updatedAt: '2026-08-28T00:01:01.000Z',
+        endedAt: '2026-08-28T00:01:01.000Z',
+      },
+    });
+    const replaced = reduceProjectProjection(incremental, {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000121',
+        projectId,
+        sequence: 4,
+        occurredAt: '2026-08-28T00:01:01.000Z',
+        type: 'planning_cycle.changed',
+        payload: { planningCycle: abandoned },
+      } as DomainEvent,
+    });
+
+    expect(replaced.planningCycles).toEqual([
+      abandoned,
+      ...terminalPlanningCycles.slice(0, 19),
+    ]);
+    expect(replaced.planningCycles).toHaveLength(20);
+    expect(replaced.planningHistoryTruncated).toBe(true);
+  });
+
+  it('applies the same authoritative planning bound to ledger approval events', () => {
+    const hydrated = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'snapshot.received',
+        snapshot: {
+          ...snapshot,
+          planningCycles: terminalPlanningCycles,
+          planningHistoryTruncated: false,
+        },
+      },
+    );
+    const incremental = reduceProjectProjection(hydrated, {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000122',
+        projectId,
+        sequence: 3,
+        occurredAt: '2026-08-28T00:01:02.000Z',
+        type: 'intent_ledger.approved',
+        payload: approvedOutcome,
+      } as DomainEvent,
+    });
+    const refreshed = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'snapshot.received',
+        snapshot: {
+          ...snapshot,
+          planningCycles: [
+            approvedOutcome.planningCycle,
+            ...terminalPlanningCycles.slice(0, 19),
+          ],
+          planningHistoryTruncated: true,
+          intentLedger: approvedOutcome.intentLedger,
+          cursors: { ...snapshot.cursors, domain: 3 },
+        },
+      },
+    );
+
+    expect(incremental).toEqual(refreshed);
   });
 
   it('requests resync for an incomplete planning projection', () => {
