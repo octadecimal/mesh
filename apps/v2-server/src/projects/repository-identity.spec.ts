@@ -1,5 +1,11 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, relative, resolve } from 'node:path';
 
@@ -214,6 +220,27 @@ describe('repository identity', () => {
       expect(identity.canonicalPath).toBe(resolve(outside));
       expect(identity.commonDirectory).toBe(resolve(outside, '.git'));
     }
+  });
+
+  it('accepts a linked path that resolves to a repository outside the workspace root', async () => {
+    const outside = createRepository(directory, 'outside');
+    const link = join(workspaceRoot, 'linked-path');
+    symlinkSync(
+      outside,
+      link,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const resolveIdentity = createRepositoryIdentityResolver({ workspaceRoot });
+
+    const identity = await resolveIdentity(link);
+
+    expect(identity).toMatchObject({
+      canonicalPath: resolve(outside),
+      commonDirectory: resolve(outside, '.git'),
+      repositoryIdentity: normalizeRepositoryIdentityPath(
+        resolve(outside, '.git'),
+      ),
+    });
   });
 
   it('accepts a linked worktree whose common directory is outside the workspace root', async () => {
