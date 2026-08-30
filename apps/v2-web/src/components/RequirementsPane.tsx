@@ -13,6 +13,15 @@ const groups = [
   ['risk', 'Risks'],
 ] as const;
 
+const relationshipLabels: Record<string, string> = {
+  refines: 'refines',
+  depends_on: 'depends on',
+  conflicts_with: 'conflicts with',
+  supersedes: 'supersedes',
+  duplicates: 'duplicates',
+  constrains: 'constrains',
+};
+
 function metadata(record: LedgerRecordRevision) {
   const content = record.content;
   if (content.type === 'requirement')
@@ -68,7 +77,7 @@ export function RequirementsPane({
   const labels = new Map(
     intentLedger.records.map((record) => [
       record.recordId,
-      record.content.statement,
+      `${record.recordId} · ${record.content.statement}`,
     ]),
   );
   return (
@@ -83,7 +92,15 @@ export function RequirementsPane({
         </h3>
         <p>{intentLedger.projectIntent.content.goal}</p>
         <p>{intentLedger.projectIntent.content.rationale}</p>
+        <ul aria-label="Approved intent provenance">
+          {intentLedger.projectIntent.content.provenance.map((source) => (
+            <li key={`${source.turnId}-${source.rationale}`}>
+              {source.turnId} · {source.rationale}
+            </li>
+          ))}
+        </ul>
       </section>
+      <p>Ledger revision {intentLedger.ledger.revision}</p>
       {intentLedger.records.length === 0 ? (
         <p>No ledger records are in this approved revision.</p>
       ) : (
@@ -109,7 +126,7 @@ export function RequirementsPane({
                       >
                         {record.provenance.map((source) => (
                           <li key={`${source.turnId}-${source.rationale}`}>
-                            {source.rationale}
+                            {source.turnId} · {source.rationale}
                           </li>
                         ))}
                       </ul>
@@ -133,7 +150,7 @@ export function RequirementsPane({
               >
                 {labels.get(relationship.fromRecordId) ??
                   relationship.fromRecordId}{' '}
-                {relationship.kind}{' '}
+                {relationshipLabels[relationship.kind]}{' '}
                 {labels.get(relationship.toRecordId) ?? relationship.toRecordId}
               </li>
             ))}

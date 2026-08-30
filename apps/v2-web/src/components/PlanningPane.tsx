@@ -32,9 +32,19 @@ function proposalCard(proposal: PlanningProposal) {
   const endpoint = (value: { recordId: string } | { proposalKey: string }) =>
     'recordId' in value ? value.recordId : value.proposalKey;
   return (
-    <article className="intent-ledger-card" aria-labelledby="proposal-heading">
-      <h3 id="proposal-heading">Proposal revision {proposal.revision}</h3>
+    <article
+      className="intent-ledger-card"
+      aria-labelledby={`proposal-heading-${proposal.id}`}
+    >
+      <h3 id={`proposal-heading-${proposal.id}`}>
+        Proposal revision {proposal.revision} · {proposal.lifecycle}
+      </h3>
       <p>{proposal.summary}</p>
+      <section aria-label={`Proposed intent revision ${proposal.revision}`}>
+        <h4>Proposed intent</h4>
+        <p>{proposal.projectIntent.goal}</p>
+        <p>{proposal.projectIntent.rationale}</p>
+      </section>
       <dl>
         <div>
           <dt>Intent changes</dt>
@@ -89,11 +99,57 @@ function proposalCard(proposal: PlanningProposal) {
         <ul>
           {proposal.projectIntent.provenance.map((source) => (
             <li key={`${source.turnId}-${source.rationale}`}>
-              {source.rationale}
+              {source.turnId} · {source.rationale}
             </li>
           ))}
         </ul>
       </section>
+      <section
+        aria-label={`Proposed records for revision ${proposal.revision}`}
+      >
+        <h4>Proposed records</h4>
+        {proposal.records.length === 0 ? (
+          <p>No proposed records.</p>
+        ) : (
+          <ul>
+            {proposal.records.map((record) => (
+              <li key={record.recordId}>
+                <strong>{record.operation}</strong> · {record.content.statement}{' '}
+                · {record.content.rationale}
+                <ul>
+                  {record.provenance.map((source) => (
+                    <li key={`${source.turnId}-${source.rationale}`}>
+                      {source.turnId} · {source.rationale}
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      <section
+        aria-label={`Proposed relationships for revision ${proposal.revision}`}
+      >
+        <h4>Final relationships</h4>
+        {proposal.relationships.length === 0 ? (
+          <p>No final relationships.</p>
+        ) : (
+          <ul>
+            {proposal.relationships.map((relationship) => (
+              <li
+                key={`${relationship.kind}-${endpoint(relationship.from)}-${endpoint(relationship.to)}`}
+              >
+                {endpoint(relationship.from)} {relationship.kind}{' '}
+                {endpoint(relationship.to)}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+      {proposal.rejectionFeedback ? (
+        <p>Rejection feedback: {proposal.rejectionFeedback}</p>
+      ) : null}
     </article>
   );
 }
@@ -105,6 +161,8 @@ export function PlanningPane({
   submitting,
   error,
   historyTruncated = false,
+  historyLimitReached = false,
+  recovery,
   executions = [],
   onSubmitTurn,
   onApprove,
@@ -117,16 +175,22 @@ export function PlanningPane({
   submitting: boolean;
   error?: string;
   historyTruncated?: boolean;
+  historyLimitReached?: boolean;
+  recovery?:
+    | { kind: 'ambiguous_start'; operation: string }
+    | { kind: 'retryable'; message: string };
   executions?: readonly WorkerExecution[];
   onSubmitTurn: (message: string, profile?: ProfileSelection) => void;
   onApprove: (proposalId: string) => void;
-  onReject: (proposalId: string) => void;
+  onReject: (proposalId: string, feedback: string) => void;
   onAbandon: (cycleId: string) => void;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [draft, setDraft] = useState('');
   const [profileId, setProfileId] = useState(profiles[0]?.profileId ?? '');
   const [requestingRevision, setRequestingRevision] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectionFeedback, setRejectionFeedback] = useState('');
   const lifecycle = cycle?.cycle.lifecycle;
   const proposal = latestProposal(cycle);
   const latestExecutionId = cycle?.turns.at(-1)?.executionId;
@@ -134,18 +198,22 @@ export function PlanningPane({
     (execution) => execution.id === latestExecutionId,
   );
   const connected = connection.status === 'ready';
-  const commandDisabled = !connected || submitting;
+  const selected = profiles.find((profile) => profile.profileId === profileId);
+  const commandDisabled = !connected || submitting || (!cycle && !selected);
   const accepting =
     lifecycle === undefined ||
     lifecycle === 'discovering' ||
     lifecycle === 'awaiting_human';
-  const canShowForm = accepting || requestingRevision;
-  const nonterminal =
-    lifecycle !== undefined &&
-    !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
   const proposalReady =
     lifecycle === 'awaiting_approval' &&
     proposal?.lifecycle === 'awaiting_approval';
+  const retryable =
+    lifecycle === 'attention_required' && recovery?.kind === 'retryable';
+  const canShowForm =
+    accepting || (proposalReady && requestingRevision) || retryable;
+  const nonterminal =
+    lifecycle !== undefined &&
+    !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
   const blockedReason = !connected
     ? connection.status === 'loading'
       ? 'Planning is loading.'
@@ -157,14 +225,20 @@ export function PlanningPane({
   useEffect(() => {
     if (error) headingRef.current?.focus();
   }, [error]);
+  useEffect(() => {
+    if (!profiles.some((profile) => profile.profileId === profileId))
+      setProfileId(profiles[0]?.profileId ?? '');
+  }, [profileId, profiles]);
+  useEffect(() => {
+    setRequestingRevision(false);
+    setRejecting(false);
+    setRejectionFeedback('');
+  }, [lifecycle, proposal?.id, proposal?.revision]);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const message = draft.trim();
     if (!message || commandDisabled) return;
-    const selected = profiles.find(
-      (profile) => profile.profileId === profileId,
-    );
     if (cycle) {
       onSubmitTurn(message);
     } else if (selected) {
@@ -208,7 +282,12 @@ export function PlanningPane({
           {status}
         </p>
       ) : null}
-      {historyTruncated ? <p>Planning history is truncated.</p> : null}
+      {historyTruncated ? <p>Planning snapshot history is truncated.</p> : null}
+      {historyLimitReached ? (
+        <p>
+          This cycle reached its history limit. Abandon it to begin a new cycle.
+        </p>
+      ) : null}
       {cycle ? (
         <ol aria-label="Planning conversation">
           {cycle.turns.map((turn) => (
@@ -248,7 +327,9 @@ export function PlanningPane({
           ))}
         </section>
       ) : null}
-      {proposal ? proposalCard(proposal) : null}
+      {cycle?.proposals.map((candidate) => (
+        <div key={candidate.id}>{proposalCard(candidate)}</div>
+      ))}
       {proposalReady ? (
         <p className="intent-ledger-actions">
           <button
@@ -268,11 +349,30 @@ export function PlanningPane({
           <button
             type="button"
             disabled={commandDisabled}
-            onClick={() => onReject(proposal.id)}
+            onClick={() => setRejecting(true)}
           >
             Reject proposal
           </button>
         </p>
+      ) : null}
+      {proposalReady && rejecting ? (
+        <section aria-label="Reject proposal">
+          <label htmlFor="rejection-feedback">Rejection feedback</label>
+          <textarea
+            id="rejection-feedback"
+            value={rejectionFeedback}
+            onChange={(event) => setRejectionFeedback(event.target.value)}
+            disabled={commandDisabled}
+            required
+          />
+          <button
+            type="button"
+            disabled={commandDisabled || !rejectionFeedback.trim()}
+            onClick={() => onReject(proposal.id, rejectionFeedback.trim())}
+          >
+            Confirm rejection
+          </button>
+        </section>
       ) : null}
       {canShowForm ? (
         <form onSubmit={submit} aria-label="Send a message to project manager">
@@ -291,6 +391,9 @@ export function PlanningPane({
                   </option>
                 ))}
               </select>
+              {profiles.length === 0 ? (
+                <p>No project manager profiles are available.</p>
+              ) : null}
             </fieldset>
           ) : null}
           <label htmlFor="pm-message">Message to project manager</label>
@@ -307,12 +410,23 @@ export function PlanningPane({
       ) : null}
       {lifecycle === 'attention_required' ? (
         <section aria-label="Planning recovery">
-          <p>Mesh did not retry the execution after restart.</p>
+          {recovery?.kind === 'retryable' ? (
+            <p>{recovery.message}</p>
+          ) : (
+            <>
+              <p>Mesh did not retry the execution after restart.</p>
+              {recovery?.kind === 'ambiguous_start' ? (
+                <p>Operation {recovery.operation}</p>
+              ) : null}
+            </>
+          )}
           {latestExecutionId ? <p>Execution {latestExecutionId}</p> : null}
           {latestExecution?.failure ? (
             <p>{latestExecution.failure.message}</p>
           ) : null}
-          <p>Abandon this cycle to start a new one.</p>
+          {recovery?.kind !== 'retryable' ? (
+            <p>Abandon this cycle to start a new one.</p>
+          ) : null}
         </section>
       ) : null}
       {nonterminal ? (

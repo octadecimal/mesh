@@ -1,5 +1,8 @@
 import { render, screen } from '@testing-library/react';
-import type { ApprovedIntentLedger } from '@mesh/v2-contracts';
+import {
+  approvedIntentLedgerSchema,
+  type ApprovedIntentLedger,
+} from '@mesh/v2-contracts';
 import { describe, expect, it } from 'vitest';
 
 import { RequirementsPane } from './RequirementsPane';
@@ -82,11 +85,13 @@ const intentLedger = {
       toRecordId: '00000000-0000-4000-8000-000000000001',
     },
   ],
-} as ApprovedIntentLedger;
+};
+
+const approvedIntentLedger = approvedIntentLedgerSchema.parse(intentLedger);
 
 describe('RequirementsPane', () => {
   it('renders the approved intent, all five record groups, metadata, provenance, and textual relationship endpoints', () => {
-    render(<RequirementsPane intentLedger={intentLedger} />);
+    render(<RequirementsPane intentLedger={approvedIntentLedger} />);
 
     expect(screen.getByText('Build Todo.')).toBeVisible();
     for (const group of [
@@ -107,9 +112,15 @@ describe('RequirementsPane', () => {
       screen.getByText('mitigated · medium · Keep the scope small.'),
     ).toBeVisible();
     expect(
-      screen.getByText('decision statement constrains requirement statement'),
-    ).toBeVisible();
-    expect(screen.getByText('requirement source')).toBeVisible();
+      screen.getByRole('heading', { name: 'Relationships' }).parentElement,
+    ).toHaveTextContent(
+      '00000000-0000-4000-8000-000000000002 · decision statement constrains 00000000-0000-4000-8000-000000000001 · requirement statement',
+    );
+    expect(
+      screen.getByRole('list', {
+        name: 'Provenance for requirement statement',
+      }),
+    ).toHaveTextContent('requirement source');
   });
 
   it('renders loading, error, empty-before-approval, and no-record states without inventing coverage or readiness', () => {
@@ -137,7 +148,11 @@ describe('RequirementsPane', () => {
 
     rerender(
       <RequirementsPane
-        intentLedger={{ ...intentLedger, records: [], relationships: [] }}
+        intentLedger={{
+          ...approvedIntentLedger,
+          records: [],
+          relationships: [],
+        }}
       />,
     );
     expect(
@@ -150,7 +165,7 @@ describe('RequirementsPane', () => {
 
   it('projects every server-defined record lifecycle without deriving a new one', () => {
     const lifecycleRecords = [
-      ...['proposed', 'approved', 'superseded', 'rejected', 'retired'].map(
+      ...['approved', 'superseded', 'rejected', 'retired'].map(
         (status, index) => ({
           type: 'requirement',
           status,
@@ -188,20 +203,19 @@ describe('RequirementsPane', () => {
     ];
     render(
       <RequirementsPane
-        intentLedger={
-          {
-            ...intentLedger,
-            records: lifecycleRecords.map((record) => ({
-              ...intentLedger.records[0],
-              recordId: `10000000-0000-4000-8000-0000000000${String(record.index).padStart(2, '0')}`,
-              content: {
-                statement: `Record ${record.index}`,
-                rationale: 'Projected from the server.',
-                ...record,
-              },
-            })),
-          } as ApprovedIntentLedger
-        }
+        intentLedger={approvedIntentLedgerSchema.parse({
+          ...approvedIntentLedger,
+          relationships: [],
+          records: lifecycleRecords.map(({ index, ...record }) => ({
+            ...approvedIntentLedger.records[0],
+            recordId: `10000000-0000-4000-8000-0000000000${String(index).padStart(2, '0')}`,
+            content: {
+              statement: `Record ${index}`,
+              rationale: 'Projected from the server.',
+              ...record,
+            },
+          })),
+        })}
       />,
     );
 
@@ -209,5 +223,20 @@ describe('RequirementsPane', () => {
       expect(
         screen.getAllByText(record.status, { exact: false }).length,
       ).toBeGreaterThan(0);
+  });
+
+  it('renders stable relationship identities, human relationship labels, and complete intent provenance', () => {
+    render(<RequirementsPane intentLedger={approvedIntentLedger} />);
+    expect(
+      screen.getByRole('heading', { name: 'Relationships' }).parentElement,
+    ).toHaveTextContent(
+      '00000000-0000-4000-8000-000000000002 · decision statement constrains 00000000-0000-4000-8000-000000000001 · requirement statement',
+    );
+    expect(
+      screen.getByRole('list', { name: 'Approved intent provenance' }),
+    ).toHaveTextContent(
+      '44444444-4444-4444-8444-444444444444 · Requested by the operator.',
+    );
+    expect(screen.getByText('Ledger revision 1')).toBeVisible();
   });
 });

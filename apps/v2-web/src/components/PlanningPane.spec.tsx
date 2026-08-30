@@ -214,7 +214,7 @@ describe('PlanningPane', () => {
     ).toBeVisible();
     expect(screen.getByText('Goal, Desired Capabilities')).toBeVisible();
     expect(screen.getByText(/Create 2 .* revise 0 .* reuse 0/)).toBeVisible();
-    expect(screen.getByText('The operator asked for Todo.')).toBeVisible();
+    expect(screen.getByText(/The operator asked for Todo/)).toBeVisible();
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Approve proposal' }));
@@ -226,11 +226,87 @@ describe('PlanningPane', () => {
     await user.click(
       screen.getByRole('button', { name: 'Send revision request' }),
     );
-    await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
 
     expect(onApprove).toHaveBeenCalledWith(proposalId);
     expect(onSubmitTurn).toHaveBeenCalledWith('Clarify offline behavior');
-    expect(onReject).toHaveBeenCalledWith(proposalId);
+    expect(onReject).not.toHaveBeenCalled();
+  });
+
+  it('requires rejection feedback and forwards it with the proposal ID', async () => {
+    const user = userEvent.setup();
+    const { onReject } = renderPane({ cycle: awaitingApprovalCycle });
+    await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
+    expect(
+      screen.getByRole('button', { name: 'Confirm rejection' }),
+    ).toBeDisabled();
+    await user.type(
+      screen.getByLabelText('Rejection feedback'),
+      'Not sufficient for release.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
+    expect(onReject).toHaveBeenCalledWith(
+      proposalId,
+      'Not sufficient for release.',
+    );
+  });
+
+  it('hides a requested revision form when the authoritative proposal is no longer awaiting approval', async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderPane({ cycle: awaitingApprovalCycle });
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+    expect(
+      screen.getByRole('button', { name: 'Send revision request' }),
+    ).toBeVisible();
+    rerender(
+      <PlanningPane
+        cycle={{
+          ...awaitingApprovalCycle,
+          cycle: {
+            ...awaitingApprovalCycle.cycle,
+            lifecycle: 'launch_pending',
+          },
+        }}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmitTurn={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Send revision request' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('waits for a valid PM profile and permits retryable attention to submit a turn', () => {
+    const { rerender } = renderPane({ cycle: undefined, profiles: [] });
+    expect(
+      screen.getByText('No project manager profiles are available.'),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled();
+    rerender(
+      <PlanningPane
+        cycle={{
+          ...baseCycle,
+          cycle: { ...baseCycle.cycle, lifecycle: 'attention_required' },
+        }}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        recovery={{
+          kind: 'retryable',
+          message: 'The PM output was malformed.',
+        }}
+        onSubmitTurn={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('The PM output was malformed.')).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled();
   });
 
   it('disables mutation actions for disconnected, stale, and submitting projections while retaining the reason', () => {
@@ -440,7 +516,9 @@ describe('PlanningPane', () => {
         onAbandon={vi.fn()}
       />,
     );
-    expect(screen.getByText('Planning history is truncated.')).toBeVisible();
+    expect(
+      screen.getByText('Planning snapshot history is truncated.'),
+    ).toBeVisible();
     expect(
       screen.getByText('This planning cycle was abandoned.'),
     ).toBeVisible();
