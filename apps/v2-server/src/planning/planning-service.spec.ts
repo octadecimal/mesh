@@ -486,6 +486,7 @@ describe('PlanningService', () => {
     expect(context.executions.list(cycle.projectId)).toEqual(before.executions);
     expect(context.launcher.inputs).toEqual([]);
     expect(context.launcher.trace).toEqual([]);
+    expect(context.fixture.commands.find('proposal-cap')).toBeUndefined();
   });
 
   it('cancels a reserved launch before binding and commits abandonment last', async () => {
@@ -555,6 +556,65 @@ describe('PlanningService', () => {
     ).rejects.toThrow('interrupt cleanup failed');
     expect(repository.cycle(cycle.id)?.lifecycle).not.toBe('abandoned');
     expect(fixture.commands.find('abandon-fails')).toBeUndefined();
+  });
+
+  it('rediscovers and contains a pre-bind reservation when abandonment cleanup is retried', async () => {
+    const context = setup();
+    let release!: () => void;
+    context.launcher.reserveBarrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const submit = context.service.submitTurn(firstTurn(context.fixture));
+    while (!context.launcher.trace.includes('reserve')) await Promise.resolve();
+    const cycle = context.repository.activeCycle(context.fixture.project.id)!;
+    context.launcher.cancelError = new Error('reservation cleanup failed');
+    const firstAbandonment = context.service.abandonCycle({
+      idempotencyKey: 'abandon-prebind-fails',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.abandon',
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+      },
+    });
+    release();
+
+    await expect(submit).rejects.toThrow('reservation cleanup failed');
+    await expect(firstAbandonment).rejects.toThrow(
+      'reservation cleanup failed',
+    );
+    expect(context.repository.cycle(cycle.id)?.lifecycle).toBe(
+      'launch_pending',
+    );
+    expect(
+      context.fixture.commands.find('abandon-prebind-fails'),
+    ).toBeUndefined();
+
+    context.launcher.cancelError = undefined;
+    const retried = await context.service.abandonCycle({
+      idempotencyKey: 'abandon-prebind-retry',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.abandon',
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+      },
+    });
+
+    expect(retried).toMatchObject({
+      ok: true,
+      planningCycle: { cycle: { lifecycle: 'abandoned' } },
+    });
+    const reservation = [...context.launcher.byKey.values()][0]!;
+    expect(context.executions.get(reservation.execution.id)?.lifecycle).toBe(
+      'failed',
+    );
+    expect(
+      context.operations.listForExecution(reservation.execution.id)[0].state,
+    ).toBe('failed');
+    expect(context.launcher.trace).toEqual(['reserve', 'cancel', 'cancel']);
   });
 
   it('does not reopen a failed launch after abandonment and restart', async () => {

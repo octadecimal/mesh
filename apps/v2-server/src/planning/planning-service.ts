@@ -201,12 +201,10 @@ export class PlanningService {
             32 ||
           currentView.proposals.length >= 16
         ) {
-          return this.storeFailure(
-            envelope,
-            requestHash,
+          return failure(
+            envelope.command.type,
             'planning_cycle_history_limit',
             'Planning cycle reached its history limit',
-            at,
           );
         }
         turnOrdinal = currentView.turns.length + 1;
@@ -318,6 +316,13 @@ export class PlanningService {
     await coordinator.active;
     const refreshed = this.dependencies.repository.cycle(cycle.id)!;
     const turns = this.dependencies.repository.cycleView(cycle.id)?.turns ?? [];
+    const pendingTurn = [...turns]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.actor === 'human' &&
+          candidate.launchState === 'launch_pending',
+      );
     const boundTurn = [...turns]
       .reverse()
       .find(
@@ -326,6 +331,16 @@ export class PlanningService {
       );
     const executionId =
       refreshed.activeExecutionId ?? boundTurn?.executionId ?? null;
+    const pendingLaunch = pendingTurn
+      ? this.launchInput(pendingTurn)
+      : undefined;
+    const pendingReservation = pendingLaunch
+      ? this.dependencies.launcher.findReserved(pendingLaunch)
+      : undefined;
+    if (pendingLaunch && pendingReservation) {
+      this.assertReservation(pendingLaunch, pendingReservation);
+      await this.containExecution(pendingReservation.execution.id);
+    }
     if (refreshed.lifecycle === 'attention_required' && boundTurn) {
       const launch = this.launchInput(boundTurn);
       const observed = this.dependencies.launcher.findReserved(launch);
@@ -338,14 +353,18 @@ export class PlanningService {
       }
     }
     if (executionId) {
-      const execution = this.dependencies.executions.get(executionId);
-      if (execution?.lifecycle === 'starting') {
-        await this.dependencies.launcher.cancelReserved(execution.id);
-      } else if (
-        execution?.lifecycle === 'running' ||
-        execution?.lifecycle === 'interrupting'
-      ) {
-        await this.dependencies.launcher.interruptForPlanning(execution.id);
+      await this.containExecution(executionId);
+    }
+    if (pendingLaunch) {
+      const observed = this.dependencies.launcher.findReserved(pendingLaunch);
+      if (observed) {
+        this.assertReservation(pendingLaunch, observed);
+        const execution = this.dependencies.executions.get(
+          observed.execution.id,
+        );
+        if (!execution || !terminalExecution.has(execution.lifecycle)) {
+          throw new Error('Planning reservation remains active');
+        }
       }
     }
 
@@ -773,6 +792,29 @@ export class PlanningService {
       reservation.execution;
     if (execution.lifecycle === 'starting') {
       await this.dependencies.launcher.cancelReserved(execution.id);
+    }
+  }
+
+  private async containExecution(
+    executionId: WorkerExecutionId,
+  ): Promise<void> {
+    let execution = this.dependencies.executions.get(executionId);
+    if (!execution) throw new Error('Planning execution was not found');
+    if (execution.lifecycle === 'starting') {
+      await this.dependencies.launcher.cancelReserved(execution.id);
+      execution = this.dependencies.executions.get(executionId);
+    }
+    if (
+      execution?.lifecycle === 'running' ||
+      execution?.lifecycle === 'interrupting'
+    ) {
+      await this.dependencies.launcher.interruptForPlanning(execution.id);
+      execution = this.dependencies.executions.get(executionId);
+    }
+    if (!execution || !terminalExecution.has(execution.lifecycle)) {
+      throw new Error(
+        'Planning execution cleanup did not reach a terminal state',
+      );
     }
   }
 

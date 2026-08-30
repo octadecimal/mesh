@@ -285,6 +285,43 @@ describe('PmReportConsumer', () => {
     expect(context.publish).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects a different output digest without replacing the first receipt', async () => {
+    const context = await setup();
+    const firstReport = {
+      ...reportBase(context),
+      result: { kind: 'questions' as const, questions: [] },
+    };
+    context.consumer.consume(
+      context.execution,
+      runtimeEvent(context, firstReport),
+    );
+    const firstReceipt = context.repository.receipt(context.execution.id)!;
+    const firstView = context.repository.cycleView(
+      firstReport.planningCycleId,
+    )!;
+    const currentExecution = context.executions.get(context.execution.id)!;
+    const conflictingReport = {
+      ...firstReport,
+      assistantMessage: 'A conflicting report for the same execution.',
+    };
+
+    expect(() =>
+      context.consumer.consume(
+        currentExecution,
+        runtimeEventFor(context, currentExecution, conflictingReport),
+      ),
+    ).toThrow('Conflicting PM output receipt');
+
+    expect(context.repository.receipt(context.execution.id)).toEqual(
+      firstReceipt,
+    );
+    expect(context.repository.cycleView(firstReport.planningCycleId)).toEqual(
+      firstView,
+    );
+    expect(context.publish).toHaveBeenCalledTimes(1);
+    expect(context.consumerBarrier.status).toBe('tripped');
+  });
+
   it('rejects a question key already present in the cycle without tripping the audit barrier', async () => {
     const context = await setup();
     const firstReport = {

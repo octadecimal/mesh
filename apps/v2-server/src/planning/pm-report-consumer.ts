@@ -84,7 +84,12 @@ export class PmReportConsumer {
   ): void {
     const outputDigest = digest(event.payload.value);
     const existing = this.dependencies.repository.receipt(execution.id);
-    if (existing) return;
+    if (existing) {
+      if (existing.outputDigest === outputDigest) return;
+      const error = new Error('Conflicting PM output receipt');
+      this.dependencies.barrier.trip(error, event.occurredAt);
+      throw error;
+    }
 
     let committedEvent: DomainEvent | undefined;
     try {

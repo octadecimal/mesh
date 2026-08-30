@@ -29,16 +29,91 @@ CREATE TABLE migration_002_start_operation_validation (
 INSERT INTO migration_002_start_operation_validation (marker)
 SELECT CASE
   WHEN json_type(request_json) = 'object'
-    AND (SELECT COUNT(*) FROM json_each(request_json)) = 2
+    AND (SELECT COUNT(*) FROM json_each(request_json)) = 4
     AND NOT EXISTS (
       SELECT 1 FROM json_each(request_json)
-      WHERE key NOT IN ('idempotencyKey', 'requestHash')
+      WHERE key NOT IN ('version', 'idempotencyKey', 'requestHash', 'request')
     )
+    AND json_type(request_json, '$.version') = 'text'
+    AND json_extract(request_json, '$.version') = 'mesh.v2.execution-start/v1'
     AND json_type(request_json, '$.idempotencyKey') = 'text'
-    AND length(json_extract(request_json, '$.idempotencyKey')) > 0
+    AND length(json_extract(request_json, '$.idempotencyKey')) BETWEEN 1 AND 256
+    AND json_extract(request_json, '$.idempotencyKey')
+      = trim(json_extract(request_json, '$.idempotencyKey'))
     AND json_type(request_json, '$.requestHash') = 'text'
     AND length(json_extract(request_json, '$.requestHash')) = 64
     AND json_extract(request_json, '$.requestHash') NOT GLOB '*[^0-9a-f]*'
+    AND json_type(request_json, '$.request') = 'object'
+    AND (SELECT COUNT(*) FROM json_each(request_json, '$.request')) = 5
+    AND NOT EXISTS (
+      SELECT 1 FROM json_each(request_json, '$.request')
+      WHERE key NOT IN (
+        'type', 'projectId', 'profileId', 'profileRevision', 'assignment'
+      )
+    )
+    AND json_type(request_json, '$.request.type') = 'text'
+    AND json_extract(request_json, '$.request.type') = 'worker_execution.start'
+    AND json_type(request_json, '$.request.projectId') = 'text'
+    AND length(json_extract(request_json, '$.request.projectId')) = 36
+    AND length(replace(
+      json_extract(request_json, '$.request.projectId'), '-', ''
+    )) = 32
+    AND substr(json_extract(request_json, '$.request.projectId'), 9, 1) = '-'
+    AND substr(json_extract(request_json, '$.request.projectId'), 14, 1) = '-'
+    AND substr(json_extract(request_json, '$.request.projectId'), 19, 1) = '-'
+    AND substr(json_extract(request_json, '$.request.projectId'), 24, 1) = '-'
+    AND lower(json_extract(request_json, '$.request.projectId'))
+      NOT GLOB '*[^0-9a-f-]*'
+    AND substr(lower(json_extract(request_json, '$.request.projectId')), 15, 1)
+      GLOB '[0-8]'
+    AND substr(lower(json_extract(request_json, '$.request.projectId')), 20, 1)
+      GLOB '[89ab]'
+    AND json_type(request_json, '$.request.profileId') = 'text'
+    AND length(json_extract(request_json, '$.request.profileId')) = 36
+    AND length(replace(
+      json_extract(request_json, '$.request.profileId'), '-', ''
+    )) = 32
+    AND substr(json_extract(request_json, '$.request.profileId'), 9, 1) = '-'
+    AND substr(json_extract(request_json, '$.request.profileId'), 14, 1) = '-'
+    AND substr(json_extract(request_json, '$.request.profileId'), 19, 1) = '-'
+    AND substr(json_extract(request_json, '$.request.profileId'), 24, 1) = '-'
+    AND lower(json_extract(request_json, '$.request.profileId'))
+      NOT GLOB '*[^0-9a-f-]*'
+    AND substr(lower(json_extract(request_json, '$.request.profileId')), 15, 1)
+      GLOB '[0-8]'
+    AND substr(lower(json_extract(request_json, '$.request.profileId')), 20, 1)
+      GLOB '[89ab]'
+    AND json_type(request_json, '$.request.profileRevision') = 'integer'
+    AND json_extract(request_json, '$.request.profileRevision') >= 0
+    AND json_type(request_json, '$.request.assignment') = 'object'
+    AND (SELECT COUNT(*) FROM json_each(
+      request_json, '$.request.assignment'
+    )) = 5
+    AND NOT EXISTS (
+      SELECT 1 FROM json_each(request_json, '$.request.assignment')
+      WHERE key NOT IN (
+        'kind', 'projectId', 'title', 'instructions', 'fakeScenario'
+      )
+    )
+    AND json_type(request_json, '$.request.assignment.kind') = 'text'
+    AND json_extract(request_json, '$.request.assignment.kind')
+      = 'foundation-check'
+    AND json_type(request_json, '$.request.assignment.projectId') = 'text'
+    AND json_extract(request_json, '$.request.assignment.projectId')
+      = json_extract(request_json, '$.request.projectId')
+    AND json_type(request_json, '$.request.assignment.title') = 'text'
+    AND length(json_extract(request_json, '$.request.assignment.title'))
+      BETWEEN 1 AND 256
+    AND json_extract(request_json, '$.request.assignment.title')
+      = trim(json_extract(request_json, '$.request.assignment.title'))
+    AND json_type(request_json, '$.request.assignment.instructions') = 'text'
+    AND length(json_extract(request_json, '$.request.assignment.instructions'))
+      BETWEEN 1 AND 32768
+    AND json_extract(request_json, '$.request.assignment.instructions')
+      = trim(json_extract(request_json, '$.request.assignment.instructions'))
+    AND json_type(request_json, '$.request.assignment.fakeScenario') = 'text'
+    AND json_extract(request_json, '$.request.assignment.fakeScenario')
+      = 'todo-foundation-v1'
   THEN 1
   ELSE NULL
 END
@@ -56,6 +131,9 @@ CREATE UNIQUE INDEX execution_operations_start_request
 
 CREATE UNIQUE INDEX worker_executions_project_identity
   ON worker_executions(id, project_id);
+
+CREATE UNIQUE INDEX runtime_events_project_execution_identity
+  ON runtime_events(id, project_id, execution_id);
 
 CREATE TABLE planning_cycles (
   id TEXT PRIMARY KEY CHECK (length(id) > 0),
@@ -198,7 +276,7 @@ CREATE TABLE pm_output_receipts (
   project_id TEXT NOT NULL REFERENCES projects(id),
   planning_cycle_id TEXT NOT NULL,
   human_turn_id TEXT NOT NULL,
-  runtime_event_id TEXT NOT NULL UNIQUE REFERENCES runtime_events(id),
+  runtime_event_id TEXT NOT NULL UNIQUE,
   output_digest TEXT NOT NULL CHECK (
     length(output_digest) = 64 AND output_digest NOT GLOB '*[^0-9a-f]*'
   ),
@@ -213,6 +291,8 @@ CREATE TABLE pm_output_receipts (
     REFERENCES planning_turns(id, planning_cycle_id, project_id),
   FOREIGN KEY (execution_id, project_id)
     REFERENCES worker_executions(id, project_id),
+  FOREIGN KEY (runtime_event_id, project_id, execution_id)
+    REFERENCES runtime_events(id, project_id, execution_id),
   CHECK ((status = 'rejected') = (rejection_reason IS NOT NULL))
 );
 

@@ -62,6 +62,30 @@ const createMigration1Database = (path: string) => {
   return database;
 };
 
+const legacyStartOperationRequest = (input: {
+  projectId: string;
+  profileId: string;
+  idempotencyKey: string;
+  requestHash: string;
+}) => ({
+  version: 'mesh.v2.execution-start/v1',
+  idempotencyKey: input.idempotencyKey,
+  requestHash: input.requestHash,
+  request: {
+    type: 'worker_execution.start',
+    projectId: input.projectId,
+    profileId: input.profileId,
+    profileRevision: 1,
+    assignment: {
+      kind: 'foundation-check',
+      projectId: input.projectId,
+      title: 'Check',
+      instructions: 'Check',
+      fakeScenario: 'todo-foundation-v1',
+    },
+  },
+});
+
 const schemaRows = (database: V2Database) =>
   database
     .prepare(
@@ -344,6 +368,7 @@ describe('V2 database identity and migration', () => {
         'execution_operations_start_request',
         'planning_cycles_one_nonterminal',
         'planning_turns_one_pending',
+        'runtime_events_project_execution_identity',
         'worker_profiles_global_name',
         'worker_profiles_project_name',
       ]),
@@ -391,6 +416,107 @@ describe('V2 database identity and migration', () => {
         )
         .run(profileId, '2026-08-28T00:00:00.000Z', 'a'.repeat(64)),
     ).toThrow();
+  });
+
+  it('rejects a receipt whose runtime event belongs to another project and execution', () => {
+    const fixture = createV2TestDatabase();
+    testDatabases.push(fixture);
+    const database = fixture.database;
+    const at = '2026-08-29T00:00:00.000Z';
+    const cycleId = randomUUID();
+    const turnId = randomUUID();
+    database
+      .prepare(
+        `INSERT INTO planning_cycles (
+          id, project_id, lifecycle, revision, profile_id, profile_revision,
+          base_project_intent_revision, base_ledger_revision,
+          latest_proposal_revision, active_execution_id, created_at, updated_at,
+          ended_at
+        ) VALUES (?, ?, 'execution_active', 1, ?, 1, NULL, NULL, 0, ?, ?, ?, NULL)`,
+      )
+      .run(
+        cycleId,
+        fixture.project.id,
+        fixture.pmProfileRevision.profileId,
+        fixture.execution.id,
+        at,
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO planning_turns VALUES (
+          ?, ?, ?, 1, 'human', 'Plan Todo.', 'execution_bound', ?, ?
+        )`,
+      )
+      .run(turnId, fixture.project.id, cycleId, fixture.execution.id, at);
+
+    const otherProject = insertV2TestProject(database, {
+      id: randomUUID(),
+      displayName: 'Other',
+      repositoryIdentity: 'other-repository',
+    });
+    const otherExecutionId = randomUUID();
+    database
+      .prepare(
+        `INSERT INTO worker_executions (
+          id, project_id, profile_id, profile_revision, assignment_json,
+          profile_snapshot_json, skill_requests_json, resolved_skills_json,
+          capability_snapshot_json, adapter_id, model, native_handle, lifecycle,
+          revision, last_adapter_cursor, last_runtime_sequence,
+          replacement_for_execution_id, failure_json, created_at, updated_at,
+          ended_at
+        ) SELECT ?, ?, profile_id, profile_revision, ?, profile_snapshot_json,
+          skill_requests_json, resolved_skills_json, capability_snapshot_json,
+          adapter_id, model, native_handle, lifecycle, revision,
+          last_adapter_cursor, last_runtime_sequence, NULL, failure_json,
+          created_at, updated_at, ended_at
+        FROM worker_executions WHERE id = ?`,
+      )
+      .run(
+        otherExecutionId,
+        otherProject.id,
+        JSON.stringify({
+          kind: 'foundation-check',
+          projectId: otherProject.id,
+          title: 'Other check',
+          instructions: 'Check the other repository.',
+          fakeScenario: 'todo-foundation-v1',
+        }),
+        fixture.execution.id,
+      );
+    const diagnosticId = randomUUID();
+    const runtimeEventId = randomUUID();
+    database
+      .prepare(
+        `INSERT INTO raw_diagnostics VALUES (?, ?, ?, 'fake', 1, ?, '{}')`,
+      )
+      .run(diagnosticId, otherProject.id, otherExecutionId, at);
+    database
+      .prepare(
+        `INSERT INTO runtime_events VALUES (
+          ?, ?, ?, ?, 1, 1, ?, 'worker_execution.structured_output', '{}'
+        )`,
+      )
+      .run(runtimeEventId, otherProject.id, otherExecutionId, diagnosticId, at);
+
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO pm_output_receipts VALUES (
+            ?, ?, ?, ?, ?, ?, 'accepted', NULL, ?
+          )`,
+        )
+        .run(
+          fixture.execution.id,
+          fixture.project.id,
+          cycleId,
+          turnId,
+          runtimeEventId,
+          'a'.repeat(64),
+          at,
+        ),
+    ).toThrow();
+    expect(database.pragma('foreign_key_check')).toEqual([]);
   });
 
   it('upgrades migration 1 without changing its source or M1 rows and replays all eight command types', () => {
@@ -462,6 +588,7 @@ describe('V2 database identity and migration', () => {
           !name.startsWith('project_intent_') &&
           !name.startsWith('ledger_') &&
           name !== 'execution_operations_start_request' &&
+          name !== 'runtime_events_project_execution_identity' &&
           name !== 'worker_executions_project_identity'
         );
       }),
@@ -552,10 +679,14 @@ describe('V2 database identity and migration', () => {
       .run(
         randomUUID(),
         executionId,
-        JSON.stringify({
-          idempotencyKey: 'start-key',
-          requestHash: 'c'.repeat(64),
-        }),
+        JSON.stringify(
+          legacyStartOperationRequest({
+            projectId,
+            profileId,
+            idempotencyKey: 'start-key',
+            requestHash: 'c'.repeat(64),
+          }),
+        ),
         at,
         at,
       );
@@ -632,30 +763,45 @@ describe('V2 database identity and migration', () => {
             randomUUID(),
             id,
             JSON.stringify(
-              mode === 'malformed'
-                ? { idempotencyKey: 'missing-hash' }
-                : mode === 'extra'
-                  ? {
-                      idempotencyKey: 'extra-key',
-                      requestHash: 'e'.repeat(64),
-                      request: {},
-                    }
-                  : mode === 'wrong-type'
-                    ? {
-                        idempotencyKey: 42,
-                        requestHash: 'e'.repeat(64),
-                      }
-                    : mode === 'nested'
-                      ? {
-                          request: {
-                            idempotencyKey: 'nested-key',
-                            requestHash: 'e'.repeat(64),
-                          },
-                        }
-                      : {
-                          idempotencyKey: 'duplicate-key',
-                          requestHash: 'e'.repeat(64),
-                        },
+              (() => {
+                const validRequest = legacyStartOperationRequest({
+                  projectId: project,
+                  profileId: p,
+                  idempotencyKey:
+                    mode === 'duplicate' ? 'duplicate-key' : `${mode}-key`,
+                  requestHash: 'e'.repeat(64),
+                });
+                if (mode === 'malformed') {
+                  return {
+                    version: validRequest.version,
+                    idempotencyKey: validRequest.idempotencyKey,
+                    request: validRequest.request,
+                  };
+                }
+                if (mode === 'extra') return { ...validRequest, extra: true };
+                if (mode === 'wrong-type') {
+                  return {
+                    ...validRequest,
+                    request: {
+                      ...validRequest.request,
+                      profileRevision: '1',
+                    },
+                  };
+                }
+                if (mode === 'nested') {
+                  return {
+                    ...validRequest,
+                    request: {
+                      ...validRequest.request,
+                      assignment: {
+                        ...validRequest.request.assignment,
+                        extra: true,
+                      },
+                    },
+                  };
+                }
+                return validRequest;
+              })(),
             ),
             at,
             at,
