@@ -1,8 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import {
-  approvedIntentLedgerSchema,
-  type ApprovedIntentLedger,
-} from '@mesh/v2-contracts';
+import { approvedIntentLedgerSchema } from '@mesh/v2-contracts';
 import { describe, expect, it } from 'vitest';
 
 import { RequirementsPane } from './RequirementsPane';
@@ -34,11 +31,11 @@ const intentLedger = {
     approvedAt: '2026-08-29T00:00:00.000Z',
     content: {
       goal: 'Build Todo.',
-      targetUsers: ['Individuals'],
-      desiredCapabilities: ['Add tasks'],
-      constraints: [],
-      nonGoals: [],
-      successConditions: ['Tasks complete'],
+      targetUsers: ['Individuals', 'Students'],
+      desiredCapabilities: ['Add tasks', 'Complete tasks'],
+      constraints: ['Works offline'],
+      nonGoals: ['Team administration'],
+      successConditions: ['Tasks complete', 'Progress persists'],
       rationale: 'Small first release.',
       provenance: [
         {
@@ -94,6 +91,18 @@ describe('RequirementsPane', () => {
     render(<RequirementsPane intentLedger={approvedIntentLedger} />);
 
     expect(screen.getByText('Build Todo.')).toBeVisible();
+    for (const intentValue of [
+      'Individuals',
+      'Students',
+      'Add tasks',
+      'Complete tasks',
+      'Works offline',
+      'Team administration',
+      'Tasks complete',
+      'Progress persists',
+      'Small first release.',
+    ])
+      expect(screen.getByText(intentValue, { exact: false })).toBeVisible();
     for (const group of [
       'Requirements',
       'Decisions',
@@ -105,16 +114,20 @@ describe('RequirementsPane', () => {
         screen.getAllByRole('heading', { name: group }).at(-1),
       ).toBeVisible();
     }
-    expect(screen.getByText('functional · approved · must')).toBeVisible();
-    expect(screen.getByText('confirmed · high')).toBeVisible();
-    expect(screen.getByText('answered · Use one list.')).toBeVisible();
     expect(
-      screen.getByText('mitigated · medium · Keep the scope small.'),
+      screen.getByText('Requirement · Functional · Approved · Must'),
+    ).toBeVisible();
+    expect(screen.getByText('Assumption · Confirmed · High')).toBeVisible();
+    expect(
+      screen.getByText('Question · Answered · Use one list.'),
+    ).toBeVisible();
+    expect(
+      screen.getByText('Risk · Mitigated · Medium · Keep the scope small.'),
     ).toBeVisible();
     expect(
       screen.getByRole('heading', { name: 'Relationships' }).parentElement,
     ).toHaveTextContent(
-      '00000000-0000-4000-8000-000000000002 · decision statement constrains 00000000-0000-4000-8000-000000000001 · requirement statement',
+      '00000000-0000-4000-8000-000000000002 · Decision · decision statement constrains 00000000-0000-4000-8000-000000000001 · Requirement · requirement statement',
     );
     expect(
       screen.getByRole('list', {
@@ -158,9 +171,7 @@ describe('RequirementsPane', () => {
     expect(
       screen.getByText('No ledger records are in this approved revision.'),
     ).toBeVisible();
-    expect(
-      screen.queryByText(/coverage|readiness|task/i),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/coverage|readiness/i)).not.toBeInTheDocument();
   });
 
   it('projects every server-defined record lifecycle without deriving a new one', () => {
@@ -230,7 +241,7 @@ describe('RequirementsPane', () => {
     expect(
       screen.getByRole('heading', { name: 'Relationships' }).parentElement,
     ).toHaveTextContent(
-      '00000000-0000-4000-8000-000000000002 · decision statement constrains 00000000-0000-4000-8000-000000000001 · requirement statement',
+      '00000000-0000-4000-8000-000000000002 · Decision · decision statement constrains 00000000-0000-4000-8000-000000000001 · Requirement · requirement statement',
     );
     expect(
       screen.getByRole('list', { name: 'Approved intent provenance' }),

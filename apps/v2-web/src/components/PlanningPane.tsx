@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
 import type {
+  ApprovedIntentLedger,
+  LedgerRecordContent,
   PlanningCycleView,
   PlanningProposal,
+  ProposedLedgerEndpoint,
   WorkerExecution,
   WorkerProfileSummary,
 } from '@mesh/v2-contracts';
@@ -22,15 +25,69 @@ function latestProposal(cycle: PlanningCycleView | undefined) {
   return cycle?.proposals.at(-1);
 }
 
-function titleCase(value: string) {
+function humanize(value: string) {
   return value
-    .replace(/([A-Z])/g, ' $1')
+    .replace(/_/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
     .replace(/^./, (letter) => letter.toUpperCase());
 }
 
-function proposalCard(proposal: PlanningProposal) {
-  const endpoint = (value: { recordId: string } | { proposalKey: string }) =>
-    'recordId' in value ? value.recordId : value.proposalKey;
+function list(values: readonly string[]) {
+  return values.length === 0 ? 'None' : values.join(' · ');
+}
+
+function recordMetadata(content: LedgerRecordContent) {
+  if (content.type === 'requirement')
+    return `${humanize(content.kind)} · ${humanize(content.status)} · ${humanize(content.priority)}`;
+  if (content.type === 'assumption')
+    return `${humanize(content.status)} · ${humanize(content.confidence)}`;
+  if (content.type === 'question')
+    return `${humanize(content.status)}${content.resolution ? ` · ${content.resolution}` : ''}`;
+  if (content.type === 'risk')
+    return `${humanize(content.status)} · ${humanize(content.severity)} · ${content.mitigation}`;
+  return humanize(content.status);
+}
+
+function recordContent(content: LedgerRecordContent) {
+  return (
+    <>
+      <p>
+        {humanize(content.type)} · {content.statement}
+      </p>
+      <p>{content.rationale}</p>
+      <p>{recordMetadata(content)}</p>
+    </>
+  );
+}
+
+function proposalCard(
+  proposal: PlanningProposal,
+  approvedIntentLedger: ApprovedIntentLedger | null,
+) {
+  const endpoint = (value: ProposedLedgerEndpoint) => {
+    const member = proposal.records.find((record) =>
+      'proposalKey' in value
+        ? record.operation === 'create' && record.key === value.proposalKey
+        : record.operation !== 'create' && record.recordId === value.recordId,
+    );
+    const approvedRecord =
+      member?.operation === 'reuse'
+        ? approvedIntentLedger?.records.find(
+            (record) =>
+              record.recordId === member.recordId &&
+              record.revision === member.expectedRevision,
+          )
+        : undefined;
+    const content =
+      member?.operation === 'create' || member?.operation === 'revise'
+        ? member.content
+        : approvedRecord?.content;
+    const identity =
+      'proposalKey' in value ? value.proposalKey : value.recordId;
+    return content
+      ? `${identity} · ${humanize(content.type)} · ${content.statement}`
+      : identity;
+  };
   return (
     <article
       className="intent-ledger-card"
@@ -42,8 +99,36 @@ function proposalCard(proposal: PlanningProposal) {
       <p>{proposal.summary}</p>
       <section aria-label={`Proposed intent revision ${proposal.revision}`}>
         <h4>Proposed intent</h4>
-        <p>{proposal.projectIntent.goal}</p>
-        <p>{proposal.projectIntent.rationale}</p>
+        <dl>
+          <div>
+            <dt>Goal</dt>
+            <dd>{proposal.projectIntent.goal}</dd>
+          </div>
+          <div>
+            <dt>Target users</dt>
+            <dd>{list(proposal.projectIntent.targetUsers)}</dd>
+          </div>
+          <div>
+            <dt>Desired capabilities</dt>
+            <dd>{list(proposal.projectIntent.desiredCapabilities)}</dd>
+          </div>
+          <div>
+            <dt>Constraints</dt>
+            <dd>{list(proposal.projectIntent.constraints)}</dd>
+          </div>
+          <div>
+            <dt>Non-goals</dt>
+            <dd>{list(proposal.projectIntent.nonGoals)}</dd>
+          </div>
+          <div>
+            <dt>Success conditions</dt>
+            <dd>{list(proposal.projectIntent.successConditions)}</dd>
+          </div>
+          <div>
+            <dt>Rationale</dt>
+            <dd>{proposal.projectIntent.rationale}</dd>
+          </div>
+        </dl>
       </section>
       <dl>
         <div>
@@ -51,7 +136,7 @@ function proposalCard(proposal: PlanningProposal) {
           <dd>
             {proposal.diff.intentChanges.length === 0
               ? 'No intent changes'
-              : proposal.diff.intentChanges.map(titleCase).join(', ')}
+              : proposal.diff.intentChanges.map(humanize).join(', ')}
           </dd>
         </div>
         <div>
@@ -79,7 +164,8 @@ function proposalCard(proposal: PlanningProposal) {
               <li
                 key={`added-${relationship.kind}-${endpoint(relationship.from)}-${endpoint(relationship.to)}`}
               >
-                Added: {endpoint(relationship.from)} {relationship.kind}{' '}
+                Added: {endpoint(relationship.from)}{' '}
+                {humanize(relationship.kind).toLowerCase()}{' '}
                 {endpoint(relationship.to)}
               </li>
             ))}
@@ -87,7 +173,8 @@ function proposalCard(proposal: PlanningProposal) {
               <li
                 key={`removed-${relationship.kind}-${endpoint(relationship.from)}-${endpoint(relationship.to)}`}
               >
-                Removed: {endpoint(relationship.from)} {relationship.kind}{' '}
+                Removed: {endpoint(relationship.from)}{' '}
+                {humanize(relationship.kind).toLowerCase()}{' '}
                 {endpoint(relationship.to)}
               </li>
             ))}
@@ -114,15 +201,48 @@ function proposalCard(proposal: PlanningProposal) {
           <ul>
             {proposal.records.map((record) => (
               <li key={record.recordId}>
-                <strong>{record.operation}</strong> · {record.content.statement}{' '}
-                · {record.content.rationale}
-                <ul>
-                  {record.provenance.map((source) => (
-                    <li key={`${source.turnId}-${source.rationale}`}>
-                      {source.turnId} · {source.rationale}
-                    </li>
-                  ))}
-                </ul>
+                <p>
+                  {record.operation === 'create'
+                    ? `Create · ${record.key}`
+                    : record.operation === 'revise'
+                      ? `Revise · expected revision ${record.expectedRevision}`
+                      : `Reuse · approved revision ${record.expectedRevision}`}
+                </p>
+                <p>Record ID {record.recordId}</p>
+                {record.operation === 'reuse' ? (
+                  (() => {
+                    const approvedRecord = approvedIntentLedger?.records.find(
+                      (candidate) =>
+                        candidate.recordId === record.recordId &&
+                        candidate.revision === record.expectedRevision,
+                    );
+                    return approvedRecord ? (
+                      <>
+                        {recordContent(approvedRecord.content)}
+                        <ul>
+                          {approvedRecord.provenance.map((source) => (
+                            <li key={`${source.turnId}-${source.rationale}`}>
+                              {source.turnId} · {source.rationale}
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    ) : (
+                      <p>Approved record revision unavailable.</p>
+                    );
+                  })()
+                ) : (
+                  <>
+                    {recordContent(record.content)}
+                    <ul>
+                      {record.provenance.map((source) => (
+                        <li key={`${source.turnId}-${source.rationale}`}>
+                          {source.turnId} · {source.rationale}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
               </li>
             ))}
           </ul>
@@ -140,7 +260,8 @@ function proposalCard(proposal: PlanningProposal) {
               <li
                 key={`${relationship.kind}-${endpoint(relationship.from)}-${endpoint(relationship.to)}`}
               >
-                {endpoint(relationship.from)} {relationship.kind}{' '}
+                {endpoint(relationship.from)}{' '}
+                {humanize(relationship.kind).toLowerCase()}{' '}
                 {endpoint(relationship.to)}
               </li>
             ))}
@@ -164,6 +285,7 @@ export function PlanningPane({
   historyLimitReached = false,
   recovery,
   executions = [],
+  approvedIntentLedger = null,
   onSubmitTurn,
   onApprove,
   onReject,
@@ -180,6 +302,7 @@ export function PlanningPane({
     | { kind: 'ambiguous_start'; operation: string }
     | { kind: 'retryable'; message: string };
   executions?: readonly WorkerExecution[];
+  approvedIntentLedger?: ApprovedIntentLedger | null;
   onSubmitTurn: (message: string, profile?: ProfileSelection) => void;
   onApprove: (proposalId: string) => void;
   onReject: (proposalId: string, feedback: string) => void;
@@ -328,7 +451,9 @@ export function PlanningPane({
         </section>
       ) : null}
       {cycle?.proposals.map((candidate) => (
-        <div key={candidate.id}>{proposalCard(candidate)}</div>
+        <div key={candidate.id}>
+          {proposalCard(candidate, approvedIntentLedger)}
+        </div>
       ))}
       {proposalReady ? (
         <p className="intent-ledger-actions">
@@ -433,7 +558,7 @@ export function PlanningPane({
         <button
           type="button"
           disabled={commandDisabled}
-          onClick={() => onAbandon(cycle.cycle.id)}
+          onClick={() => cycle && onAbandon(cycle.cycle.id)}
         >
           Abandon cycle
         </button>

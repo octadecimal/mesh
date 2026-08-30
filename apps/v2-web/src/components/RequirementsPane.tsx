@@ -22,17 +22,27 @@ const relationshipLabels: Record<string, string> = {
   constrains: 'constrains',
 };
 
+function humanize(value: string) {
+  return value
+    .replace(/_/g, ' ')
+    .replace(/^./, (letter) => letter.toUpperCase());
+}
+
+function list(values: readonly string[]) {
+  return values.length === 0 ? 'None' : values.join(' · ');
+}
+
 function metadata(record: LedgerRecordRevision) {
   const content = record.content;
   if (content.type === 'requirement')
-    return `${content.kind} · ${content.status} · ${content.priority}`;
+    return `Requirement · ${humanize(content.kind)} · ${humanize(content.status)} · ${humanize(content.priority)}`;
   if (content.type === 'assumption')
-    return `${content.status} · ${content.confidence}`;
+    return `Assumption · ${humanize(content.status)} · ${humanize(content.confidence)}`;
   if (content.type === 'question')
-    return `${content.status}${content.resolution ? ` · ${content.resolution}` : ''}`;
+    return `Question · ${humanize(content.status)}${content.resolution ? ` · ${content.resolution}` : ''}`;
   if (content.type === 'risk')
-    return `${content.status} · ${content.severity} · ${content.mitigation}`;
-  return content.status;
+    return `Risk · ${humanize(content.status)} · ${humanize(content.severity)} · ${content.mitigation}`;
+  return `Decision · ${humanize(content.status)}`;
 }
 
 export function RequirementsPane({
@@ -77,7 +87,7 @@ export function RequirementsPane({
   const labels = new Map(
     intentLedger.records.map((record) => [
       record.recordId,
-      `${record.recordId} · ${record.content.statement}`,
+      `${record.recordId} · ${humanize(record.content.type)} · ${record.content.statement}`,
     ]),
   );
   return (
@@ -90,8 +100,40 @@ export function RequirementsPane({
         <h3>
           Approved intent · revision {intentLedger.projectIntent.revision}
         </h3>
-        <p>{intentLedger.projectIntent.content.goal}</p>
-        <p>{intentLedger.projectIntent.content.rationale}</p>
+        <dl>
+          <div>
+            <dt>Goal</dt>
+            <dd>{intentLedger.projectIntent.content.goal}</dd>
+          </div>
+          <div>
+            <dt>Target users</dt>
+            <dd>{list(intentLedger.projectIntent.content.targetUsers)}</dd>
+          </div>
+          <div>
+            <dt>Desired capabilities</dt>
+            <dd>
+              {list(intentLedger.projectIntent.content.desiredCapabilities)}
+            </dd>
+          </div>
+          <div>
+            <dt>Constraints</dt>
+            <dd>{list(intentLedger.projectIntent.content.constraints)}</dd>
+          </div>
+          <div>
+            <dt>Non-goals</dt>
+            <dd>{list(intentLedger.projectIntent.content.nonGoals)}</dd>
+          </div>
+          <div>
+            <dt>Success conditions</dt>
+            <dd>
+              {list(intentLedger.projectIntent.content.successConditions)}
+            </dd>
+          </div>
+          <div>
+            <dt>Rationale</dt>
+            <dd>{intentLedger.projectIntent.content.rationale}</dd>
+          </div>
+        </dl>
         <ul aria-label="Approved intent provenance">
           {intentLedger.projectIntent.content.provenance.map((source) => (
             <li key={`${source.turnId}-${source.rationale}`}>
