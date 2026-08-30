@@ -675,7 +675,7 @@ export const planningProposalSchema = z
     });
     if (!result.success) {
       for (const issue of result.error.issues) {
-        context.addIssue({ ...issue, path: issue.path.slice(1) });
+        context.addIssue(issue);
       }
     }
     const recordChanges = { create: 0, revise: 0, reuse: 0 };
@@ -702,34 +702,30 @@ export const planningProposalSchema = z
         message: 'Record change counts must match proposal operations',
       });
     }
-    const addedCount = value.diff.relationshipChanges.added.length;
-    const diffRelationships = [
-      ...value.diff.relationshipChanges.added,
-      ...value.diff.relationshipChanges.removed,
-    ];
-    const diffResult = pmProposalResultSchema.safeParse({
-      kind: 'proposal',
-      summary: value.summary,
-      projectIntent: value.projectIntent,
-      records: proposalRecords,
-      relationships: diffRelationships,
-    });
-    if (!diffResult.success) {
-      for (const issue of diffResult.error.issues) {
-        if (issue.path[0] !== 'relationships') continue;
-        const index = Number(issue.path[1]);
-        const change = index < addedCount ? 'added' : 'removed';
-        const changeIndex = index < addedCount ? index : index - addedCount;
-        context.addIssue({
-          ...issue,
-          path: [
-            'diff',
-            'relationshipChanges',
-            change,
-            changeIndex,
-            ...issue.path.slice(2),
-          ],
-        });
+    for (const [change, relationships] of [
+      ['added', value.diff.relationshipChanges.added],
+      ['removed', value.diff.relationshipChanges.removed],
+    ] as const) {
+      const diffResult = pmProposalResultSchema.safeParse({
+        kind: 'proposal',
+        summary: value.summary,
+        projectIntent: value.projectIntent,
+        records: proposalRecords,
+        relationships,
+      });
+      if (!diffResult.success) {
+        for (const issue of diffResult.error.issues) {
+          if (issue.path[0] !== 'relationships') continue;
+          context.addIssue({
+            ...issue,
+            path: [
+              'diff',
+              'relationshipChanges',
+              change,
+              ...issue.path.slice(1),
+            ],
+          });
+        }
       }
     }
     const finalRelationships = new Set(

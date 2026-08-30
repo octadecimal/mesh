@@ -3487,6 +3487,93 @@ describe('V2 intent ledger contracts', () => {
     ).toThrow(expected);
   });
 
+  it('bounds added and removed relationship changes independently', () => {
+    const records = Array.from({ length: 20 }, (_, index) => ({
+      operation: 'create' as const,
+      key: `bulk-record-${index}`,
+      recordId: randomUUID(),
+      content: requirementContent,
+      provenance,
+    }));
+    const relationships = records.flatMap((from, fromIndex) =>
+      records
+        .filter((_, toIndex) => toIndex !== fromIndex)
+        .map((to) => ({
+          kind: 'depends_on' as const,
+          from: { proposalKey: from.key },
+          to: { proposalKey: to.key },
+        })),
+    );
+    const added = relationships.slice(0, 101);
+    const removed = relationships.slice(101, 201);
+    const candidate = {
+      ...proposal,
+      records,
+      relationships: added,
+      diff: {
+        ...proposalDiff,
+        recordChanges: { create: records.length, revise: 0, reuse: 0 },
+        relationshipChanges: { added, removed },
+      },
+    };
+
+    expect(planningProposalSchema.parse(candidate)).toEqual(candidate);
+
+    for (const relationshipChanges of [
+      { added: relationships.slice(0, 201), removed: [] },
+      { added: [], removed: relationships.slice(0, 201) },
+    ]) {
+      expect(
+        planningProposalDiffSchema.safeParse({
+          ...proposalDiff,
+          relationshipChanges,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('preserves semantic relationship issue paths', () => {
+    const unresolved = {
+      kind: 'depends_on' as const,
+      from: { proposalKey: 'missing-record' },
+      to: { proposalKey: 'complete-todo' },
+    };
+    const finalResult = planningProposalSchema.safeParse({
+      ...proposal,
+      relationships: [unresolved],
+      diff: {
+        ...proposalDiff,
+        relationshipChanges: { added: [unresolved], removed: [] },
+      },
+    });
+    const removedResult = planningProposalSchema.safeParse({
+      ...proposal,
+      diff: {
+        ...proposalDiff,
+        relationshipChanges: {
+          ...proposalDiff.relationshipChanges,
+          removed: [unresolved],
+        },
+      },
+    });
+
+    expect(finalResult.success).toBe(false);
+    expect(removedResult.success).toBe(false);
+    if (!finalResult.success) {
+      expect(
+        finalResult.error.issues.map((issue) => issue.path),
+      ).toContainEqual(['relationships', 0, 'from']);
+      expect(
+        finalResult.error.issues.map((issue) => issue.path),
+      ).toContainEqual(['diff', 'relationshipChanges', 'added', 0, 'from']);
+    }
+    if (!removedResult.success) {
+      expect(
+        removedResult.error.issues.map((issue) => issue.path),
+      ).toContainEqual(['diff', 'relationshipChanges', 'removed', 0, 'from']);
+    }
+  });
+
   it('enforces all planning collection boundaries at the limit plus one', () => {
     const proposalMembers = Array.from({ length: 101 }, (_, index) => ({
       operation: 'create' as const,
