@@ -4,6 +4,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   harnessCapabilitiesSchema,
   harnessEventEnvelopeSchema,
+  resolvedWorkerProfileSnapshotSchema,
   startExecutionCommandSchema,
   type DomainEvent,
   type HarnessAdapter,
@@ -185,11 +186,14 @@ export class ExecutionRuntime {
     stored: StoredCommandResult,
     envelope: StartExecutionEnvelope,
     requestHash: string,
+    knownOperation?: ExecutionOperation,
   ): ReservedExecutionStart {
-    const operation = this.dependencies.operations.findStartReservation(
-      envelope.idempotencyKey,
-      requestHash,
-    );
+    const operation =
+      knownOperation ??
+      this.dependencies.operations.findStartReservation(
+        envelope.idempotencyKey,
+        requestHash,
+      );
     if (!operation) throw new Error('Reserved start operation was not found');
     const exactOperation = this.exactStartOperation(
       operation.executionId,
@@ -304,7 +308,11 @@ export class ExecutionRuntime {
     if (
       !coherent ||
       (!stored.result.ok &&
-        (operation.state !== 'failed' || execution.lifecycle !== 'failed'))
+        (operation.state !== 'failed' ||
+          execution.lifecycle !== 'failed' ||
+          execution.failure === null ||
+          stored.result.error.code !== execution.failure.code ||
+          stored.result.error.message !== execution.failure.message))
     ) {
       throw new Error('Reserved start operation state is inconsistent');
     }
@@ -345,7 +353,11 @@ export class ExecutionRuntime {
     }
 
     const project = this.dependencies.projects.get(envelope.command.projectId);
-    if (!project) {
+    if (
+      !project ||
+      project.id !== envelope.command.projectId ||
+      project.id !== envelope.command.assignment.projectId
+    ) {
       throw new ExecutionReservationError({
         ok: false,
         commandType: 'worker_execution.start',
@@ -354,10 +366,21 @@ export class ExecutionRuntime {
     }
     let profile: ResolvedWorkerProfileSnapshot;
     try {
-      profile = this.dependencies.profiles.resolveApproved(
-        envelope.command.profileId,
-        envelope.command.profileRevision,
+      profile = resolvedWorkerProfileSnapshotSchema.parse(
+        this.dependencies.profiles.resolveApproved(
+          envelope.command.profileId,
+          envelope.command.profileRevision,
+        ),
       );
+      if (
+        profile.profileId !== envelope.command.profileId ||
+        profile.profileRevision !== envelope.command.profileRevision ||
+        (profile.projectId !== null && profile.projectId !== project.id) ||
+        profile.document.spec.assignmentKinds[0] !==
+          envelope.command.assignment.kind
+      ) {
+        throw new Error('Resolved profile does not match start authority');
+      }
     } catch (error) {
       throw new ExecutionReservationError({
         ok: false,
@@ -556,12 +579,14 @@ export class ExecutionRuntime {
   async activateReserved(executionId: WorkerExecutionId): Promise<void> {
     const active = this.activations.get(executionId);
     if (active) return active;
-    const activation = this.activate(executionId).finally(() => {
+    const activation = Promise.resolve().then(() => this.activate(executionId));
+    this.activations.set(executionId, activation);
+    const remove = () => {
       if (this.activations.get(executionId) === activation) {
         this.activations.delete(executionId);
       }
-    });
-    this.activations.set(executionId, activation);
+    };
+    void activation.then(remove, remove);
     return activation;
   }
 
@@ -645,11 +670,29 @@ export class ExecutionRuntime {
 
   async start(envelope: StartExecutionEnvelope): Promise<V2CommandResult> {
     this.dependencies.barrier.assertHealthy();
+    const requestHash = hashV2Command(envelope.command);
     const stored = this.dependencies.commands.find(
       envelope.idempotencyKey,
-      hashV2Command(envelope.command),
+      requestHash,
     );
-    if (stored) return stored.result;
+    if (stored) {
+      try {
+        const operation = this.dependencies.operations.findStartReservation(
+          envelope.idempotencyKey,
+          requestHash,
+        );
+        if (!operation) return stored.result;
+        return this.reservedStartFromStored(
+          stored,
+          envelope,
+          requestHash,
+          operation,
+        ).result;
+      } catch (error) {
+        this.dependencies.barrier.trip(error, this.dependencies.now());
+        throw error;
+      }
+    }
     try {
       const reservation = await this.reserveStartAfterLookup(envelope, true);
       if (reservation.activationRequired) {
@@ -664,21 +707,20 @@ export class ExecutionRuntime {
 
   private async activate(executionId: string): Promise<void> {
     this.dependencies.barrier.assertHealthy();
+    let operation: ExecutionOperation;
+    try {
+      operation = this.exactStartOperation(executionId);
+    } catch (error) {
+      if (this.dependencies.barrier.status === 'healthy') {
+        this.dependencies.barrier.trip(error, this.dependencies.now());
+      }
+      throw error;
+    }
     const execution = requireExecution(
       this.dependencies.executions,
       executionId,
     );
     if (execution.lifecycle !== 'starting') return;
-    const startOperations = this.dependencies.operations
-      .listForExecution(executionId)
-      .filter((operation) => operation.kind === 'start');
-    if (
-      startOperations.length !== 1 ||
-      startOperations[0]?.state !== 'pending'
-    ) {
-      throw new Error('Pending reserved start operation was not found');
-    }
-    const operation = startOperations[0];
     const project = this.dependencies.projects.get(execution.projectId);
     if (!project) throw new Error('Reserved execution project was not found');
 
@@ -801,6 +843,38 @@ export class ExecutionRuntime {
     return interrupt;
   }
 
+  private async rejectPlanningInterruptAuditConflict(
+    executionId: string,
+    current: WorkerExecution,
+    message: string,
+  ): Promise<never> {
+    const owned = this.active.get(executionId);
+    const exactOwned =
+      owned !== undefined &&
+      current.nativeHandle !== null &&
+      owned.session.nativeHandle === current.nativeHandle
+        ? owned
+        : undefined;
+    if (exactOwned) exactOwned.fenced = true;
+    const error = new Error(message);
+    this.dependencies.barrier.trip(error, this.dependencies.now());
+    const diagnostics: PlanningInterruptCleanupDiagnostic[] = [
+      { phase: 'audit', message },
+    ];
+    if (exactOwned) {
+      await this.containAfterBarrier(exactOwned.session, diagnostics);
+      diagnostics.push(
+        ...(await this.quiescePlanningSession(executionId, exactOwned, false)),
+      );
+    }
+    throw new PlanningInterruptCleanupError(
+      'planning_interrupt_audit_failure',
+      message,
+      diagnostics,
+      error,
+    );
+  }
+
   private async performPlanningInterrupt(executionId: string): Promise<void> {
     if (this.consumerContext.getStore() === executionId) {
       throw new PlanningInterruptCleanupError(
@@ -835,56 +909,44 @@ export class ExecutionRuntime {
       );
     }
     if (current.assignment.kind !== 'pm_discovery') {
+      if (tagged.length > 0) {
+        return this.rejectPlanningInterruptAuditConflict(
+          executionId,
+          current,
+          'Planning interrupt operation is not owned by a PM runtime',
+        );
+      }
       throw new PlanningInterruptCleanupError(
         'planning_interrupt_not_running',
         'Execution is not a planning runtime',
       );
     }
     if (tagged.length > 1) {
-      const owned = this.active.get(executionId);
-      const exactOwned =
-        owned !== undefined &&
-        current.nativeHandle !== null &&
-        owned.session.nativeHandle === current.nativeHandle
-          ? owned
-          : undefined;
-      if (exactOwned) exactOwned.fenced = true;
-      const error = new Error(
+      return this.rejectPlanningInterruptAuditConflict(
+        executionId,
+        current,
         'Conflicting planning interrupt operations found',
-      );
-      this.dependencies.barrier.trip(error, this.dependencies.now());
-      const diagnostics: PlanningInterruptCleanupDiagnostic[] = [
-        { phase: 'audit', message: error.message },
-      ];
-      if (exactOwned) {
-        await this.containAfterBarrier(exactOwned.session, diagnostics);
-        diagnostics.push(
-          ...(await this.quiescePlanningSession(
-            executionId,
-            exactOwned,
-            false,
-          )),
-        );
-      }
-      throw new PlanningInterruptCleanupError(
-        'planning_interrupt_audit_failure',
-        error.message,
-        diagnostics,
-        error,
       );
     }
     const prior = tagged[0];
     if (prior?.state === 'succeeded') {
       if (current.lifecycle === 'interrupted') return;
-      const error = new Error(
+      return this.rejectPlanningInterruptAuditConflict(
+        executionId,
+        current,
         'Planning interrupt operation does not match execution lifecycle',
       );
-      this.dependencies.barrier.trip(error, this.dependencies.now());
-      throw new PlanningInterruptCleanupError(
-        'planning_interrupt_audit_failure',
-        error.message,
-        [{ phase: 'audit', message: error.message }],
-        error,
+    }
+    if (
+      (prior?.state === 'pending' && current.lifecycle !== 'interrupting') ||
+      ((prior?.state === 'unknown' || prior?.state === 'failed') &&
+        current.lifecycle !== 'attention_required') ||
+      (prior === undefined && current.lifecycle === 'interrupting')
+    ) {
+      return this.rejectPlanningInterruptAuditConflict(
+        executionId,
+        current,
+        'Planning interrupt operation does not match execution lifecycle',
       );
     }
     if (
@@ -923,10 +985,7 @@ export class ExecutionRuntime {
             ],
       );
     }
-    if (
-      (prior === undefined && current.lifecycle !== 'running') ||
-      (prior?.state === 'pending' && current.lifecycle !== 'interrupting')
-    ) {
+    if (prior === undefined && current.lifecycle !== 'running') {
       throw new PlanningInterruptCleanupError(
         'planning_interrupt_not_running',
         'Execution is not an active planning runtime',

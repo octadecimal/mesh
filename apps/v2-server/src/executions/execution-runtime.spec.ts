@@ -8,6 +8,7 @@ import type {
   HarnessSession,
   HarnessStartRequest,
   InterruptExecutionEnvelope,
+  Project,
   ResolvedWorkerProfileSnapshot,
   RuntimeEvent,
   StartExecutionEnvelope,
@@ -30,6 +31,7 @@ import {
 import { AuditBarrier } from './audit-barrier.js';
 import { ExecutionRepository } from './execution-repository.js';
 import {
+  ExecutionReservationError,
   ExecutionRuntime,
   PlanningInterruptCleanupError,
 } from './execution-runtime.js';
@@ -53,6 +55,7 @@ const createRuntime = (
     profile?: (
       snapshot: ResolvedWorkerProfileSnapshot,
     ) => ResolvedWorkerProfileSnapshot;
+    project?: (project: Project) => Project;
     publisher?: {
       domain(event: DomainEvent): void;
       runtime(event: RuntimeEvent): void;
@@ -77,12 +80,13 @@ const createRuntime = (
     digest: fixture.profileRevision.digest,
   };
   const profile = options.profile?.(baseSnapshot) ?? baseSnapshot;
+  const project = options.project?.(fixture.project) ?? fixture.project;
   const runtime = new ExecutionRuntime({
     database: fixture.database,
     commands: fixture.commands,
     events: fixture.events,
     projects: {
-      get: (id) => (id === fixture.project.id ? fixture.project : undefined),
+      get: (id) => (id === fixture.project.id ? project : undefined),
     },
     profiles: { resolveApproved: () => profile },
     executions,
@@ -557,6 +561,64 @@ describe('ExecutionRuntime', () => {
     expect(fake.startCount).toBe(0);
   });
 
+  it('fails terminal reservation replay closed for a forged valid error receipt', async () => {
+    const fake = new FakeHarnessAdapter();
+    fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
+    const context = createRuntime({ fake });
+    await context.runtime.reserveStart(context.start);
+    context.fixture.database
+      .prepare(
+        'UPDATE command_results SET result_json = ? WHERE idempotency_key = ?',
+      )
+      .run(
+        JSON.stringify({
+          ok: false,
+          commandType: 'worker_execution.start',
+          error: {
+            code: 'required_skill_unavailable',
+            message: 'Forged but schema-valid terminal error',
+          },
+        }),
+        context.start.idempotencyKey,
+      );
+    const before = durableReservationState(context.fixture);
+
+    expect(() => context.runtime.findReservedStart(context.start)).toThrow();
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(fake.startCount).toBe(0);
+  });
+
+  it('fails public linked replay closed for a forged terminal receipt', async () => {
+    const fake = new FakeHarnessAdapter();
+    fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
+    const context = createRuntime({ fake });
+    await context.runtime.reserveStart(context.start);
+    context.fixture.database
+      .prepare(
+        'UPDATE command_results SET result_json = ? WHERE idempotency_key = ?',
+      )
+      .run(
+        JSON.stringify({
+          ok: false,
+          commandType: 'worker_execution.start',
+          error: {
+            code: 'required_skill_unavailable',
+            message: 'Forged public replay error',
+          },
+        }),
+        context.start.idempotencyKey,
+      );
+    const before = durableReservationState(context.fixture);
+
+    await expect(context.runtime.start(context.start)).rejects.toThrow();
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(fake.startCount).toBe(0);
+  });
+
   it('coalesces concurrent activation before adapter start and attachment', async () => {
     const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
     fake.blockStart();
@@ -750,6 +812,63 @@ describe('ExecutionRuntime', () => {
     expect(context.operations.listForExecution(settled.id)).toMatchObject([
       { kind: 'start', state: 'succeeded' },
     ]);
+  });
+
+  it('registers activation ownership before synchronous cancellation reentry', async () => {
+    const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
+    const originalStart = fake.start.bind(fake);
+    const contextRef: { current?: ReturnType<typeof createRuntime> } = {};
+    let cancellation: Promise<WorkerExecution> | undefined;
+    vi.spyOn(fake, 'start').mockImplementation(async (request) => {
+      const context = required(contextRef.current, 'Expected runtime context');
+      cancellation = context.runtime.cancelReserved(request.executionId);
+      return originalStart(request);
+    });
+    const context = createRuntime({ fake });
+    contextRef.current = context;
+    const reservation = await context.runtime.reserveStart(context.start);
+
+    await context.runtime.activateReserved(reservation.execution.id);
+    const settled = await required(
+      cancellation,
+      'Expected synchronous cancellation reentry',
+    );
+    await context.runtime.drain();
+
+    expect(settled).toMatchObject({ lifecycle: 'running' });
+    expect(context.barrier.status).toBe('healthy');
+    expect(fake.startCount).toBe(1);
+    expect(context.operations.listForExecution(settled.id)).toMatchObject([
+      { kind: 'start', state: 'succeeded' },
+    ]);
+  });
+
+  it('fails activation closed before adapter start for corrupt durable authority', async () => {
+    const context = createRuntime();
+    const reservation = await context.runtime.reserveStart(context.start);
+    const operation = required(
+      context.operations.listForExecution(reservation.execution.id)[0],
+      'Expected start operation',
+    );
+    const request = operation.request as Record<string, unknown>;
+    context.fixture.database
+      .prepare('UPDATE execution_operations SET request_json = ? WHERE id = ?')
+      .run(
+        JSON.stringify({
+          ...request,
+          version: 'mesh.v2.execution-start/v0',
+        }),
+        operation.id,
+      );
+    const before = durableReservationState(context.fixture);
+
+    await expect(
+      context.runtime.activateReserved(reservation.execution.id),
+    ).rejects.toThrow('link is invalid');
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(context.fake.startCount).toBe(0);
   });
 
   it('trips the barrier when reserved cancellation cannot commit', async () => {
@@ -1138,6 +1257,165 @@ describe('ExecutionRuntime', () => {
     await context.runtime.drain();
     expect(durableRuntimeState(context.fixture)).toEqual(before);
   });
+
+  it.each(['pending', 'succeeded', 'unknown', 'failed'] as const)(
+    'contains the exact blocked session before rejecting a %s planning tag on a running lifecycle',
+    async (state) => {
+      const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const running = required(
+        context.executions.get(
+          started.ok && 'execution' in started ? started.execution.id : '',
+        ),
+        'Expected a running execution',
+      );
+      const { session, state: sessionState } =
+        await attachBlockedPlanningSession(context, running);
+      inImmediateTransaction(context.fixture.database, () => {
+        const operation = context.operations.createPendingInTransaction({
+          executionId: running.id,
+          kind: 'interrupt',
+          request: { version: 'mesh.v2.planning-interrupt/v1' },
+          createdAt: '2026-08-28T01:00:01.000Z',
+        });
+        if (state !== 'pending') {
+          context.operations.finishInTransaction(
+            operation.id,
+            state,
+            { reason: 'mismatched planning audit fixture' },
+            '2026-08-28T01:00:02.000Z',
+          );
+        }
+      });
+      const before = durableRuntimeState(context.fixture);
+      const publishedBefore = context.published.domain.length;
+
+      await expect(
+        context.runtime.interruptForPlanning(running.id),
+      ).rejects.toMatchObject({
+        code: 'planning_interrupt_audit_failure',
+        diagnostics: [
+          {
+            phase: 'audit',
+            message:
+              'Planning interrupt operation does not match execution lifecycle',
+          },
+        ],
+      });
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(sessionState.closeCount).toBe(1);
+      expect(context.fake.interruptCalls).toContain(session.nativeHandle);
+      await context.runtime.drain();
+      expect(durableRuntimeState(context.fixture)).toEqual(before);
+      expect(context.published.domain).toHaveLength(publishedBefore);
+    },
+  );
+
+  it('contains a live non-PM session before rejecting its tagged planning operation', async () => {
+    const context = createRuntime({
+      fake: new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 }),
+    });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const { session, state } = await attachBlockedPlanningSession(
+      context,
+      running,
+    );
+    inImmediateTransaction(context.fixture.database, () => {
+      context.operations.createPendingInTransaction({
+        executionId: running.id,
+        kind: 'interrupt',
+        request: { version: 'mesh.v2.planning-interrupt/v1' },
+        createdAt: '2026-08-28T01:00:01.000Z',
+      });
+    });
+    const before = durableRuntimeState(context.fixture);
+
+    await expect(
+      context.runtime.interruptForPlanning(running.id),
+    ).rejects.toMatchObject({
+      code: 'planning_interrupt_audit_failure',
+      diagnostics: [
+        {
+          phase: 'audit',
+          message: 'Planning interrupt operation is not owned by a PM runtime',
+        },
+      ],
+    });
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(state.closeCount).toBe(1);
+    expect(context.fake.interruptCalls).toContain(session.nativeHandle);
+    await context.runtime.drain();
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+  });
+
+  it.each([
+    'profile-id',
+    'profile-revision',
+    'profile-project',
+    'loaded-project',
+  ] as const)(
+    'rejects mismatched %s authority before adapter probing or writes',
+    async (fault) => {
+      const context = createRuntime(
+        fault === 'loaded-project'
+          ? {
+              project: (project) => ({ ...project, id: randomUUID() }),
+            }
+          : {
+              profile: (profile) =>
+                fault === 'profile-id'
+                  ? { ...profile, profileId: randomUUID() }
+                  : fault === 'profile-revision'
+                    ? {
+                        ...profile,
+                        profileRevision: profile.profileRevision + 1,
+                      }
+                    : {
+                        ...profile,
+                        projectId: randomUUID(),
+                        document: {
+                          ...profile.document,
+                          metadata: {
+                            ...profile.document.metadata,
+                            scope: 'project',
+                          },
+                        },
+                      },
+            },
+      );
+      if (fault === 'profile-id') {
+        context.start.command.profileId =
+          context.fixture.profileRevision.profileId;
+      }
+      if (fault === 'profile-revision') {
+        context.start.command.profileRevision =
+          context.fixture.profileRevision.revision;
+      }
+      const before = durableReservationState(context.fixture);
+
+      await expect(
+        context.runtime.reserveStart(context.start),
+      ).rejects.toBeInstanceOf(ExecutionReservationError);
+
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.published.domain).toEqual([]);
+      expect({
+        capabilities: context.fake.capabilitiesCount,
+        skills: context.fake.resolveSkillsCount,
+        starts: context.fake.startCount,
+      }).toEqual({ capabilities: 0, skills: 0, starts: 0 });
+    },
+  );
 
   it('records an unproven already-terminal probe before rejecting cleanup', async () => {
     const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
@@ -1788,7 +2066,7 @@ describe('ExecutionRuntime', () => {
     fake.releaseCapabilities();
     const [first, replay] = await Promise.all([firstResult, secondResult]);
     expect(replay).toEqual(first);
-    expect(lookupTransactions.filter((inside) => !inside)).toHaveLength(2);
+    expect(lookupTransactions.filter((inside) => !inside)).toHaveLength(3);
     expect(lookupTransactions.filter(Boolean)).toHaveLength(2);
     expect(fake.startCount).toBe(1);
     const created = context.executions
