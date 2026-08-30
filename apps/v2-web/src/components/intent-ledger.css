@@ -1,0 +1,24 @@
+.intent-ledger-pane {
+  display: grid;
+  gap: 1rem;
+}
+.intent-ledger-pane textarea {
+  display: block;
+  min-height: 6rem;
+  width: 100%;
+}
+.intent-ledger-pane button {
+  margin: 0.25rem;
+}
+.intent-ledger-card {
+  border: 1px solid currentColor;
+  padding: 0.75rem;
+}
+.intent-ledger-card > :first-child {
+  margin-top: 0;
+}
+.intent-ledger-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
