@@ -656,20 +656,21 @@ export const planningProposalSchema = z
         message: 'Proposal base revisions must be jointly null or non-null',
       });
     }
+    const proposalRecords = value.records.map((record) =>
+      record.operation === 'create'
+        ? {
+            operation: record.operation,
+            key: record.key,
+            content: record.content,
+            provenance: record.provenance,
+          }
+        : record,
+    );
     const result = pmProposalResultSchema.safeParse({
       kind: 'proposal',
       summary: value.summary,
       projectIntent: value.projectIntent,
-      records: value.records.map((record) =>
-        record.operation === 'create'
-          ? {
-              operation: record.operation,
-              key: record.key,
-              content: record.content,
-              provenance: record.provenance,
-            }
-          : record,
-      ),
+      records: proposalRecords,
       relationships: value.relationships,
     });
     if (!result.success) {
@@ -710,7 +711,7 @@ export const planningProposalSchema = z
       kind: 'proposal',
       summary: value.summary,
       projectIntent: value.projectIntent,
-      records: value.records,
+      records: proposalRecords,
       relationships: diffRelationships,
     });
     if (!diffResult.success) {

@@ -3453,6 +3453,40 @@ describe('V2 intent ledger contracts', () => {
     ).toThrow(/relationship changes must be unique/i);
   });
 
+  it.each([
+    [
+      'an unresolved removed relationship',
+      {
+        kind: 'depends_on' as const,
+        from: { proposalKey: 'missing-record' },
+        to: { proposalKey: 'complete-todo' },
+      },
+      /relationship endpoint must resolve inside the proposal/i,
+    ],
+    [
+      'a self-referential removed relationship',
+      {
+        kind: 'depends_on' as const,
+        from: { proposalKey: 'complete-todo' },
+        to: { proposalKey: 'complete-todo' },
+      },
+      /proposal relationships cannot be self-edges/i,
+    ],
+  ])('rejects %s for projected create records', (_label, removed, expected) => {
+    expect(() =>
+      planningProposalSchema.parse({
+        ...proposal,
+        diff: {
+          ...proposalDiff,
+          relationshipChanges: {
+            ...proposalDiff.relationshipChanges,
+            removed: [removed],
+          },
+        },
+      }),
+    ).toThrow(expected);
+  });
+
   it('enforces all planning collection boundaries at the limit plus one', () => {
     const proposalMembers = Array.from({ length: 101 }, (_, index) => ({
       operation: 'create' as const,
