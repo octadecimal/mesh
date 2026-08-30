@@ -675,7 +675,7 @@ export const planningProposalSchema = z
     });
     if (!result.success) {
       for (const issue of result.error.issues) {
-        context.addIssue(issue);
+        context.addIssue({ ...issue, path: issue.path });
       }
     }
     const recordChanges = { create: 0, revise: 0, reuse: 0 };
