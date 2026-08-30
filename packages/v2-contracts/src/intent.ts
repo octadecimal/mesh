@@ -433,6 +433,16 @@ export const planningCycleSchema = z
     endedAt: isoTimestampSchema.nullable(),
   })
   .superRefine((value, context) => {
+    if (
+      (value.baseProjectIntentRevision === null) !==
+      (value.baseLedgerRevision === null)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['baseLedgerRevision'],
+        message: 'Cycle base revisions must be jointly null or non-null',
+      });
+    }
     const terminal = terminalPlanningCycleLifecycles.has(value.lifecycle);
     if (terminal && value.endedAt === null) {
       context.addIssue({
@@ -620,6 +630,16 @@ export const planningProposalSchema = z
     decidedAt: isoTimestampSchema.nullable(),
   })
   .superRefine((value, context) => {
+    if (
+      (value.baseProjectIntentRevision === null) !==
+      (value.baseLedgerRevision === null)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['baseLedgerRevision'],
+        message: 'Proposal base revisions must be jointly null or non-null',
+      });
+    }
     const result = pmProposalResultSchema.safeParse({
       kind: 'proposal',
       summary: value.summary,
@@ -754,6 +774,26 @@ export const planningCycleViewSchema = z
           message: 'Planning turn ordinals must be ordered and contiguous',
         });
       }
+      if (turn.actor === 'pm') {
+        const triggeringTurn = value.turns[index - 1];
+        if (
+          triggeringTurn?.actor !== 'human' ||
+          triggeringTurn.launchState !== 'execution_bound'
+        ) {
+          context.addIssue({
+            code: 'custom',
+            path: ['turns', index],
+            message:
+              'PM turns must immediately follow an execution-bound human turn',
+          });
+        } else if (turn.executionId !== triggeringTurn.executionId) {
+          context.addIssue({
+            code: 'custom',
+            path: ['turns', index, 'executionId'],
+            message: 'Paired human and PM turns must share an execution',
+          });
+        }
+      }
     });
     if (turnIds.size !== value.turns.length) {
       context.addIssue({
@@ -836,6 +876,17 @@ export const planningCycleViewSchema = z
           message: 'Proposal execution must match its PM turn',
         });
       }
+      if (
+        proposal.baseProjectIntentRevision !==
+          value.cycle.baseProjectIntentRevision ||
+        proposal.baseLedgerRevision !== value.cycle.baseLedgerRevision
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['proposals', index],
+          message: 'Proposal base must match the cycle base',
+        });
+      }
     });
     const questionIds = new Set(value.questions.map((question) => question.id));
     if (questionIds.size !== value.questions.length) {
@@ -863,6 +914,15 @@ export const planningCycleViewSchema = z
       }
     });
     const latestProposal = value.proposals.at(-1) ?? null;
+    value.proposals.slice(0, -1).forEach((proposal, index) => {
+      if (proposal.lifecycle !== 'superseded') {
+        context.addIssue({
+          code: 'custom',
+          path: ['proposals', index, 'lifecycle'],
+          message: 'Non-latest proposals must be superseded',
+        });
+      }
+    });
     const latestTurn = value.turns.at(-1);
     if (
       value.cycle.lifecycle === 'launch_pending' &&
@@ -921,6 +981,23 @@ export const planningCycleViewSchema = z
         code: 'custom',
         path: ['cycle', 'latestProposalRevision'],
         message: 'Latest proposal revision must match proposal history',
+      });
+    }
+    const cycleLifecycleForProposal = {
+      awaiting_approval: 'awaiting_approval',
+      approved: 'approved',
+      rejected: 'proposal_rejected',
+    } as const;
+    if (
+      latestProposal !== null &&
+      latestProposal.lifecycle !== 'superseded' &&
+      value.cycle.lifecycle !==
+        cycleLifecycleForProposal[latestProposal.lifecycle]
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['proposals', value.proposals.length - 1, 'lifecycle'],
+        message: 'Latest proposal lifecycle must match the cycle lifecycle',
       });
     }
     if (
@@ -1083,6 +1160,13 @@ export const approvedIntentLedgerSchema = z
   });
 export type ApprovedIntentLedger = z.infer<typeof approvedIntentLedgerSchema>;
 
+const approvedRecordContent = (
+  content: LedgerRecordContent,
+): LedgerRecordContent =>
+  content.type === 'requirement' && content.status === 'proposed'
+    ? { ...content, status: 'approved' }
+    : content;
+
 export const approvedPlanningOutcomeSchema = z
   .strictObject({
     planningCycle: planningCycleViewSchema,
@@ -1182,6 +1266,63 @@ export const approvedPlanningOutcomeSchema = z
         message: 'Ledger revision must advance from the proposal base',
       });
     }
+    if (latestProposal !== null) {
+      let membersMatch =
+        latestProposal.records.length === value.intentLedger.records.length;
+      const createCandidates = [...value.intentLedger.records];
+
+      for (const member of latestProposal.records) {
+        if (member.operation === 'create') continue;
+        const record = value.intentLedger.records.find(
+          (candidate) => candidate.recordId === member.recordId,
+        );
+        const expectedRevision =
+          member.operation === 'revise'
+            ? member.expectedRevision + 1
+            : member.expectedRevision;
+        if (record === undefined || record.revision !== expectedRevision) {
+          membersMatch = false;
+          continue;
+        }
+        createCandidates.splice(createCandidates.indexOf(record), 1);
+        if (
+          member.operation === 'revise' &&
+          (record.proposalId !== latestProposal.id ||
+            JSON.stringify(record.content) !==
+              JSON.stringify(approvedRecordContent(member.content)) ||
+            JSON.stringify(record.provenance) !==
+              JSON.stringify(member.provenance))
+        ) {
+          membersMatch = false;
+        }
+      }
+
+      for (const member of latestProposal.records) {
+        if (member.operation !== 'create') continue;
+        const candidateIndex = createCandidates.findIndex(
+          (record) =>
+            record.revision === 1 &&
+            record.proposalId === latestProposal.id &&
+            JSON.stringify(record.content) ===
+              JSON.stringify(approvedRecordContent(member.content)) &&
+            JSON.stringify(record.provenance) ===
+              JSON.stringify(member.provenance),
+        );
+        if (candidateIndex === -1) {
+          membersMatch = false;
+        } else {
+          createCandidates.splice(candidateIndex, 1);
+        }
+      }
+
+      if (!membersMatch || createCandidates.length !== 0) {
+        context.addIssue({
+          code: 'custom',
+          path: ['intentLedger', 'records'],
+          message: 'Proposal operations must match canonical ledger members',
+        });
+      }
+    }
   });
 export type ApprovedPlanningOutcome = z.infer<
   typeof approvedPlanningOutcomeSchema
@@ -1249,15 +1390,21 @@ export const pmDiscoveryAssignmentSchema = z
     input: pmDiscoveryInputSchema,
   })
   .superRefine((value, context) => {
-    if (
-      !value.input.conversation.some(
-        (turn) => turn.turnId === value.humanTurnId && turn.actor === 'human',
-      )
-    ) {
+    const latestHumanTurn = value.input.conversation.reduce<
+      PmDiscoveryInput['conversation'][number] | null
+    >((latest, turn) => (turn.actor === 'human' ? turn : latest), null);
+    if (latestHumanTurn === null) {
       context.addIssue({
         code: 'custom',
         path: ['input', 'conversation'],
         message: 'Assignment conversation must contain its human turn',
+      });
+    } else if (latestHumanTurn.turnId !== value.humanTurnId) {
+      context.addIssue({
+        code: 'custom',
+        path: ['humanTurnId'],
+        message:
+          'Assignment human turn must be the latest human conversation turn',
       });
     }
     if (

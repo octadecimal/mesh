@@ -97,6 +97,7 @@ export const v2ProjectSnapshotSchema = z
     cursors: projectEventCursorsSchema,
   })
   .superRefine((value, context) => {
+    const planningTurnIds = new Set<string>();
     value.profiles.forEach((profile, index) => {
       if (
         profile.projectId !== null &&
@@ -126,6 +127,16 @@ export const v2ProjectSnapshotSchema = z
           message: 'Planning cycle must match the snapshot project',
         });
       }
+      planningCycle.turns.forEach((turn, turnIndex) => {
+        if (planningTurnIds.has(turn.id)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['planningCycles', index, 'turns', turnIndex, 'id'],
+            message: 'Planning turn IDs must be unique across cycles',
+          });
+        }
+        planningTurnIds.add(turn.id);
+      });
     });
     const nonterminalCycles = value.planningCycles.filter(
       ({ cycle }) =>
