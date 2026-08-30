@@ -223,6 +223,7 @@ export function FocusedProjectShell({
               connection={{ status: 'ready' }}
               profiles={[]}
               submitting={false}
+              headingLabel="PM Chat history"
               historyTruncated={snapshot.planningHistoryTruncated}
               executions={snapshot.executions}
               approvedIntentLedger={snapshot.intentLedger}

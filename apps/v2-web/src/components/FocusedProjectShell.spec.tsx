@@ -183,7 +183,7 @@ describe('FocusedProjectShell', () => {
     (lifecycle, status) => {
       const terminalCycle = terminalPlanningCycle(lifecycle);
 
-      render(
+      const { container } = render(
         <FocusedProjectShell
           model={{
             status: 'ready',
@@ -204,8 +204,26 @@ describe('FocusedProjectShell', () => {
         screen.getByText(`Visible ${lifecycle} planning transcript.`),
       ).toBeVisible();
       expect(screen.getByText(`Visible ${lifecycle} proposal.`)).toBeVisible();
+      expect(
+        screen.getByRole('heading', { name: 'PM Chat history' }),
+      ).toBeVisible();
+      expect(screen.getByRole('heading', { name: 'PM Chat' })).toBeVisible();
       expect(screen.getByLabelText('Project manager profile')).toBeVisible();
       expect(screen.getByLabelText('Message to project manager')).toBeVisible();
+      const ids = [...container.querySelectorAll<HTMLElement>('[id]')].map(
+        ({ id }) => id,
+      );
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const relationship of container.querySelectorAll<HTMLElement>(
+        '[aria-labelledby]',
+      )) {
+        const labelledBy = relationship.getAttribute('aria-labelledby');
+        if (labelledBy === null)
+          throw new Error('Expected labelled relationship');
+        for (const id of labelledBy.split(' ')) {
+          expect(ids.filter((candidate) => candidate === id)).toHaveLength(1);
+        }
+      }
       expect(
         screen.queryByRole('button', { name: 'Abandon cycle' }),
       ).not.toBeInTheDocument();

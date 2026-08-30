@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 
 import type {
   ApprovedIntentLedger,
@@ -283,6 +283,7 @@ export function PlanningPane({
   error,
   historyTruncated = false,
   historyLimitReached = false,
+  headingLabel = 'PM Chat',
   recovery,
   executions = [],
   approvedIntentLedger = null,
@@ -298,6 +299,7 @@ export function PlanningPane({
   error?: string;
   historyTruncated?: boolean;
   historyLimitReached?: boolean;
+  headingLabel?: string;
   recovery?:
     | { kind: 'ambiguous_start'; operation: string }
     | { kind: 'retryable'; message: string };
@@ -308,6 +310,7 @@ export function PlanningPane({
   onReject: (proposalId: PlanningProposal['id'], feedback: string) => void;
   onAbandon: (cycleId: PlanningCycleView['cycle']['id']) => void;
 }) {
+  const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [draft, setDraft] = useState('');
   const [profileId, setProfileId] = useState(profiles[0]?.profileId ?? '');
@@ -396,9 +399,9 @@ export function PlanningPane({
               : undefined;
 
   return (
-    <section className="intent-ledger-pane" aria-labelledby="pm-chat-heading">
-      <h2 id="pm-chat-heading" ref={headingRef} tabIndex={-1}>
-        PM Chat
+    <section className="intent-ledger-pane" aria-labelledby={headingId}>
+      <h2 id={headingId} ref={headingRef} tabIndex={-1}>
+        {headingLabel}
       </h2>
       {error ? (
         <p role="alert" aria-live="assertive">

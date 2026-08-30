@@ -316,6 +316,60 @@ function renderPane(
 }
 
 describe('PlanningPane', () => {
+  it('keeps sibling pane labels and relationships unique while preserving the default heading', () => {
+    const terminalCycle: PlanningCycleView = {
+      ...baseCycle,
+      cycle: {
+        ...baseCycle.cycle,
+        lifecycle: 'approved',
+        endedAt: '2026-08-29T00:00:02.000Z',
+      },
+    };
+    const callbacks = {
+      onSubmitTurn: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const { container } = render(
+      <>
+        <PlanningPane
+          cycle={terminalCycle}
+          connection={{ status: 'ready' }}
+          profiles={[]}
+          submitting={false}
+          headingLabel="PM Chat history"
+          {...callbacks}
+        />
+        <PlanningPane
+          connection={{ status: 'ready' }}
+          profiles={[profile]}
+          submitting={false}
+          {...callbacks}
+        />
+      </>,
+    );
+
+    expect(
+      screen.getByRole('heading', { name: 'PM Chat history' }),
+    ).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'PM Chat' })).toBeVisible();
+    const ids = [...container.querySelectorAll<HTMLElement>('[id]')].map(
+      ({ id }) => id,
+    );
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const relationship of container.querySelectorAll<HTMLElement>(
+      '[aria-labelledby]',
+    )) {
+      const labelledBy = relationship.getAttribute('aria-labelledby');
+      if (labelledBy === null)
+        throw new Error('Expected labelled relationship');
+      for (const id of labelledBy.split(' ')) {
+        expect(ids.filter((candidate) => candidate === id)).toHaveLength(1);
+      }
+    }
+  });
+
   it('starts discovery with an accessible profile selection and submits a human turn', async () => {
     const user = userEvent.setup();
     const { onSubmitTurn } = renderPane({ cycle: undefined });
