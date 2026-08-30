@@ -40,7 +40,7 @@ The parallel projects and defaults are:
 | --- | --- |
 | `MESH_V2_HOST` | `127.0.0.1`; only `127.0.0.1` and `::1` are accepted |
 | `MESH_V2_PORT` | `3838` |
-| `MESH_V2_WORKSPACE_ROOT` | the operator's home directory; overrides must be absolute |
+| `MESH_V2_WORKSPACE_ROOT` | the operator's home directory; overrides must be absolute; used only as the base for relative repository paths, not as an allowlist |
 | `MESH_V2_DATA_DIR` | `~/.mesh/v2`; overrides must be absolute |
 | `MESH_V2_DATABASE_PATH` | `mesh-v2.sqlite` inside the V2 data directory; overrides must be absolute |
 | `MESH_V2_DEV_ORIGIN` | exact loopback HTTP origin; the V2 server development command defaults it to `http://127.0.0.1:4300` |
@@ -54,6 +54,12 @@ owned by V2; the V1 database is deliberately outside this boundary.
 
 `MESH_V2_FAKE_HOLD_AFTER_CURSOR` is an acceptance-test control. It is rejected
 outside test mode and is not a normal operating setting.
+
+Project registration accepts readable local Git working trees anywhere on the
+machine. Absolute paths, `..`-relative paths, links, and linked worktrees may
+resolve outside `MESH_V2_WORKSPACE_ROOT`; the server still canonicalizes Git's
+top-level and common-directory paths and requires one committed 40- or
+64-character `HEAD`.
 
 `MESH_V2_TEST_FAKE_PM_SCENARIO=todo` selects the deterministic Todo project
 manager conversation used by V2 acceptance. The server accepts it only when

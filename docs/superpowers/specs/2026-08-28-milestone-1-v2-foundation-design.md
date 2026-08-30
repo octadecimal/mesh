@@ -180,9 +180,11 @@ type Project = {
 };
 ```
 
-`project.register` accepts an absolute or workspace-root-relative path. The V2
-platform boundary resolves every component, rejects traversal and symlink or
-junction escape, requires a readable Git working tree, and runs explicit
+`project.register` accepts an absolute or workspace-root-relative path.
+`MESH_V2_WORKSPACE_ROOT` is only the base for relative input; it is not an
+allowlist. Absolute paths, `..`-relative paths, and links may resolve outside
+that root. The V2 platform boundary canonicalizes the selected path, requires a
+readable Git working tree, and runs explicit
 non-interactive `git rev-parse --path-format=absolute --show-toplevel
 --git-common-dir` and `git rev-parse --verify HEAD^{commit}` commands. The
 normalized canonical common-directory path is the durable
@@ -740,8 +742,10 @@ projection is disconnected, stale, loading, or the audit barrier is tripped.
 ## Security, Workspace, and Billing Invariants
 
 - Server listeners and accepted browser origins are loopback-only.
-- Repository paths are canonicalized inside `MESH_V2_WORKSPACE_ROOT`; path
-  traversal, link escape, unreadable Git state, and ambiguous identity fail
+- Repository paths are canonicalized before registration.
+  `MESH_V2_WORKSPACE_ROOT` resolves relative input but does not confine absolute
+  paths, `..` traversal, links, or linked-worktree common directories.
+  Unreadable paths, non-working-tree Git state, and ambiguous identity fail
   closed.
 - M1 reads Git identity only. It creates no branch, worktree, commit, child
   shell, or repository file and never cleans a repository.
@@ -876,7 +880,8 @@ documents; formatting alone is not link proof.
   are separate while V1 remains runnable.
 - Both fresh and existing V2 databases work; V1/unknown state is rejected
   without mutation.
-- Project registration and focused selection are explicit and path-safe.
+- Project registration and focused selection are explicit, canonical, and
+  Git-validated.
 - Global/project profile revisions, one-level extension, approval, resolution,
   and immutable execution snapshots match the defined schema and merge rules.
 - WorkerExecution contains Mesh assignment/runtime facts only and the fake
