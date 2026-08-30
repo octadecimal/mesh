@@ -1047,11 +1047,25 @@ export const planningCycleViewSchema = z
       approved: 'approved',
       rejected: 'proposal_rejected',
     } as const;
+    const proposalTurnIndex = value.turns.findIndex(
+      (turn) => turn.id === latestProposal?.createdByTurnId,
+    );
+    const revisionHumanTurn = value.turns.at(-2);
+    const awaitingHumanRevision =
+      value.cycle.lifecycle === 'awaiting_human' &&
+      latestTurn?.actor === 'pm' &&
+      revisionHumanTurn?.actor === 'human' &&
+      revisionHumanTurn.launchState === 'execution_bound' &&
+      revisionHumanTurn.executionId === latestTurn.executionId &&
+      proposalTurnIndex >= 0 &&
+      proposalTurnIndex < value.turns.length - 2 &&
+      value.questions.some((question) => question.turnId === latestTurn.id);
     const awaitingProposalMatchesCycle =
       latestProposal?.lifecycle === 'awaiting_approval' &&
       (value.cycle.lifecycle === 'awaiting_approval' ||
         value.cycle.lifecycle === 'launch_pending' ||
         value.cycle.lifecycle === 'execution_active' ||
+        awaitingHumanRevision ||
         (value.cycle.lifecycle === 'attention_required' &&
           latestTurn?.actor === 'human' &&
           (latestTurn.launchState === 'launch_pending' ||

@@ -2596,6 +2596,83 @@ describe('V2 intent ledger contracts', () => {
     },
   );
 
+  it('preserves an awaiting proposal when a revision PM asks current questions', () => {
+    const revisionExecutionId = randomUUID();
+    const revisionHumanTurn = {
+      ...cycleView.turns[0],
+      id: randomUUID(),
+      ordinal: 3,
+      message: 'Revise the current proposal.',
+      executionId: revisionExecutionId,
+    };
+    const revisionPmTurn = {
+      ...cycleView.turns[1],
+      id: randomUUID(),
+      ordinal: 4,
+      message: 'I need one more answer.',
+      executionId: revisionExecutionId,
+    };
+    const view = {
+      ...cycleView,
+      cycle: {
+        ...cycleView.cycle,
+        lifecycle: 'awaiting_human' as const,
+      },
+      turns: [...cycleView.turns, revisionHumanTurn, revisionPmTurn],
+      questions: [
+        {
+          ...planningQuestion,
+          id: randomUUID(),
+          turnId: revisionPmTurn.id,
+        },
+      ],
+    };
+
+    expect(planningCycleViewSchema.parse(view)).toEqual(view);
+  });
+
+  it.each([
+    [
+      'the same PM turn produced the proposal and question',
+      {
+        ...cycleView,
+        cycle: {
+          ...cycleView.cycle,
+          lifecycle: 'awaiting_human' as const,
+        },
+        questions: [planningQuestion],
+      },
+    ],
+    [
+      'the question PM lacks a bound post-proposal human turn',
+      (() => {
+        const questionPmTurn = {
+          ...cycleView.turns[1],
+          id: randomUUID(),
+          ordinal: 3,
+          message: 'Unrelated question output.',
+        };
+        return {
+          ...cycleView,
+          cycle: {
+            ...cycleView.cycle,
+            lifecycle: 'awaiting_human' as const,
+          },
+          turns: [...cycleView.turns, questionPmTurn],
+          questions: [
+            {
+              ...planningQuestion,
+              id: randomUUID(),
+              turnId: questionPmTurn.id,
+            },
+          ],
+        };
+      })(),
+    ],
+  ] as const)('rejects awaiting-human when %s', (_label, view) => {
+    expect(planningCycleViewSchema.safeParse(view).success).toBe(false);
+  });
+
   it('rejects unrelated recovery state for an awaiting proposal', () => {
     expect(
       issueText(
