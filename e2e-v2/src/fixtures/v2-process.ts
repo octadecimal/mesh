@@ -16,7 +16,6 @@ import {
   type ClientRealtimeMessage,
   type RetainedDomainWindow,
   type RetainedRuntimeWindow,
-  type ServerRealtimeMessage,
   type V2CommandEnvelope,
   type V2ProjectSnapshot,
 } from '@mesh/v2-contracts';
@@ -272,6 +271,7 @@ export class V2ProcessFixture {
   private constructor(
     readonly fixtureRoot: string,
     todoRepository: string,
+    private readonly fakePmScenario?: 'todo',
   ) {
     this.todoRepository = todoRepository;
     this.databasePath = assertContainedPath(
@@ -280,7 +280,12 @@ export class V2ProcessFixture {
     );
   }
 
-  static async createTodo(options: { onRoot?: (root: string) => void } = {}) {
+  static async createTodo(
+    options: {
+      onRoot?: (root: string) => void;
+      fakePmScenario?: 'todo';
+    } = {},
+  ) {
     let root: string | undefined;
     try {
       root = assertOwnedFixtureRoot(
@@ -288,7 +293,7 @@ export class V2ProcessFixture {
       );
       options.onRoot?.(root);
       const repository = await createTodoRepository(root);
-      return new V2ProcessFixture(root, repository);
+      return new V2ProcessFixture(root, repository, options.fakePmScenario);
     } catch (error) {
       if (root) await rm(root, { recursive: true, force: true });
       throw error;
@@ -339,6 +344,9 @@ export class V2ProcessFixture {
       HOME: this.fixtureRoot,
       USERPROFILE: this.fixtureRoot,
     };
+    if (this.fakePmScenario) {
+      environment.MESH_V2_TEST_FAKE_PM_SCENARIO = this.fakePmScenario;
+    }
     if (options.holdAfterAdapterCursor !== undefined) {
       environment.MESH_V2_FAKE_HOLD_AFTER_CURSOR = String(
         options.holdAfterAdapterCursor,
@@ -885,6 +893,53 @@ spec:
       } satisfies ClientRealtimeMessage,
     );
     return raw.map((message) => serverRealtimeMessageSchema.parse(message));
+  }
+
+  async forceProjectResync(page: Page) {
+    const snapshot = await this.projectSnapshot();
+    const raw = await page.evaluate(
+      ({ type, projectId, protocolVersion, cursors }) =>
+        new Promise<unknown>((resolveResync, rejectResync) => {
+          const socket = new WebSocket('/api/v2/realtime');
+          socket.onerror = () => rejectResync(new Error('V2 WebSocket failed'));
+          socket.onopen = () =>
+            socket.send(
+              JSON.stringify({
+                type,
+                protocolVersion,
+                projectId,
+                cursors,
+              }),
+            );
+          socket.onmessage = ({ data }) => {
+            const message = JSON.parse(String(data)) as { type?: string };
+            if (message.type !== 'v2.resync_required') return;
+            socket.close();
+            resolveResync(message);
+          };
+        }),
+      {
+        type: 'v2.subscribe',
+        projectId: this.projectId,
+        protocolVersion: V2_PROTOCOL_VERSION,
+        cursors: {
+          domain: snapshot.cursors.domain + 1,
+          runtime: snapshot.cursors.runtime + 1,
+        },
+      } satisfies ClientRealtimeMessage,
+    );
+    expect(serverRealtimeMessageSchema.parse(raw)).toMatchObject({
+      type: 'v2.resync_required',
+      projectId: this.projectId,
+      reason: 'retained_gap',
+    });
+    await page.reload();
+    await expect(
+      page.getByText(
+        `Domain cursor ${snapshot.cursors.domain}; runtime cursor ${snapshot.cursors.runtime}`,
+      ),
+    ).toBeVisible();
+    return this.projectSnapshot();
   }
 
   async expectContinuousStreamsAndStableSnapshots(page: Page) {

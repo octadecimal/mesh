@@ -1,8 +1,8 @@
 # V2 foundation development
 
-Mesh V2 Milestone 1 is an implemented foundation that runs beside the existing
-session platform. It has separate Nx projects, wire contracts, settings, ports,
-and SQLite storage. It does not replace, upgrade, read, or migrate V1. For V1
+Mesh V2 Milestones 1 and 2 are implemented beside the existing session
+platform. V2 has separate Nx projects, wire contracts, settings, ports, and
+SQLite storage. It does not replace, upgrade, read, or migrate V1. For V1
 operation, see [Session platform development](session-platform.md).
 
 ## Start the V2 applications
@@ -25,7 +25,7 @@ Both hosts remain loopback-only.
 
 The parallel projects and defaults are:
 
-| Surface | V1 | V2 Milestone 1 |
+| Surface | V1 | V2 Milestones 1 and 2 |
 | --- | --- | --- |
 | Server | `server`, port `3737` | `v2-server`, port `3838` |
 | Web | `web`, port `4200` | `v2-web`, port `4300` |
@@ -55,7 +55,11 @@ owned by V2; the V1 database is deliberately outside this boundary.
 `MESH_V2_FAKE_HOLD_AFTER_CURSOR` is an acceptance-test control. It is rejected
 outside test mode and is not a normal operating setting.
 
-## Foundation flow and verification
+`MESH_V2_TEST_FAKE_PM_SCENARIO=todo` selects the deterministic Todo project
+manager conversation used by V2 acceptance. The server accepts it only when
+`NODE_ENV=test`; it is not a production setting or a real project-manager mode.
+
+## Foundation and intent-ledger flow
 
 M1 supports V2 project registration, profile discovery and approval, and the
 `foundation-check` execution kind. A browser command is validated through
@@ -64,6 +68,17 @@ then published to the browser projection. On restart, the server opens the V2
 database, reconciles nonterminal execution evidence, publishes committed
 recovery events, and restores the snapshot and replay path before accepting new
 work.
+
+M2 adds project-owned planning cycles and the approved intent ledger. Each
+human turn launches at most one finite project-manager execution. That execution
+must return one structured set of questions or one complete proposal; it does
+not remain as an open-ended chat session. Planning turns, questions, proposal
+revisions, recovery state, and terminal history are durable across restart.
+Human approval is the atomic boundary that creates immutable project-intent and
+ledger revisions with record provenance and relationships. The Requirements
+pane renders the approved intent plus requirement, assumption, decision,
+question, and risk records. The Board remains a placeholder, and planning does
+not create or execute M3 tasks.
 
 Run the deterministic Chromium acceptance scenario with:
 
@@ -75,9 +90,15 @@ That suite runs the built V2 processes against a temporary Todo repository and
 temporary V2 database. Its `Todo foundation survives restart without V1 state`
 scenario starts a fake execution, restarts the backend with a fresh fake
 adapter, and verifies durable execution and event recovery without V1 state.
+Its `conversation becomes an approved intent ledger` scenario uses the
+test-only Todo PM script, restarts the same temporary database between both
+turns and after approval, forces a retained-gap resynchronization, and proves
+that transcript, questions, intent revision 1, ledger revision 1, provenance,
+and relationships remain identical.
 
-Normal V2 M1 execution uses only the fake harness adapter. M1 has no real
-harness smoke test and must not contact Claude, use subscription capacity, or
-use API-billed traffic. The focused web shell contains inert placeholders for
-later workflow domains; project intents, requirements, task boards, runs, QA,
-integration, and worktree orchestration are not implemented in M1.
+V2 M1 and M2 execution currently uses only the fake harness adapter. The real
+Claude smoke test documented for the established session platform is separate,
+opt-in, and consumes subscription capacity; it is never part of V2 acceptance
+or default verification. Do not supply `ANTHROPIC_API_KEY` or use API-billed
+traffic. Task boards, planning-derived tasks, runs, QA, integration, and
+worktree orchestration remain future workflow domains.
