@@ -167,15 +167,27 @@ const terminalPlanningCycles = Array.from({ length: 20 }, (_, index) =>
       lifecycle: 'abandoned',
       revision: 3,
       activeExecutionId: null,
-      createdAt: `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`,
-      updatedAt: `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`,
-      endedAt: `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`,
+      createdAt: '2026-08-28T00:00:00.000Z',
+      updatedAt: '2026-08-28T00:00:00.000Z',
+      endedAt: '2026-08-28T00:00:00.000Z',
     },
     turns: [],
     questions: [],
     proposals: [],
   }),
 );
+
+const descendingCodeUnits = (left: string, right: string) =>
+  left === right ? 0 : left > right ? -1 : 1;
+
+const authoritativeTerminalOrder = (
+  cycles: readonly (typeof planningCycle)[],
+) =>
+  [...cycles].sort(
+    (left, right) =>
+      descendingCodeUnits(left.cycle.updatedAt, right.cycle.updatedAt) ||
+      descendingCodeUnits(left.cycle.id, right.cycle.id),
+  );
 
 const execution = {
   id: executionId,
@@ -376,6 +388,9 @@ describe('reduceProjectProjection', () => {
   });
 
   it('converges an active cycle over exactly twenty terminal cycles with the authoritative bound', () => {
+    const terminalAuthority = authoritativeTerminalOrder(
+      terminalPlanningCycles,
+    );
     const hydrated = reduceProjectProjection(
       createInitialProjectProjection(projectId),
       {
@@ -404,17 +419,14 @@ describe('reduceProjectProjection', () => {
         type: 'snapshot.received',
         snapshot: {
           ...snapshot,
-          planningCycles: [
-            planningCycle,
-            ...terminalPlanningCycles.slice(0, 19),
-          ],
+          planningCycles: [planningCycle, ...terminalAuthority.slice(0, 19)],
           planningHistoryTruncated: true,
           cursors: { ...snapshot.cursors, domain: 3 },
         },
       },
     );
 
-    expect(incremental).toEqual(refreshed);
+    expect(JSON.stringify(incremental)).toBe(JSON.stringify(refreshed));
 
     const abandoned = planningCycleViewSchema.parse({
       ...planningCycle,
@@ -439,15 +451,20 @@ describe('reduceProjectProjection', () => {
       } as DomainEvent,
     });
 
-    expect(replaced.planningCycles).toEqual([
-      abandoned,
-      ...terminalPlanningCycles.slice(0, 19),
-    ]);
+    expect(replaced.planningCycles).toEqual(
+      authoritativeTerminalOrder([abandoned, ...terminalPlanningCycles]).slice(
+        0,
+        20,
+      ),
+    );
     expect(replaced.planningCycles).toHaveLength(20);
     expect(replaced.planningHistoryTruncated).toBe(true);
   });
 
   it('applies the same authoritative planning bound to ledger approval events', () => {
+    const terminalAuthority = authoritativeTerminalOrder(
+      terminalPlanningCycles,
+    );
     const hydrated = reduceProjectProjection(
       createInitialProjectProjection(projectId),
       {
@@ -478,7 +495,7 @@ describe('reduceProjectProjection', () => {
           ...snapshot,
           planningCycles: [
             approvedOutcome.planningCycle,
-            ...terminalPlanningCycles.slice(0, 19),
+            ...terminalAuthority.slice(0, 19),
           ],
           planningHistoryTruncated: true,
           intentLedger: approvedOutcome.intentLedger,
@@ -487,7 +504,7 @@ describe('reduceProjectProjection', () => {
       },
     );
 
-    expect(incremental).toEqual(refreshed);
+    expect(JSON.stringify(incremental)).toBe(JSON.stringify(refreshed));
   });
 
   it('requests resync for an incomplete planning projection', () => {

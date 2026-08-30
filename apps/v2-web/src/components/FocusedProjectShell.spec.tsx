@@ -100,37 +100,120 @@ const planningCycle = {
   proposals: [],
 } as PlanningCycleView;
 
-describe('FocusedProjectShell', () => {
-  it('keeps terminal history while presenting the ordinary new-cycle form', () => {
-    const terminalCycle = {
-      ...planningCycle,
-      cycle: {
-        ...planningCycle.cycle,
-        lifecycle: 'approved' as const,
-        revision: 3,
-        endedAt: '2026-08-28T00:00:02.000Z',
+const terminalPlanningCycle = (
+  lifecycle: 'approved' | 'proposal_rejected' | 'abandoned',
+): PlanningCycleView => ({
+  ...planningCycle,
+  cycle: {
+    ...planningCycle.cycle,
+    lifecycle,
+    revision: 3,
+    latestProposalRevision: 1,
+    updatedAt: '2026-08-28T00:00:03.000Z',
+    endedAt: '2026-08-28T00:00:03.000Z',
+  },
+  turns: [
+    {
+      id: '55555555-5555-4555-8555-555555555555',
+      projectId: snapshot.project.id,
+      planningCycleId: planningCycle.cycle.id,
+      ordinal: 1,
+      actor: 'human',
+      message: `Visible ${lifecycle} planning transcript.`,
+      launchState: 'consumed',
+      executionId: null,
+      createdAt: '2026-08-28T00:00:01.000Z',
+    },
+  ],
+  proposals: [
+    {
+      id: '66666666-6666-4666-8666-666666666666',
+      projectId: snapshot.project.id,
+      planningCycleId: planningCycle.cycle.id,
+      revision: 1,
+      lifecycle:
+        lifecycle === 'approved'
+          ? 'approved'
+          : lifecycle === 'proposal_rejected'
+            ? 'rejected'
+            : 'superseded',
+      baseProjectIntentRevision: null,
+      baseLedgerRevision: null,
+      summary: `Visible ${lifecycle} proposal.`,
+      projectIntent: {
+        goal: 'Retain terminal planning history.',
+        targetUsers: ['Operator'],
+        desiredCapabilities: ['Review prior planning'],
+        constraints: [],
+        nonGoals: [],
+        successConditions: ['Terminal history remains visible'],
+        rationale: 'Planning history is durable authority.',
+        provenance: [
+          {
+            kind: 'conversation_turn',
+            turnId: '55555555-5555-4555-8555-555555555555',
+            rationale: 'The prior human turn.',
+          },
+        ],
       },
-    };
-    const planningCycles = [terminalCycle];
+      records: [],
+      relationships: [],
+      diff: {
+        intentChanges: [],
+        recordChanges: { create: 0, revise: 0, reuse: 0 },
+        relationshipChanges: { added: [], removed: [] },
+      },
+      createdByTurnId: '55555555-5555-4555-8555-555555555555',
+      createdByExecutionId: executionFixture.id,
+      rejectionFeedback:
+        lifecycle === 'proposal_rejected' ? 'Keep the scope smaller.' : null,
+      createdAt: '2026-08-28T00:00:02.000Z',
+      decidedAt: '2026-08-28T00:00:03.000Z',
+    },
+  ],
+});
 
-    render(
-      <FocusedProjectShell
-        model={{
-          status: 'ready',
-          interrupt: { enabled: true },
-          snapshot: { ...snapshot, profiles: [pmProfile], planningCycles },
-        }}
-        onDeselect={vi.fn()}
-        onInterrupt={vi.fn()}
-      />,
-    );
+describe('FocusedProjectShell', () => {
+  it.each([
+    ['approved', 'Proposal approved.'],
+    ['proposal_rejected', 'Proposal rejected.'],
+    ['abandoned', 'This planning cycle was abandoned.'],
+  ] as const)(
+    'shows %s history and the ordinary new-cycle form without granting terminal command authority',
+    (lifecycle, status) => {
+      const terminalCycle = terminalPlanningCycle(lifecycle);
 
-    expect(
-      screen.getByText('Describe the outcome you want to discover.'),
-    ).toBeVisible();
-    expect(screen.getByLabelText('Project manager profile')).toBeVisible();
-    expect(planningCycles).toEqual([terminalCycle]);
-  });
+      render(
+        <FocusedProjectShell
+          model={{
+            status: 'ready',
+            interrupt: { enabled: true },
+            snapshot: {
+              ...snapshot,
+              profiles: [pmProfile],
+              planningCycles: [terminalCycle],
+            },
+          }}
+          onDeselect={vi.fn()}
+          onInterrupt={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText(status)).toBeVisible();
+      expect(
+        screen.getByText(`Visible ${lifecycle} planning transcript.`),
+      ).toBeVisible();
+      expect(screen.getByText(`Visible ${lifecycle} proposal.`)).toBeVisible();
+      expect(screen.getByLabelText('Project manager profile')).toBeVisible();
+      expect(screen.getByLabelText('Message to project manager')).toBeVisible();
+      expect(
+        screen.queryByRole('button', { name: 'Abandon cycle' }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: 'Approve proposal' }),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it('derives history-limit guidance from the active cycle', () => {
     const boundedCycle = {
@@ -243,7 +326,9 @@ describe('FocusedProjectShell', () => {
   );
 
   it('keeps ambiguous execution authority abandon-only with its durable diagnostic', () => {
-    const diagnostic = 'Start outcome is unknown for operation op-17.';
+    const operationId = '88888888-8888-4888-8888-888888888888';
+    const probeReason = 'Execution has no native handle';
+    const diagnostic = `${operationId}: ${probeReason}`;
     const attentionCycle = {
       ...planningCycle,
       cycle: {
@@ -295,7 +380,9 @@ describe('FocusedProjectShell', () => {
       />,
     );
 
-    expect(screen.getByText(`Operation ${diagnostic}`)).toBeVisible();
+    expect(
+      screen.getByText(`Operation ${operationId}: ${probeReason}`),
+    ).toBeVisible();
     expect(
       screen.queryByLabelText('Message to project manager'),
     ).not.toBeInTheDocument();

@@ -17,7 +17,10 @@ import type { V2RouteDependencies } from './routes';
 import { createV2Snapshots } from './snapshots';
 import { inImmediateTransaction } from '../db/database';
 import { AuditBarrier } from '../executions/audit-barrier';
-import { ExecutionRepository } from '../executions/execution-repository';
+import {
+  ExecutionRepository,
+  type ExecutionAttentionDetail,
+} from '../executions/execution-repository';
 import { auditAwareRepositoryIdentityResolver } from '../main';
 import { PlanningRepository } from '../planning/planning-repository';
 import { ProjectRepository } from '../projects/project-repository';
@@ -634,6 +637,76 @@ describe('V2 snapshots', () => {
         intentLedger: null,
         cursors: { domain: 0, runtime: 0 },
       });
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it.each([
+    [
+      'malformed operation ID',
+      {
+        kind: 'mesh.v2.reconciliation-probe/v1',
+        operationId: 'not-an-operation-id',
+        probe: { status: 'unknown', reason: 'Probe could not prove start.' },
+      },
+    ],
+    [
+      'oversized probe reason',
+      {
+        kind: 'mesh.v2.reconciliation-probe/v1',
+        operationId: '77777777-7777-4777-8777-777777777777',
+        probe: { status: 'unknown', reason: 'x'.repeat(1025) },
+      },
+    ],
+  ])('fails closed for %s reconciliation evidence', (_, payload) => {
+    const fixture = createV2TestDatabase();
+    try {
+      const execution = {
+        ...fixture.execution,
+        lifecycle: 'attention_required' as const,
+        failure: null,
+      };
+      const detail: ExecutionAttentionDetail = {
+        execution,
+        evidence: [
+          {
+            id: randomUUID(),
+            projectId: fixture.project.id,
+            executionId: execution.id,
+            adapterId: execution.adapterId,
+            adapterCursor: null,
+            receivedAt: timestamp,
+            payload,
+          },
+        ],
+      };
+      const snapshots = createV2Snapshots({
+        projects: new ProjectRepository(fixture.database),
+        profiles: new WorkerProfileService({
+          database: fixture.database,
+          commands: fixture.commands,
+          events: fixture.events,
+          projects: { exists: () => true },
+          publishDomain: () => undefined,
+          now: () => timestamp,
+        }),
+        executions: {
+          list: () => [execution],
+          listAttentionDetails: () => [detail],
+        },
+        planning: new PlanningRepository(fixture.database),
+        events: fixture.events,
+        barrier: new AuditBarrier(),
+      });
+
+      expect(snapshots.project(fixture.project.id)?.attentionItems).toEqual([
+        {
+          executionId: execution.id,
+          code: 'internal_error',
+          message: 'Execution requires operator attention.',
+        },
+      ]);
     } finally {
       fixture.close();
     }

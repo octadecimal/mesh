@@ -7,6 +7,7 @@ import {
   type V2Health,
   type WorkerProfileRevision,
 } from '@mesh/v2-contracts';
+import { z } from 'zod';
 
 import type { AuditBarrier } from '../executions/audit-barrier.js';
 import type {
@@ -57,8 +58,23 @@ const summary = (profile: WorkerProfileRevision) => ({
   approvedRevision: profile.revision,
 });
 
+const reconciliationAttentionSchema = z
+  .object({
+    kind: z.literal('mesh.v2.reconciliation-probe/v1'),
+    operationId: z.string().uuid(),
+    probe: z.object({
+      status: z.enum(['missing', 'unknown']),
+      reason: z.string().trim().min(1).max(1024),
+    }),
+  })
+  .passthrough();
+
 const evidenceMessage = (detail: ExecutionAttentionDetail): string => {
   const payload = detail.evidence.at(-1)?.payload;
+  const reconciliation = reconciliationAttentionSchema.safeParse(payload);
+  if (reconciliation.success) {
+    return `${reconciliation.data.operationId}: ${reconciliation.data.probe.reason}`;
+  }
   if (typeof payload === 'object' && payload !== null) {
     const value = payload as Record<string, unknown>;
     for (const key of ['recoveryError', 'reason']) {

@@ -143,6 +143,11 @@ export function FocusedProjectShell({
   const activePlanningCycle = snapshot.planningCycles.find(
     ({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle),
   );
+  const terminalPlanningHistory = activePlanningCycle
+    ? undefined
+    : snapshot.planningCycles.find(({ cycle }) =>
+        terminalPlanningLifecycles.has(cycle.lifecycle),
+      );
   const latestPlanningExecutionId =
     activePlanningCycle?.turns.at(-1)?.executionId;
   const latestPlanningExecution = snapshot.executions.find(
@@ -212,13 +217,32 @@ export function FocusedProjectShell({
       </p>
       <div className="v2-project-layout">
         <aside className="v2-pm-pane" aria-label="PM Chat">
+          {terminalPlanningHistory ? (
+            <PlanningPane
+              cycle={terminalPlanningHistory}
+              connection={{ status: 'ready' }}
+              profiles={[]}
+              submitting={false}
+              historyTruncated={snapshot.planningHistoryTruncated}
+              executions={snapshot.executions}
+              approvedIntentLedger={snapshot.intentLedger}
+              onSubmitTurn={planning.onSubmitTurn}
+              onApprove={planning.onApprove}
+              onReject={planning.onReject}
+              onAbandon={planning.onAbandon}
+            />
+          ) : null}
           <PlanningPane
             cycle={activePlanningCycle}
             connection={planningConnection}
             profiles={planningProfiles}
             submitting={planning.submitting}
             error={planning.error}
-            historyTruncated={snapshot.planningHistoryTruncated}
+            historyTruncated={
+              terminalPlanningHistory
+                ? false
+                : snapshot.planningHistoryTruncated
+            }
             historyLimitReached={planningHistoryLimitReached}
             recovery={planningRecovery}
             executions={snapshot.executions}

@@ -181,9 +181,13 @@ const seedPlanningRecoveryCase = async (kind: PlanningRecoveryCase) => {
     },
   });
   let executionId: string | undefined;
+  let operationId: string | undefined;
   if (kind !== 'pending_without_operation') {
     const reservation = await runtime.reserveStart(launch);
     executionId = reservation.execution.id;
+    operationId = operations
+      .listForExecution(reservation.execution.id)
+      .find(({ kind: operationKind }) => operationKind === 'start')?.id;
     if (kind !== 'unbound_terminal') {
       inImmediateTransaction(fixture.database, () => {
         planning.bindTurnInTransaction(turnId, reservation.execution.id);
@@ -218,6 +222,7 @@ const seedPlanningRecoveryCase = async (kind: PlanningRecoveryCase) => {
     adapter,
     cycleId,
     executionId,
+    operationId,
     startCount: fake.startCount,
     resumeCount: fake.resumeCount,
   };
@@ -912,6 +917,19 @@ describe('startV2Server', () => {
           expect(cycle?.turns[0]).toMatchObject({
             launchState: 'execution_bound',
             executionId: expect.any(String),
+          });
+        }
+        if (
+          kind === 'ambiguous_before_start' ||
+          kind === 'ambiguous_after_start'
+        ) {
+          expect(seeded.operationId).toEqual(expect.any(String));
+          expect(
+            snapshot.attentionItems.find(
+              ({ executionId }) => executionId === seeded.executionId,
+            ),
+          ).toMatchObject({
+            message: `${seeded.operationId}: Execution has no native handle`,
           });
         }
         expect(

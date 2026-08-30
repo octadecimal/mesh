@@ -129,6 +129,22 @@ const terminalPlanningLifecycles = new Set([
   'abandoned',
 ]);
 
+const descendingCodeUnits = (left: string, right: string) =>
+  left === right ? 0 : left > right ? -1 : 1;
+
+const comparePlanningCycles = (
+  left: PlanningCycleView,
+  right: PlanningCycleView,
+) => {
+  const leftTerminal = terminalPlanningLifecycles.has(left.cycle.lifecycle);
+  const rightTerminal = terminalPlanningLifecycles.has(right.cycle.lifecycle);
+  if (leftTerminal !== rightTerminal) return leftTerminal ? 1 : -1;
+  return (
+    descendingCodeUnits(left.cycle.updatedAt, right.cycle.updatedAt) ||
+    descendingCodeUnits(left.cycle.id, right.cycle.id)
+  );
+};
+
 const replacePlanningCycle = (
   cycles: readonly PlanningCycleView[],
   next: PlanningCycleView,
@@ -138,15 +154,7 @@ const replacePlanningCycle = (
     next,
     ...cycles.filter(({ cycle }) => cycle.id !== next.cycle.id),
   ];
-  const active = candidates.find(
-    ({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle),
-  );
-  const ordered = [
-    ...(active ? [active] : []),
-    ...candidates.filter(({ cycle }) =>
-      terminalPlanningLifecycles.has(cycle.lifecycle),
-    ),
-  ];
+  const ordered = candidates.sort(comparePlanningCycles);
   return {
     planningCycles: ordered.slice(0, 20),
     planningHistoryTruncated: historyTruncated || ordered.length > 20,
