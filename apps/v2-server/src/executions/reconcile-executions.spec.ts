@@ -351,60 +351,84 @@ describe('reconcileExecutions', () => {
     }
   });
 
-  it('marks an ambiguous pending start attention-required with probe evidence', async () => {
-    const context = setup();
-    try {
-      const starting = advance(context.fixture, context.executions, 'starting');
-      const operation = context.executions.transaction(() =>
-        context.operations.createPendingInTransaction({
-          executionId: starting.id,
-          kind: 'start',
-          request: { version: 'mesh.v2.execution-start/v1' },
-          createdAt: '2026-08-28T02:00:03.000Z',
-        }),
-      );
-      const result = await reconcileExecutions({
-        executions: context.executions,
-        operations: context.operations,
-        adapter: new FakeHarnessAdapter(),
-        events: context.fixture.events,
-        barrier: context.barrier,
-        attach: () => undefined,
-      });
-      expect(context.executions.get(starting.id)?.lifecycle).toBe(
-        'attention_required',
-      );
-      expect(context.operations.get(operation.id)?.state).toBe('unknown');
-      expect(result.attentionRequired).toEqual([starting.id]);
-      expect(diagnosticCount(context.fixture)).toBe(1);
-      const details = context.executions.listAttentionDetails(
-        context.fixture.project.id,
-      );
-      expect(details).toMatchObject([
-        {
-          execution: { id: starting.id, lifecycle: 'attention_required' },
-          evidence: [
-            {
-              executionId: starting.id,
-              adapterCursor: null,
-              payload: {
-                kind: 'mesh.v2.reconciliation-probe/v1',
-                operationId: operation.id,
+  it.each([
+    ['before adapter start', false],
+    ['after adapter start returns without durable handle', true],
+  ])(
+    'marks an ambiguous pending start %s attention-required without a duplicate launch',
+    async (_window, startedExternally) => {
+      const context = setup();
+      try {
+        const starting = advance(
+          context.fixture,
+          context.executions,
+          'starting',
+        );
+        const operation = context.executions.transaction(() =>
+          context.operations.createPendingInTransaction({
+            executionId: starting.id,
+            kind: 'start',
+            request: { version: 'mesh.v2.execution-start/v1' },
+            createdAt: '2026-08-28T02:00:03.000Z',
+          }),
+        );
+        const adapter = new FakeHarnessAdapter();
+        if (startedExternally) {
+          await adapter.start({
+            executionId: starting.id,
+            project: context.fixture.project,
+            assignment: starting.assignment,
+            profile: starting.profileSnapshot,
+            resolvedSkills: starting.resolvedSkills,
+          });
+        }
+        const start = vi.spyOn(adapter, 'start');
+        const resume = vi.spyOn(adapter, 'resume');
+        const result = await reconcileExecutions({
+          executions: context.executions,
+          operations: context.operations,
+          adapter,
+          events: context.fixture.events,
+          barrier: context.barrier,
+          attach: () => undefined,
+        });
+        expect(context.executions.get(starting.id)?.lifecycle).toBe(
+          'attention_required',
+        );
+        expect(context.operations.get(operation.id)?.state).toBe('unknown');
+        expect(start).not.toHaveBeenCalled();
+        expect(resume).not.toHaveBeenCalled();
+        expect(result.attentionRequired).toEqual([starting.id]);
+        expect(diagnosticCount(context.fixture)).toBe(1);
+        const details = context.executions.listAttentionDetails(
+          context.fixture.project.id,
+        );
+        expect(details).toMatchObject([
+          {
+            execution: { id: starting.id, lifecycle: 'attention_required' },
+            evidence: [
+              {
+                executionId: starting.id,
+                adapterCursor: null,
+                payload: {
+                  kind: 'mesh.v2.reconciliation-probe/v1',
+                  operationId: operation.id,
+                },
               },
-            },
-          ],
-        },
-      ]);
-      expect(Object.isFrozen(details)).toBe(true);
-      expect(Object.isFrozen(details[0])).toBe(true);
-      expect(Object.isFrozen(details[0]?.evidence)).toBe(true);
-      expect(
-        context.executions.listAttentionDetails(context.fixture.project.id),
-      ).not.toBe(details);
-    } finally {
-      context.fixture.close();
-    }
-  });
+            ],
+          },
+        ]);
+        expect(Object.isFrozen(details)).toBe(true);
+        expect(Object.isFrozen(details[0])).toBe(true);
+        expect(Object.isFrozen(details[0]?.evidence)).toBe(true);
+        expect(
+          context.executions.listAttentionDetails(context.fixture.project.id),
+        ).not.toBe(details);
+      } finally {
+        context.fixture.close();
+      }
+    },
+  );
 
   it('returns immutable audit barrier health snapshots as diagnostics accumulate', () => {
     const barrier = new AuditBarrier();

@@ -8,6 +8,11 @@ import {
   workerExecutionIdSchema,
   workerProfileIdSchema,
 } from './ids';
+import {
+  approvedIntentLedgerSchema,
+  approvedPlanningOutcomeSchema,
+  planningCycleViewSchema,
+} from './intent';
 import { projectSchema } from './projects';
 import {
   profileNameSchema,
@@ -86,9 +91,14 @@ export const v2ProjectSnapshotSchema = z
     profiles: z.array(resolvedWorkerProfileSnapshotSchema).readonly(),
     executions: z.array(workerExecutionSchema).readonly(),
     attentionItems: z.array(v2AttentionItemSchema).readonly(),
+    planningCycles: z.array(planningCycleViewSchema).max(20).readonly(),
+    planningHistoryTruncated: z.boolean(),
+    intentLedger: approvedIntentLedgerSchema.nullable(),
     cursors: projectEventCursorsSchema,
   })
   .superRefine((value, context) => {
+    const planningCycleIds = new Set<string>();
+    const planningTurnIds = new Set<string>();
     value.profiles.forEach((profile, index) => {
       if (
         profile.projectId !== null &&
@@ -110,6 +120,119 @@ export const v2ProjectSnapshotSchema = z
         });
       }
     });
+    value.planningCycles.forEach((planningCycle, index) => {
+      if (planningCycleIds.has(planningCycle.cycle.id)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['planningCycles', index, 'cycle', 'id'],
+          message: 'Planning cycle IDs must be unique',
+        });
+      }
+      planningCycleIds.add(planningCycle.cycle.id);
+      if (planningCycle.cycle.projectId !== value.project.id) {
+        context.addIssue({
+          code: 'custom',
+          path: ['planningCycles', index, 'cycle', 'projectId'],
+          message: 'Planning cycle must match the snapshot project',
+        });
+      }
+      planningCycle.turns.forEach((turn, turnIndex) => {
+        if (planningTurnIds.has(turn.id)) {
+          context.addIssue({
+            code: 'custom',
+            path: ['planningCycles', index, 'turns', turnIndex, 'id'],
+            message: 'Planning turn IDs must be unique across cycles',
+          });
+        }
+        planningTurnIds.add(turn.id);
+      });
+    });
+    const nonterminalCycles = value.planningCycles.filter(
+      ({ cycle }) =>
+        cycle.lifecycle !== 'approved' &&
+        cycle.lifecycle !== 'proposal_rejected' &&
+        cycle.lifecycle !== 'abandoned',
+    );
+    if (nonterminalCycles.length > 1) {
+      context.addIssue({
+        code: 'custom',
+        path: ['planningCycles'],
+        message:
+          'A snapshot can contain at most one nonterminal planning cycle',
+      });
+    }
+    const newestApprovedCycle = value.planningCycles
+      .filter(({ cycle }) => cycle.lifecycle === 'approved')
+      .reduce<(typeof value.planningCycles)[number] | null>(
+        (newest, candidate) => {
+          if (newest === null) return candidate;
+          const candidateIntentRevision =
+            (candidate.cycle.baseProjectIntentRevision ?? 0) + 1;
+          const newestIntentRevision =
+            (newest.cycle.baseProjectIntentRevision ?? 0) + 1;
+          if (candidateIntentRevision !== newestIntentRevision) {
+            return candidateIntentRevision > newestIntentRevision
+              ? candidate
+              : newest;
+          }
+          const candidateLedgerRevision =
+            (candidate.cycle.baseLedgerRevision ?? 0) + 1;
+          const newestLedgerRevision =
+            (newest.cycle.baseLedgerRevision ?? 0) + 1;
+          return candidateLedgerRevision > newestLedgerRevision
+            ? candidate
+            : newest;
+        },
+        null,
+      );
+    if (newestApprovedCycle !== null && value.intentLedger === null) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger'],
+        message: 'Approved snapshot history requires an intent ledger',
+      });
+    }
+    if (
+      newestApprovedCycle === null &&
+      !value.planningHistoryTruncated &&
+      value.intentLedger !== null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger'],
+        message:
+          'Untruncated snapshot without approval cannot have an intent ledger',
+      });
+    }
+    if (newestApprovedCycle !== null && value.intentLedger !== null) {
+      const latestProposal = newestApprovedCycle.proposals.at(-1);
+      if (
+        latestProposal === undefined ||
+        value.intentLedger.projectIntent.proposalId !== latestProposal.id ||
+        value.intentLedger.ledger.proposalId !== latestProposal.id ||
+        value.intentLedger.projectIntent.revision !==
+          (newestApprovedCycle.cycle.baseProjectIntentRevision ?? 0) + 1 ||
+        value.intentLedger.ledger.revision !==
+          (newestApprovedCycle.cycle.baseLedgerRevision ?? 0) + 1
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['intentLedger'],
+          message:
+            'Snapshot intent ledger must match the newest approved cycle',
+        });
+      }
+    }
+    if (
+      value.intentLedger !== null &&
+      value.intentLedger.projectIntent.projectId !== value.project.id
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger', 'projectIntent', 'projectId'],
+        message: 'Intent ledger must match the snapshot project',
+      });
+    }
   });
 export type V2ProjectSnapshot = z.infer<typeof v2ProjectSnapshotSchema>;
 
@@ -121,6 +244,61 @@ const commandFailureSchema = z.strictObject({
     message: z.string().trim().min(1).max(4096),
   }),
 });
+
+const planningProposalApproveResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_proposal.approve'),
+    planningCycle: planningCycleViewSchema,
+    intentLedger: approvedIntentLedgerSchema,
+  })
+  .superRefine((value, context) => {
+    const result = approvedPlanningOutcomeSchema.safeParse({
+      planningCycle: value.planningCycle,
+      intentLedger: value.intentLedger,
+    });
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        context.addIssue({ ...issue, path: issue.path });
+      }
+    }
+  });
+
+const planningTurnSubmitResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_cycle.submit_turn'),
+    planningCycle: planningCycleViewSchema,
+  })
+  .refine((value) => value.planningCycle.cycle.lifecycle === 'launch_pending', {
+    path: ['planningCycle', 'cycle', 'lifecycle'],
+    message: 'Submit-turn success must be launch-pending',
+  });
+
+const planningProposalRejectResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_proposal.reject'),
+    planningCycle: planningCycleViewSchema,
+  })
+  .refine(
+    (value) => value.planningCycle.cycle.lifecycle === 'proposal_rejected',
+    {
+      path: ['planningCycle', 'cycle', 'lifecycle'],
+      message: 'Reject success must be proposal-rejected',
+    },
+  );
+
+const planningCycleAbandonResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('planning_cycle.abandon'),
+    planningCycle: planningCycleViewSchema,
+  })
+  .refine((value) => value.planningCycle.cycle.lifecycle === 'abandoned', {
+    path: ['planningCycle', 'cycle', 'lifecycle'],
+    message: 'Abandon success must be abandoned',
+  });
 
 export const v2CommandResultSchema = z.union([
   z.strictObject({
@@ -143,6 +321,10 @@ export const v2CommandResultSchema = z.union([
     commandType: z.literal('worker_execution.interrupt'),
     execution: workerExecutionSchema,
   }),
+  planningTurnSubmitResultSchema,
+  planningProposalApproveResultSchema,
+  planningProposalRejectResultSchema,
+  planningCycleAbandonResultSchema,
   commandFailureSchema,
 ]);
 export type V2CommandResult = z.infer<typeof v2CommandResultSchema>;

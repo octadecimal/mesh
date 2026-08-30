@@ -7,6 +7,7 @@ import {
   type V2Health,
   type WorkerProfileRevision,
 } from '@mesh/v2-contracts';
+import { z } from 'zod';
 
 import type { AuditBarrier } from '../executions/audit-barrier.js';
 import type {
@@ -14,6 +15,7 @@ import type {
   ExecutionRepository,
 } from '../executions/execution-repository.js';
 import type { WorkerProfileService } from '../profiles/profile-service.js';
+import type { PlanningRepository } from '../planning/planning-repository.js';
 import type { V2EventStore } from '../storage/event-store.js';
 
 type ProjectReader = {
@@ -28,6 +30,7 @@ export type V2SnapshotDependencies = {
     'approvedGlobal' | 'approvedForProject' | 'resolveApproved'
   >;
   executions: Pick<ExecutionRepository, 'list' | 'listAttentionDetails'>;
+  planning: Pick<PlanningRepository, 'planningSnapshot'>;
   events: Pick<V2EventStore, 'cursors'>;
   barrier: Pick<AuditBarrier, 'health'>;
 };
@@ -55,8 +58,23 @@ const summary = (profile: WorkerProfileRevision) => ({
   approvedRevision: profile.revision,
 });
 
+const reconciliationAttentionSchema = z
+  .object({
+    kind: z.literal('mesh.v2.reconciliation-probe/v1'),
+    operationId: z.string().uuid(),
+    probe: z.object({
+      status: z.enum(['missing', 'unknown']),
+      reason: z.string().trim().min(1).max(1024),
+    }),
+  })
+  .passthrough();
+
 const evidenceMessage = (detail: ExecutionAttentionDetail): string => {
   const payload = detail.evidence.at(-1)?.payload;
+  const reconciliation = reconciliationAttentionSchema.safeParse(payload);
+  if (reconciliation.success) {
+    return `${reconciliation.data.operationId}: ${reconciliation.data.probe.reason}`;
+  }
   if (typeof payload === 'object' && payload !== null) {
     const value = payload as Record<string, unknown>;
     for (const key of ['recoveryError', 'reason']) {
@@ -102,6 +120,7 @@ export const createV2Snapshots = (dependencies: V2SnapshotDependencies) => ({
       attentionItems: dependencies.executions
         .listAttentionDetails(projectId)
         .map(attentionItem),
+      ...dependencies.planning.planningSnapshot(projectId),
       cursors: dependencies.events.cursors(projectId),
     });
   },

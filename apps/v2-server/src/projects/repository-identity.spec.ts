@@ -211,27 +211,39 @@ describe('repository identity', () => {
     });
   });
 
-  it('rejects a canonical top-level reached through a symlink or junction escape before running Git', async () => {
+  it('uses the workspace root only as the base for absolute and traversing relative repository paths', async () => {
     const outside = createRepository(directory, 'outside');
-    const link = join(workspaceRoot, 'escaped');
+    const resolveIdentity = createRepositoryIdentityResolver({ workspaceRoot });
+
+    for (const path of [outside, relative(workspaceRoot, outside)]) {
+      const identity = await resolveIdentity(path);
+      expect(identity.canonicalPath).toBe(resolve(outside));
+      expect(identity.commonDirectory).toBe(resolve(outside, '.git'));
+    }
+  });
+
+  it('accepts a linked path that resolves to a repository outside the workspace root', async () => {
+    const outside = createRepository(directory, 'outside');
+    const link = join(workspaceRoot, 'linked-path');
     symlinkSync(
       outside,
       link,
       process.platform === 'win32' ? 'junction' : 'dir',
     );
-    const runner = new RecordingRunner();
-    const resolveIdentity = createRepositoryIdentityResolver({
-      workspaceRoot,
-      processRunner: runner,
-    });
+    const resolveIdentity = createRepositoryIdentityResolver({ workspaceRoot });
 
-    await expect(resolveIdentity(link)).rejects.toMatchObject({
-      code: 'repository_path_escape',
+    const identity = await resolveIdentity(link);
+
+    expect(identity).toMatchObject({
+      canonicalPath: resolve(outside),
+      commonDirectory: resolve(outside, '.git'),
+      repositoryIdentity: normalizeRepositoryIdentityPath(
+        resolve(outside, '.git'),
+      ),
     });
-    expect(runner.calls).toEqual([]);
   });
 
-  it('rejects a linked worktree whose real common directory escapes the workspace', async () => {
+  it('accepts a linked worktree whose common directory is outside the workspace root', async () => {
     const source = createRepository(directory, 'source');
     const linked = join(workspaceRoot, 'linked');
     git(
@@ -240,9 +252,10 @@ describe('repository identity', () => {
     );
     const resolveIdentity = createRepositoryIdentityResolver({ workspaceRoot });
 
-    await expect(resolveIdentity(linked)).rejects.toMatchObject({
-      code: 'repository_path_escape',
-    });
+    const identity = await resolveIdentity(linked);
+
+    expect(identity.canonicalPath).toBe(resolve(linked));
+    expect(identity.commonDirectory).toBe(resolve(source, '.git'));
   });
 
   it('classifies an actual git init repository with no commit as unborn', async () => {

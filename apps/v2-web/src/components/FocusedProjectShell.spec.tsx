@@ -1,6 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type {
+  PlanningCycleView,
   V2ProjectSnapshot,
   WorkerExecution,
   WorkerExecutionLifecycle,
@@ -45,10 +46,369 @@ const snapshot: V2ProjectSnapshot = {
       message: 'Required skill is unavailable.',
     },
   ],
+  planningCycles: [],
+  planningHistoryTruncated: false,
+  intentLedger: null,
   cursors: { domain: 4, runtime: 12 },
 };
 
+const pmProfile = {
+  profileId: '33333333-3333-4333-8333-333333333333',
+  projectId: snapshot.project.id,
+  profileRevision: 1,
+  baseProfileId: null,
+  baseRevision: null,
+  document: {
+    apiVersion: 'mesh.dev/v1alpha1',
+    kind: 'WorkerProfile',
+    metadata: {
+      name: 'project-manager',
+      displayName: 'Project manager',
+      scope: 'project',
+    },
+    spec: {
+      assignmentKinds: ['pm_discovery'],
+      preferredRuntime: { harness: 'fake', model: 'deterministic' },
+      alternatives: [],
+      requiredCapabilities: [],
+      skills: { preferred: [], required: [] },
+      instructions: 'Discover intent.',
+      outputSchema: 'mesh.pm-discovery-report/v1',
+    },
+  },
+  digest: 'a'.repeat(64),
+} as V2ProjectSnapshot['profiles'][number];
+
+const planningCycle = {
+  cycle: {
+    id: '44444444-4444-4444-8444-444444444444',
+    projectId: snapshot.project.id,
+    lifecycle: 'awaiting_human',
+    revision: 2,
+    profileId: pmProfile.profileId,
+    profileRevision: 1,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    latestProposalRevision: 0,
+    activeExecutionId: null,
+    createdAt: '2026-08-28T00:00:00.000Z',
+    updatedAt: '2026-08-28T00:00:01.000Z',
+    endedAt: null,
+  },
+  turns: [],
+  questions: [],
+  proposals: [],
+} as PlanningCycleView;
+
+const terminalPlanningCycle = (
+  lifecycle: 'approved' | 'proposal_rejected' | 'abandoned',
+): PlanningCycleView => ({
+  ...planningCycle,
+  cycle: {
+    ...planningCycle.cycle,
+    lifecycle,
+    revision: 3,
+    latestProposalRevision: 1,
+    updatedAt: '2026-08-28T00:00:03.000Z',
+    endedAt: '2026-08-28T00:00:03.000Z',
+  },
+  turns: [
+    {
+      id: '55555555-5555-4555-8555-555555555555',
+      projectId: snapshot.project.id,
+      planningCycleId: planningCycle.cycle.id,
+      ordinal: 1,
+      actor: 'human',
+      message: `Visible ${lifecycle} planning transcript.`,
+      launchState: 'consumed',
+      executionId: null,
+      createdAt: '2026-08-28T00:00:01.000Z',
+    },
+  ],
+  proposals: [
+    {
+      id: '66666666-6666-4666-8666-666666666666',
+      projectId: snapshot.project.id,
+      planningCycleId: planningCycle.cycle.id,
+      revision: 1,
+      lifecycle:
+        lifecycle === 'approved'
+          ? 'approved'
+          : lifecycle === 'proposal_rejected'
+            ? 'rejected'
+            : 'superseded',
+      baseProjectIntentRevision: null,
+      baseLedgerRevision: null,
+      summary: `Visible ${lifecycle} proposal.`,
+      projectIntent: {
+        goal: 'Retain terminal planning history.',
+        targetUsers: ['Operator'],
+        desiredCapabilities: ['Review prior planning'],
+        constraints: [],
+        nonGoals: [],
+        successConditions: ['Terminal history remains visible'],
+        rationale: 'Planning history is durable authority.',
+        provenance: [
+          {
+            kind: 'conversation_turn',
+            turnId: '55555555-5555-4555-8555-555555555555',
+            rationale: 'The prior human turn.',
+          },
+        ],
+      },
+      records: [],
+      relationships: [],
+      diff: {
+        intentChanges: [],
+        recordChanges: { create: 0, revise: 0, reuse: 0 },
+        relationshipChanges: { added: [], removed: [] },
+      },
+      createdByTurnId: '55555555-5555-4555-8555-555555555555',
+      createdByExecutionId: executionFixture.id,
+      rejectionFeedback:
+        lifecycle === 'proposal_rejected' ? 'Keep the scope smaller.' : null,
+      createdAt: '2026-08-28T00:00:02.000Z',
+      decidedAt: '2026-08-28T00:00:03.000Z',
+    },
+  ],
+});
+
 describe('FocusedProjectShell', () => {
+  it.each([
+    ['approved', 'Proposal approved.'],
+    ['proposal_rejected', 'Proposal rejected.'],
+    ['abandoned', 'This planning cycle was abandoned.'],
+  ] as const)(
+    'shows %s history and the ordinary new-cycle form without granting terminal command authority',
+    (lifecycle, status) => {
+      const terminalCycle = terminalPlanningCycle(lifecycle);
+
+      const { container } = render(
+        <FocusedProjectShell
+          model={{
+            status: 'ready',
+            interrupt: { enabled: true },
+            snapshot: {
+              ...snapshot,
+              profiles: [pmProfile],
+              planningCycles: [terminalCycle],
+            },
+          }}
+          onDeselect={vi.fn()}
+          onInterrupt={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText(status)).toBeVisible();
+      expect(
+        screen.getByText(`Visible ${lifecycle} planning transcript.`),
+      ).toBeVisible();
+      expect(screen.getByText(`Visible ${lifecycle} proposal.`)).toBeVisible();
+      expect(
+        screen.getByRole('heading', { name: 'PM Chat history' }),
+      ).toBeVisible();
+      expect(screen.getByRole('heading', { name: 'PM Chat' })).toBeVisible();
+      expect(screen.getByLabelText('Project manager profile')).toBeVisible();
+      expect(screen.getByLabelText('Message to project manager')).toBeVisible();
+      const ids = [...container.querySelectorAll<HTMLElement>('[id]')].map(
+        ({ id }) => id,
+      );
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const relationship of container.querySelectorAll<HTMLElement>(
+        '[aria-labelledby]',
+      )) {
+        const labelledBy = relationship.getAttribute('aria-labelledby');
+        if (labelledBy === null)
+          throw new Error('Expected labelled relationship');
+        for (const id of labelledBy.split(' ')) {
+          expect(ids.filter((candidate) => candidate === id)).toHaveLength(1);
+        }
+      }
+      expect(
+        screen.queryByRole('button', { name: 'Abandon cycle' }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: 'Approve proposal' }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it('derives history-limit guidance from the active cycle', () => {
+    const boundedCycle = {
+      ...planningCycle,
+      turns: Array.from({ length: 32 }, (_, index) => ({
+        id: `55555555-5555-4555-8555-${String(index).padStart(12, '0')}`,
+        projectId: snapshot.project.id,
+        planningCycleId: planningCycle.cycle.id,
+        ordinal: index + 1,
+        actor: 'human' as const,
+        message: `Turn ${index + 1}`,
+        launchState: 'consumed' as const,
+        executionId: null,
+        createdAt: '2026-08-28T00:00:01.000Z',
+      })),
+    };
+
+    render(
+      <FocusedProjectShell
+        model={{
+          status: 'ready',
+          interrupt: { enabled: true },
+          snapshot: {
+            ...snapshot,
+            profiles: [pmProfile],
+            planningCycles: [boundedCycle],
+          },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        'This cycle reached its history limit. Abandon it to begin a new cycle.',
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByLabelText('Project manager profile'),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Abandon cycle' })).toBeVisible();
+  });
+
+  it.each([
+    ['failed', 'Project manager runtime failed.'],
+    ['completed', 'Project manager output was missing.'],
+    ['completed', 'Project manager output was malformed.'],
+    ['completed', 'Project manager output belonged to another execution.'],
+  ] as const)(
+    'offers a human retry after %s recovery attention: %s',
+    (lifecycle, message) => {
+      const attentionCycle = {
+        ...planningCycle,
+        cycle: {
+          ...planningCycle.cycle,
+          lifecycle: 'attention_required' as const,
+        },
+        turns: [
+          {
+            id: '66666666-6666-4666-8666-666666666666',
+            projectId: snapshot.project.id,
+            planningCycleId: planningCycle.cycle.id,
+            ordinal: 1,
+            actor: 'human' as const,
+            message: 'Plan Todo.',
+            launchState: 'execution_bound' as const,
+            executionId: executionFixture.id,
+            createdAt: '2026-08-28T00:00:01.000Z',
+          },
+        ],
+      };
+      const recoveredExecution = {
+        ...executionFixture,
+        lifecycle,
+        failure:
+          lifecycle === 'failed' ? { code: 'internal_error', message } : null,
+      } as WorkerExecution;
+
+      render(
+        <FocusedProjectShell
+          model={{
+            status: 'ready',
+            interrupt: { enabled: true },
+            snapshot: {
+              ...snapshot,
+              profiles: [pmProfile],
+              executions: [recoveredExecution],
+              attentionItems: [
+                {
+                  executionId: executionFixture.id,
+                  code: 'internal_error',
+                  message,
+                },
+              ],
+              planningCycles: [attentionCycle],
+            },
+          }}
+          onDeselect={vi.fn()}
+          onInterrupt={vi.fn()}
+        />,
+      );
+
+      expect(screen.getAllByText(message)[0]).toBeVisible();
+      expect(screen.getByLabelText('Message to project manager')).toBeVisible();
+      expect(
+        screen.queryByText('Abandon this cycle to start a new one.'),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it('keeps ambiguous execution authority abandon-only with its durable diagnostic', () => {
+    const operationId = '88888888-8888-4888-8888-888888888888';
+    const probeReason = 'Execution has no native handle';
+    const diagnostic = `${operationId}: ${probeReason}`;
+    const attentionCycle = {
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'attention_required' as const,
+      },
+      turns: [
+        {
+          id: '77777777-7777-4777-8777-777777777777',
+          projectId: snapshot.project.id,
+          planningCycleId: planningCycle.cycle.id,
+          ordinal: 1,
+          actor: 'human' as const,
+          message: 'Plan Todo.',
+          launchState: 'execution_bound' as const,
+          executionId: executionFixture.id,
+          createdAt: '2026-08-28T00:00:01.000Z',
+        },
+      ],
+    };
+
+    render(
+      <FocusedProjectShell
+        model={{
+          status: 'ready',
+          interrupt: { enabled: true },
+          snapshot: {
+            ...snapshot,
+            profiles: [pmProfile],
+            executions: [
+              {
+                ...executionFixture,
+                lifecycle: 'attention_required',
+                failure: null,
+              } as WorkerExecution,
+            ],
+            attentionItems: [
+              {
+                executionId: executionFixture.id,
+                code: 'internal_error',
+                message: diagnostic,
+              },
+            ],
+            planningCycles: [attentionCycle],
+          },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText(`Operation ${operationId}: ${probeReason}`),
+    ).toBeVisible();
+    expect(
+      screen.queryByLabelText('Message to project manager'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText('Abandon this cycle to start a new one.'),
+    ).toBeVisible();
+  });
+
   it('shows future panes, handles keyboard tabs, and calls deselect and interrupt callbacks', async () => {
     const user = userEvent.setup();
     const onDeselect = vi.fn();
@@ -86,11 +446,11 @@ describe('FocusedProjectShell', () => {
     );
 
     expect(screen.getAllByText('Available in a later milestone')).toHaveLength(
-      3,
+      1,
     );
     expect(
       screen.getByRole('complementary', { name: 'PM Chat' }),
-    ).toBeVisible();
+    ).toHaveTextContent('Project manager');
     const boardTab = screen.getByRole('tab', { name: 'Board' });
     await user.click(boardTab);
     await user.keyboard('{ArrowRight}');
@@ -99,6 +459,9 @@ describe('FocusedProjectShell', () => {
       'true',
     );
     expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
+    expect(
+      screen.getByRole('tabpanel', { name: 'Requirements' }),
+    ).toHaveTextContent('No approved intent or requirements yet.');
     await user.keyboard('{Home}');
     expect(screen.getByRole('tab', { name: 'Board' })).toHaveFocus();
     await user.keyboard('{End}');
@@ -183,7 +546,7 @@ describe('FocusedProjectShell', () => {
     expect(
       screen.getByRole('button', { name: 'Interrupt execution' }),
     ).toBeDisabled();
-    expect(screen.getByText('Resyncing project')).toBeVisible();
+    expect(screen.getAllByText('Resyncing project')[0]).toBeVisible();
     expect(
       screen.getByText(
         'Wait for a fresh project snapshot before interrupting.',

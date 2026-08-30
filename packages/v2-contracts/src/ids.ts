@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 const uuid = () => z.string().uuid();
+const brandedUuid = <T extends string>() => uuid().brand<T>();
 
 export const projectIdSchema = uuid();
 export type ProjectId = z.infer<typeof projectIdSchema>;
@@ -20,8 +21,32 @@ export type RuntimeEventId = z.infer<typeof runtimeEventIdSchema>;
 export const rawDiagnosticIdSchema = uuid();
 export type RawDiagnosticId = z.infer<typeof rawDiagnosticIdSchema>;
 
+export const planningCycleIdSchema = brandedUuid<'PlanningCycleId'>();
+export type PlanningCycleId = z.infer<typeof planningCycleIdSchema>;
+
+export const planningTurnIdSchema = brandedUuid<'PlanningTurnId'>();
+export type PlanningTurnId = z.infer<typeof planningTurnIdSchema>;
+
+export const planningQuestionIdSchema = brandedUuid<'PlanningQuestionId'>();
+export type PlanningQuestionId = z.infer<typeof planningQuestionIdSchema>;
+
+export const planningProposalIdSchema = brandedUuid<'PlanningProposalId'>();
+export type PlanningProposalId = z.infer<typeof planningProposalIdSchema>;
+
+export const projectIntentIdSchema = brandedUuid<'ProjectIntentId'>();
+export type ProjectIntentId = z.infer<typeof projectIntentIdSchema>;
+
+export const ledgerIdSchema = brandedUuid<'LedgerId'>();
+export type LedgerId = z.infer<typeof ledgerIdSchema>;
+
+export const ledgerRecordIdSchema = brandedUuid<'LedgerRecordId'>();
+export type LedgerRecordId = z.infer<typeof ledgerRecordIdSchema>;
+
 export const isoTimestampSchema = z.string().datetime({ offset: true });
 export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;
 
 export const nonNegativeIntegerSchema = z.number().int().nonnegative();
 export type NonNegativeInteger = z.infer<typeof nonNegativeIntegerSchema>;
+
+export const positiveIntegerSchema = z.number().int().positive();
+export type PositiveInteger = z.infer<typeof positiveIntegerSchema>;

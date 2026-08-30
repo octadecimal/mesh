@@ -13,18 +13,30 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 
 import {
+  PM_DISCOVERY_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
   serverRealtimeMessageSchema,
+  startExecutionEnvelopeSchema,
+  v2CommandResultSchema,
   v2ProjectSnapshotSchema,
   type HarnessAdapter,
+  type PlanningCycle,
+  type PlanningTurn,
+  type ResolvedWorkerProfileSnapshot,
   type ServerRealtimeMessage,
 } from '@mesh/v2-contracts';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { FakeHarnessAdapter } from './executions/fake-harness';
+import { AuditBarrier } from './executions/audit-barrier';
+import { ExecutionRepository } from './executions/execution-repository';
+import { ExecutionRuntime } from './executions/execution-runtime';
+import { OperationRepository } from './executions/operation-repository';
 import { startV2Server, type RunningV2Server } from './main';
+import { PlanningRepository } from './planning/planning-repository';
 import { approveV2GitExecutable } from './platform/process-runner';
 import { createV2TestDatabase } from './test/create-v2-test-database';
+import { inImmediateTransaction } from './db/database';
 
 const servers: RunningV2Server[] = [];
 const directories: string[] = [];
@@ -54,6 +66,165 @@ const environment = async (root: string, databasePath: string) => {
     MESH_V2_WORKSPACE_ROOT: root,
     MESH_V2_DATABASE_PATH: databasePath,
     MESH_V2_GIT_EXECUTABLE: git.path,
+  };
+};
+
+type PlanningRecoveryCase =
+  | 'bound_output'
+  | 'bound_terminal'
+  | 'unbound_terminal'
+  | 'pending_without_operation'
+  | 'ambiguous_before_start'
+  | 'ambiguous_after_start';
+
+const seedPlanningRecoveryCase = async (kind: PlanningRecoveryCase) => {
+  const fixture = createV2TestDatabase();
+  const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });
+  let adapter: HarnessAdapter = fake;
+  if (kind === 'unbound_terminal') {
+    const capabilities = await fake.capabilities();
+    adapter = {
+      id: fake.id,
+      capabilities: async () => ({ ...capabilities, capabilities: [] }),
+      resolveSkills: (requests) => fake.resolveSkills(requests),
+      start: (request) => fake.start(request),
+      probe: (nativeHandle) => fake.probe(nativeHandle),
+      resume: (request) => fake.resume(request),
+      interrupt: (nativeHandle) => fake.interrupt(nativeHandle),
+    };
+  }
+  const planning = new PlanningRepository(fixture.database);
+  const executions = new ExecutionRepository(fixture.database);
+  const operations = new OperationRepository(fixture.database);
+  const cycleId = randomUUID();
+  const turnId = randomUUID();
+  const now = '2026-08-29T00:00:00.000Z';
+  const cycle: PlanningCycle = {
+    id: cycleId,
+    projectId: fixture.project.id,
+    lifecycle: 'launch_pending',
+    revision: 0,
+    profileId: fixture.pmProfileRevision.profileId,
+    profileRevision: fixture.pmProfileRevision.revision,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    latestProposalRevision: 0,
+    activeExecutionId: null,
+    createdAt: now,
+    updatedAt: now,
+    endedAt: null,
+  };
+  const turn: PlanningTurn = {
+    id: turnId,
+    projectId: fixture.project.id,
+    planningCycleId: cycleId,
+    ordinal: 1,
+    actor: 'human',
+    message: 'Build a durable Todo application.',
+    launchState: 'launch_pending',
+    executionId: null,
+    createdAt: now,
+  };
+  inImmediateTransaction(fixture.database, () => {
+    planning.insertCycleInTransaction(cycle);
+    planning.insertTurnInTransaction(turn);
+  });
+  const profile: ResolvedWorkerProfileSnapshot = {
+    profileId: fixture.pmProfileRevision.profileId,
+    projectId: fixture.pmProfileRevision.projectId,
+    profileRevision: fixture.pmProfileRevision.revision,
+    baseProfileId: fixture.pmProfileRevision.baseProfileId,
+    baseRevision: fixture.pmProfileRevision.baseRevision,
+    document: fixture.pmProfileRevision.document,
+    digest: fixture.pmProfileRevision.digest,
+  };
+  const runtime = new ExecutionRuntime({
+    database: fixture.database,
+    commands: fixture.commands,
+    events: fixture.events,
+    projects: {
+      get: (projectId) =>
+        projectId === fixture.project.id ? fixture.project : undefined,
+    },
+    profiles: { resolveApproved: () => profile },
+    executions,
+    operations,
+    adapter,
+    publisher: { domain: () => undefined, runtime: () => undefined },
+    barrier: new AuditBarrier(),
+    now: () => now,
+  });
+  const launch = startExecutionEnvelopeSchema.parse({
+    idempotencyKey: `planning-turn:${turnId}`,
+    actor: { kind: 'human' },
+    command: {
+      type: 'worker_execution.start',
+      projectId: fixture.project.id,
+      profileId: profile.profileId,
+      profileRevision: profile.profileRevision,
+      assignment: {
+        kind: 'pm_discovery',
+        projectId: fixture.project.id,
+        outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId: cycleId,
+        humanTurnId: turnId,
+        expectedCycleRevision: 0,
+        expectedProposalRevision: 1,
+        baseProjectIntentRevision: null,
+        baseLedgerRevision: null,
+        input: {
+          conversation: [{ turnId, actor: 'human', message: turn.message }],
+          latestProposal: null,
+          approvedIntentLedger: null,
+        },
+      },
+    },
+  });
+  let executionId: string | undefined;
+  let operationId: string | undefined;
+  if (kind !== 'pending_without_operation') {
+    const reservation = await runtime.reserveStart(launch);
+    executionId = reservation.execution.id;
+    operationId = operations
+      .listForExecution(reservation.execution.id)
+      .find(({ kind: operationKind }) => operationKind === 'start')?.id;
+    if (kind !== 'unbound_terminal') {
+      inImmediateTransaction(fixture.database, () => {
+        planning.bindTurnInTransaction(turnId, reservation.execution.id);
+        planning.updateCycleInTransaction(
+          {
+            ...cycle,
+            lifecycle: 'execution_active',
+            activeExecutionId: reservation.execution.id,
+          },
+          cycle.revision,
+        );
+      });
+    }
+    if (kind === 'bound_output') {
+      await runtime.activateReserved(reservation.execution.id);
+      await runtime.drain();
+    } else if (kind === 'bound_terminal') {
+      await runtime.cancelReserved(reservation.execution.id);
+    } else if (kind === 'ambiguous_after_start') {
+      await adapter.start({
+        executionId: reservation.execution.id,
+        project: fixture.project,
+        assignment: reservation.execution.assignment,
+        profile: reservation.execution.profileSnapshot,
+        resolvedSkills: reservation.execution.resolvedSkills,
+      });
+    }
+  }
+  return {
+    fixture,
+    fake,
+    adapter,
+    cycleId,
+    executionId,
+    operationId,
+    startCount: fake.startCount,
+    resumeCount: fake.resumeCount,
   };
 };
 
@@ -510,6 +681,306 @@ describe('startV2Server', () => {
     }
   });
 
+  it('composes Todo planning commands, runtime output, and snapshots durably', async () => {
+    const fixture = createV2TestDatabase();
+    let awaitingHumanResolve!: () => void;
+    let awaitingApprovalResolve!: () => void;
+    const awaitingHuman = new Promise<void>(
+      (resolve) => (awaitingHumanResolve = resolve),
+    );
+    const awaitingApproval = new Promise<void>(
+      (resolve) => (awaitingApprovalResolve = resolve),
+    );
+    let structuredOutputCount = 0;
+    fixture.database.close();
+    try {
+      const server = await startV2Server({
+        environment: {
+          ...(await environment(fixture.directory, fixture.path)),
+          MESH_V2_TEST_FAKE_PM_SCENARIO: 'todo',
+        },
+        test: {
+          onPublished: (message) => {
+            if (
+              message.type === 'v2.runtime_event' &&
+              message.event.type === 'worker_execution.structured_output'
+            ) {
+              structuredOutputCount += 1;
+            }
+            if (
+              message.type === 'v2.domain_event' &&
+              message.event.type === 'planning_cycle.changed'
+            ) {
+              if (
+                message.event.payload.planningCycle.cycle.lifecycle ===
+                'awaiting_human'
+              ) {
+                awaitingHumanResolve();
+              }
+              if (
+                message.event.payload.planningCycle.cycle.lifecycle ===
+                'awaiting_approval'
+              ) {
+                awaitingApprovalResolve();
+              }
+            }
+          },
+        },
+      });
+      servers.push(server);
+      const command = (body: unknown) =>
+        fetch(`${server.origin}/api/v2/commands`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(async (response) => ({
+          status: response.status,
+          body: v2CommandResultSchema.parse(await response.json()),
+        }));
+
+      const firstEnvelope = {
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.submit_turn',
+          projectId: fixture.project.id,
+          expectedCycleRevision: null,
+          profileId: fixture.pmProfileRevision.profileId,
+          profileRevision: fixture.pmProfileRevision.revision,
+          message: 'Build a Todo application.',
+        },
+      };
+      const first = await command(firstEnvelope);
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({
+        ok: true,
+        commandType: 'planning_cycle.submit_turn',
+      });
+      await expect(command(firstEnvelope)).resolves.toEqual(first);
+      await awaitingHuman;
+      const questionSnapshot = v2ProjectSnapshotSchema.parse(
+        await fetch(
+          `${server.origin}/api/v2/projects/${fixture.project.id}/snapshot`,
+        ).then((response) => response.json()),
+      );
+      const questionCycle = questionSnapshot.planningCycles[0]!;
+      expect(questionCycle.cycle.lifecycle).toBe('awaiting_human');
+      expect(questionCycle.questions).toHaveLength(2);
+
+      const secondEnvelope = (message: string) => ({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' as const },
+        command: {
+          type: 'planning_cycle.submit_turn' as const,
+          projectId: fixture.project.id,
+          planningCycleId: questionCycle.cycle.id,
+          expectedCycleRevision: questionCycle.cycle.revision,
+          message,
+        },
+      });
+      const raced = await Promise.all([
+        command(
+          secondEnvelope('Persist locally and support keyboard controls.'),
+        ),
+        command(secondEnvelope('A distinct stale second answer.')),
+      ]);
+      expect(raced.map(({ status }) => status)).toEqual([200, 200]);
+      expect(raced.filter(({ body }) => body.ok)).toHaveLength(1);
+      expect(raced.find(({ body }) => !body.ok)?.body).toMatchObject({
+        ok: false,
+        error: { code: 'planning_cycle_revision_conflict' },
+      });
+      await awaitingApproval;
+      const proposalSnapshot = v2ProjectSnapshotSchema.parse(
+        await fetch(
+          `${server.origin}/api/v2/projects/${fixture.project.id}/snapshot`,
+        ).then((response) => response.json()),
+      );
+      const proposalCycle = proposalSnapshot.planningCycles[0]!;
+      const proposal = proposalCycle.proposals.at(-1)!;
+      expect(proposalCycle.cycle.lifecycle).toBe('awaiting_approval');
+
+      const approved = await command({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_proposal.approve',
+          projectId: fixture.project.id,
+          planningCycleId: proposalCycle.cycle.id,
+          proposalId: proposal.id,
+          expectedCycleRevision: proposalCycle.cycle.revision,
+          expectedProposalRevision: proposal.revision,
+          expectedProjectIntentRevision: proposal.baseProjectIntentRevision,
+          expectedLedgerRevision: proposal.baseLedgerRevision,
+        },
+      });
+      expect(approved).toMatchObject({
+        status: 200,
+        body: { ok: true, commandType: 'planning_proposal.approve' },
+      });
+      const approvedSnapshot = v2ProjectSnapshotSchema.parse(
+        await fetch(
+          `${server.origin}/api/v2/projects/${fixture.project.id}/snapshot`,
+        ).then((response) => response.json()),
+      );
+      expect(approvedSnapshot.planningCycles[0]?.cycle.lifecycle).toBe(
+        'approved',
+      );
+      expect(approvedSnapshot.intentLedger?.ledger.revision).toBe(1);
+      expect(structuredOutputCount).toBe(2);
+    } finally {
+      await Promise.all(servers.splice(0).map((server) => server.close()));
+      fixture.close();
+    }
+  });
+
+  it.each([
+    [
+      'bound_output',
+      'awaiting_human',
+      0,
+      'planning_pending_reservations_reconciled',
+    ],
+    [
+      'bound_terminal',
+      'attention_required',
+      0,
+      'planning_pending_reservations_reconciled',
+    ],
+    [
+      'unbound_terminal',
+      'attention_required',
+      0,
+      'planning_pending_reservations_reconciled',
+    ],
+    [
+      'pending_without_operation',
+      'awaiting_human',
+      1,
+      'recovered_sessions_attached',
+    ],
+    [
+      'ambiguous_before_start',
+      'attention_required',
+      0,
+      'planning_pending_reservations_reconciled',
+    ],
+    [
+      'ambiguous_after_start',
+      'attention_required',
+      0,
+      'planning_pending_reservations_reconciled',
+    ],
+  ] as const)(
+    'recovers the %s planning startup window before accepting commands',
+    async (kind, expectedLifecycle, expectedStarts, publicationPhase) => {
+      const seeded = await seedPlanningRecoveryCase(kind);
+      const phases: string[] = [];
+      const publications: Array<{
+        message: ServerRealtimeMessage;
+        phase: string | undefined;
+      }> = [];
+      seeded.fixture.database.close();
+      try {
+        const server = await startV2Server({
+          environment: await environment(
+            seeded.fixture.directory,
+            seeded.fixture.path,
+          ),
+          test: {
+            adapter: seeded.adapter,
+            onStartupPhase: (phase) => phases.push(phase),
+            onPublished: (message) =>
+              publications.push({ message, phase: phases.at(-1) }),
+          },
+        });
+        servers.push(server);
+
+        const snapshot = v2ProjectSnapshotSchema.parse(
+          await fetch(
+            `${server.origin}/api/v2/projects/${seeded.fixture.project.id}/snapshot`,
+          ).then((response) => response.json()),
+        );
+        const cycle = snapshot.planningCycles.find(
+          ({ cycle }) => cycle.id === seeded.cycleId,
+        );
+        expect(cycle?.cycle.lifecycle).toBe(expectedLifecycle);
+        expect(seeded.fake.startCount - seeded.startCount).toBe(expectedStarts);
+        expect(seeded.fake.resumeCount - seeded.resumeCount).toBe(0);
+        if (kind === 'bound_output') {
+          expect(
+            cycle?.turns.filter(({ actor }) => actor === 'pm'),
+          ).toHaveLength(1);
+          expect(cycle?.questions).toHaveLength(2);
+        }
+        if (kind === 'unbound_terminal') {
+          expect(cycle?.turns[0]).toMatchObject({
+            launchState: 'execution_bound',
+            executionId: expect.any(String),
+          });
+        }
+        if (
+          kind === 'ambiguous_before_start' ||
+          kind === 'ambiguous_after_start'
+        ) {
+          expect(seeded.operationId).toEqual(expect.any(String));
+          expect(
+            snapshot.attentionItems.find(
+              ({ executionId }) => executionId === seeded.executionId,
+            ),
+          ).toMatchObject({
+            message: `${seeded.operationId}: Execution has no native handle`,
+          });
+        }
+        expect(
+          publications.some(
+            ({ message, phase }) =>
+              phase === publicationPhase &&
+              message.type === 'v2.domain_event' &&
+              message.event.type === 'planning_cycle.changed' &&
+              message.event.payload.planningCycle.cycle.id === seeded.cycleId,
+          ),
+        ).toBe(true);
+        expect(phases).toEqual([
+          'executions_reconciled',
+          'planning_bound_cycles_reconciled',
+          'planning_pending_reservations_reconciled',
+          'recovery_window_published',
+          'recovered_sessions_attached',
+          'pending_launches_drained',
+          'accepting_commands',
+        ]);
+
+        const command = await fetch(`${server.origin}/api/v2/commands`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            idempotencyKey: randomUUID(),
+            actor: { kind: 'human' },
+            command: {
+              type: 'planning_cycle.abandon',
+              projectId: seeded.fixture.project.id,
+              planningCycleId: randomUUID(),
+              expectedCycleRevision: 0,
+            },
+          }),
+        });
+        expect(command.status).toBe(200);
+        expect(v2CommandResultSchema.parse(await command.json())).toMatchObject(
+          {
+            ok: false,
+            commandType: 'planning_cycle.abandon',
+            error: { code: 'planning_cycle_not_found' },
+          },
+        );
+      } finally {
+        await Promise.all(servers.splice(0).map((server) => server.close()));
+        seeded.fixture.close();
+      }
+    },
+    30_000,
+  );
+
   it('runs the built entrypoint with one ready line, V2 routes, and signal shutdown', async () => {
     const fixture = createV2TestDatabase();
     const webRoot = temporaryDirectory();
@@ -574,6 +1045,7 @@ describe('startV2Server', () => {
   it('reconstructs and resumes a held execution after process loss before listen', async () => {
     const fixture = createV2TestDatabase();
     const restartedFake = new FakeHarnessAdapter();
+    const startupPhases: string[] = [];
     const publications: Array<{
       message: ServerRealtimeMessage;
       beforeListen: boolean;
@@ -660,6 +1132,7 @@ describe('startV2Server', () => {
         environment: await environment(fixture.directory, fixture.path),
         test: {
           adapter: immediatelyResolvingResumeAdapter(restartedFake),
+          onStartupPhase: (phase) => startupPhases.push(phase),
           onPublished: (message) => {
             publications.push({ message, beforeListen: !secondStarted });
             if (
@@ -712,6 +1185,32 @@ describe('startV2Server', () => {
           (execution) => execution.id === executionId,
         ),
       ).toMatchObject({ lifecycle: 'completed', lastAdapterCursor: 6 });
+      const commandResponse = await fetch(`${second.origin}/api/v2/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'worker_execution.interrupt',
+            projectId: fixture.project.id,
+            executionId,
+            expectedRevision: recoveredSnapshot.executions.find(
+              (execution) => execution.id === executionId,
+            )!.revision,
+          },
+        }),
+      });
+      expect(commandResponse.status).toBe(200);
+      expect(startupPhases).toEqual([
+        'executions_reconciled',
+        'planning_bound_cycles_reconciled',
+        'planning_pending_reservations_reconciled',
+        'recovery_window_published',
+        'recovered_sessions_attached',
+        'pending_launches_drained',
+        'accepting_commands',
+      ]);
     } finally {
       if (
         first &&

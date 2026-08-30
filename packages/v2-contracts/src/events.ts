@@ -10,6 +10,10 @@ import {
   workerExecutionIdSchema,
 } from './ids';
 import { workerExecutionSchema } from './executions';
+import {
+  approvedPlanningOutcomeSchema,
+  planningCycleViewSchema,
+} from './intent';
 import { projectSchema } from './projects';
 import { workerProfileRevisionSchema } from './profiles';
 
@@ -33,12 +37,24 @@ const executionLifecycleDraftSchema = z.strictObject({
   type: z.literal('worker_execution.lifecycle_changed'),
   payload: z.strictObject({ execution: workerExecutionSchema }),
 });
+const planningCycleChangedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('planning_cycle.changed'),
+  payload: z.strictObject({ planningCycle: planningCycleViewSchema }),
+});
+const intentLedgerApprovedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('intent_ledger.approved'),
+  payload: approvedPlanningOutcomeSchema,
+});
 
 const requireDomainEventProjectCoherence = (
   value:
     | z.infer<typeof projectRegisteredDraftSchema>
     | z.infer<typeof profileApprovedDraftSchema>
-    | z.infer<typeof executionLifecycleDraftSchema>,
+    | z.infer<typeof executionLifecycleDraftSchema>
+    | z.infer<typeof planningCycleChangedDraftSchema>
+    | z.infer<typeof intentLedgerApprovedDraftSchema>,
   context: z.RefinementCtx,
 ) => {
   const embeddedProjectId =
@@ -46,12 +62,24 @@ const requireDomainEventProjectCoherence = (
       ? value.payload.project.id
       : value.type === 'worker_profile.revision_approved'
         ? value.payload.profileRevision.projectId
-        : value.payload.execution.projectId;
+        : value.type === 'worker_execution.lifecycle_changed'
+          ? value.payload.execution.projectId
+          : value.payload.planningCycle.cycle.projectId;
   if (embeddedProjectId !== value.projectId) {
     context.addIssue({
       code: 'custom',
       path: ['payload'],
       message: 'Embedded record project must match the domain event project',
+    });
+  }
+  if (
+    value.type === 'intent_ledger.approved' &&
+    value.payload.intentLedger.projectIntent.projectId !== value.projectId
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['payload', 'intentLedger'],
+      message: 'Approved intent ledger must match the domain event project',
     });
   }
 };
@@ -61,6 +89,8 @@ export const domainEventDraftSchema = z
     projectRegisteredDraftSchema,
     profileApprovedDraftSchema,
     executionLifecycleDraftSchema,
+    planningCycleChangedDraftSchema,
+    intentLedgerApprovedDraftSchema,
   ])
   .superRefine(requireDomainEventProjectCoherence);
 export type DomainEventDraft = z.infer<typeof domainEventDraftSchema>;
@@ -76,6 +106,14 @@ export const domainEventSchema = z
       sequence: nonNegativeIntegerSchema,
     }),
     executionLifecycleDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    planningCycleChangedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    intentLedgerApprovedDraftSchema.extend({
       id: domainEventIdSchema,
       sequence: nonNegativeIntegerSchema,
     }),
@@ -119,6 +157,17 @@ const adapterFailedDraftSchema = z.strictObject({
     message: z.string().trim().min(1).max(4096),
   }),
 });
+export const executionStructuredOutputDraftSchema = z.strictObject({
+  ...runtimeEventBase,
+  type: z.literal('worker_execution.structured_output'),
+  payload: z.strictObject({
+    schema: z.string().trim().min(1).max(256),
+    value: z.unknown(),
+  }),
+});
+export type WorkerExecutionStructuredOutputRuntimeEventDraft = z.infer<
+  typeof executionStructuredOutputDraftSchema
+>;
 export const executionCompletedDraftSchema = z.strictObject({
   ...runtimeEventBase,
   type: z.literal('worker_execution.completed'),
@@ -133,6 +182,7 @@ export const runtimeEventDraftSchema = z.discriminatedUnion('type', [
   childStartedDraftSchema,
   childFinishedDraftSchema,
   adapterFailedDraftSchema,
+  executionStructuredOutputDraftSchema,
   executionCompletedDraftSchema,
 ]);
 export type RuntimeEventDraft = z.infer<typeof runtimeEventDraftSchema>;
@@ -158,6 +208,11 @@ export const runtimeEventSchema = z.discriminatedUnion('type', [
     diagnosticId: rawDiagnosticIdSchema,
     sequence: nonNegativeIntegerSchema,
   }),
+  executionStructuredOutputDraftSchema.extend({
+    id: runtimeEventIdSchema,
+    diagnosticId: rawDiagnosticIdSchema,
+    sequence: nonNegativeIntegerSchema,
+  }),
   executionCompletedDraftSchema.extend({
     id: runtimeEventIdSchema,
     diagnosticId: rawDiagnosticIdSchema,
@@ -168,6 +223,10 @@ export type RuntimeEvent = z.infer<typeof runtimeEventSchema>;
 export type WorkerExecutionCompletedRuntimeEvent = Extract<
   RuntimeEvent,
   { type: 'worker_execution.completed' }
+>;
+export type WorkerExecutionStructuredOutputRuntimeEvent = Extract<
+  RuntimeEvent,
+  { type: 'worker_execution.structured_output' }
 >;
 
 export const rawDiagnosticDraftSchema = z.strictObject({

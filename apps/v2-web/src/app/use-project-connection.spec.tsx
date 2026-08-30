@@ -18,6 +18,68 @@ const projectTwo = '22222222-2222-4222-8222-222222222222';
 const executionId = '33333333-3333-4333-8333-333333333333';
 const diagnosticId = '44444444-4444-4444-8444-444444444444';
 
+const planningTruth = (projectId: string, revision: number) => ({
+  planningCycles: [
+    {
+      cycle: {
+        id: '66666666-6666-4666-8666-666666666666',
+        projectId,
+        lifecycle: 'abandoned' as const,
+        revision,
+        profileId: '77777777-7777-4777-8777-777777777777',
+        profileRevision: 1,
+        baseProjectIntentRevision: null,
+        baseLedgerRevision: null,
+        latestProposalRevision: 0,
+        activeExecutionId: null,
+        createdAt: '2026-08-28T00:00:00.000Z',
+        updatedAt: '2026-08-28T00:00:01.000Z',
+        endedAt: '2026-08-28T00:00:01.000Z',
+      },
+      turns: [],
+      questions: [],
+      proposals: [],
+    },
+  ],
+  planningHistoryTruncated: true,
+  intentLedger: {
+    projectIntent: {
+      id: '88888888-8888-4888-8888-888888888888',
+      projectId,
+      revision,
+      proposalId: '99999999-9999-4999-8999-999999999999',
+      approvedBy: 'human' as const,
+      approvedAt: '2026-08-28T00:00:00.000Z',
+      content: {
+        goal: 'Track Todo items.',
+        targetUsers: ['Individuals'],
+        desiredCapabilities: ['Add Todo items'],
+        constraints: [],
+        nonGoals: [],
+        successConditions: ['Items can be completed'],
+        rationale: 'The operator requested Todo.',
+        provenance: [
+          {
+            kind: 'conversation_turn' as const,
+            turnId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            rationale: 'Initial Todo request.',
+          },
+        ],
+      },
+    },
+    ledger: {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      projectId,
+      revision,
+      proposalId: '99999999-9999-4999-8999-999999999999',
+      approvedBy: 'human' as const,
+      approvedAt: '2026-08-28T00:00:00.000Z',
+    },
+    records: [],
+    relationships: [],
+  },
+});
+
 const outputEvent = (
   projectId: string,
   sequence: number,
@@ -57,6 +119,7 @@ const snapshot = (
     profiles: [],
     executions: [],
     attentionItems: [],
+    ...planningTruth(projectId, domain),
     cursors: { domain, runtime },
   });
 
@@ -119,6 +182,9 @@ const Harness = ({
       <p data-testid="activity">
         {connection.projection.activity.map(({ id }) => id).join(',')}
       </p>
+      <p data-testid="planning-revision">
+        {connection.projection.intentLedger?.ledger.revision ?? 'none'}
+      </p>
       {connection.error ? <p role="alert">{connection.error}</p> : null}
     </>
   );
@@ -163,6 +229,7 @@ it('fetches before socket creation, replaces a stale projection once, and reconn
     <Harness api={api} projectId={projectOne} socketFactory={socketFactory} />,
   );
   expect(await screen.findByTestId('project-name')).toHaveTextContent('Todo');
+  expect(screen.getByTestId('planning-revision')).toHaveTextContent('3');
   expect(calls.slice(0, 4)).toEqual([
     'snapshot',
     'replay:5',
@@ -219,6 +286,7 @@ it('fetches before socket creation, replaces a stale projection once, and reconn
   expect(screen.getByTestId('project-name')).toHaveTextContent(
     'Todo refreshed',
   );
+  expect(screen.getByTestId('planning-revision')).toHaveTextContent('8');
   expect(sockets[0]?.close).toHaveBeenCalledOnce();
   act(() => sockets[1]?.open());
   expect(JSON.parse(sockets[1]?.sent[0] ?? '{}')).toMatchObject({

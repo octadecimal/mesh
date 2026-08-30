@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import {
+  sha256DigestSchema,
+  startExecutionCommandSchema,
+} from '@mesh/v2-contracts';
+import { z } from 'zod';
+
 import { inImmediateTransaction, type V2Database } from './database.js';
 import {
   assertV2OrEmptyDatabase,
@@ -16,9 +22,38 @@ const foundationMigration = {
   ),
 };
 
-const migrations = [foundationMigration] as const;
+const intentLedgerMigration = {
+  version: 2,
+  name: '002_intent_ledger',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '002_intent_ledger.sql'),
+    'utf8',
+  ),
+};
+
+const migrations = [foundationMigration, intentLedgerMigration] as const;
 
 type MigrationLedgerRow = { version: number; name: string };
+type StartOperationRow = { request_json: string };
+
+const startOperationRequestSchema = z.strictObject({
+  version: z.literal('mesh.v2.execution-start/v1'),
+  idempotencyKey: z.string().trim().min(1).max(256),
+  requestHash: sha256DigestSchema,
+  request: startExecutionCommandSchema,
+});
+
+const validateStartOperationRequests = (database: V2Database): void => {
+  const rows = database
+    .prepare(
+      `SELECT request_json FROM execution_operations
+       WHERE kind = 'start' ORDER BY id`,
+    )
+    .all() as StartOperationRow[];
+  for (const row of rows) {
+    startOperationRequestSchema.parse(JSON.parse(row.request_json));
+  }
+};
 
 export class V2MigrationLedgerError extends Error {
   readonly code = 'migration_ledger_mismatch' as const;
@@ -74,6 +109,9 @@ export const migrateV2Database = (database: V2Database): void => {
 
     for (const migration of migrations) {
       if (hasMigration.get(migration.version)) continue;
+      if (migration.version === intentLedgerMigration.version) {
+        validateStartOperationRequests(database);
+      }
       database.exec(migration.sql);
       recordMigration.run(
         migration.version,

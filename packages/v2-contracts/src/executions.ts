@@ -8,6 +8,11 @@ import {
   workerExecutionIdSchema,
   workerProfileIdSchema,
 } from './ids';
+import {
+  PM_DISCOVERY_REPORT_SCHEMA,
+  pmDiscoveryAssignmentSchema,
+  type PmDiscoveryAssignment,
+} from './intent';
 import { projectSchema, type Project } from './projects';
 import {
   logicalSkillIdSchema,
@@ -33,6 +38,15 @@ export const V2_ERROR_CODES = [
   'profile_not_found',
   'profile_revision_conflict',
   'profile_scope_invalid',
+  'planning_canonical_base_conflict',
+  'planning_cycle_active_conflict',
+  'planning_cycle_history_limit',
+  'planning_cycle_not_found',
+  'planning_cycle_revision_conflict',
+  'planning_profile_incompatible',
+  'planning_proposal_invalid',
+  'planning_proposal_not_found',
+  'planning_proposal_revision_conflict',
   'repository_head_ambiguous',
   'repository_head_failed',
   'repository_head_unborn',
@@ -61,6 +75,12 @@ export const foundationCheckAssignmentSchema = z.strictObject({
 export type FoundationCheckAssignment = z.infer<
   typeof foundationCheckAssignmentSchema
 >;
+
+export const workerAssignmentSchema = z.discriminatedUnion('kind', [
+  foundationCheckAssignmentSchema,
+  pmDiscoveryAssignmentSchema,
+]);
+export type WorkerAssignment = z.infer<typeof workerAssignmentSchema>;
 
 export const harnessSkillDescriptorSchema = z.strictObject({
   logicalId: logicalSkillIdSchema,
@@ -164,7 +184,7 @@ export const workerExecutionSchema = z
     projectId: projectIdSchema,
     profileId: workerProfileIdSchema,
     profileRevision: nonNegativeIntegerSchema,
-    assignment: foundationCheckAssignmentSchema,
+    assignment: workerAssignmentSchema,
     profileSnapshot: resolvedWorkerProfileSnapshotSchema,
     skillRequests: z.strictObject({
       preferred: z.array(logicalSkillRequestSchema).readonly(),
@@ -213,6 +233,28 @@ export const workerExecutionSchema = z
         message: 'Project profile snapshot must match the execution project',
       });
     }
+    if (
+      value.profileSnapshot.document.spec.assignmentKinds[0] !==
+      value.assignment.kind
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['profileSnapshot', 'document', 'spec', 'assignmentKinds'],
+        message: 'Profile assignment kind must match the execution assignment',
+      });
+    }
+    if (
+      value.assignment.kind === 'pm_discovery' &&
+      (value.assignment.outputSchema !== PM_DISCOVERY_REPORT_SCHEMA ||
+        value.profileSnapshot.document.spec.outputSchema !==
+          PM_DISCOVERY_REPORT_SCHEMA)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['profileSnapshot', 'document', 'spec', 'outputSchema'],
+        message: 'PM execution output schemas must match the discovery schema',
+      });
+    }
     if (value.capabilitySnapshot.adapterId !== value.adapterId) {
       context.addIssue({
         code: 'custom',
@@ -226,7 +268,7 @@ export type WorkerExecution = z.infer<typeof workerExecutionSchema>;
 const harnessStartRequestShape = {
   executionId: workerExecutionIdSchema,
   project: projectSchema,
-  assignment: foundationCheckAssignmentSchema,
+  assignment: workerAssignmentSchema,
   profile: resolvedWorkerProfileSnapshotSchema,
   resolvedSkills: z.array(resolvedSkillSnapshotSchema).readonly(),
 };
@@ -234,7 +276,7 @@ const harnessStartRequestShape = {
 const requireHarnessProjectCoherence = (
   value: {
     project: Project;
-    assignment: FoundationCheckAssignment;
+    assignment: FoundationCheckAssignment | PmDiscoveryAssignment;
     profile: ResolvedWorkerProfileSnapshot;
   },
   context: z.RefinementCtx,
@@ -254,6 +296,26 @@ const requireHarnessProjectCoherence = (
       code: 'custom',
       path: ['profile', 'projectId'],
       message: 'Project profile must match the harness project',
+    });
+  }
+  if (
+    value.profile.document.spec.assignmentKinds[0] !== value.assignment.kind
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['profile', 'document', 'spec', 'assignmentKinds'],
+      message: 'Profile assignment kind must match the harness assignment',
+    });
+  }
+  if (
+    value.assignment.kind === 'pm_discovery' &&
+    (value.assignment.outputSchema !== PM_DISCOVERY_REPORT_SCHEMA ||
+      value.profile.document.spec.outputSchema !== PM_DISCOVERY_REPORT_SCHEMA)
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['profile', 'document', 'spec', 'outputSchema'],
+      message: 'PM harness output schemas must match the discovery schema',
     });
   }
 };

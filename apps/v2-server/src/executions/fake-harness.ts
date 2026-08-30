@@ -5,6 +5,8 @@ import {
   harnessEventEnvelopeSchema,
   harnessResumeRequestSchema,
   harnessStartRequestSchema,
+  PM_DISCOVERY_REPORT_SCHEMA,
+  planningTurnIdSchema,
   workerExecutionIdSchema,
   type HarnessAdapter,
   type HarnessEventEnvelope,
@@ -14,19 +16,39 @@ import {
   type HarnessSession,
   type HarnessStartRequest,
   type LogicalSkillRequest,
+  type PmDiscoveryAssignment,
+  type PmDiscoveryReport,
+  type PlanningTurnId,
 } from '@mesh/v2-contracts';
 
 import { canonicalJson } from '../storage/canonical-json.js';
 import { matchingSkill } from './harness-adapter.js';
 
 const MAX_HANDLE_BYTES = 4096;
-const SCENARIO = 'todo-foundation-v1' as const;
+const FOUNDATION_SCENARIO = 'todo-foundation-v1' as const;
+const PM_SCENARIO = 'pm-discovery-v1' as const;
+
+export type FakePmScenario =
+  | 'todo'
+  | 'malformed'
+  | 'duplicate'
+  | 'missing_output';
 
 type FakeHandle = {
   executionId: string;
-  scenario: typeof SCENARIO;
+  scenario: typeof FOUNDATION_SCENARIO | typeof PM_SCENARIO;
+  pmScenario?: FakePmScenario;
   checkpointCursor: number;
 };
+
+const terminalCursor = (handle: FakeHandle): number =>
+  handle.scenario === FOUNDATION_SCENARIO
+    ? 6
+    : handle.pmScenario === 'duplicate'
+      ? 3
+      : handle.pmScenario === 'todo' || handle.pmScenario === 'malformed'
+        ? 2
+        : 1;
 
 export type FakeHarnessOptions = {
   holdAfterAdapterCursor?: number;
@@ -34,6 +56,7 @@ export type FakeHarnessOptions = {
   failAtAdapterCursor?: number;
   available?: boolean;
   interruptThrows?: boolean;
+  pmScenario?: FakePmScenario;
 };
 
 const encodeHandle = (value: FakeHandle): string => {
@@ -94,12 +117,16 @@ const decodeHandle = (
       };
     }
     const value = JSON.parse(decoded) as unknown;
+    const keys =
+      typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? Object.keys(value).sort().join(',')
+        : '';
     if (
       typeof value !== 'object' ||
       value === null ||
       Array.isArray(value) ||
-      Object.keys(value).sort().join(',') !==
-        'checkpointCursor,executionId,scenario'
+      (keys !== 'checkpointCursor,executionId,scenario' &&
+        keys !== 'checkpointCursor,executionId,pmScenario,scenario')
     ) {
       return {
         ok: false,
@@ -110,10 +137,18 @@ const decodeHandle = (
     const candidate = value as Partial<FakeHandle>;
     if (
       !workerExecutionIdSchema.safeParse(candidate.executionId).success ||
-      candidate.scenario !== SCENARIO ||
+      (candidate.scenario !== FOUNDATION_SCENARIO &&
+        candidate.scenario !== PM_SCENARIO) ||
+      (candidate.scenario === PM_SCENARIO &&
+        !['todo', 'malformed', 'duplicate', 'missing_output'].includes(
+          String(candidate.pmScenario),
+        )) ||
+      (candidate.scenario === FOUNDATION_SCENARIO &&
+        candidate.pmScenario !== undefined) ||
       !Number.isInteger(candidate.checkpointCursor) ||
       (candidate.checkpointCursor as number) < 0 ||
-      (candidate.checkpointCursor as number) > 6 ||
+      (candidate.checkpointCursor as number) >
+        terminalCursor(candidate as FakeHandle) ||
       canonicalJson(value) !== decoded
     ) {
       return {
@@ -132,7 +167,7 @@ const decodeHandle = (
   }
 };
 
-const scriptEnvelope = (
+const foundationEnvelope = (
   request: HarnessStartRequest,
   adapterCursor: number,
 ): HarnessEventEnvelope => {
@@ -185,10 +220,262 @@ const scriptEnvelope = (
                 };
   return harnessEventEnvelopeSchema.parse({
     adapterCursor,
-    raw: { source: 'fake', scenario: SCENARIO, adapterCursor },
+    raw: {
+      source: 'fake',
+      scenario: FOUNDATION_SCENARIO,
+      adapterCursor,
+    },
     normalized,
   });
 };
+
+const humanTurnIds = (
+  assignment: PmDiscoveryAssignment,
+): readonly PlanningTurnId[] =>
+  assignment.input.conversation
+    .filter(({ actor }) => actor === 'human')
+    .map(({ turnId }) => planningTurnIdSchema.parse(turnId));
+
+const provenance = (assignment: PmDiscoveryAssignment) =>
+  humanTurnIds(assignment).map((turnId) => ({
+    kind: 'conversation_turn' as const,
+    turnId,
+    rationale: 'The operator supplied the Todo discovery input.',
+  }));
+
+const todoReport = (assignment: PmDiscoveryAssignment): PmDiscoveryReport => {
+  const binding = {
+    schema: PM_DISCOVERY_REPORT_SCHEMA,
+    planningCycleId: assignment.planningCycleId,
+    humanTurnId: assignment.humanTurnId,
+    expectedCycleRevision: assignment.expectedCycleRevision,
+    expectedProposalRevision: assignment.expectedProposalRevision,
+  };
+  if (humanTurnIds(assignment).length === 1) {
+    return {
+      ...binding,
+      assistantMessage: 'I need two details before proposing Todo intent.',
+      result: {
+        kind: 'questions',
+        questions: [
+          {
+            key: 'todo.persistence',
+            prompt: 'How should Todo items persist?',
+            rationale: 'Persistence changes the product contract.',
+            choices: ['Local browser storage', 'No persistence'],
+          },
+          {
+            key: 'todo.keyboard',
+            prompt: 'Should all Todo controls be keyboard operable?',
+            rationale: 'Keyboard behavior is a material UX requirement.',
+            choices: ['Yes', 'No'],
+          },
+        ],
+      },
+    };
+  }
+  const sources = provenance(assignment);
+  return {
+    ...binding,
+    assistantMessage:
+      'The complete Todo intent and ledger are ready to review.',
+    result: {
+      kind: 'proposal',
+      summary: 'Define a small persistent, keyboard-operable Todo product.',
+      projectIntent: {
+        goal: 'Let people add and complete Todo items reliably.',
+        targetUsers: ['People tracking a short personal task list.'],
+        desiredCapabilities: [
+          'Add Todo items.',
+          'Complete Todo items.',
+          'Restore Todo items after reload.',
+        ],
+        constraints: ['All controls are keyboard operable.'],
+        nonGoals: ['Team collaboration is excluded.'],
+        successConditions: [
+          'A saved Todo item remains after reload.',
+          'A keyboard user can add and complete an item.',
+        ],
+        rationale: 'The operator requested a focused persistent Todo product.',
+        provenance: sources,
+      },
+      records: [
+        {
+          operation: 'create',
+          key: 'requirement.todo-items',
+          content: {
+            type: 'requirement',
+            statement: 'Users can add and complete Todo items.',
+            rationale: 'Creating and completing items is the core workflow.',
+            kind: 'functional',
+            status: 'proposed',
+            priority: 'must',
+          },
+          provenance: sources,
+        },
+        {
+          operation: 'create',
+          key: 'requirement.keyboard',
+          content: {
+            type: 'requirement',
+            statement: 'Every Todo control is keyboard operable.',
+            rationale: 'The product must support keyboard interaction.',
+            kind: 'ux',
+            status: 'proposed',
+            priority: 'must',
+          },
+          provenance: sources,
+        },
+        {
+          operation: 'create',
+          key: 'requirement.persistence',
+          content: {
+            type: 'requirement',
+            statement: 'Todo items persist across application reloads.',
+            rationale: 'Reloading must not discard the task list.',
+            kind: 'operational',
+            status: 'proposed',
+            priority: 'must',
+          },
+          provenance: sources,
+        },
+        {
+          operation: 'create',
+          key: 'assumption.single-user',
+          content: {
+            type: 'assumption',
+            statement: 'One person uses the Todo list on one device.',
+            rationale: 'Collaboration is outside this product slice.',
+            status: 'active',
+            confidence: 'high',
+          },
+          provenance: sources,
+        },
+        {
+          operation: 'create',
+          key: 'decision.local-storage',
+          content: {
+            type: 'decision',
+            statement: 'Store Todo items locally in the application.',
+            rationale: 'Local persistence satisfies the requested scope.',
+            status: 'active',
+          },
+          provenance: sources,
+        },
+        {
+          operation: 'create',
+          key: 'question.retention',
+          content: {
+            type: 'question',
+            statement: 'How long should completed Todo items remain visible?',
+            rationale:
+              'Retention can be decided after the first product slice.',
+            status: 'open',
+          },
+          provenance: sources,
+        },
+        {
+          operation: 'create',
+          key: 'risk.storage-loss',
+          content: {
+            type: 'risk',
+            statement: 'Local browser data can be cleared by the user.',
+            rationale: 'Local persistence is not a backup service.',
+            status: 'open',
+            severity: 'medium',
+            mitigation: 'Explain that clearing site data removes Todo items.',
+          },
+          provenance: sources,
+        },
+      ],
+      relationships: [
+        {
+          kind: 'depends_on',
+          from: { proposalKey: 'requirement.todo-items' },
+          to: { proposalKey: 'requirement.persistence' },
+        },
+        {
+          kind: 'constrains',
+          from: { proposalKey: 'decision.local-storage' },
+          to: { proposalKey: 'requirement.persistence' },
+        },
+      ],
+    },
+  };
+};
+
+const pmEnvelope = (
+  request: HarnessStartRequest & { assignment: PmDiscoveryAssignment },
+  adapterCursor: number,
+  scenario: FakePmScenario | undefined,
+): HarnessEventEnvelope => {
+  const base = {
+    projectId: request.project.id,
+    executionId: request.executionId,
+    adapterCursor,
+    occurredAt: new Date(
+      Date.UTC(2026, 7, 29, 0, 0, adapterCursor),
+    ).toISOString(),
+  };
+  const outputCount =
+    scenario === 'duplicate'
+      ? 2
+      : scenario === 'todo' || scenario === 'malformed'
+        ? 1
+        : 0;
+  const normalized =
+    adapterCursor <= outputCount
+      ? {
+          ...base,
+          type: 'worker_execution.structured_output' as const,
+          payload: {
+            schema: PM_DISCOVERY_REPORT_SCHEMA,
+            value:
+              scenario === 'malformed'
+                ? { schema: PM_DISCOVERY_REPORT_SCHEMA, malformed: true }
+                : todoReport(request.assignment),
+          },
+        }
+      : {
+          ...base,
+          type: 'worker_execution.completed' as const,
+          payload: { outcome: 'completed' as const },
+        };
+  return harnessEventEnvelopeSchema.parse({
+    adapterCursor,
+    raw: {
+      source: 'fake',
+      scenario: scenario ?? 'missing_output',
+      adapterCursor,
+    },
+    normalized,
+  });
+};
+
+const scriptEnvelope = (
+  request: HarnessStartRequest,
+  adapterCursor: number,
+  options: FakeHarnessOptions,
+): HarnessEventEnvelope =>
+  request.assignment.kind === 'pm_discovery'
+    ? pmEnvelope(
+        request as HarnessStartRequest & { assignment: PmDiscoveryAssignment },
+        adapterCursor,
+        options.pmScenario,
+      )
+    : foundationEnvelope(request, adapterCursor);
+
+const scriptLength = (
+  assignment: HarnessStartRequest['assignment'],
+  scenario: FakePmScenario | undefined,
+): number =>
+  assignment.kind === 'foundation-check'
+    ? 6
+    : scenario === 'duplicate'
+      ? 3
+      : scenario === 'todo' || scenario === 'malformed'
+        ? 2
+        : 1;
 
 class FakeHarnessSession implements HarnessSession {
   readonly consumedAdapterCursors: number[] = [];
@@ -207,7 +494,13 @@ class FakeHarnessSession implements HarnessSession {
   get nativeHandle(): string {
     return encodeHandle({
       executionId: this.request.executionId,
-      scenario: SCENARIO,
+      scenario:
+        this.request.assignment.kind === 'pm_discovery'
+          ? PM_SCENARIO
+          : FOUNDATION_SCENARIO,
+      ...(this.request.assignment.kind === 'pm_discovery'
+        ? { pmScenario: this.options.pmScenario ?? 'missing_output' }
+        : {}),
       checkpointCursor: this.checkpointCursor,
     });
   }
@@ -220,13 +513,17 @@ class FakeHarnessSession implements HarnessSession {
         'Fake session checkpoint does not match requested cursor',
       );
     }
-    for (let cursor = afterAdapterCursor + 1; cursor <= 6; cursor += 1) {
+    const length = scriptLength(
+      this.request.assignment,
+      this.options.pmScenario,
+    );
+    for (let cursor = afterAdapterCursor + 1; cursor <= length; cursor += 1) {
       if (this.closed) return;
       this.consumedAdapterCursors.push(cursor);
       if (this.options.failAtAdapterCursor === cursor) {
         throw new Error(`fake adapter failure at cursor ${cursor}`);
       }
-      const envelope = scriptEnvelope(this.request, cursor);
+      const envelope = scriptEnvelope(this.request, cursor, this.options);
       this.checkpointCursor = cursor;
       if (this.options.malformedAtAdapterCursor === cursor) {
         yield {
@@ -333,7 +630,7 @@ export class FakeHarnessAdapter implements HarnessAdapter {
     if (this.interruptedExecutions.has(parsed.value.executionId)) {
       return { status: 'terminal', outcome: 'interrupted' };
     }
-    if (parsed.value.checkpointCursor === 6) {
+    if (parsed.value.checkpointCursor === terminalCursor(parsed.value)) {
       return { status: 'terminal', outcome: 'completed' };
     }
     return {
@@ -349,8 +646,18 @@ export class FakeHarnessAdapter implements HarnessAdapter {
     if (parsed.value.executionId !== request.executionId) {
       throw new Error('Fake handle execution does not match resume request');
     }
-    if (parsed.value.scenario !== request.assignment.fakeScenario) {
+    const requestScenario =
+      request.assignment.kind === 'pm_discovery'
+        ? PM_SCENARIO
+        : request.assignment.fakeScenario;
+    if (parsed.value.scenario !== requestScenario) {
       throw new Error('Fake handle scenario does not match resume request');
+    }
+    if (
+      requestScenario === PM_SCENARIO &&
+      parsed.value.pmScenario !== (this.options.pmScenario ?? 'missing_output')
+    ) {
+      throw new Error('Fake handle PM scenario does not match adapter fixture');
     }
     if (parsed.value.checkpointCursor !== request.afterAdapterCursor) {
       throw new Error('Fake handle checkpoint does not match resume cursor');

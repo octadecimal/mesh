@@ -1,10 +1,14 @@
 import {
   V2_PROTOCOL_VERSION,
+  abandonPlanningCycleEnvelopeSchema,
+  approvePlanningProposalEnvelopeSchema,
   interruptExecutionEnvelopeSchema,
   projectIdSchema,
   projectRegisterEnvelopeSchema,
   profileApprovalEnvelopeSchema,
+  rejectPlanningProposalEnvelopeSchema,
   startExecutionEnvelopeSchema,
+  submitPlanningTurnEnvelopeSchema,
   v2CommandEnvelopeSchema,
   v2ErrorCodeSchema,
   type RetainedDomainWindow,
@@ -17,6 +21,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import type { ExecutionRuntime } from '../executions/execution-runtime.js';
+import type { PlanningService } from '../planning/planning-service.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { WorkerProfileService } from '../profiles/profile-service.js';
 
@@ -32,6 +37,10 @@ export type V2RouteDependencies = {
   projects: Pick<ProjectService, 'get' | 'register'>;
   profiles: Pick<WorkerProfileService, 'approveRevision'>;
   runtime: Pick<ExecutionRuntime, 'start' | 'interrupt'>;
+  planning: Pick<
+    PlanningService,
+    'submitTurn' | 'approveProposal' | 'rejectProposal' | 'abandonCycle'
+  >;
   snapshots: {
     system(): V2SystemSnapshot;
     project(projectId: string): V2ProjectSnapshot | undefined;
@@ -175,6 +184,30 @@ export const registerV2Routes = (
         return reply.send(
           await dependencies.runtime.interrupt(
             interruptExecutionEnvelopeSchema.parse(envelope),
+          ),
+        );
+      case 'planning_cycle.submit_turn':
+        return reply.send(
+          await dependencies.planning.submitTurn(
+            submitPlanningTurnEnvelopeSchema.parse(envelope),
+          ),
+        );
+      case 'planning_proposal.approve':
+        return reply.send(
+          dependencies.planning.approveProposal(
+            approvePlanningProposalEnvelopeSchema.parse(envelope),
+          ),
+        );
+      case 'planning_proposal.reject':
+        return reply.send(
+          dependencies.planning.rejectProposal(
+            rejectPlanningProposalEnvelopeSchema.parse(envelope),
+          ),
+        );
+      case 'planning_cycle.abandon':
+        return reply.send(
+          await dependencies.planning.abandonCycle(
+            abandonPlanningCycleEnvelopeSchema.parse(envelope),
           ),
         );
     }

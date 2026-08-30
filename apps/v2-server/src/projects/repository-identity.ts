@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, sep } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 
 import type { V2ErrorCode } from '@mesh/v2-contracts';
 
@@ -51,35 +51,6 @@ export const normalizeRepositoryIdentityPath = (
   path: string,
   platform: NodeJS.Platform = process.platform,
 ): string => (platform === 'win32' ? path.toLowerCase() : path);
-
-const isContained = (
-  root: string,
-  candidate: string,
-  platform: NodeJS.Platform,
-): boolean => {
-  const rootKey = normalizeRepositoryIdentityPath(root, platform);
-  const candidateKey = normalizeRepositoryIdentityPath(candidate, platform);
-  const pathFromRoot = relative(rootKey, candidateKey);
-  return (
-    pathFromRoot === '' ||
-    (pathFromRoot !== '..' &&
-      !pathFromRoot.startsWith(`..${sep}`) &&
-      !isAbsolute(pathFromRoot))
-  );
-};
-
-const requireContained = (
-  root: string,
-  candidate: string,
-  platform: NodeJS.Platform,
-): void => {
-  if (!isContained(root, candidate, platform)) {
-    throw new RepositoryIdentityError(
-      'repository_path_escape',
-      'Repository path escapes the configured V2 workspace root',
-    );
-  }
-};
 
 export const nodeGitProcessRunner: GitProcessRunner = {
   run(call) {
@@ -197,19 +168,13 @@ export const createRepositoryIdentityResolver = ({
     const requested = isAbsolute(repositoryPath)
       ? resolve(repositoryPath)
       : resolve(configuredRoot, repositoryPath);
-    requireContained(configuredRoot, requested, platform);
 
-    let canonicalWorkspaceRoot: string;
     let canonicalRequested: string;
     try {
-      [canonicalWorkspaceRoot, canonicalRequested] = await Promise.all([
-        realpath(configuredRoot),
-        realpath(requested),
-      ]);
+      canonicalRequested = await realpath(requested);
     } catch {
       throw invalidRepository('Repository path is not readable');
     }
-    requireContained(canonicalWorkspaceRoot, canonicalRequested, platform);
 
     const rootResult = await processRunner.run({
       executable: gitExecutable,
@@ -244,9 +209,6 @@ export const createRepositoryIdentityResolver = ({
     } catch {
       throw invalidRepository('Git repository identity paths are not readable');
     }
-    requireContained(canonicalWorkspaceRoot, canonicalPath, platform);
-    requireContained(canonicalWorkspaceRoot, commonDirectory, platform);
-
     const headResult = await processRunner.run({
       executable: gitExecutable,
       args: [

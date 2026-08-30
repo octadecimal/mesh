@@ -43,6 +43,13 @@ const toOperation = (row: OperationRow): ExecutionOperation =>
 export class OperationRepository {
   constructor(private readonly database: V2Database) {}
 
+  migrationAppliedAt(version: number): string | undefined {
+    const row = this.database
+      .prepare('SELECT applied_at FROM v2_schema_migrations WHERE version = ?')
+      .get(version) as { applied_at: string } | undefined;
+    return row ? z.string().datetime().parse(row.applied_at) : undefined;
+  }
+
   get(id: string): ExecutionOperation | undefined {
     const row = this.database
       .prepare('SELECT * FROM execution_operations WHERE id = ?')
@@ -58,6 +65,26 @@ export class OperationRepository {
         )
         .all(executionId) as OperationRow[]
     ).map(toOperation);
+  }
+
+  findStartReservation(
+    idempotencyKey: string,
+    requestHash: string,
+  ): ExecutionOperation | undefined {
+    const rows = this.database
+      .prepare(
+        `
+        SELECT * FROM execution_operations
+        WHERE kind = 'start'
+          AND json_extract(request_json, '$.idempotencyKey') = ?
+          AND json_extract(request_json, '$.requestHash') = ?
+        ORDER BY created_at, id
+      `,
+      )
+      .all(idempotencyKey, requestHash) as OperationRow[];
+    if (rows.length > 1)
+      throw new Error('Conflicting start reservations found');
+    return rows[0] ? toOperation(rows[0]) : undefined;
   }
 
   listPending(): readonly ExecutionOperation[] {

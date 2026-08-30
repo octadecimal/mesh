@@ -7,6 +7,10 @@ import type {
   HarnessResumeRequest,
   HarnessStartRequest,
 } from '@mesh/v2-contracts';
+import {
+  PM_DISCOVERY_REPORT_SCHEMA,
+  pmDiscoveryReportSchema,
+} from '@mesh/v2-contracts';
 
 import { createV2TestDatabase } from '../test/create-v2-test-database.js';
 import { FakeHarnessAdapter } from './fake-harness.js';
@@ -46,10 +50,218 @@ const collect = async <T>(events: AsyncIterable<T>): Promise<T[]> => {
   return collected;
 };
 
+const pmRequest = (
+  fixture: ReturnType<typeof createV2TestDatabase>,
+  turn: 1 | 2,
+): HarnessStartRequest => {
+  const firstHumanTurnId = randomUUID();
+  const pmTurnId = randomUUID();
+  const humanTurnId = turn === 1 ? firstHumanTurnId : randomUUID();
+  return {
+    executionId: randomUUID(),
+    project: fixture.project,
+    assignment: {
+      kind: 'pm_discovery',
+      projectId: fixture.project.id,
+      outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+      planningCycleId: randomUUID(),
+      humanTurnId,
+      expectedCycleRevision: turn,
+      expectedProposalRevision: 1,
+      baseProjectIntentRevision: null,
+      baseLedgerRevision: null,
+      input: {
+        conversation:
+          turn === 1
+            ? [
+                {
+                  turnId: firstHumanTurnId,
+                  actor: 'human',
+                  message: 'Build a Todo application.',
+                },
+              ]
+            : [
+                {
+                  turnId: firstHumanTurnId,
+                  actor: 'human',
+                  message: 'Build a Todo application.',
+                },
+                {
+                  turnId: pmTurnId,
+                  actor: 'pm',
+                  message: 'Which persistence and keyboard behavior?',
+                },
+                {
+                  turnId: humanTurnId,
+                  actor: 'human',
+                  message: 'Persist locally and support keyboard controls.',
+                },
+              ],
+        latestProposal: null,
+        approvedIntentLedger: null,
+      },
+    },
+    profile: {
+      profileId: fixture.profileRevision.profileId,
+      projectId: fixture.profileRevision.projectId,
+      profileRevision: fixture.profileRevision.revision,
+      baseProfileId: fixture.profileRevision.baseProfileId,
+      baseRevision: fixture.profileRevision.baseRevision,
+      document: {
+        ...fixture.profileRevision.document,
+        spec: {
+          ...fixture.profileRevision.document.spec,
+          assignmentKinds: ['pm_discovery'],
+          outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+        },
+      },
+      digest: fixture.profileRevision.digest,
+    },
+    resolvedSkills: [],
+  };
+};
+
 const rawHandle = (payload: unknown, encoding: BufferEncoding = 'base64url') =>
   `fake:v1:${Buffer.from(JSON.stringify(payload)).toString(encoding)}`;
 
 describe('FakeHarnessAdapter', () => {
+  it('emits finite assignment-bound Todo questions and proposal reports', async () => {
+    const fixture = createV2TestDatabase();
+    const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });
+    try {
+      const questionRequest = pmRequest(fixture, 1);
+      const questionSession = await fake.start(questionRequest);
+      const questionEvents = await collect(questionSession.events(0));
+      expect(questionEvents.map((event) => event.normalized.type)).toEqual([
+        'worker_execution.structured_output',
+        'worker_execution.completed',
+      ]);
+      const questionOutput = questionEvents[0]?.normalized;
+      expect(questionOutput).toMatchObject({
+        type: 'worker_execution.structured_output',
+        payload: { schema: PM_DISCOVERY_REPORT_SCHEMA },
+      });
+      if (questionOutput?.type !== 'worker_execution.structured_output') {
+        throw new Error('Expected structured question output');
+      }
+      expect(
+        pmDiscoveryReportSchema.parse(questionOutput.payload.value),
+      ).toMatchObject({
+        planningCycleId:
+          questionRequest.assignment.kind === 'pm_discovery'
+            ? questionRequest.assignment.planningCycleId
+            : '',
+        humanTurnId:
+          questionRequest.assignment.kind === 'pm_discovery'
+            ? questionRequest.assignment.humanTurnId
+            : '',
+        result: { kind: 'questions' },
+      });
+
+      const proposalRequest = pmRequest(fixture, 2);
+      const proposalSession = await fake.start(proposalRequest);
+      const proposalEvents = await collect(proposalSession.events(0));
+      expect(proposalEvents.map((event) => event.normalized.type)).toEqual([
+        'worker_execution.structured_output',
+        'worker_execution.completed',
+      ]);
+      const proposalOutput = proposalEvents[0]?.normalized;
+      if (proposalOutput?.type !== 'worker_execution.structured_output') {
+        throw new Error('Expected structured proposal output');
+      }
+      const report = pmDiscoveryReportSchema.parse(
+        proposalOutput.payload.value,
+      );
+      expect(report.result).toMatchObject({ kind: 'proposal' });
+      if (report.result.kind !== 'proposal') {
+        throw new Error('Expected proposal report');
+      }
+      expect(report.result.records.map(({ content }) => content.type)).toEqual([
+        'requirement',
+        'requirement',
+        'requirement',
+        'assumption',
+        'decision',
+        'question',
+        'risk',
+      ]);
+      expect(report.result.relationships.map(({ kind }) => kind)).toEqual([
+        'depends_on',
+        'constrains',
+      ]);
+      const expectedTurnIds = new Set(
+        proposalRequest.assignment.kind === 'pm_discovery'
+          ? proposalRequest.assignment.input.conversation
+              .filter(({ actor }) => actor === 'human')
+              .map(({ turnId }) => turnId)
+          : [],
+      );
+      expect(
+        new Set(
+          report.result.records.flatMap((member) =>
+            member.operation === 'reuse'
+              ? []
+              : member.provenance.map(({ turnId }) => turnId),
+          ),
+        ),
+      ).toEqual(expectedTurnIds);
+      expect(proposalSession.nativeHandle).not.toBe(
+        questionSession.nativeHandle,
+      );
+      expect(fake.startCount).toBe(2);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it.each([
+    [undefined, ['worker_execution.completed']],
+    ['missing_output' as const, ['worker_execution.completed']],
+    [
+      'duplicate' as const,
+      [
+        'worker_execution.structured_output',
+        'worker_execution.structured_output',
+        'worker_execution.completed',
+      ],
+    ],
+  ])('keeps PM scenario %s finite', async (pmScenario, expectedTypes) => {
+    const fixture = createV2TestDatabase();
+    try {
+      const fake = new FakeHarnessAdapter({ pmScenario });
+      const session = await fake.start(pmRequest(fixture, 1));
+      const events = await collect(session.events(0));
+      expect(events.map((event) => event.normalized.type)).toEqual(
+        expectedTypes,
+      );
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it('emits a strict runtime envelope containing malformed PM report data', async () => {
+    const fixture = createV2TestDatabase();
+    try {
+      const session = await new FakeHarnessAdapter({
+        pmScenario: 'malformed',
+      }).start(pmRequest(fixture, 1));
+      const events = await collect(session.events(0));
+      expect(events.map((event) => event.normalized.type)).toEqual([
+        'worker_execution.structured_output',
+        'worker_execution.completed',
+      ]);
+      const output = events[0]?.normalized;
+      if (output?.type !== 'worker_execution.structured_output') {
+        throw new Error('Expected malformed structured output');
+      }
+      expect(
+        pmDiscoveryReportSchema.safeParse(output.payload.value).success,
+      ).toBe(false);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it.each([
     ['1.9.0', '^1.2.3', true],
     ['2.0.0', '^1.2.3', false],
@@ -176,6 +388,42 @@ describe('FakeHarnessAdapter', () => {
       ).rejects.toThrow('checkpoint');
     });
   });
+
+  it.each([
+    ['todo', 3],
+    ['malformed', 3],
+    ['duplicate', 4],
+    ['missing_output', 2],
+  ] as const)(
+    'rejects a %s PM handle beyond its scenario terminal cursor',
+    async (pmScenario, checkpointCursor) => {
+      const fixture = createV2TestDatabase();
+      try {
+        const request = pmRequest(fixture, 1);
+        const nativeHandle = rawHandle({
+          checkpointCursor,
+          executionId: request.executionId,
+          pmScenario,
+          scenario: 'pm-discovery-v1',
+        });
+        const fake = new FakeHarnessAdapter({ pmScenario });
+
+        await expect(fake.probe(nativeHandle)).resolves.toMatchObject({
+          status: 'missing',
+        });
+        await expect(
+          fake.resume({
+            ...request,
+            nativeHandle,
+            afterAdapterCursor: checkpointCursor,
+          }),
+        ).rejects.toThrow('invalid');
+        expect(fake.resumeCount).toBe(0);
+      } finally {
+        fixture.close();
+      }
+    },
+  );
 
   it('rejects malformed, oversized, mismatched, and unknown-version handles', async () => {
     const fake = new FakeHarnessAdapter();

@@ -2,17 +2,24 @@ import { z } from 'zod';
 
 import {
   nonNegativeIntegerSchema,
+  planningCycleIdSchema,
+  planningProposalIdSchema,
+  positiveIntegerSchema,
   projectIdSchema,
   workerExecutionIdSchema,
   workerProfileIdSchema,
 } from './ids';
-import { foundationCheckAssignmentSchema } from './executions';
+import { workerAssignmentSchema } from './executions';
 
 export const v2CommandTypeSchema = z.enum([
   'project.register',
   'worker_profile.approve_revision',
   'worker_execution.start',
   'worker_execution.interrupt',
+  'planning_cycle.submit_turn',
+  'planning_proposal.approve',
+  'planning_proposal.reject',
+  'planning_cycle.abandon',
 ]);
 export type V2CommandType = z.infer<typeof v2CommandTypeSchema>;
 
@@ -62,7 +69,7 @@ export const startExecutionCommandSchema = z
     projectId: projectIdSchema,
     profileId: workerProfileIdSchema,
     profileRevision: nonNegativeIntegerSchema,
-    assignment: foundationCheckAssignmentSchema,
+    assignment: workerAssignmentSchema,
   })
   .superRefine((value, context) => {
     if (value.projectId !== value.assignment.projectId) {
@@ -85,11 +92,104 @@ export type InterruptExecutionCommand = z.infer<
   typeof interruptExecutionCommandSchema
 >;
 
+const requireProfileOnlyForNewCycle = (
+  value: {
+    planningCycleId?: string;
+    expectedCycleRevision: number | null;
+    profileId?: string;
+    profileRevision?: number;
+  },
+  context: z.RefinementCtx,
+) => {
+  const newCycle = value.planningCycleId === undefined;
+  if (
+    newCycle &&
+    (value.expectedCycleRevision !== null ||
+      value.profileId === undefined ||
+      value.profileRevision === undefined)
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['planningCycleId'],
+      message:
+        'New cycles require a profile and null revision; existing cycles require only an expected revision',
+    });
+  }
+  if (
+    !newCycle &&
+    (value.expectedCycleRevision === null ||
+      value.profileId !== undefined ||
+      value.profileRevision !== undefined)
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['profileId'],
+      message: 'Existing cycles reuse their frozen profile',
+    });
+  }
+};
+
+export const submitPlanningTurnCommandSchema = z
+  .strictObject({
+    type: z.literal('planning_cycle.submit_turn'),
+    projectId: projectIdSchema,
+    planningCycleId: planningCycleIdSchema.optional(),
+    expectedCycleRevision: nonNegativeIntegerSchema.nullable(),
+    profileId: workerProfileIdSchema.optional(),
+    profileRevision: positiveIntegerSchema.optional(),
+    message: z.string().trim().min(1).max(16_384),
+  })
+  .superRefine(requireProfileOnlyForNewCycle);
+export type SubmitPlanningTurnCommand = z.infer<
+  typeof submitPlanningTurnCommandSchema
+>;
+
+export const approvePlanningProposalCommandSchema = z.strictObject({
+  type: z.literal('planning_proposal.approve'),
+  projectId: projectIdSchema,
+  planningCycleId: planningCycleIdSchema,
+  proposalId: planningProposalIdSchema,
+  expectedCycleRevision: nonNegativeIntegerSchema,
+  expectedProposalRevision: positiveIntegerSchema,
+  expectedProjectIntentRevision: positiveIntegerSchema.nullable(),
+  expectedLedgerRevision: positiveIntegerSchema.nullable(),
+});
+export type ApprovePlanningProposalCommand = z.infer<
+  typeof approvePlanningProposalCommandSchema
+>;
+
+export const rejectPlanningProposalCommandSchema = z.strictObject({
+  type: z.literal('planning_proposal.reject'),
+  projectId: projectIdSchema,
+  planningCycleId: planningCycleIdSchema,
+  proposalId: planningProposalIdSchema,
+  expectedCycleRevision: nonNegativeIntegerSchema,
+  expectedProposalRevision: positiveIntegerSchema,
+  feedback: z.string().trim().min(1).max(4096),
+});
+export type RejectPlanningProposalCommand = z.infer<
+  typeof rejectPlanningProposalCommandSchema
+>;
+
+export const abandonPlanningCycleCommandSchema = z.strictObject({
+  type: z.literal('planning_cycle.abandon'),
+  projectId: projectIdSchema,
+  planningCycleId: planningCycleIdSchema,
+  expectedCycleRevision: nonNegativeIntegerSchema,
+});
+export type AbandonPlanningCycleCommand = z.infer<
+  typeof abandonPlanningCycleCommandSchema
+>;
+
 export const v2CommandSchema = z.discriminatedUnion('type', [
   projectRegisterCommandSchema,
   profileApprovalCommandSchema,
   startExecutionCommandSchema,
   interruptExecutionCommandSchema,
+  submitPlanningTurnCommandSchema,
+  approvePlanningProposalCommandSchema,
+  rejectPlanningProposalCommandSchema,
+  abandonPlanningCycleCommandSchema,
 ]);
 export type V2Command = z.infer<typeof v2CommandSchema>;
 
@@ -114,12 +214,32 @@ export const interruptExecutionEnvelopeSchema = z.strictObject({
   ...v2CommandEnvelopeBase,
   command: interruptExecutionCommandSchema,
 });
+export const submitPlanningTurnEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: submitPlanningTurnCommandSchema,
+});
+export const approvePlanningProposalEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: approvePlanningProposalCommandSchema,
+});
+export const rejectPlanningProposalEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: rejectPlanningProposalCommandSchema,
+});
+export const abandonPlanningCycleEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: abandonPlanningCycleCommandSchema,
+});
 
 export const v2CommandEnvelopeSchema = z.union([
   projectRegisterEnvelopeSchema,
   profileApprovalEnvelopeSchema,
   startExecutionEnvelopeSchema,
   interruptExecutionEnvelopeSchema,
+  submitPlanningTurnEnvelopeSchema,
+  approvePlanningProposalEnvelopeSchema,
+  rejectPlanningProposalEnvelopeSchema,
+  abandonPlanningCycleEnvelopeSchema,
 ]);
 export type V2CommandEnvelope = z.infer<typeof v2CommandEnvelopeSchema>;
 
@@ -134,4 +254,16 @@ export type StartExecutionEnvelope = V2CommandEnvelope & {
 };
 export type InterruptExecutionEnvelope = V2CommandEnvelope & {
   command: Extract<V2Command, { type: 'worker_execution.interrupt' }>;
+};
+export type SubmitPlanningTurnEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'planning_cycle.submit_turn' }>;
+};
+export type ApprovePlanningProposalEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'planning_proposal.approve' }>;
+};
+export type RejectPlanningProposalEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'planning_proposal.reject' }>;
+};
+export type AbandonPlanningCycleEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'planning_cycle.abandon' }>;
 };

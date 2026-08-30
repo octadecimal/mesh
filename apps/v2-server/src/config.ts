@@ -8,6 +8,7 @@ export type V2ServerConfig = {
   developmentOrigin?: string;
   webRoot?: string;
   testFakeHoldAfterAdapterCursor?: number;
+  testFakePmScenario?: 'todo';
 };
 
 export type V2ConfigErrorCode =
@@ -115,6 +116,16 @@ export const loadV2ServerConfig = (
       'Fake cursor hold is outside the fake script',
     );
   }
+  const fakePmScenario = environment.MESH_V2_TEST_FAKE_PM_SCENARIO;
+  if (
+    fakePmScenario !== undefined &&
+    (environment.NODE_ENV !== 'test' || fakePmScenario !== 'todo')
+  ) {
+    throw new V2ConfigError(
+      'invalid_v2_test_option',
+      'Fake PM scenario must be todo in the test environment',
+    );
+  }
   const developmentOrigin =
     environment.MESH_V2_DEV_ORIGIN ??
     (environment.NODE_ENV === 'development'
@@ -137,5 +148,8 @@ export const loadV2ServerConfig = (
     ...(testFakeHoldAfterAdapterCursor === undefined
       ? {}
       : { testFakeHoldAfterAdapterCursor }),
+    ...(fakePmScenario === undefined
+      ? {}
+      : { testFakePmScenario: fakePmScenario }),
   };
 };
