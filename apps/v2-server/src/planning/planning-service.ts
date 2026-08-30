@@ -75,7 +75,11 @@ type Dependencies = {
   publishDomain?: (event: DomainEvent) => void;
 };
 
-type LaunchCoordinator = { cancelled: boolean; active?: Promise<void> };
+type LaunchCoordinator = {
+  cancelled: boolean;
+  cancellationOwners: Set<symbol>;
+  active?: Promise<void>;
+};
 
 const terminalExecution = new Set<WorkerExecution['lifecycle']>([
   'completed',
@@ -313,143 +317,150 @@ export class PlanningService {
     }
 
     const coordinator = this.coordinator(cycle.id);
-    coordinator.cancelled = true;
-    await coordinator.active;
-    this.dependencies.barrier.assertHealthy();
-    const refreshed = this.dependencies.repository.cycle(cycle.id)!;
-    const turns = this.dependencies.repository.cycleView(cycle.id)?.turns ?? [];
-    const pendingTurn = [...turns]
-      .reverse()
-      .find(
-        (candidate) =>
-          candidate.actor === 'human' &&
-          candidate.launchState === 'launch_pending',
-      );
-    const boundTurn = [...turns]
-      .reverse()
-      .find(
-        (candidate) =>
-          candidate.actor === 'human' && candidate.executionId !== null,
-      );
-    const executionId =
-      refreshed.activeExecutionId ?? boundTurn?.executionId ?? null;
-    const pendingLaunch = pendingTurn
-      ? this.launchInput(pendingTurn)
-      : undefined;
-    const pendingReservation = pendingLaunch
-      ? this.dependencies.launcher.findReserved(pendingLaunch)
-      : undefined;
-    if (pendingLaunch && pendingReservation) {
-      this.assertReservation(pendingLaunch, pendingReservation);
-      await this.containExecution(pendingReservation.execution.id);
+    const cancellationOwner = Symbol();
+    coordinator.cancellationOwners.add(cancellationOwner);
+    try {
+      await coordinator.active;
       this.dependencies.barrier.assertHealthy();
-    }
-    if (refreshed.lifecycle === 'attention_required' && boundTurn) {
-      const launch = this.launchInput(boundTurn);
-      const observed = this.dependencies.launcher.findReserved(launch);
-      if (!observed) {
-        throw new Error('Reconciled planning reservation was not found');
-      }
-      this.assertReservation(launch, observed);
-      if (observed.execution.id !== boundTurn.executionId) {
-        throw new Error('Reconciled planning reservation binding changed');
-      }
-    }
-    if (executionId) {
-      await this.containExecution(executionId);
-      this.dependencies.barrier.assertHealthy();
-    }
-    if (pendingLaunch) {
-      const observed = this.dependencies.launcher.findReserved(pendingLaunch);
-      if (observed) {
-        this.assertReservation(pendingLaunch, observed);
-        const execution = this.dependencies.executions.get(
-          observed.execution.id,
+      const refreshed = this.dependencies.repository.cycle(cycle.id)!;
+      const turns =
+        this.dependencies.repository.cycleView(cycle.id)?.turns ?? [];
+      const pendingTurn = [...turns]
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.actor === 'human' &&
+            candidate.launchState === 'launch_pending',
         );
-        if (!execution || !terminalExecution.has(execution.lifecycle)) {
-          throw new Error('Planning reservation remains active');
+      const boundTurn = [...turns]
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.actor === 'human' && candidate.executionId !== null,
+        );
+      const executionId =
+        refreshed.activeExecutionId ?? boundTurn?.executionId ?? null;
+      const pendingLaunch = pendingTurn
+        ? this.launchInput(pendingTurn)
+        : undefined;
+      const pendingReservation = pendingLaunch
+        ? this.dependencies.launcher.findReserved(pendingLaunch)
+        : undefined;
+      if (pendingLaunch && pendingReservation) {
+        this.assertReservation(pendingLaunch, pendingReservation);
+        await this.containExecution(pendingReservation.execution.id);
+        this.dependencies.barrier.assertHealthy();
+      }
+      if (refreshed.lifecycle === 'attention_required' && boundTurn) {
+        const launch = this.launchInput(boundTurn);
+        const observed = this.dependencies.launcher.findReserved(launch);
+        if (!observed) {
+          throw new Error('Reconciled planning reservation was not found');
+        }
+        this.assertReservation(launch, observed);
+        if (observed.execution.id !== boundTurn.executionId) {
+          throw new Error('Reconciled planning reservation binding changed');
         }
       }
-    }
+      if (executionId) {
+        await this.containExecution(executionId);
+        this.dependencies.barrier.assertHealthy();
+      }
+      if (pendingLaunch) {
+        const observed = this.dependencies.launcher.findReserved(pendingLaunch);
+        if (observed) {
+          this.assertReservation(pendingLaunch, observed);
+          const execution = this.dependencies.executions.get(
+            observed.execution.id,
+          );
+          if (!execution || !terminalExecution.has(execution.lifecycle)) {
+            throw new Error('Planning reservation remains active');
+          }
+        }
+      }
 
-    let event: DomainEvent | undefined;
-    const result = this.auditTransaction(() => {
-      const replay = this.dependencies.commands.find(
-        envelope.idempotencyKey,
-        requestHash,
-      );
-      if (replay) return replay.result;
-      const at = this.now();
-      const current = this.dependencies.repository.cycle(cycle.id);
-      if (!current || current.projectId !== envelope.command.projectId) {
-        return this.storeFailure(
-          envelope,
+      let event: DomainEvent | undefined;
+      const result = this.auditTransaction(() => {
+        const replay = this.dependencies.commands.find(
+          envelope.idempotencyKey,
           requestHash,
-          'planning_cycle_not_found',
-          'Planning cycle was not found',
-          at,
         );
-      }
-      if (
-        current.revision !== envelope.command.expectedCycleRevision ||
-        ['approved', 'proposal_rejected', 'abandoned'].includes(
-          current.lifecycle,
-        )
-      ) {
-        return this.storeFailure(
-          envelope,
-          requestHash,
-          'planning_cycle_revision_conflict',
-          'Planning cycle revision does not match',
-          at,
+        if (replay) return replay.result;
+        const at = this.now();
+        const current = this.dependencies.repository.cycle(cycle.id);
+        if (!current || current.projectId !== envelope.command.projectId) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_cycle_not_found',
+            'Planning cycle was not found',
+            at,
+          );
+        }
+        if (
+          current.revision !== envelope.command.expectedCycleRevision ||
+          ['approved', 'proposal_rejected', 'abandoned'].includes(
+            current.lifecycle,
+          )
+        ) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_cycle_revision_conflict',
+            'Planning cycle revision does not match',
+            at,
+          );
+        }
+        const view = this.dependencies.repository.cycleView(cycle.id)!;
+        const latest = view.proposals.at(-1);
+        if (latest?.lifecycle === 'awaiting_approval') {
+          this.dependencies.repository.updateProposalInTransaction({
+            ...latest,
+            lifecycle: 'superseded',
+            decidedAt: at,
+          });
+        }
+        this.dependencies.repository.updateCycleInTransaction(
+          {
+            ...current,
+            lifecycle: 'abandoned',
+            revision: current.revision + 1,
+            activeExecutionId: null,
+            updatedAt: at,
+            endedAt: at,
+          },
+          current.revision,
         );
-      }
-      const view = this.dependencies.repository.cycleView(cycle.id)!;
-      const latest = view.proposals.at(-1);
-      if (latest?.lifecycle === 'awaiting_approval') {
-        this.dependencies.repository.updateProposalInTransaction({
-          ...latest,
-          lifecycle: 'superseded',
-          decidedAt: at,
+        const planningCycle = this.dependencies.repository.cycleView(cycle.id)!;
+        event = this.dependencies.events.appendDomainInTransaction(
+          cycle.projectId,
+          {
+            projectId: cycle.projectId,
+            occurredAt: at,
+            type: 'planning_cycle.changed',
+            payload: { planningCycle },
+          },
+        );
+        const success = v2CommandResultSchema.parse({
+          ok: true,
+          commandType: 'planning_cycle.abandon',
+          planningCycle,
         });
-      }
-      this.dependencies.repository.updateCycleInTransaction(
-        {
-          ...current,
-          lifecycle: 'abandoned',
-          revision: current.revision + 1,
-          activeExecutionId: null,
-          updatedAt: at,
-          endedAt: at,
-        },
-        current.revision,
-      );
-      const planningCycle = this.dependencies.repository.cycleView(cycle.id)!;
-      event = this.dependencies.events.appendDomainInTransaction(
-        cycle.projectId,
-        {
-          projectId: cycle.projectId,
-          occurredAt: at,
-          type: 'planning_cycle.changed',
-          payload: { planningCycle },
-        },
-      );
-      const success = v2CommandResultSchema.parse({
-        ok: true,
-        commandType: 'planning_cycle.abandon',
-        planningCycle,
+        this.dependencies.commands.storeInTransaction({
+          idempotencyKey: envelope.idempotencyKey,
+          commandType: envelope.command.type,
+          requestHash,
+          result: success,
+          createdAt: at,
+        });
+        return success;
       });
-      this.dependencies.commands.storeInTransaction({
-        idempotencyKey: envelope.idempotencyKey,
-        commandType: envelope.command.type,
-        requestHash,
-        result: success,
-        createdAt: at,
-      });
-      return success;
-    });
-    if (event) this.dependencies.publishDomain?.(event);
-    return result;
+      if (result.ok) coordinator.cancelled = true;
+      if (event) this.dependencies.publishDomain?.(event);
+      return result;
+    } finally {
+      coordinator.cancellationOwners.delete(cancellationOwner);
+    }
   }
 
   reconcilePendingReservations(): void {
@@ -733,7 +744,7 @@ export class PlanningService {
         await this.cancelStartingReservation(reservation);
         return;
       }
-      if (coordinator.cancelled) {
+      if (coordinator.cancelled || coordinator.cancellationOwners.size > 0) {
         await this.cancelStartingReservation(reservation);
         return;
       }
@@ -816,7 +827,9 @@ export class PlanningService {
     turn: PlanningTurn,
     coordinator: LaunchCoordinator,
   ): boolean {
-    if (coordinator.cancelled) return false;
+    if (coordinator.cancelled || coordinator.cancellationOwners.size > 0) {
+      return false;
+    }
     const current = this.dependencies.repository.turn(turn.id);
     const cycle = this.dependencies.repository.cycle(turn.planningCycleId);
     return (
@@ -952,7 +965,7 @@ export class PlanningService {
   private coordinator(cycleId: string): LaunchCoordinator {
     let coordinator = this.coordinators.get(cycleId);
     if (!coordinator) {
-      coordinator = { cancelled: false };
+      coordinator = { cancelled: false, cancellationOwners: new Set() };
       this.coordinators.set(cycleId, coordinator);
     }
     return coordinator;

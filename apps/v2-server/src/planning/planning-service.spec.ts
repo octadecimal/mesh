@@ -768,9 +768,9 @@ describe('PlanningService', () => {
       displayName: 'Notes',
       repositoryIdentity: 'notes-repository',
     });
-    vi.spyOn(context.launcher, 'reserve').mockRejectedValue(
-      new Error('reservation transport stopped'),
-    );
+    const reserve = vi
+      .spyOn(context.launcher, 'reserve')
+      .mockRejectedValue(new Error('reservation transport stopped'));
     await expect(
       context.service.submitTurn(firstTurn(context.fixture)),
     ).rejects.toThrow('reservation transport stopped');
@@ -861,6 +861,46 @@ describe('PlanningService', () => {
     expect(context.repository.cycle(losingCycle.id)).toEqual(losingCycle);
     expect(() => context.barrier.assertHealthy()).not.toThrow();
 
+    const losingTurn = context.repository.cycleView(losingCycle.id)?.turns[0];
+    if (!losingTurn) throw new Error('Expected losing cycle turn');
+    expect(context.repository.pendingLaunchTurns().map(({ id }) => id)).toEqual(
+      [losingTurn.id],
+    );
+    reserve.mockRestore();
+    context.launcher.trace.splice(0);
+
+    await context.service.drainPendingLaunches();
+
+    const drained = context.repository.cycleView(losingCycle.id);
+    const executionId = drained?.turns[0]?.executionId;
+    if (!drained || !executionId) {
+      throw new Error('Expected losing cycle launch to bind');
+    }
+    expect(drained.cycle).toMatchObject({
+      lifecycle: 'execution_active',
+      activeExecutionId: executionId,
+    });
+    expect(drained.turns[0]).toMatchObject({
+      launchState: 'execution_bound',
+      executionId,
+    });
+    expect(context.executions.get(executionId)?.lifecycle).toBe('running');
+    expect(context.launcher.trace).toEqual(['reserve', 'activate']);
+    expect(context.repository.cycle(winningCycle.id)).toMatchObject({
+      lifecycle: 'abandoned',
+      revision: winningCycle.revision + 1,
+    });
+    expect(
+      context.repository.cycleView(winningCycle.id)?.turns[0],
+    ).toMatchObject({
+      launchState: 'launch_pending',
+      executionId: null,
+    });
+    expect(context.fixture.events.cursors(losingCycle.projectId).domain).toBe(
+      beforeLosingCursor + 1,
+    );
+    expect(context.publish).toHaveBeenCalledTimes(beforePublish + 2);
+
     context.fixture.database.exec(`
       CREATE TRIGGER fail_planning_cycle_audit_write
       BEFORE UPDATE ON planning_cycles
@@ -874,15 +914,116 @@ describe('PlanningService', () => {
         actor: { kind: 'human' },
         command: {
           type: 'planning_cycle.abandon',
-          projectId: losingCycle.projectId,
-          planningCycleId: losingCycle.id,
-          expectedCycleRevision: losingCycle.revision,
+          projectId: drained.cycle.projectId,
+          planningCycleId: drained.cycle.id,
+          expectedCycleRevision: drained.cycle.revision,
         },
       }),
     ).rejects.toThrow('forced planning audit failure');
     expect(() => context.barrier.assertHealthy()).toThrow(
       'Audit barrier is tripped',
     );
+  });
+
+  it('does not clear another active abandonment cancellation owner', async () => {
+    const context = setup();
+    let releaseReservation!: () => void;
+    context.launcher.reserveBarrier = new Promise<void>((resolve) => {
+      releaseReservation = resolve;
+    });
+    const submit = context.service.submitTurn(firstTurn(context.fixture));
+    while (!context.launcher.trace.includes('reserve')) await Promise.resolve();
+    const cycle = context.repository.activeCycle(context.fixture.project.id);
+    const turn = cycle
+      ? context.repository.cycleView(cycle.id)?.turns[0]
+      : undefined;
+    if (!cycle || !turn) throw new Error('Expected pending planning launch');
+
+    const restarted = new PlanningService({
+      database: context.fixture.database,
+      repository: context.repository,
+      commands: context.fixture.commands,
+      events: context.fixture.events,
+      executions: context.executions,
+      profiles: {
+        resolveApproved: () => ({
+          profileId: context.fixture.pmProfileRevision.profileId,
+          projectId: null,
+          profileRevision: context.fixture.pmProfileRevision.revision,
+          baseProfileId: null,
+          baseRevision: null,
+          document: context.fixture.pmProfileRevision.document,
+          digest: context.fixture.pmProfileRevision.digest,
+        }),
+      },
+      launcher: context.launcher,
+      barrier: context.barrier,
+      reportConsumer: { consume: vi.fn() },
+      now: () => now,
+      publishDomain: context.publish,
+    });
+    const cancelReserved = context.launcher.cancelReserved.bind(
+      context.launcher,
+    );
+    let releaseCleanup!: () => void;
+    const cleanupBarrier = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const cancel = vi
+      .spyOn(context.launcher, 'cancelReserved')
+      .mockImplementationOnce(async (executionId) => {
+        await cleanupBarrier;
+        return cancelReserved(executionId);
+      })
+      .mockRejectedValueOnce(new Error('competing cleanup failed'));
+    const command = {
+      type: 'planning_cycle.abandon' as const,
+      projectId: cycle.projectId,
+      planningCycleId: cycle.id,
+      expectedCycleRevision: cycle.revision,
+    };
+
+    const winning = restarted.abandonCycle({
+      idempotencyKey: 'abandon-owner-active',
+      actor: { kind: 'human' },
+      command,
+    });
+    while (cancel.mock.calls.length === 0) await Promise.resolve();
+    const losing = restarted.abandonCycle({
+      idempotencyKey: 'abandon-owner-fails',
+      actor: { kind: 'human' },
+      command,
+    });
+    await expect(losing).rejects.toThrow('competing cleanup failed');
+    expect(() => context.barrier.assertHealthy()).not.toThrow();
+
+    await restarted.drainPendingLaunches();
+
+    expect(context.repository.cycle(cycle.id)).toEqual(cycle);
+    expect(context.repository.turn(turn.id)).toMatchObject({
+      launchState: 'launch_pending',
+      executionId: null,
+    });
+    expect(cancel).toHaveBeenCalledTimes(2);
+
+    releaseCleanup();
+    await expect(winning).resolves.toMatchObject({
+      ok: true,
+      planningCycle: { cycle: { lifecycle: 'abandoned' } },
+    });
+    await restarted.drainPendingLaunches();
+    expect(context.repository.cycle(cycle.id)).toMatchObject({
+      lifecycle: 'abandoned',
+      revision: cycle.revision + 1,
+    });
+    expect(context.repository.turn(turn.id)).toMatchObject({
+      launchState: 'launch_pending',
+      executionId: null,
+    });
+    expect(cancel).toHaveBeenCalledTimes(2);
+
+    releaseReservation();
+    await submit;
   });
 
   it('does not reopen a failed launch after abandonment and restart', async () => {
