@@ -278,6 +278,63 @@ const attachBlockedPlanningSession = async (
   return { session, state };
 };
 
+const attachLatePlanningSession = async (
+  context: ReturnType<typeof createPmRuntime>,
+  execution: WorkerExecution,
+  nativeHandle = required(execution.nativeHandle, 'Expected a native handle'),
+) => {
+  let releaseNext: (() => void) | undefined;
+  const blockedNext = new Promise<void>((resolve) => {
+    releaseNext = resolve;
+  });
+  let nextCalledResolve: (() => void) | undefined;
+  const nextCalled = new Promise<void>((resolve) => {
+    nextCalledResolve = resolve;
+  });
+  const state = { closeCount: 0 };
+  const session: HarnessSession = {
+    nativeHandle,
+    events: () => ({
+      [Symbol.asyncIterator]() {
+        let delivered = false;
+        return {
+          async next(): Promise<IteratorResult<HarnessEventEnvelope>> {
+            if (delivered) return { done: true, value: undefined };
+            delivered = true;
+            nextCalledResolve?.();
+            await blockedNext;
+            return {
+              done: false,
+              value: {
+                adapterCursor: execution.lastAdapterCursor + 1,
+                raw: { source: 'late planning audit-conflict output' },
+                normalized: {
+                  projectId: execution.projectId,
+                  executionId: execution.id,
+                  adapterCursor: execution.lastAdapterCursor + 1,
+                  occurredAt: '2026-08-28T01:00:03.000Z',
+                  type: 'worker_execution.structured_output',
+                  payload: {
+                    schema: PM_DISCOVERY_REPORT_SCHEMA,
+                    value: { late: true },
+                  },
+                },
+              },
+            };
+          },
+        };
+      },
+    }),
+    async close() {
+      state.closeCount += 1;
+      releaseNext?.();
+    },
+  };
+  context.runtime.attach(execution.id, session);
+  await nextCalled;
+  return { release: () => releaseNext?.(), session, state };
+};
+
 describe('ExecutionRuntime', () => {
   it('audits and publishes a strict PM structured output before completion', async () => {
     const published: RuntimeEvent[] = [];
@@ -523,6 +580,173 @@ describe('ExecutionRuntime', () => {
       expect(context.fake.startCount).toBe(0);
     },
   );
+
+  it.each(['assignment', 'initial-lifecycle'] as const)(
+    'fails linked replay closed for a forged successful %s receipt',
+    async (fault) => {
+      const context = createRuntime();
+      const reservation = await context.runtime.reserveStart(context.start);
+      if (!reservation.result.ok || !('execution' in reservation.result)) {
+        throw new Error('Expected a successful reservation receipt');
+      }
+      const assignment = reservation.result.execution.assignment;
+      if (assignment.kind !== 'foundation-check') {
+        throw new Error('Expected a foundation assignment');
+      }
+      context.fixture.database
+        .prepare(
+          'UPDATE command_results SET result_json = ? WHERE idempotency_key = ?',
+        )
+        .run(
+          JSON.stringify({
+            ...reservation.result,
+            execution: {
+              ...reservation.result.execution,
+              ...(fault === 'assignment'
+                ? {
+                    assignment: {
+                      ...assignment,
+                      title: 'Forged receipt assignment',
+                    },
+                  }
+                : { lifecycle: 'completed' }),
+            },
+          }),
+          context.start.idempotencyKey,
+        );
+      const before = durableReservationState(context.fixture);
+
+      expect(() => context.runtime.findReservedStart(context.start)).toThrow();
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.fake.startCount).toBe(0);
+    },
+  );
+
+  it.each(['replay', 'activation'] as const)(
+    'fails %s closed for a coherent durable assignment mutation',
+    async (boundary) => {
+      const context = createRuntime();
+      const reservation = await context.runtime.reserveStart(context.start);
+      const assignment = reservation.execution.assignment;
+      if (assignment.kind !== 'foundation-check') {
+        throw new Error('Expected a foundation assignment');
+      }
+      context.fixture.database
+        .prepare(
+          'UPDATE worker_executions SET assignment_json = ? WHERE id = ?',
+        )
+        .run(
+          JSON.stringify({
+            ...assignment,
+            title: 'Mutated durable assignment',
+          }),
+          reservation.execution.id,
+        );
+      const before = durableReservationState(context.fixture);
+      let authorityError: unknown;
+
+      try {
+        if (boundary === 'replay') {
+          context.runtime.findReservedStart(context.start);
+        } else {
+          await context.runtime.activateReserved(reservation.execution.id);
+        }
+      } catch (error) {
+        authorityError = error;
+      } finally {
+        await context.runtime.close();
+      }
+
+      expect(authorityError).toBeInstanceOf(Error);
+      expect(context.barrier.status).toBe('tripped');
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.fake.startCount).toBe(0);
+    },
+  );
+
+  it('fails linked replay closed when terminal failure missing evidence changes', async () => {
+    const fake = new FakeHarnessAdapter();
+    fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
+    const context = createRuntime({ fake });
+    const reservation = await context.runtime.reserveStart(context.start);
+    const failure = required(
+      reservation.execution.failure,
+      'Expected terminal reservation failure',
+    );
+    expect(
+      context.operations
+        .listForExecution(reservation.execution.id)
+        .find(({ kind }) => kind === 'start')?.result,
+    ).toEqual({ reason: failure.message, failure });
+    context.fixture.database
+      .prepare('UPDATE worker_executions SET failure_json = ? WHERE id = ?')
+      .run(
+        JSON.stringify({ ...failure, missing: ['forged.missing'] }),
+        reservation.execution.id,
+      );
+    const before = durableReservationState(context.fixture);
+
+    expect(() => context.runtime.findReservedStart(context.start)).toThrow();
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(fake.startCount).toBe(0);
+  });
+
+  it('fails linked replay closed for a forged successful operation result', async () => {
+    const context = createRuntime();
+    const reservation = await context.runtime.reserveStart(context.start);
+    await context.runtime.activateReserved(reservation.execution.id);
+    await context.runtime.drain();
+    const operation = required(
+      context.operations
+        .listForExecution(reservation.execution.id)
+        .find(({ kind }) => kind === 'start'),
+      'Expected start operation',
+    );
+    context.fixture.database
+      .prepare('UPDATE execution_operations SET result_json = ? WHERE id = ?')
+      .run(JSON.stringify({ nativeHandle: 'forged:handle' }), operation.id);
+    const before = durableReservationState(context.fixture);
+
+    expect(() => context.runtime.findReservedStart(context.start)).toThrow();
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    await context.runtime.close();
+  });
+
+  it('fails activation closed when the loaded project identity changes', async () => {
+    let loadedProjectId: string | undefined;
+    const context = createRuntime({
+      project: (project) =>
+        new Proxy(project, {
+          get: (target, property, receiver) =>
+            property === 'id' && loadedProjectId !== undefined
+              ? loadedProjectId
+              : Reflect.get(target, property, receiver),
+        }),
+    });
+    const reservation = await context.runtime.reserveStart(context.start);
+    loadedProjectId = randomUUID();
+    const before = durableReservationState(context.fixture);
+    let activationError: unknown;
+
+    try {
+      await context.runtime.activateReserved(reservation.execution.id);
+    } catch (error) {
+      activationError = error;
+    } finally {
+      await context.runtime.close();
+    }
+
+    expect(activationError).toBeInstanceOf(Error);
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(context.fake.startCount).toBe(0);
+  });
 
   it('links terminal capability reservations and never activates them', async () => {
     const fake = new FakeHarnessAdapter();
@@ -1357,6 +1581,107 @@ describe('ExecutionRuntime', () => {
     await context.runtime.drain();
     expect(durableRuntimeState(context.fixture)).toEqual(before);
   });
+
+  it.each([
+    'succeeded-interrupted',
+    'unknown-attention',
+    'untagged-completed',
+    'native-handle-mismatch',
+  ] as const)(
+    'contains any runtime-owned session before rejecting %s planning audit state',
+    async (fault) => {
+      const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const running = required(
+        context.executions.get(
+          started.ok && 'execution' in started ? started.execution.id : '',
+        ),
+        'Expected a running execution',
+      );
+      if (fault !== 'native-handle-mismatch') {
+        inImmediateTransaction(context.fixture.database, () => {
+          const exact = required(
+            context.executions.get(running.id),
+            'Expected durable execution',
+          );
+          if (fault === 'untagged-completed') {
+            context.executions.transitionInTransaction(
+              exact.id,
+              exact.revision,
+              'completed',
+              '2026-08-28T01:00:01.000Z',
+            );
+            return;
+          }
+          const interrupting = context.executions.transitionInTransaction(
+            exact.id,
+            exact.revision,
+            'interrupting',
+            '2026-08-28T01:00:01.000Z',
+          );
+          const operation = context.operations.createPendingInTransaction({
+            executionId: exact.id,
+            kind: 'interrupt',
+            request: { version: 'mesh.v2.planning-interrupt/v1' },
+            createdAt: '2026-08-28T01:00:01.000Z',
+          });
+          context.operations.finishInTransaction(
+            operation.id,
+            fault === 'succeeded-interrupted' ? 'succeeded' : 'unknown',
+            { diagnostics: [] },
+            '2026-08-28T01:00:02.000Z',
+          );
+          context.executions.transitionInTransaction(
+            interrupting.id,
+            interrupting.revision,
+            fault === 'succeeded-interrupted'
+              ? 'interrupted'
+              : 'attention_required',
+            '2026-08-28T01:00:02.000Z',
+          );
+        });
+      }
+      const durable = required(
+        context.executions.get(running.id),
+        'Expected durable planning execution',
+      );
+      const { release, session, state } = await attachLatePlanningSession(
+        context,
+        durable,
+        fault === 'native-handle-mismatch'
+          ? `mismatched:${running.id}`
+          : required(durable.nativeHandle, 'Expected a durable native handle'),
+      );
+      const before = durableRuntimeState(context.fixture);
+      const publishedBefore = {
+        domain: context.published.domain.length,
+        runtime: context.published.runtime.length,
+      };
+      let cleanupError: unknown;
+
+      try {
+        await context.runtime.interruptForPlanning(running.id);
+      } catch (error) {
+        cleanupError = error;
+      }
+      const closeCountAtRejection = state.closeCount;
+      release();
+      await context.runtime.drain();
+
+      expect(cleanupError).toMatchObject({
+        code: 'planning_interrupt_audit_failure',
+        diagnostics: [{ phase: 'audit' }],
+      });
+      expect(context.barrier.status).toBe('tripped');
+      expect(closeCountAtRejection).toBe(1);
+      expect(state.closeCount).toBe(1);
+      expect(context.fake.interruptCalls).toContain(session.nativeHandle);
+      expect(durableRuntimeState(context.fixture)).toEqual(before);
+      expect(context.published.domain).toHaveLength(publishedBefore.domain);
+      expect(context.published.runtime).toHaveLength(publishedBefore.runtime);
+    },
+  );
 
   it.each([
     'profile-id',

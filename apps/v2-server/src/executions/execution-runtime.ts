@@ -28,6 +28,7 @@ import {
   type StoredCommandResult,
   type V2CommandRepository,
 } from '../storage/command-repository.js';
+import { canonicalJson } from '../storage/canonical-json.js';
 import type { V2EventStore } from '../storage/event-store.js';
 import { AuditBarrier } from './audit-barrier.js';
 import { ExecutionRepository } from './execution-repository.js';
@@ -161,6 +162,9 @@ const trustedNextAdapterCursor = (
     : null;
 };
 
+const sameDurableValue = (left: unknown, right: unknown): boolean =>
+  canonicalJson(left) === canonicalJson(right);
+
 const databaseActivations = new WeakMap<
   V2Database,
   Map<string, Promise<void>>
@@ -240,6 +244,13 @@ export class ExecutionRuntime {
       typeof request === 'object' && request !== null && !Array.isArray(request)
         ? Object.keys(request).sort().join(',')
         : '';
+    const embeddedRequest =
+      typeof request === 'object' &&
+      request !== null &&
+      !Array.isArray(request) &&
+      'request' in request
+        ? startExecutionCommandSchema.safeParse(request.request)
+        : undefined;
     if (
       typeof request !== 'object' ||
       request === null ||
@@ -252,11 +263,12 @@ export class ExecutionRuntime {
       !('requestHash' in request) ||
       typeof request.requestHash !== 'string' ||
       !('request' in request) ||
-      !startExecutionCommandSchema.safeParse(request.request).success ||
+      !embeddedRequest?.success ||
       (expected !== undefined &&
         (request.idempotencyKey !== expected.idempotencyKey ||
           request.requestHash !== expected.requestHash ||
-          hashV2Command(expected.request) !== expected.requestHash))
+          hashV2Command(expected.request) !== expected.requestHash ||
+          !sameDurableValue(embeddedRequest.data, expected.request)))
     ) {
       throw new Error('Reserved start operation link is invalid');
     }
@@ -278,11 +290,8 @@ export class ExecutionRuntime {
       linked.executionId !== executionId ||
       !stored ||
       stored.commandType !== 'worker_execution.start' ||
-      hashV2Command(request.request as StartExecutionEnvelope['command']) !==
-        request.requestHash ||
-      (stored.result.ok &&
-        (!('execution' in stored.result) ||
-          stored.result.execution.id !== executionId))
+      stored.result.commandType !== 'worker_execution.start' ||
+      hashV2Command(embeddedRequest.data) !== request.requestHash
     ) {
       throw new Error('Reserved start operation is not durably linked');
     }
@@ -290,6 +299,56 @@ export class ExecutionRuntime {
       this.dependencies.executions,
       executionId,
     );
+    if (
+      embeddedRequest.data.projectId !== execution.projectId ||
+      embeddedRequest.data.profileId !== execution.profileId ||
+      embeddedRequest.data.profileRevision !== execution.profileRevision ||
+      !sameDurableValue(embeddedRequest.data.assignment, execution.assignment)
+    ) {
+      throw new Error('Reserved start operation authority is inconsistent');
+    }
+    const successfulReceipt =
+      stored.result.ok && 'execution' in stored.result
+        ? stored.result.execution
+        : undefined;
+    if (
+      successfulReceipt !== undefined &&
+      (successfulReceipt.id !== execution.id ||
+        successfulReceipt.projectId !== execution.projectId ||
+        successfulReceipt.profileId !== execution.profileId ||
+        successfulReceipt.profileRevision !== execution.profileRevision ||
+        !sameDurableValue(successfulReceipt.assignment, execution.assignment) ||
+        !sameDurableValue(
+          successfulReceipt.profileSnapshot,
+          execution.profileSnapshot,
+        ) ||
+        !sameDurableValue(
+          successfulReceipt.skillRequests,
+          execution.skillRequests,
+        ) ||
+        !sameDurableValue(
+          successfulReceipt.resolvedSkills,
+          execution.resolvedSkills,
+        ) ||
+        !sameDurableValue(
+          successfulReceipt.capabilitySnapshot,
+          execution.capabilitySnapshot,
+        ) ||
+        successfulReceipt.adapterId !== execution.adapterId ||
+        successfulReceipt.model !== execution.model ||
+        successfulReceipt.nativeHandle !== null ||
+        successfulReceipt.lifecycle !== 'starting' ||
+        successfulReceipt.revision !== 0 ||
+        successfulReceipt.lastAdapterCursor !== 0 ||
+        successfulReceipt.lastRuntimeSequence !== 0 ||
+        successfulReceipt.replacementForExecutionId !== null ||
+        successfulReceipt.failure !== null ||
+        successfulReceipt.createdAt !== execution.createdAt ||
+        successfulReceipt.updatedAt !== execution.createdAt ||
+        successfulReceipt.endedAt !== null)
+    ) {
+      throw new Error('Reserved start operation receipt is inconsistent');
+    }
     const coherent =
       operation.state === 'pending'
         ? execution.lifecycle === 'starting'
@@ -305,15 +364,81 @@ export class ExecutionRuntime {
                 'interrupted',
                 'attention_required',
               ].includes(execution.lifecycle);
-    if (
-      !coherent ||
-      (!stored.result.ok &&
-        (operation.state !== 'failed' ||
-          execution.lifecycle !== 'failed' ||
-          execution.failure === null ||
-          stored.result.error.code !== execution.failure.code ||
-          stored.result.error.message !== execution.failure.message))
-    ) {
+    const failure = execution.failure;
+    const expectedTerminalFailure =
+      failure?.code === 'required_capability_unavailable'
+        ? {
+            code: failure.code,
+            message: 'Required adapter capabilities are unavailable',
+            missing:
+              execution.profileSnapshot.document.spec.requiredCapabilities.filter(
+                (capability) =>
+                  !execution.capabilitySnapshot.capabilities.includes(
+                    capability,
+                  ),
+              ),
+          }
+        : failure?.code === 'required_skill_unavailable'
+          ? {
+              code: failure.code,
+              message: 'Required skills are unavailable',
+              missing: execution.resolvedSkills
+                .filter(
+                  (skill) =>
+                    skill.mode === 'required' &&
+                    skill.resolution.kind === 'unavailable',
+                )
+                .map((skill) => skill.requested.id),
+            }
+          : undefined;
+    const failedReceiptCoherent = stored.result.ok
+      ? true
+      : operation.state === 'failed' &&
+        execution.lifecycle === 'failed' &&
+        execution.revision === 1 &&
+        execution.nativeHandle === null &&
+        execution.lastAdapterCursor === 0 &&
+        execution.lastRuntimeSequence === 0 &&
+        execution.replacementForExecutionId === null &&
+        execution.createdAt === execution.updatedAt &&
+        execution.endedAt === execution.createdAt &&
+        operation.createdAt === execution.createdAt &&
+        operation.updatedAt === execution.createdAt &&
+        failure !== null &&
+        expectedTerminalFailure !== undefined &&
+        sameDurableValue(failure, expectedTerminalFailure) &&
+        stored.result.error.code === failure.code &&
+        stored.result.error.message === failure.message;
+    const expectedFailedResult =
+      operation.state === 'failed' && failure !== null
+        ? {
+            reason:
+              stored.result.ok &&
+              failure.code === 'startup_interrupted_before_start'
+                ? 'planning_cycle_abandoned'
+                : failure.message,
+            failure,
+          }
+        : undefined;
+    const operationResultCoherent =
+      operation.state === 'pending'
+        ? operation.result === null
+        : operation.state === 'succeeded'
+          ? execution.nativeHandle !== null &&
+            sameDurableValue(operation.result, {
+              nativeHandle: execution.nativeHandle,
+            })
+          : operation.state === 'failed'
+            ? expectedFailedResult !== undefined &&
+              sameDurableValue(operation.result, expectedFailedResult)
+            : execution.nativeHandle === null &&
+              sameDurableValue(operation.result, {
+                probe: {
+                  status: 'unknown',
+                  reason: 'Execution has no native handle',
+                },
+              });
+    if (!coherent || !failedReceiptCoherent || !operationResultCoherent) {
       throw new Error('Reserved start operation state is inconsistent');
     }
     return operation;
@@ -542,7 +667,10 @@ export class ExecutionRuntime {
           this.dependencies.operations.finishInTransaction(
             operation.id,
             'failed',
-            { reason: execution.failure.message },
+            {
+              reason: execution.failure.message,
+              failure: execution.failure,
+            },
             occurredAt,
           );
         } else {
@@ -646,7 +774,10 @@ export class ExecutionRuntime {
         this.dependencies.operations.finishInTransaction(
           operation.id,
           'failed',
-          { reason: 'planning_cycle_abandoned' },
+          {
+            reason: 'planning_cycle_abandoned',
+            failure: cancelled.failure,
+          },
           occurredAt,
         );
         domainEvent = this.dependencies.events.appendDomainInTransaction(
@@ -722,7 +853,13 @@ export class ExecutionRuntime {
     );
     if (execution.lifecycle !== 'starting') return;
     const project = this.dependencies.projects.get(execution.projectId);
-    if (!project) throw new Error('Reserved execution project was not found');
+    if (!project || project.id !== execution.projectId) {
+      const error = new Error('Reserved execution project authority changed');
+      if (this.dependencies.barrier.status === 'healthy') {
+        this.dependencies.barrier.trip(error, this.dependencies.now());
+      }
+      throw error;
+    }
 
     let session: HarnessSession;
     try {
@@ -762,7 +899,7 @@ export class ExecutionRuntime {
           this.dependencies.operations.finishInTransaction(
             operation.id,
             'failed',
-            { reason: failed.failure?.message },
+            { reason: failed.failure?.message, failure: failed.failure },
             failedAt,
           );
           return this.dependencies.events.appendDomainInTransaction(
@@ -845,26 +982,20 @@ export class ExecutionRuntime {
 
   private async rejectPlanningInterruptAuditConflict(
     executionId: string,
-    current: WorkerExecution,
     message: string,
+    owned: ActiveSession | undefined,
+    cause?: unknown,
   ): Promise<never> {
-    const owned = this.active.get(executionId);
-    const exactOwned =
-      owned !== undefined &&
-      current.nativeHandle !== null &&
-      owned.session.nativeHandle === current.nativeHandle
-        ? owned
-        : undefined;
-    if (exactOwned) exactOwned.fenced = true;
-    const error = new Error(message);
+    if (owned) owned.fenced = true;
+    const error = cause ?? new Error(message);
     this.dependencies.barrier.trip(error, this.dependencies.now());
     const diagnostics: PlanningInterruptCleanupDiagnostic[] = [
       { phase: 'audit', message },
     ];
-    if (exactOwned) {
-      await this.containAfterBarrier(exactOwned.session, diagnostics);
+    if (owned) {
+      await this.containAfterBarrier(owned.session, diagnostics);
       diagnostics.push(
-        ...(await this.quiescePlanningSession(executionId, exactOwned, false)),
+        ...(await this.quiescePlanningSession(executionId, owned, false)),
       );
     }
     throw new PlanningInterruptCleanupError(
@@ -891,29 +1022,53 @@ export class ExecutionRuntime {
     const activation = this.activations.get(executionId);
     if (activation) await activation;
 
-    const tagged = this.dependencies.operations
-      .listForExecution(executionId)
-      .filter(
-        (operation) =>
-          operation.kind === 'interrupt' &&
-          typeof operation.request === 'object' &&
-          operation.request !== null &&
-          'version' in operation.request &&
-          operation.request.version === PLANNING_INTERRUPT_OPERATION_VERSION,
+    const owned = this.active.get(executionId);
+    if (owned) owned.fenced = true;
+    let tagged: readonly ExecutionOperation[];
+    let current: WorkerExecution | undefined;
+    try {
+      tagged = this.dependencies.operations
+        .listForExecution(executionId)
+        .filter(
+          (operation) =>
+            operation.kind === 'interrupt' &&
+            typeof operation.request === 'object' &&
+            operation.request !== null &&
+            'version' in operation.request &&
+            operation.request.version === PLANNING_INTERRUPT_OPERATION_VERSION,
+        );
+      current = this.dependencies.executions.get(executionId);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Planning interrupt authority could not be read';
+      return this.rejectPlanningInterruptAuditConflict(
+        executionId,
+        message,
+        owned,
+        error,
       );
-    const current = this.dependencies.executions.get(executionId);
+    }
     if (!current) {
+      if (owned) {
+        return this.rejectPlanningInterruptAuditConflict(
+          executionId,
+          'Active planning session has no durable execution',
+          owned,
+        );
+      }
       throw new PlanningInterruptCleanupError(
         'planning_interrupt_not_running',
         'Planning execution was not found',
       );
     }
     if (current.assignment.kind !== 'pm_discovery') {
-      if (tagged.length > 0) {
+      if (tagged.length > 0 || owned) {
         return this.rejectPlanningInterruptAuditConflict(
           executionId,
-          current,
           'Planning interrupt operation is not owned by a PM runtime',
+          owned,
         );
       }
       throw new PlanningInterruptCleanupError(
@@ -924,17 +1079,19 @@ export class ExecutionRuntime {
     if (tagged.length > 1) {
       return this.rejectPlanningInterruptAuditConflict(
         executionId,
-        current,
         'Conflicting planning interrupt operations found',
+        owned,
       );
     }
     const prior = tagged[0];
     if (prior?.state === 'succeeded') {
-      if (current.lifecycle === 'interrupted') return;
+      if (current.lifecycle === 'interrupted' && !owned) return;
       return this.rejectPlanningInterruptAuditConflict(
         executionId,
-        current,
-        'Planning interrupt operation does not match execution lifecycle',
+        current.lifecycle === 'interrupted'
+          ? 'Active planning session contradicts completed interruption'
+          : 'Planning interrupt operation does not match execution lifecycle',
+        owned,
       );
     }
     if (
@@ -945,8 +1102,8 @@ export class ExecutionRuntime {
     ) {
       return this.rejectPlanningInterruptAuditConflict(
         executionId,
-        current,
         'Planning interrupt operation does not match execution lifecycle',
+        owned,
       );
     }
     if (
@@ -954,6 +1111,13 @@ export class ExecutionRuntime {
       prior?.state === 'failed' ||
       current.lifecycle === 'attention_required'
     ) {
+      if (owned) {
+        return this.rejectPlanningInterruptAuditConflict(
+          executionId,
+          'Active planning session contradicts settled interrupt evidence',
+          owned,
+        );
+      }
       const replayDiagnostics =
         prior?.result &&
         typeof prior.result === 'object' &&
@@ -986,18 +1150,20 @@ export class ExecutionRuntime {
       );
     }
     if (prior === undefined && current.lifecycle !== 'running') {
+      if (owned) {
+        return this.rejectPlanningInterruptAuditConflict(
+          executionId,
+          'Active planning session contradicts non-running execution state',
+          owned,
+        );
+      }
       throw new PlanningInterruptCleanupError(
         'planning_interrupt_not_running',
         'Execution is not an active planning runtime',
       );
     }
 
-    const owned = this.active.get(executionId);
-    if (
-      !owned ||
-      current.nativeHandle === null ||
-      owned.session.nativeHandle !== current.nativeHandle
-    ) {
+    if (!owned) {
       throw new PlanningInterruptCleanupError(
         'planning_interrupt_quiescence_failure',
         'The exact active planning session is unavailable',
@@ -1009,7 +1175,16 @@ export class ExecutionRuntime {
         ],
       );
     }
-    owned.fenced = true;
+    if (
+      current.nativeHandle === null ||
+      owned.session.nativeHandle !== current.nativeHandle
+    ) {
+      return this.rejectPlanningInterruptAuditConflict(
+        executionId,
+        'Active planning session does not match durable native handle',
+        owned,
+      );
+    }
     try {
       this.dependencies.barrier.assertHealthy();
     } catch (error) {
