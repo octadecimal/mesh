@@ -3,6 +3,8 @@ import userEvent from '@testing-library/user-event';
 import {
   approvedIntentLedgerSchema,
   planningCycleViewSchema,
+  type PlanningCycleView,
+  type PlanningProposal,
   workerProfileSummarySchema,
 } from '@mesh/v2-contracts';
 import { describe, expect, it, vi } from 'vitest';
@@ -389,6 +391,31 @@ describe('PlanningPane', () => {
     expect(onReject).not.toHaveBeenCalled();
   });
 
+  it('composes with strict branded proposal and cycle command handlers', async () => {
+    const user = userEvent.setup();
+    const onApprove = vi.fn<(id: PlanningProposal['id']) => void>();
+    const onReject =
+      vi.fn<(id: PlanningProposal['id'], feedback: string) => void>();
+    const onAbandon = vi.fn<(id: PlanningCycleView['cycle']['id']) => void>();
+    render(
+      <PlanningPane
+        cycle={awaitingApprovalCycle}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmitTurn={vi.fn()}
+        onApprove={onApprove}
+        onReject={onReject}
+        onAbandon={onAbandon}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Approve proposal' }));
+    await user.click(screen.getByRole('button', { name: 'Abandon cycle' }));
+    expect(onApprove).toHaveBeenCalledWith(proposalId);
+    expect(onAbandon).toHaveBeenCalledWith(cycleId);
+  });
+
   it('renders every intent field and operation-specific record and relationship details', () => {
     renderPane({ cycle: awaitingApprovalCycle, approvedIntentLedger });
 
@@ -608,6 +635,178 @@ describe('PlanningPane', () => {
     );
 
     expect(screen.getByRole('heading', { name: 'PM Chat' })).toHaveFocus();
+  });
+
+  it('preserves the draft when a command fails without a projection change', async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderPane();
+    await user.type(
+      screen.getByLabelText('Message to project manager'),
+      'Keep this draft',
+    );
+
+    rerender(
+      <PlanningPane
+        cycle={baseCycle}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        error="Planning command failed"
+        onSubmitTurn={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByLabelText('Message to project manager')).toHaveValue(
+      'Keep this draft',
+    );
+  });
+
+  it('clears the draft when cycle identity, revision, or lifecycle changes', async () => {
+    const user = userEvent.setup();
+    const callbacks = {
+      onSubmitTurn: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const { rerender } = renderPane(callbacks);
+    const input = () => screen.getByLabelText('Message to project manager');
+
+    await user.type(input(), 'Revision draft');
+    const revisedCycle = planningCycleViewSchema.parse({
+      ...baseCycle,
+      cycle: { ...baseCycle.cycle, revision: baseCycle.cycle.revision + 1 },
+    });
+    rerender(
+      <PlanningPane
+        cycle={revisedCycle}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        {...callbacks}
+      />,
+    );
+    expect(input()).toHaveValue('');
+
+    await user.type(input(), 'Lifecycle draft');
+    const attentionCycle = planningCycleViewSchema.parse({
+      ...revisedCycle,
+      cycle: { ...revisedCycle.cycle, lifecycle: 'attention_required' },
+      questions: [],
+    });
+    rerender(
+      <PlanningPane
+        cycle={attentionCycle}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        recovery={{ kind: 'retryable', message: 'Retry planning.' }}
+        {...callbacks}
+      />,
+    );
+    expect(input()).toHaveValue('');
+
+    await user.type(input(), 'Cycle identity draft');
+    const nextCycleId = '15151515-1515-4515-8515-151515151515';
+    const nextCycle = planningCycleViewSchema.parse({
+      ...attentionCycle,
+      cycle: { ...attentionCycle.cycle, id: nextCycleId },
+      turns: attentionCycle.turns.map((turn) => ({
+        ...turn,
+        planningCycleId: nextCycleId,
+      })),
+      questions: attentionCycle.questions.map((question) => ({
+        ...question,
+        planningCycleId: nextCycleId,
+      })),
+    });
+    rerender(
+      <PlanningPane
+        cycle={nextCycle}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        recovery={{ kind: 'retryable', message: 'Retry planning.' }}
+        {...callbacks}
+      />,
+    );
+    expect(input()).toHaveValue('');
+  });
+
+  it('clears the draft when the latest turn identity or launch state changes', async () => {
+    const user = userEvent.setup();
+    const callbacks = {
+      onSubmitTurn: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const attentionCycle = planningCycleViewSchema.parse({
+      ...baseCycle,
+      cycle: { ...baseCycle.cycle, lifecycle: 'attention_required' },
+      questions: [],
+    });
+    const { rerender } = renderPane({
+      cycle: attentionCycle,
+      recovery: { kind: 'retryable', message: 'Retry planning.' },
+      ...callbacks,
+    });
+    const input = () => screen.getByLabelText('Message to project manager');
+
+    await user.type(input(), 'Turn identity draft');
+    const latestHumanTurn = {
+      id: '16161616-1616-4616-8616-161616161616',
+      projectId,
+      planningCycleId: cycleId,
+      ordinal: 3,
+      actor: 'human',
+      message: 'Retry the plan.',
+      launchState: 'launch_pending',
+      executionId: null,
+      createdAt: '2026-08-29T00:00:04.000Z',
+    } as const;
+    const pendingTurnCycle = planningCycleViewSchema.parse({
+      ...attentionCycle,
+      turns: [...attentionCycle.turns, latestHumanTurn],
+    });
+    rerender(
+      <PlanningPane
+        cycle={pendingTurnCycle}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        recovery={{ kind: 'retryable', message: 'Retry planning.' }}
+        {...callbacks}
+      />,
+    );
+    expect(input()).toHaveValue('');
+
+    await user.type(input(), 'Turn state draft');
+    const boundTurnCycle = planningCycleViewSchema.parse({
+      ...pendingTurnCycle,
+      turns: [
+        ...pendingTurnCycle.turns.slice(0, -1),
+        {
+          ...latestHumanTurn,
+          launchState: 'execution_bound',
+          executionId: secondExecutionId,
+        },
+      ],
+    });
+    rerender(
+      <PlanningPane
+        cycle={boundTurnCycle}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        recovery={{ kind: 'retryable', message: 'Retry planning.' }}
+        {...callbacks}
+      />,
+    );
+    expect(input()).toHaveValue('');
   });
 
   it('renders ambiguous operation evidence with abandon as the only available action', async () => {

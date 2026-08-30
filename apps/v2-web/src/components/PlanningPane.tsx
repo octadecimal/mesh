@@ -304,9 +304,9 @@ export function PlanningPane({
   executions?: readonly WorkerExecution[];
   approvedIntentLedger?: ApprovedIntentLedger | null;
   onSubmitTurn: (message: string, profile?: ProfileSelection) => void;
-  onApprove: (proposalId: string) => void;
-  onReject: (proposalId: string, feedback: string) => void;
-  onAbandon: (cycleId: string) => void;
+  onApprove: (proposalId: PlanningProposal['id']) => void;
+  onReject: (proposalId: PlanningProposal['id'], feedback: string) => void;
+  onAbandon: (cycleId: PlanningCycleView['cycle']['id']) => void;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [draft, setDraft] = useState('');
@@ -316,7 +316,8 @@ export function PlanningPane({
   const [rejectionFeedback, setRejectionFeedback] = useState('');
   const lifecycle = cycle?.cycle.lifecycle;
   const proposal = latestProposal(cycle);
-  const latestExecutionId = cycle?.turns.at(-1)?.executionId;
+  const latestTurn = cycle?.turns.at(-1);
+  const latestExecutionId = latestTurn?.executionId;
   const latestExecution = executions.find(
     (execution) => execution.id === latestExecutionId,
   );
@@ -352,6 +353,15 @@ export function PlanningPane({
     if (!profiles.some((profile) => profile.profileId === profileId))
       setProfileId(profiles[0]?.profileId ?? '');
   }, [profileId, profiles]);
+  useEffect(() => {
+    setDraft('');
+  }, [
+    cycle?.cycle.id,
+    cycle?.cycle.revision,
+    lifecycle,
+    latestTurn?.id,
+    latestTurn?.launchState,
+  ]);
   useEffect(() => {
     setRequestingRevision(false);
     setRejecting(false);
