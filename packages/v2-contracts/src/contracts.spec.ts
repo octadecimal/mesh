@@ -1531,6 +1531,15 @@ describe('V2 intent ledger contracts', () => {
     success: boolean;
     error?: { issues: unknown[] };
   }) => (result.success ? '' : JSON.stringify(result.error?.issues));
+  const planningQuestion = {
+    id: randomUUID(),
+    projectId,
+    planningCycleId,
+    turnId: pmTurnId,
+    key: 'storage-choice',
+    prompt: 'Which storage should the Todo app use?',
+    rationale: 'Storage determines restart behavior.',
+  };
 
   it('requires coherent approved terminal outcomes in events and command results', () => {
     const approvedEvent = {
@@ -1834,7 +1843,57 @@ describe('V2 intent ledger contracts', () => {
     }
   });
 
+  it('accepts PM-authored question and proposal provenance', () => {
+    const view = { ...cycleView, questions: [planningQuestion] };
+    expect(planningCycleViewSchema.parse(view)).toEqual(view);
+  });
+
+  it('rejects a question attributed to a human turn', () => {
+    expect(
+      issueText(
+        planningCycleViewSchema.safeParse({
+          ...cycleView,
+          questions: [{ ...planningQuestion, turnId: humanTurnId }],
+        }),
+      ),
+    ).toMatch(/questions must reference a PM-authored turn/i);
+  });
+
+  it('rejects a proposal attributed to a human turn', () => {
+    expect(
+      issueText(
+        planningCycleViewSchema.safeParse({
+          ...cycleView,
+          proposals: [{ ...proposal, createdByTurnId: humanTurnId }],
+        }),
+      ),
+    ).toMatch(/proposals must reference a PM-authored turn/i);
+  });
+
+  it('rejects a proposal execution unrelated to its PM turn', () => {
+    expect(
+      issueText(
+        planningCycleViewSchema.safeParse({
+          ...cycleView,
+          proposals: [{ ...proposal, createdByExecutionId: randomUUID() }],
+        }),
+      ),
+    ).toMatch(/proposal execution must match its PM turn/i);
+  });
+
   it('enforces proposal decision fields and cycle/latest-proposal coherence', () => {
+    const activeCycleView = {
+      ...cycleView,
+      cycle: {
+        ...cycleView.cycle,
+        lifecycle: 'execution_active' as const,
+        activeExecutionId: executionId,
+      },
+    };
+    expect(planningCycleViewSchema.parse(activeCycleView)).toEqual(
+      activeCycleView,
+    );
+
     for (const [label, candidate, expected] of [
       [
         'awaiting proposal with decision time',
@@ -1911,6 +1970,17 @@ describe('V2 intent ledger contracts', () => {
         },
         /active cycles require an execution id/i,
       ],
+      [
+        'active cycle with unrelated execution',
+        {
+          ...activeCycleView,
+          cycle: {
+            ...activeCycleView.cycle,
+            activeExecutionId: randomUUID(),
+          },
+        },
+        /active execution must match the latest bound human turn/i,
+      ],
     ] as const) {
       expect(
         issueText(planningCycleViewSchema.safeParse(candidate)),
@@ -1965,6 +2035,25 @@ describe('V2 intent ledger contracts', () => {
       lifecycle: 'superseded' as const,
       decidedAt: now,
     };
+    const firstSupersededProposal = {
+      ...proposal,
+      lifecycle: 'superseded' as const,
+      decidedAt: now,
+    };
+    const secondAwaitingProposal = {
+      ...proposal,
+      id: randomUUID(),
+      revision: 2,
+    };
+    const contiguousHistory = {
+      ...cycleView,
+      cycle: { ...cycleView.cycle, latestProposalRevision: 2 },
+      proposals: [firstSupersededProposal, secondAwaitingProposal],
+    };
+    expect(planningCycleViewSchema.parse(contiguousHistory)).toEqual(
+      contiguousHistory,
+    );
+
     for (const [label, candidate, expected] of [
       [
         'launch pending without pending human turn',
@@ -2015,6 +2104,26 @@ describe('V2 intent ledger contracts', () => {
           proposals: [proposal, laterSupersededProposal],
         },
         /awaiting proposal must be latest/i,
+      ],
+      [
+        'proposal revision gap',
+        {
+          ...contiguousHistory,
+          cycle: { ...contiguousHistory.cycle, latestProposalRevision: 3 },
+          proposals: [
+            firstSupersededProposal,
+            { ...secondAwaitingProposal, revision: 3 },
+          ],
+        },
+        /proposal revisions must be ordered and contiguous/i,
+      ],
+      [
+        'proposal revisions reordered',
+        {
+          ...contiguousHistory,
+          proposals: [secondAwaitingProposal, firstSupersededProposal],
+        },
+        /proposal revisions must be ordered and contiguous/i,
       ],
     ] as const) {
       expect(
@@ -2113,6 +2222,24 @@ describe('V2 intent ledger contracts', () => {
           input: { ...assignment.input, latestProposal: null },
         },
         /expected proposal revision must be one/i,
+      ],
+      [
+        'duplicate conversation turn across actors',
+        {
+          ...assignment,
+          input: {
+            ...assignment.input,
+            conversation: [
+              assignment.input.conversation[0],
+              {
+                turnId: humanTurnId,
+                actor: 'pm',
+                message: 'Duplicate turn ID.',
+              },
+            ],
+          },
+        },
+        /conversation turn IDs must be unique/i,
       ],
     ] as const) {
       expect(
@@ -2305,7 +2432,7 @@ describe('V2 intent ledger contracts', () => {
       id: randomUUID(),
       projectId,
       planningCycleId,
-      turnId: humanTurnId,
+      turnId: pmTurnId,
       key: `persisted-question-${index}`,
       prompt: `Question ${index}`,
       rationale: `Rationale ${index}`,

@@ -744,7 +744,8 @@ export const planningCycleViewSchema = z
   .superRefine((value, context) => {
     const projectId = value.cycle.projectId;
     const cycleId = value.cycle.id;
-    const turnIds = new Set(value.turns.map((turn) => turn.id));
+    const turnsById = new Map(value.turns.map((turn) => [turn.id, turn]));
+    const turnIds = new Set(turnsById.keys());
     value.turns.forEach((turn, index) => {
       if (turn.ordinal !== index + 1) {
         context.addIssue({
@@ -799,20 +800,40 @@ export const planningCycleViewSchema = z
       });
     }
     value.questions.forEach((question, index) => {
-      if (!turnIds.has(question.turnId)) {
+      const turn = turnsById.get(question.turnId);
+      if (turn === undefined) {
         context.addIssue({
           code: 'custom',
           path: ['questions', index, 'turnId'],
           message: 'Planning questions must reference a turn in the view',
         });
+      } else if (turn.actor !== 'pm') {
+        context.addIssue({
+          code: 'custom',
+          path: ['questions', index, 'turnId'],
+          message: 'Planning questions must reference a PM-authored turn',
+        });
       }
     });
     value.proposals.forEach((proposal, index) => {
-      if (!turnIds.has(proposal.createdByTurnId)) {
+      const turn = turnsById.get(proposal.createdByTurnId);
+      if (turn === undefined) {
         context.addIssue({
           code: 'custom',
           path: ['proposals', index, 'createdByTurnId'],
           message: 'Planning proposals must reference a turn in the view',
+        });
+      } else if (turn.actor !== 'pm') {
+        context.addIssue({
+          code: 'custom',
+          path: ['proposals', index, 'createdByTurnId'],
+          message: 'Planning proposals must reference a PM-authored turn',
+        });
+      } else if (proposal.createdByExecutionId !== turn.executionId) {
+        context.addIssue({
+          code: 'custom',
+          path: ['proposals', index, 'createdByExecutionId'],
+          message: 'Proposal execution must match its PM turn',
         });
       }
     });
@@ -825,9 +846,6 @@ export const planningCycleViewSchema = z
       });
     }
     const proposalIds = new Set(value.proposals.map((proposal) => proposal.id));
-    const proposalRevisions = new Set(
-      value.proposals.map((proposal) => proposal.revision),
-    );
     if (proposalIds.size !== value.proposals.length) {
       context.addIssue({
         code: 'custom',
@@ -835,20 +853,16 @@ export const planningCycleViewSchema = z
         message: 'Planning proposal IDs must be unique',
       });
     }
-    if (proposalRevisions.size !== value.proposals.length) {
-      context.addIssue({
-        code: 'custom',
-        path: ['proposals'],
-        message: 'Planning proposal revisions must be unique',
-      });
-    }
-    const latestProposal = value.proposals.reduce<PlanningProposal | null>(
-      (latest, proposal) =>
-        latest === null || proposal.revision > latest.revision
-          ? proposal
-          : latest,
-      null,
-    );
+    value.proposals.forEach((proposal, index) => {
+      if (proposal.revision !== index + 1) {
+        context.addIssue({
+          code: 'custom',
+          path: ['proposals', index, 'revision'],
+          message: 'Planning proposal revisions must be ordered and contiguous',
+        });
+      }
+    });
+    const latestProposal = value.proposals.at(-1) ?? null;
     const latestTurn = value.turns.at(-1);
     if (
       value.cycle.lifecycle === 'launch_pending' &&
@@ -860,6 +874,24 @@ export const planningCycleViewSchema = z
         path: ['turns'],
         message:
           'Launch-pending cycles require the latest turn to be a launch-pending human turn',
+      });
+    }
+    const latestBoundHumanTurn = value.turns.reduce<PlanningTurn | null>(
+      (latest, turn) =>
+        turn.actor === 'human' && turn.launchState === 'execution_bound'
+          ? turn
+          : latest,
+      null,
+    );
+    if (
+      value.cycle.lifecycle === 'execution_active' &&
+      value.cycle.activeExecutionId !== latestBoundHumanTurn?.executionId
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['cycle', 'activeExecutionId'],
+        message:
+          'Active execution must match the latest bound human turn execution',
       });
     }
     const awaitingProposals = value.proposals.filter(
@@ -1171,6 +1203,17 @@ export const pmDiscoveryInputSchema = z
     approvedIntentLedger: approvedIntentLedgerSchema.nullable(),
   })
   .superRefine((value, context) => {
+    const turnIds = new Set<string>();
+    value.conversation.forEach((turn, index) => {
+      if (turnIds.has(turn.turnId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['conversation', index, 'turnId'],
+          message: 'Conversation turn IDs must be unique',
+        });
+      }
+      turnIds.add(turn.turnId);
+    });
     const humanTurnCount = value.conversation.filter(
       (turn) => turn.actor === 'human',
     ).length;
