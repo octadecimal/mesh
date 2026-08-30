@@ -1,0 +1,502 @@
+import { randomUUID } from 'node:crypto';
+
+import {
+  startExecutionEnvelopeSchema,
+  workerExecutionSchema,
+  type PmDiscoveryAssignment,
+  type StartExecutionEnvelope,
+  type V2CommandResult,
+  type WorkerExecution,
+} from '@mesh/v2-contracts';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { inImmediateTransaction } from '../db/database.js';
+import { AuditBarrier } from '../executions/audit-barrier.js';
+import { ExecutionRepository } from '../executions/execution-repository.js';
+import { OperationRepository } from '../executions/operation-repository.js';
+import { hashV2Command } from '../storage/command-repository.js';
+import { createV2TestDatabase } from '../test/create-v2-test-database.js';
+import { PlanningRepository } from './planning-repository.js';
+import {
+  PlanningService,
+  type PmExecutionLauncher,
+  type PmExecutionLaunchInput,
+  type PmExecutionReservation,
+} from './planning-service.js';
+
+const fixtures: ReturnType<typeof createV2TestDatabase>[] = [];
+const now = '2026-08-29T00:00:00.000Z';
+
+class FakeLauncher implements PmExecutionLauncher {
+  readonly inputs: PmExecutionLaunchInput[] = [];
+  readonly trace: string[] = [];
+  readonly byKey = new Map<string, PmExecutionReservation>();
+  reserveBarrier: Promise<void> | undefined;
+  activateBarrier: Promise<void> | undefined;
+  cancelError: Error | undefined;
+  interruptError: Error | undefined;
+
+  constructor(
+    private readonly fixture: ReturnType<typeof createV2TestDatabase>,
+    private readonly executions: ExecutionRepository,
+    private readonly operations: OperationRepository,
+  ) {}
+
+  findReserved(input: StartExecutionEnvelope) {
+    this.inputs.push(startExecutionEnvelopeSchema.parse(input));
+    return this.byKey.get(input.idempotencyKey);
+  }
+
+  async reserve(input: StartExecutionEnvelope) {
+    const parsed = startExecutionEnvelopeSchema.parse(input);
+    this.inputs.push(parsed);
+    this.trace.push('reserve');
+    const existing = this.byKey.get(parsed.idempotencyKey);
+    if (existing) return existing;
+    const execution = workerExecutionSchema.parse({
+      id: randomUUID(),
+      projectId: parsed.command.projectId,
+      profileId: parsed.command.profileId,
+      profileRevision: parsed.command.profileRevision,
+      assignment: parsed.command.assignment,
+      profileSnapshot: {
+        profileId: this.fixture.pmProfileRevision.profileId,
+        projectId: null,
+        profileRevision: this.fixture.pmProfileRevision.revision,
+        baseProfileId: null,
+        baseRevision: null,
+        document: this.fixture.pmProfileRevision.document,
+        digest: this.fixture.pmProfileRevision.digest,
+      },
+      skillRequests: { preferred: [], required: [] },
+      resolvedSkills: [],
+      capabilitySnapshot: {
+        adapterId: 'fake',
+        capabilities: ['execution.stream'],
+        skills: [],
+        exactResume: true,
+      },
+      adapterId: 'fake',
+      model: 'deterministic',
+      nativeHandle: null,
+      lifecycle: 'starting',
+      revision: 0,
+      lastAdapterCursor: 0,
+      lastRuntimeSequence: 0,
+      replacementForExecutionId: null,
+      failure: null,
+      createdAt: now,
+      updatedAt: now,
+      endedAt: null,
+    });
+    const result: V2CommandResult = {
+      ok: true,
+      commandType: 'worker_execution.start',
+      execution,
+    };
+    inImmediateTransaction(this.fixture.database, () => {
+      this.executions.insertInTransaction(execution);
+      this.operations.createPendingInTransaction({
+        executionId: execution.id,
+        kind: 'start',
+        request: {
+          version: 'mesh.v2.execution-start/v1',
+          idempotencyKey: parsed.idempotencyKey,
+          requestHash: hashV2Command(parsed.command),
+          request: parsed.command,
+        },
+        createdAt: now,
+      });
+    });
+    const reservation = { execution, result, activationRequired: true };
+    this.byKey.set(parsed.idempotencyKey, reservation);
+    await this.reserveBarrier;
+    return reservation;
+  }
+
+  async activate(executionId: string) {
+    this.trace.push('activate');
+    await this.activateBarrier;
+    const current = this.executions.get(executionId)!;
+    if (current.lifecycle !== 'starting') return;
+    inImmediateTransaction(this.fixture.database, () => {
+      this.executions.transitionInTransaction(
+        executionId,
+        current.revision,
+        'running',
+        now,
+        { nativeHandle: `fake:${executionId}` },
+      );
+      const operation = this.operations
+        .listForExecution(executionId)
+        .find(({ kind }) => kind === 'start')!;
+      this.operations.finishInTransaction(
+        operation.id,
+        'succeeded',
+        { status: 'succeeded' },
+        now,
+      );
+    });
+  }
+
+  async cancelReserved(executionId: string): Promise<WorkerExecution> {
+    this.trace.push('cancel');
+    if (this.cancelError) throw this.cancelError;
+    const current = this.executions.get(executionId)!;
+    if (current.lifecycle !== 'starting') return current;
+    return inImmediateTransaction(this.fixture.database, () => {
+      const failed = this.executions.transitionInTransaction(
+        executionId,
+        current.revision,
+        'failed',
+        now,
+        {
+          failure: {
+            code: 'startup_interrupted_before_start',
+            message: 'Planning cycle was abandoned before adapter start',
+          },
+        },
+      );
+      const operation = this.operations
+        .listForExecution(executionId)
+        .find(({ kind }) => kind === 'start')!;
+      this.operations.finishInTransaction(
+        operation.id,
+        'failed',
+        { reason: 'planning_cycle_abandoned' },
+        now,
+      );
+      return failed;
+    });
+  }
+
+  async interruptForPlanning(executionId: string): Promise<void> {
+    this.trace.push('interrupt');
+    if (this.interruptError) throw this.interruptError;
+    const current = this.executions.get(executionId)!;
+    if (current.lifecycle !== 'running') return;
+    inImmediateTransaction(this.fixture.database, () => {
+      const interrupting = this.executions.transitionInTransaction(
+        executionId,
+        current.revision,
+        'interrupting',
+        now,
+      );
+      this.executions.transitionInTransaction(
+        executionId,
+        interrupting.revision,
+        'interrupted',
+        now,
+      );
+    });
+  }
+}
+
+const setup = () => {
+  const fixture = createV2TestDatabase();
+  fixtures.push(fixture);
+  const repository = new PlanningRepository(fixture.database);
+  const executions = new ExecutionRepository(fixture.database);
+  const operations = new OperationRepository(fixture.database);
+  const launcher = new FakeLauncher(fixture, executions, operations);
+  const publish = vi.fn();
+  const service = new PlanningService({
+    database: fixture.database,
+    repository,
+    commands: fixture.commands,
+    events: fixture.events,
+    executions,
+    profiles: {
+      resolveApproved: () => ({
+        profileId: fixture.pmProfileRevision.profileId,
+        projectId: null,
+        profileRevision: fixture.pmProfileRevision.revision,
+        baseProfileId: null,
+        baseRevision: null,
+        document: fixture.pmProfileRevision.document,
+        digest: fixture.pmProfileRevision.digest,
+      }),
+    },
+    launcher,
+    barrier: new AuditBarrier(),
+    reportConsumer: { consume: vi.fn() },
+    now: () => now,
+    publishDomain: publish,
+  });
+  return {
+    fixture,
+    repository,
+    executions,
+    operations,
+    launcher,
+    publish,
+    service,
+  };
+};
+
+afterEach(() => {
+  for (const fixture of fixtures.splice(0)) fixture.close();
+});
+
+const firstTurn = (fixture: ReturnType<typeof createV2TestDatabase>) => ({
+  idempotencyKey: 'planning-first',
+  actor: { kind: 'human' as const },
+  command: {
+    type: 'planning_cycle.submit_turn' as const,
+    projectId: fixture.project.id,
+    expectedCycleRevision: null,
+    profileId: fixture.pmProfileRevision.profileId,
+    profileRevision: fixture.pmProfileRevision.revision,
+    message: 'Build a persistent Todo application.',
+  },
+});
+
+describe('PlanningService', () => {
+  it('commits a human turn, publishes it, binds the exact reservation, then activates', async () => {
+    const { fixture, repository, launcher, publish, service } = setup();
+
+    const result = await service.submitTurn(firstTurn(fixture));
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'planning_cycle.submit_turn',
+      planningCycle: { cycle: { lifecycle: 'launch_pending' } },
+    });
+    const active = repository.activeCycle(fixture.project.id)!;
+    const view = repository.cycleView(active.id)!;
+    const human = view.turns[0];
+    expect(view.cycle.lifecycle).toBe('execution_active');
+    expect(human.launchState).toBe('execution_bound');
+    expect(launcher.trace).toEqual(['reserve', 'activate']);
+    expect(publish).toHaveBeenCalledTimes(2);
+    const launch = launcher.inputs.at(-1)!;
+    expect(startExecutionEnvelopeSchema.parse(launch)).toEqual(launch);
+    expect(launch).toMatchObject({
+      idempotencyKey: `planning-turn:${human.id}`,
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.start',
+        projectId: fixture.project.id,
+        profileId: fixture.pmProfileRevision.profileId,
+        profileRevision: fixture.pmProfileRevision.revision,
+        assignment: {
+          kind: 'pm_discovery',
+          planningCycleId: active.id,
+          humanTurnId: human.id,
+          expectedCycleRevision: 1,
+          expectedProposalRevision: 1,
+        } satisfies Partial<PmDiscoveryAssignment>,
+      },
+    });
+  });
+
+  it('replays the exact submit result and rejects a distinct concurrent turn without writes', async () => {
+    const { fixture, repository, launcher, service } = setup();
+    const envelope = firstTurn(fixture);
+    const first = await service.submitTurn(envelope);
+    const active = repository.activeCycle(fixture.project.id)!;
+    const replay = await service.submitTurn(envelope);
+    const distinct = await service.submitTurn({
+      idempotencyKey: 'planning-distinct',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.submit_turn',
+        projectId: fixture.project.id,
+        planningCycleId: active.id,
+        expectedCycleRevision: active.revision,
+        message: 'A second turn while execution is active.',
+      },
+    });
+
+    expect(replay).toEqual(first);
+    expect(distinct).toMatchObject({
+      ok: false,
+      error: { code: 'planning_cycle_revision_conflict' },
+    });
+    expect(repository.cycleView(active.id)?.turns).toHaveLength(1);
+    expect(launcher.trace.filter((entry) => entry === 'reserve')).toHaveLength(
+      1,
+    );
+  });
+
+  it('rejects an incompatible PM profile before a turn, event, or launch write', async () => {
+    const context = setup();
+    const service = new PlanningService({
+      database: context.fixture.database,
+      repository: context.repository,
+      commands: context.fixture.commands,
+      events: context.fixture.events,
+      executions: context.executions,
+      profiles: {
+        resolveApproved: () => ({
+          profileId: context.fixture.profileRevision.profileId,
+          projectId: null,
+          profileRevision: context.fixture.profileRevision.revision,
+          baseProfileId: null,
+          baseRevision: null,
+          document: context.fixture.profileRevision.document,
+          digest: context.fixture.profileRevision.digest,
+        }),
+      },
+      launcher: context.launcher,
+      barrier: new AuditBarrier(),
+      reportConsumer: { consume: vi.fn() },
+      now: () => now,
+      publishDomain: context.publish,
+    });
+
+    const result = await service.submitTurn(firstTurn(context.fixture));
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'planning_profile_incompatible' },
+    });
+    expect(
+      context.repository.activeCycle(context.fixture.project.id),
+    ).toBeUndefined();
+    expect(
+      context.fixture.events.cursors(context.fixture.project.id).domain,
+    ).toBe(0);
+    expect(context.launcher.trace).toEqual([]);
+  });
+
+  it('cancels a reserved launch before binding and commits abandonment last', async () => {
+    const { fixture, repository, launcher, service } = setup();
+    let release!: () => void;
+    launcher.reserveBarrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const submit = service.submitTurn(firstTurn(fixture));
+    while (!launcher.trace.includes('reserve')) await Promise.resolve();
+    const cycle = repository.activeCycle(fixture.project.id)!;
+    const abandon = service.abandonCycle({
+      idempotencyKey: 'abandon-reserved',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.abandon',
+        projectId: fixture.project.id,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+      },
+    });
+    release();
+    await submit;
+    const result = await abandon;
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'planning_cycle.abandon',
+      planningCycle: { cycle: { lifecycle: 'abandoned' } },
+    });
+    expect(launcher.trace).toEqual(['reserve', 'cancel']);
+    expect(repository.cycle(cycle.id)?.lifecycle).toBe('abandoned');
+    const abandoned = repository.cycle(cycle.id)!;
+    const repeat = await service.abandonCycle({
+      idempotencyKey: 'abandon-distinct-after-terminal',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.abandon',
+        projectId: fixture.project.id,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: abandoned.revision,
+      },
+    });
+    expect(repeat).toMatchObject({
+      ok: false,
+      error: { code: 'planning_cycle_revision_conflict' },
+    });
+  });
+
+  it('does not store abandonment when cleanup fails', async () => {
+    const { fixture, repository, launcher, service } = setup();
+    await service.submitTurn(firstTurn(fixture));
+    const cycle = repository.activeCycle(fixture.project.id)!;
+    launcher.interruptError = new Error('interrupt cleanup failed');
+
+    await expect(
+      service.abandonCycle({
+        idempotencyKey: 'abandon-fails',
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.abandon',
+          projectId: fixture.project.id,
+          planningCycleId: cycle.id,
+          expectedCycleRevision: cycle.revision,
+        },
+      }),
+    ).rejects.toThrow('interrupt cleanup failed');
+    expect(repository.cycle(cycle.id)?.lifecycle).not.toBe('abandoned');
+    expect(fixture.commands.find('abandon-fails')).toBeUndefined();
+  });
+
+  it('projects an existing reconciled reservation to attention without reserving or activating', async () => {
+    const { fixture, repository, executions, operations, launcher, service } =
+      setup();
+    const reserveFailure = vi
+      .spyOn(launcher, 'reserve')
+      .mockRejectedValueOnce(new Error('reservation transport stopped'));
+    await expect(service.submitTurn(firstTurn(fixture))).rejects.toThrow(
+      'reservation transport stopped',
+    );
+    reserveFailure.mockRestore();
+    const turn = repository.pendingLaunchTurns()[0];
+    const launch = launcher.inputs.at(-1)!;
+    const reservation = await launcher.reserve(launch);
+    const starting = executions.get(reservation.execution.id)!;
+    inImmediateTransaction(fixture.database, () => {
+      executions.transitionInTransaction(
+        starting.id,
+        starting.revision,
+        'attention_required',
+        now,
+        {
+          failure: {
+            code: 'internal_error',
+            message: 'Startup state was unknown after restart',
+          },
+        },
+      );
+      operations.finishInTransaction(
+        operations.listForExecution(starting.id)[0].id,
+        'unknown',
+        { reason: 'restart_reconciliation' },
+        now,
+      );
+    });
+    launcher.trace.splice(0);
+    const findReserved = vi.spyOn(launcher, 'findReserved');
+
+    service.reconcilePendingReservations();
+
+    expect(repository.turn(turn.id)).toMatchObject({
+      launchState: 'execution_bound',
+      executionId: starting.id,
+    });
+    expect(repository.cycle(turn.planningCycleId)?.lifecycle).toBe(
+      'attention_required',
+    );
+    expect(launcher.trace).toEqual([]);
+
+    const operationBefore = operations.listForExecution(starting.id)[0];
+    const attentionCycle = repository.cycle(turn.planningCycleId)!;
+    const abandoned = await service.abandonCycle({
+      idempotencyKey: 'abandon-reconciled-attention',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.abandon',
+        projectId: fixture.project.id,
+        planningCycleId: attentionCycle.id,
+        expectedCycleRevision: attentionCycle.revision,
+      },
+    });
+    expect(abandoned).toMatchObject({
+      ok: true,
+      planningCycle: { cycle: { lifecycle: 'abandoned' } },
+    });
+    expect(findReserved).toHaveBeenCalledTimes(2);
+    expect(launcher.trace).toEqual([]);
+    expect(operations.listForExecution(starting.id)[0]).toEqual(
+      operationBefore,
+    );
+  });
+});

@@ -55,6 +55,7 @@ export type V2TestDatabase = {
   events: V2EventStore;
   project: Project;
   profileRevision: WorkerProfileRevision;
+  pmProfileRevision: WorkerProfileRevision;
   execution: WorkerExecution;
   close(): void;
 };
@@ -168,6 +169,77 @@ export const createV2TestDatabase = (
         profileRevision.digest,
       );
 
+    const pmProfileId = randomUUID();
+    const pmProfileDocument = {
+      apiVersion: 'mesh.dev/v1alpha1' as const,
+      kind: 'WorkerProfile' as const,
+      metadata: {
+        name: 'project-manager',
+        displayName: 'Project manager',
+        scope: 'global' as const,
+      },
+      spec: {
+        assignmentKinds: ['pm_discovery'] as const,
+        preferredRuntime: { harness: 'fake', model: 'deterministic' },
+        alternatives: [],
+        requiredCapabilities: ['execution.stream'],
+        skills: { preferred: [], required: [] },
+        instructions:
+          'Clarify intent and propose the complete approved ledger.',
+        outputSchema: 'mesh.dev/pm-discovery-report/v1',
+      },
+    };
+    const pmProfileRevision = workerProfileRevisionSchema.parse({
+      profileId: pmProfileId,
+      scope: 'global',
+      projectId: null,
+      name: pmProfileDocument.metadata.name,
+      displayName: pmProfileDocument.metadata.displayName,
+      revision: 1,
+      sourceYaml: 'apiVersion: mesh.dev/v1alpha1',
+      document: pmProfileDocument,
+      baseProfileId: null,
+      baseRevision: null,
+      approvedBy: { kind: 'human' },
+      approvedAt: now,
+      digest: 'c'.repeat(64),
+    });
+    database
+      .prepare(
+        `INSERT INTO worker_profiles (
+        id, scope, project_id, name, display_name, approved_revision,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        pmProfileId,
+        'global',
+        null,
+        pmProfileRevision.name,
+        pmProfileRevision.displayName,
+        1,
+        now,
+        now,
+      );
+    database
+      .prepare(
+        `INSERT INTO worker_profile_revisions (
+        profile_id, revision, source_yaml, normalized_json,
+        base_profile_id, base_revision, approved_by, approved_at, digest
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        pmProfileId,
+        1,
+        pmProfileRevision.sourceYaml,
+        canonicalJson(pmProfileRevision.document),
+        null,
+        null,
+        canonicalJson(pmProfileRevision.approvedBy),
+        now,
+        pmProfileRevision.digest,
+      );
+
     const execution = workerExecutionSchema.parse({
       id: randomUUID(),
       projectId: project.id,
@@ -248,6 +320,7 @@ export const createV2TestDatabase = (
       events: new V2EventStore(initializedDatabase),
       project,
       profileRevision,
+      pmProfileRevision,
       execution,
       close() {
         if (closed) return;

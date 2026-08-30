@@ -16,7 +16,16 @@ const foundationMigration = {
   ),
 };
 
-const migrations = [foundationMigration] as const;
+const intentLedgerMigration = {
+  version: 2,
+  name: '002_intent_ledger',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '002_intent_ledger.sql'),
+    'utf8',
+  ),
+};
+
+const migrations = [foundationMigration, intentLedgerMigration] as const;
 
 type MigrationLedgerRow = { version: number; name: string };
 
