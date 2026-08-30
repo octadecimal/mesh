@@ -32,7 +32,10 @@ import {
 import { canonicalJson } from '../storage/canonical-json.js';
 import type { V2EventStore } from '../storage/event-store.js';
 import type { PmReportConsumer } from './pm-report-consumer.js';
-import { PlanningRepository } from './planning-repository.js';
+import {
+  PlanningProposalInvalidError,
+  PlanningRepository,
+} from './planning-repository.js';
 
 export type PmExecutionReservation = {
   execution: WorkerExecution;
@@ -195,13 +198,14 @@ export class PlanningService {
         )!;
         if (
           currentView.turns.filter(({ actor }) => actor === 'human').length >=
-          32
+            32 ||
+          currentView.proposals.length >= 16
         ) {
           return this.storeFailure(
             envelope,
             requestHash,
             'planning_cycle_history_limit',
-            'Planning cycle reached its human-turn limit',
+            'Planning cycle reached its history limit',
             at,
           );
         }
@@ -399,9 +403,11 @@ export class PlanningService {
 
   reconcilePendingReservations(): void {
     for (const turn of this.dependencies.repository.pendingLaunchTurns()) {
+      const coordinator = this.coordinator(turn.planningCycleId);
+      if (!this.isLaunchable(turn, coordinator)) continue;
       const input = this.launchInput(turn);
       const reservation = this.dependencies.launcher.findReserved(input);
-      if (reservation) {
+      if (reservation && this.isLaunchable(turn, coordinator)) {
         this.assertReservation(input, reservation);
         this.bindReservation(turn, reservation, true);
       }
@@ -549,11 +555,22 @@ export class PlanningService {
             at,
           );
         }
-        intentLedger =
-          this.dependencies.repository.applyApprovedProposalInTransaction(
-            proposal,
+        try {
+          intentLedger =
+            this.dependencies.repository.applyApprovedProposalInTransaction(
+              proposal,
+              at,
+            );
+        } catch (error) {
+          if (!(error instanceof PlanningProposalInvalidError)) throw error;
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_proposal_invalid',
+            'Planning proposal is not valid for approval',
             at,
           );
+        }
       }
 
       this.dependencies.repository.updateProposalInTransaction({
@@ -630,24 +647,29 @@ export class PlanningService {
     const coordinator = this.coordinator(turn.planningCycleId);
     if (coordinator.active) return coordinator.active;
     coordinator.active = (async () => {
+      if (!this.isLaunchable(turn, coordinator)) return;
       const input = this.launchInput(turn);
       const existing = this.dependencies.launcher.findReserved(input);
       if (existing) {
         this.assertReservation(input, existing);
+        if (!this.isLaunchable(turn, coordinator)) {
+          await this.cancelStartingReservation(existing);
+          return;
+        }
         this.bindReservation(turn, existing, true);
         return;
       }
+      if (!this.isLaunchable(turn, coordinator)) return;
       const reservation = await this.dependencies.launcher.reserve(input);
       this.assertReservation(input, reservation);
-      if (coordinator.cancelled) {
-        if (reservation.execution.lifecycle === 'starting') {
-          await this.dependencies.launcher.cancelReserved(
-            reservation.execution.id,
-          );
-        }
+      if (!this.isLaunchable(turn, coordinator)) {
+        await this.cancelStartingReservation(reservation);
         return;
       }
-      this.bindReservation(turn, reservation, false);
+      if (!this.bindReservation(turn, reservation, false)) {
+        await this.cancelStartingReservation(reservation);
+        return;
+      }
       if (coordinator.cancelled) {
         const execution = this.dependencies.executions.get(
           reservation.execution.id,
@@ -672,16 +694,32 @@ export class PlanningService {
     turn: PlanningTurn,
     reservation: PmExecutionReservation,
     recovered: boolean,
-  ): void {
-    const current = this.dependencies.repository.turn(turn.id);
-    if (!current || current.launchState === 'execution_bound') return;
+  ): boolean {
     let event: DomainEvent | undefined;
+    let bound = false;
     this.auditTransaction(() => {
+      const current = this.dependencies.repository.turn(turn.id);
+      const cycle = this.dependencies.repository.cycle(turn.planningCycleId);
+      if (
+        current?.launchState === 'execution_bound' &&
+        current.executionId === reservation.execution.id &&
+        cycle?.lifecycle === 'execution_active'
+      ) {
+        bound = true;
+        return;
+      }
+      if (
+        !current ||
+        current.launchState !== 'launch_pending' ||
+        !cycle ||
+        cycle.lifecycle !== 'launch_pending'
+      ) {
+        return;
+      }
       this.dependencies.repository.bindTurnInTransaction(
         turn.id,
         reservation.execution.id,
       );
-      const cycle = this.dependencies.repository.cycle(turn.planningCycleId)!;
       const execution =
         this.dependencies.executions.get(reservation.execution.id) ??
         reservation.execution;
@@ -708,8 +746,34 @@ export class PlanningService {
           payload: { planningCycle },
         },
       );
+      bound = true;
     });
     if (event) this.dependencies.publishDomain?.(event);
+    return bound;
+  }
+
+  private isLaunchable(
+    turn: PlanningTurn,
+    coordinator: LaunchCoordinator,
+  ): boolean {
+    if (coordinator.cancelled) return false;
+    const current = this.dependencies.repository.turn(turn.id);
+    const cycle = this.dependencies.repository.cycle(turn.planningCycleId);
+    return (
+      current?.launchState === 'launch_pending' &&
+      cycle?.lifecycle === 'launch_pending'
+    );
+  }
+
+  private async cancelStartingReservation(
+    reservation: PmExecutionReservation,
+  ): Promise<void> {
+    const execution =
+      this.dependencies.executions.get(reservation.execution.id) ??
+      reservation.execution;
+    if (execution.lifecycle === 'starting') {
+      await this.dependencies.launcher.cancelReserved(execution.id);
+    }
   }
 
   private launchInput(turn: PlanningTurn): PmExecutionLaunchInput {

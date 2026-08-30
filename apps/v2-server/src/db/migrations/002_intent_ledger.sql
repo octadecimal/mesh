@@ -28,7 +28,13 @@ CREATE TABLE migration_002_start_operation_validation (
 
 INSERT INTO migration_002_start_operation_validation (marker)
 SELECT CASE
-  WHEN json_type(request_json, '$.idempotencyKey') = 'text'
+  WHEN json_type(request_json) = 'object'
+    AND (SELECT COUNT(*) FROM json_each(request_json)) = 2
+    AND NOT EXISTS (
+      SELECT 1 FROM json_each(request_json)
+      WHERE key NOT IN ('idempotencyKey', 'requestHash')
+    )
+    AND json_type(request_json, '$.idempotencyKey') = 'text'
     AND length(json_extract(request_json, '$.idempotencyKey')) > 0
     AND json_type(request_json, '$.requestHash') = 'text'
     AND length(json_extract(request_json, '$.requestHash')) = 64
@@ -48,6 +54,9 @@ CREATE UNIQUE INDEX execution_operations_start_request
   )
   WHERE kind = 'start';
 
+CREATE UNIQUE INDEX worker_executions_project_identity
+  ON worker_executions(id, project_id);
+
 CREATE TABLE planning_cycles (
   id TEXT PRIMARY KEY CHECK (length(id) > 0),
   project_id TEXT NOT NULL REFERENCES projects(id),
@@ -62,13 +71,19 @@ CREATE TABLE planning_cycles (
   base_project_intent_revision INTEGER CHECK (base_project_intent_revision > 0),
   base_ledger_revision INTEGER CHECK (base_ledger_revision > 0),
   latest_proposal_revision INTEGER NOT NULL CHECK (latest_proposal_revision >= 0),
-  active_execution_id TEXT REFERENCES worker_executions(id),
+  active_execution_id TEXT,
   created_at TEXT NOT NULL CHECK (length(created_at) > 0),
   updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
   ended_at TEXT CHECK (ended_at IS NULL OR length(ended_at) > 0),
   UNIQUE (id, project_id),
   FOREIGN KEY (profile_id, profile_revision)
     REFERENCES worker_profile_revisions(profile_id, revision),
+  FOREIGN KEY (active_execution_id, project_id)
+    REFERENCES worker_executions(id, project_id),
+  FOREIGN KEY (project_id, base_project_intent_revision)
+    REFERENCES project_intent_revisions(project_id, revision),
+  FOREIGN KEY (project_id, base_ledger_revision)
+    REFERENCES ledger_revisions(project_id, revision),
   CHECK ((base_project_intent_revision IS NULL) = (base_ledger_revision IS NULL)),
   CHECK ((lifecycle = 'execution_active') = (active_execution_id IS NOT NULL)),
   CHECK (
@@ -89,13 +104,15 @@ CREATE TABLE planning_turns (
   actor TEXT NOT NULL CHECK (actor IN ('human', 'pm')),
   message TEXT NOT NULL CHECK (length(message) BETWEEN 1 AND 16384),
   launch_state TEXT CHECK (launch_state IN ('launch_pending', 'execution_bound')),
-  execution_id TEXT REFERENCES worker_executions(id),
+  execution_id TEXT,
   created_at TEXT NOT NULL CHECK (length(created_at) > 0),
   UNIQUE (planning_cycle_id, ordinal),
   UNIQUE (id, project_id),
   UNIQUE (id, planning_cycle_id, project_id),
   FOREIGN KEY (planning_cycle_id, project_id)
     REFERENCES planning_cycles(id, project_id),
+  FOREIGN KEY (execution_id, project_id)
+    REFERENCES worker_executions(id, project_id),
   CHECK (
     (actor = 'human' AND launch_state IS NOT NULL)
     OR (actor = 'pm' AND launch_state IS NULL AND execution_id IS NOT NULL)
@@ -145,7 +162,7 @@ CREATE TABLE planning_proposals (
   relationships_json TEXT NOT NULL CHECK (json_valid(relationships_json)),
   diff_json TEXT NOT NULL CHECK (json_valid(diff_json)),
   created_by_turn_id TEXT NOT NULL,
-  created_by_execution_id TEXT NOT NULL REFERENCES worker_executions(id),
+  created_by_execution_id TEXT NOT NULL,
   rejection_feedback TEXT CHECK (
     rejection_feedback IS NULL OR length(rejection_feedback) > 0
   ),
@@ -157,6 +174,12 @@ CREATE TABLE planning_proposals (
     REFERENCES planning_cycles(id, project_id),
   FOREIGN KEY (created_by_turn_id, planning_cycle_id, project_id)
     REFERENCES planning_turns(id, planning_cycle_id, project_id),
+  FOREIGN KEY (created_by_execution_id, project_id)
+    REFERENCES worker_executions(id, project_id),
+  FOREIGN KEY (project_id, base_project_intent_revision)
+    REFERENCES project_intent_revisions(project_id, revision),
+  FOREIGN KEY (project_id, base_ledger_revision)
+    REFERENCES ledger_revisions(project_id, revision),
   CHECK ((base_project_intent_revision IS NULL) = (base_ledger_revision IS NULL)),
   CHECK ((lifecycle = 'awaiting_approval') = (decided_at IS NULL)),
   CHECK ((lifecycle = 'rejected') = (rejection_feedback IS NOT NULL))
@@ -171,7 +194,7 @@ CREATE TABLE planning_proposal_records (
 );
 
 CREATE TABLE pm_output_receipts (
-  execution_id TEXT PRIMARY KEY REFERENCES worker_executions(id),
+  execution_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
   planning_cycle_id TEXT NOT NULL,
   human_turn_id TEXT NOT NULL,
@@ -188,6 +211,8 @@ CREATE TABLE pm_output_receipts (
     REFERENCES planning_cycles(id, project_id),
   FOREIGN KEY (human_turn_id, planning_cycle_id, project_id)
     REFERENCES planning_turns(id, planning_cycle_id, project_id),
+  FOREIGN KEY (execution_id, project_id)
+    REFERENCES worker_executions(id, project_id),
   CHECK ((status = 'rejected') = (rejection_reason IS NOT NULL))
 );
 
@@ -196,12 +221,14 @@ CREATE TABLE project_intent_revisions (
   project_id TEXT NOT NULL REFERENCES projects(id),
   revision INTEGER NOT NULL CHECK (revision > 0),
   content_json TEXT NOT NULL CHECK (json_valid(content_json)),
-  proposal_id TEXT NOT NULL UNIQUE REFERENCES planning_proposals(id),
+  proposal_id TEXT NOT NULL UNIQUE,
   approved_by TEXT NOT NULL CHECK (approved_by = 'human'),
   approved_at TEXT NOT NULL CHECK (length(approved_at) > 0),
   PRIMARY KEY (id, revision),
   UNIQUE (project_id, revision),
-  UNIQUE (id, revision, project_id)
+  UNIQUE (id, revision, project_id),
+  FOREIGN KEY (proposal_id, project_id)
+    REFERENCES planning_proposals(id, project_id)
 );
 
 CREATE TABLE project_intent_provenance (
@@ -225,9 +252,11 @@ CREATE TABLE ledger_records (
   type TEXT NOT NULL CHECK (type IN (
     'requirement', 'decision', 'assumption', 'question', 'risk'
   )),
-  created_proposal_id TEXT NOT NULL REFERENCES planning_proposals(id),
+  created_proposal_id TEXT NOT NULL,
   created_at TEXT NOT NULL CHECK (length(created_at) > 0),
-  UNIQUE (id, project_id)
+  UNIQUE (id, project_id),
+  FOREIGN KEY (created_proposal_id, project_id)
+    REFERENCES planning_proposals(id, project_id)
 );
 
 CREATE TABLE ledger_record_revisions (
@@ -235,12 +264,14 @@ CREATE TABLE ledger_record_revisions (
   project_id TEXT NOT NULL,
   revision INTEGER NOT NULL CHECK (revision > 0),
   content_json TEXT NOT NULL CHECK (json_valid(content_json)),
-  proposal_id TEXT NOT NULL REFERENCES planning_proposals(id),
+  proposal_id TEXT NOT NULL,
   approved_by TEXT NOT NULL CHECK (approved_by = 'human'),
   approved_at TEXT NOT NULL CHECK (length(approved_at) > 0),
   PRIMARY KEY (record_id, revision),
   UNIQUE (record_id, revision, project_id),
-  FOREIGN KEY (record_id, project_id) REFERENCES ledger_records(id, project_id)
+  FOREIGN KEY (record_id, project_id) REFERENCES ledger_records(id, project_id),
+  FOREIGN KEY (proposal_id, project_id)
+    REFERENCES planning_proposals(id, project_id)
 );
 
 CREATE TABLE ledger_record_revision_provenance (
@@ -261,12 +292,14 @@ CREATE TABLE ledger_revisions (
   id TEXT NOT NULL CHECK (length(id) > 0),
   project_id TEXT NOT NULL REFERENCES projects(id),
   revision INTEGER NOT NULL CHECK (revision > 0),
-  proposal_id TEXT NOT NULL UNIQUE REFERENCES planning_proposals(id),
+  proposal_id TEXT NOT NULL UNIQUE,
   approved_by TEXT NOT NULL CHECK (approved_by = 'human'),
   approved_at TEXT NOT NULL CHECK (length(approved_at) > 0),
   PRIMARY KEY (id, revision),
   UNIQUE (project_id, revision),
-  UNIQUE (id, revision, project_id)
+  UNIQUE (id, revision, project_id),
+  FOREIGN KEY (proposal_id, project_id)
+    REFERENCES planning_proposals(id, project_id)
 );
 
 CREATE TABLE ledger_revision_members (

@@ -4,6 +4,9 @@ import {
   startExecutionEnvelopeSchema,
   workerExecutionSchema,
   type PmDiscoveryAssignment,
+  type PlanningCycle,
+  type PlanningProposal,
+  type PlanningTurn,
   type StartExecutionEnvelope,
   type V2CommandResult,
   type WorkerExecution,
@@ -200,6 +203,7 @@ const setup = () => {
   const operations = new OperationRepository(fixture.database);
   const launcher = new FakeLauncher(fixture, executions, operations);
   const publish = vi.fn();
+  const barrier = new AuditBarrier();
   const service = new PlanningService({
     database: fixture.database,
     repository,
@@ -218,7 +222,7 @@ const setup = () => {
       }),
     },
     launcher,
-    barrier: new AuditBarrier(),
+    barrier,
     reportConsumer: { consume: vi.fn() },
     now: () => now,
     publishDomain: publish,
@@ -229,9 +233,99 @@ const setup = () => {
     executions,
     operations,
     launcher,
+    barrier,
     publish,
     service,
   };
+};
+
+const seedProposalHistory = (
+  context: ReturnType<typeof setup>,
+): { cycle: PlanningCycle; human: PlanningTurn } => {
+  const cycle: PlanningCycle = {
+    id: randomUUID(),
+    projectId: context.fixture.project.id,
+    lifecycle: 'awaiting_approval',
+    revision: 1,
+    profileId: context.fixture.pmProfileRevision.profileId,
+    profileRevision: context.fixture.pmProfileRevision.revision,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    latestProposalRevision: 16,
+    activeExecutionId: null,
+    createdAt: now,
+    updatedAt: now,
+    endedAt: null,
+  };
+  const human: PlanningTurn = {
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    ordinal: 1,
+    actor: 'human',
+    message: 'Build a persistent Todo application.',
+    launchState: 'execution_bound',
+    executionId: context.fixture.execution.id,
+    createdAt: now,
+  };
+  const pm: PlanningTurn = {
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    ordinal: 2,
+    actor: 'pm',
+    message: 'Review this proposal.',
+    launchState: null,
+    executionId: context.fixture.execution.id,
+    createdAt: now,
+  };
+  const proposal = (revision: number): PlanningProposal => ({
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    revision,
+    lifecycle: revision === 16 ? 'awaiting_approval' : 'superseded',
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    summary: `Todo proposal ${revision}`,
+    projectIntent: {
+      goal: 'Ship Todo.',
+      targetUsers: ['People'],
+      desiredCapabilities: ['Add items'],
+      constraints: [],
+      nonGoals: [],
+      successConditions: ['Items persist'],
+      rationale: 'Requested.',
+      provenance: [
+        {
+          kind: 'conversation_turn',
+          turnId: human.id,
+          rationale: 'Initial request.',
+        },
+      ],
+    },
+    records: [],
+    relationships: [],
+    diff: {
+      intentChanges: [],
+      recordChanges: { create: 0, revise: 0, reuse: 0 },
+      relationshipChanges: { added: [], removed: [] },
+    },
+    createdByTurnId: pm.id,
+    createdByExecutionId: context.fixture.execution.id,
+    rejectionFeedback: null,
+    createdAt: now,
+    decidedAt: revision === 16 ? null : now,
+  });
+  inImmediateTransaction(context.fixture.database, () => {
+    context.repository.insertCycleInTransaction(cycle);
+    context.repository.insertTurnInTransaction(human);
+    context.repository.insertTurnInTransaction(pm);
+    for (let revision = 1; revision <= 16; revision += 1) {
+      context.repository.insertProposalInTransaction(proposal(revision));
+    }
+  });
+  return { cycle, human };
 };
 
 afterEach(() => {
@@ -360,6 +454,40 @@ describe('PlanningService', () => {
     expect(context.launcher.trace).toEqual([]);
   });
 
+  it('rejects the proposal history cap before any durable or launcher side effect', async () => {
+    const context = setup();
+    const { cycle } = seedProposalHistory(context);
+    const before = {
+      turns: context.repository.cycleView(cycle.id)!.turns,
+      cursor: context.fixture.events.cursors(cycle.projectId).domain,
+      executions: context.executions.list(cycle.projectId),
+    };
+
+    const result = await context.service.submitTurn({
+      idempotencyKey: 'proposal-cap',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.submit_turn',
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+        message: 'Please revise the proposal.',
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'planning_cycle_history_limit' },
+    });
+    expect(context.repository.cycleView(cycle.id)!.turns).toEqual(before.turns);
+    expect(context.fixture.events.cursors(cycle.projectId).domain).toBe(
+      before.cursor,
+    );
+    expect(context.executions.list(cycle.projectId)).toEqual(before.executions);
+    expect(context.launcher.inputs).toEqual([]);
+    expect(context.launcher.trace).toEqual([]);
+  });
+
   it('cancels a reserved launch before binding and commits abandonment last', async () => {
     const { fixture, repository, launcher, service } = setup();
     let release!: () => void;
@@ -427,6 +555,74 @@ describe('PlanningService', () => {
     ).rejects.toThrow('interrupt cleanup failed');
     expect(repository.cycle(cycle.id)?.lifecycle).not.toBe('abandoned');
     expect(fixture.commands.find('abandon-fails')).toBeUndefined();
+  });
+
+  it('does not reopen a failed launch after abandonment and restart', async () => {
+    const context = setup();
+    vi.spyOn(context.launcher, 'reserve').mockRejectedValueOnce(
+      new Error('reservation transport stopped'),
+    );
+    await expect(
+      context.service.submitTurn(firstTurn(context.fixture)),
+    ).rejects.toThrow('reservation transport stopped');
+    const pending = context.repository.pendingLaunchTurns()[0];
+    const cycle = context.repository.cycle(pending.planningCycleId)!;
+
+    const abandoned = await context.service.abandonCycle({
+      idempotencyKey: 'abandon-after-reservation-failure',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.abandon',
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+      },
+    });
+    expect(abandoned).toMatchObject({
+      ok: true,
+      planningCycle: { cycle: { lifecycle: 'abandoned' } },
+    });
+
+    const restartedLauncher = new FakeLauncher(
+      context.fixture,
+      context.executions,
+      context.operations,
+    );
+    const restarted = new PlanningService({
+      database: context.fixture.database,
+      repository: context.repository,
+      commands: context.fixture.commands,
+      events: context.fixture.events,
+      executions: context.executions,
+      profiles: {
+        resolveApproved: () => ({
+          profileId: context.fixture.pmProfileRevision.profileId,
+          projectId: null,
+          profileRevision: context.fixture.pmProfileRevision.revision,
+          baseProfileId: null,
+          baseRevision: null,
+          document: context.fixture.pmProfileRevision.document,
+          digest: context.fixture.pmProfileRevision.digest,
+        }),
+      },
+      launcher: restartedLauncher,
+      barrier: new AuditBarrier(),
+      reportConsumer: { consume: vi.fn() },
+      now: () => now,
+      publishDomain: vi.fn(),
+    });
+
+    restarted.reconcilePendingReservations();
+    await restarted.drainPendingLaunches();
+
+    expect(context.repository.pendingLaunchTurns()).toEqual([]);
+    expect(context.repository.turn(pending.id)).toMatchObject({
+      launchState: 'launch_pending',
+      executionId: null,
+    });
+    expect(context.repository.cycle(cycle.id)?.lifecycle).toBe('abandoned');
+    expect(restartedLauncher.inputs).toEqual([]);
+    expect(restartedLauncher.trace).toEqual([]);
   });
 
   it('projects an existing reconciled reservation to attention without reserving or activating', async () => {

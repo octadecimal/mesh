@@ -13,8 +13,13 @@ import {
 } from './database.js';
 import { migrateV2Database } from './migrate.js';
 import { V2CommandRepository } from '../storage/command-repository.js';
+import {
+  createV2TestDatabase,
+  insertV2TestProject,
+} from '../test/create-v2-test-database.js';
 
 const openDatabases: V2Database[] = [];
+const testDatabases: ReturnType<typeof createV2TestDatabase>[] = [];
 const directories: string[] = [];
 
 const temporaryDirectory = () => {
@@ -66,6 +71,7 @@ const schemaRows = (database: V2Database) =>
     .all();
 
 afterEach(async () => {
+  for (const fixture of testDatabases.splice(0)) fixture.close();
   for (const database of openDatabases.splice(0)) database.close();
   const { rm } = await import('node:fs/promises');
   for (const directory of directories.splice(0)) {
@@ -86,6 +92,8 @@ describe('V2 database identity and migration', () => {
     expect(database.pragma('foreign_keys', { simple: true })).toBe(1);
     expect(database.pragma('busy_timeout', { simple: true })).toBe(5_000);
     expect(database.pragma('journal_mode', { simple: true })).toBe('wal');
+    expect(database.pragma('quick_check')).toEqual([{ quick_check: 'ok' }]);
+    expect(database.pragma('foreign_key_check')).toEqual([]);
     expect(
       database
         .prepare(
@@ -453,7 +461,8 @@ describe('V2 database identity and migration', () => {
           !name.startsWith('pm_output_') &&
           !name.startsWith('project_intent_') &&
           !name.startsWith('ledger_') &&
-          name !== 'execution_operations_start_request'
+          name !== 'execution_operations_start_request' &&
+          name !== 'worker_executions_project_identity'
         );
       }),
     ).toEqual(beforeM1Schema);
@@ -491,6 +500,7 @@ describe('V2 database identity and migration', () => {
         commandType,
       });
     }
+    expect(database.pragma('foreign_key_check')).toEqual([]);
   });
 
   it('indexes valid start-operation links and rejects malformed or duplicate legacy links', () => {
@@ -560,7 +570,13 @@ describe('V2 database identity and migration', () => {
         .get(),
     ).toEqual({ name: 'execution_operations_start_request' });
 
-    for (const mode of ['malformed', 'duplicate'] as const) {
+    for (const mode of [
+      'malformed',
+      'duplicate',
+      'extra',
+      'wrong-type',
+      'nested',
+    ] as const) {
       const path = join(temporaryDirectory(), `${mode}-link.sqlite`);
       const database = createMigration1Database(path);
       openDatabases.push(database);
@@ -618,16 +634,44 @@ describe('V2 database identity and migration', () => {
             JSON.stringify(
               mode === 'malformed'
                 ? { idempotencyKey: 'missing-hash' }
-                : {
-                    idempotencyKey: 'duplicate-key',
-                    requestHash: 'e'.repeat(64),
-                  },
+                : mode === 'extra'
+                  ? {
+                      idempotencyKey: 'extra-key',
+                      requestHash: 'e'.repeat(64),
+                      request: {},
+                    }
+                  : mode === 'wrong-type'
+                    ? {
+                        idempotencyKey: 42,
+                        requestHash: 'e'.repeat(64),
+                      }
+                    : mode === 'nested'
+                      ? {
+                          request: {
+                            idempotencyKey: 'nested-key',
+                            requestHash: 'e'.repeat(64),
+                          },
+                        }
+                      : {
+                          idempotencyKey: 'duplicate-key',
+                          requestHash: 'e'.repeat(64),
+                        },
             ),
             at,
             at,
           );
       }
+      const beforeSchema = schemaRows(database);
+      const beforeOperations = database
+        .prepare('SELECT * FROM execution_operations ORDER BY id')
+        .all();
       expect(() => migrateV2Database(database)).toThrow();
+      expect(schemaRows(database)).toEqual(beforeSchema);
+      expect(
+        database
+          .prepare('SELECT * FROM execution_operations ORDER BY id')
+          .all(),
+      ).toEqual(beforeOperations);
       expect(
         database.prepare('SELECT version FROM v2_schema_migrations').all(),
       ).toEqual([{ version: 1 }]);
@@ -669,7 +713,265 @@ describe('V2 database identity and migration', () => {
         applied_at: '2026-08-28T00:00:00.000Z',
       },
     ]);
+    expect(database.pragma('foreign_key_check')).toEqual([]);
     database.close();
+  });
+
+  it('enforces project ownership for executions, proposals, and canonical bases', () => {
+    const fixture = createV2TestDatabase();
+    testDatabases.push(fixture);
+    const database = fixture.database;
+    const projectA = fixture.project.id;
+    const projectB = insertV2TestProject(database, {
+      id: randomUUID(),
+      displayName: 'Second project',
+      repositoryIdentity: 'second-project',
+    }).id;
+    const executionB = randomUUID();
+    database
+      .prepare(
+        `INSERT INTO worker_executions
+         SELECT ?, ?, profile_id, profile_revision, assignment_json,
+           profile_snapshot_json, skill_requests_json, resolved_skills_json,
+           capability_snapshot_json, adapter_id, model, native_handle,
+           lifecycle, revision, last_adapter_cursor, last_runtime_sequence,
+           replacement_for_execution_id, failure_json, created_at, updated_at,
+           ended_at
+         FROM worker_executions WHERE id = ?`,
+      )
+      .run(executionB, projectB, fixture.execution.id);
+    const cycleA = randomUUID();
+    const humanA = randomUUID();
+    const pmA = randomUUID();
+    const proposalA = randomUUID();
+    const cycleB = randomUUID();
+    const humanB = randomUUID();
+    const pmB = randomUUID();
+    const at = '2026-08-29T00:00:00.000Z';
+    const insertCycle = database.prepare(
+      `INSERT INTO planning_cycles VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      )`,
+    );
+    const insertTurn = database.prepare(
+      `INSERT INTO planning_turns VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const insertProposal = database.prepare(
+      `INSERT INTO planning_proposals VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+      )`,
+    );
+    insertCycle.run(
+      cycleA,
+      projectA,
+      'awaiting_approval',
+      1,
+      fixture.pmProfileRevision.profileId,
+      fixture.pmProfileRevision.revision,
+      null,
+      null,
+      1,
+      null,
+      at,
+      at,
+      null,
+    );
+    insertTurn.run(
+      humanA,
+      projectA,
+      cycleA,
+      1,
+      'human',
+      'Build Todo.',
+      'execution_bound',
+      fixture.execution.id,
+      at,
+    );
+    insertTurn.run(
+      pmA,
+      projectA,
+      cycleA,
+      2,
+      'pm',
+      'Review proposal.',
+      null,
+      fixture.execution.id,
+      at,
+    );
+    insertProposal.run(
+      proposalA,
+      projectA,
+      cycleA,
+      1,
+      'awaiting_approval',
+      null,
+      null,
+      'Todo proposal',
+      '{}',
+      '[]',
+      '[]',
+      '{}',
+      pmA,
+      fixture.execution.id,
+      null,
+      at,
+      null,
+    );
+    database
+      .prepare(
+        `INSERT INTO project_intent_revisions
+         VALUES (?, ?, 1, '{}', ?, 'human', ?)`,
+      )
+      .run(randomUUID(), projectA, proposalA, at);
+    database
+      .prepare(
+        `INSERT INTO ledger_revisions
+         VALUES (?, ?, 1, ?, 'human', ?)`,
+      )
+      .run(randomUUID(), projectA, proposalA, at);
+    insertCycle.run(
+      cycleB,
+      projectB,
+      'discovering',
+      0,
+      fixture.pmProfileRevision.profileId,
+      fixture.pmProfileRevision.revision,
+      null,
+      null,
+      0,
+      null,
+      at,
+      at,
+      null,
+    );
+    insertTurn.run(
+      humanB,
+      projectB,
+      cycleB,
+      1,
+      'human',
+      'Build notes.',
+      'execution_bound',
+      executionB,
+      at,
+    );
+    insertTurn.run(
+      pmB,
+      projectB,
+      cycleB,
+      2,
+      'pm',
+      'Review notes proposal.',
+      null,
+      executionB,
+      at,
+    );
+
+    const expectOwnershipFailure = (operation: () => void) => {
+      database.exec('SAVEPOINT ownership_check');
+      let error: unknown;
+      try {
+        operation();
+      } catch (caught) {
+        error = caught;
+      } finally {
+        database.exec('ROLLBACK TO ownership_check');
+        database.exec('RELEASE ownership_check');
+      }
+      expect(error).toBeDefined();
+    };
+
+    expectOwnershipFailure(() =>
+      database
+        .prepare(
+          `UPDATE planning_cycles
+           SET lifecycle = 'execution_active', active_execution_id = ?
+           WHERE id = ?`,
+        )
+        .run(fixture.execution.id, cycleB),
+    );
+    expectOwnershipFailure(() =>
+      insertTurn.run(
+        randomUUID(),
+        projectB,
+        cycleB,
+        3,
+        'pm',
+        'Wrong execution.',
+        null,
+        fixture.execution.id,
+        at,
+      ),
+    );
+    expectOwnershipFailure(() =>
+      insertProposal.run(
+        randomUUID(),
+        projectB,
+        cycleB,
+        1,
+        'awaiting_approval',
+        null,
+        null,
+        'Wrong execution proposal',
+        '{}',
+        '[]',
+        '[]',
+        '{}',
+        pmB,
+        fixture.execution.id,
+        null,
+        at,
+        null,
+      ),
+    );
+    expectOwnershipFailure(() =>
+      database
+        .prepare(
+          `INSERT INTO project_intent_revisions
+           VALUES (?, ?, 1, '{}', ?, 'human', ?)`,
+        )
+        .run(randomUUID(), projectB, proposalA, at),
+    );
+    expectOwnershipFailure(() =>
+      database
+        .prepare(
+          `INSERT INTO ledger_revisions
+           VALUES (?, ?, 1, ?, 'human', ?)`,
+        )
+        .run(randomUUID(), projectB, proposalA, at),
+    );
+    expectOwnershipFailure(() =>
+      database
+        .prepare(
+          `UPDATE planning_cycles
+           SET base_project_intent_revision = 1, base_ledger_revision = 1
+           WHERE id = ?`,
+        )
+        .run(cycleB),
+    );
+    expectOwnershipFailure(() =>
+      insertProposal.run(
+        randomUUID(),
+        projectB,
+        cycleB,
+        1,
+        'awaiting_approval',
+        1,
+        1,
+        'Wrong canonical bases',
+        '{}',
+        '[]',
+        '[]',
+        '{}',
+        pmB,
+        executionB,
+        null,
+        at,
+        null,
+      ),
+    );
+    expect(database.pragma('quick_check')).toEqual([{ quick_check: 'ok' }]);
+    expect(database.pragma('foreign_key_check')).toEqual([]);
   });
 
   it('enforces foreign keys and rolls back immediate transactions completely', () => {

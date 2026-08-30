@@ -93,13 +93,15 @@ const setup = async () => {
     interruptForPlanning: vi.fn(async () => undefined),
   };
   const publish = vi.fn();
+  const consumerBarrier = new AuditBarrier();
   const consumer = new PmReportConsumer({
     database: fixture.database,
     repository,
     events: fixture.events,
-    barrier: new AuditBarrier(),
+    barrier: consumerBarrier,
     publishDomain: publish,
   });
+  const serviceBarrier = new AuditBarrier();
   const service = new PlanningService({
     database: fixture.database,
     repository,
@@ -118,7 +120,7 @@ const setup = async () => {
       }),
     },
     launcher,
-    barrier: new AuditBarrier(),
+    barrier: serviceBarrier,
     reportConsumer: consumer,
     now: () => now,
     publishDomain: vi.fn(),
@@ -142,9 +144,12 @@ const setup = async () => {
     executions,
     launcher,
     execution,
+    latestExecution: () => reserved!,
     consumer,
+    consumerBarrier,
     publish,
     service,
+    serviceBarrier,
   };
 };
 
@@ -155,22 +160,28 @@ afterEach(() => {
 const runtimeEvent = (
   context: Awaited<ReturnType<typeof setup>>,
   value: unknown,
+) => runtimeEventFor(context, context.execution, value);
+
+const runtimeEventFor = (
+  context: Awaited<ReturnType<typeof setup>>,
+  execution: NonNullable<ReturnType<ExecutionRepository['get']>>,
+  value: unknown,
 ) =>
   inImmediateTransaction(context.fixture.database, () =>
     context.fixture.events.appendRuntimeWithDiagnosticInTransaction(
       context.fixture.project.id,
       {
         projectId: context.fixture.project.id,
-        executionId: context.execution.id,
+        executionId: execution.id,
         adapterId: 'fake',
-        adapterCursor: context.execution.lastAdapterCursor + 1,
+        adapterCursor: execution.lastAdapterCursor + 1,
         receivedAt: now,
         payload: { value },
       },
       {
         projectId: context.fixture.project.id,
-        executionId: context.execution.id,
-        adapterCursor: context.execution.lastAdapterCursor + 1,
+        executionId: execution.id,
+        adapterCursor: execution.lastAdapterCursor + 1,
         occurredAt: now,
         type: 'worker_execution.structured_output',
         payload: { schema: PM_DISCOVERY_REPORT_SCHEMA, value },
@@ -272,6 +283,74 @@ describe('PmReportConsumer', () => {
     expect(context.publish).toHaveBeenCalledTimes(1);
     context.consumer.consume(context.execution, event);
     expect(context.publish).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a question key already present in the cycle without tripping the audit barrier', async () => {
+    const context = await setup();
+    const firstReport = {
+      ...reportBase(context),
+      result: {
+        kind: 'questions' as const,
+        questions: [
+          {
+            key: 'storage',
+            prompt: 'Should items persist?',
+            rationale: 'Storage materially changes the product.',
+          },
+        ],
+      },
+    };
+    context.consumer.consume(
+      context.execution,
+      runtimeEvent(context, firstReport),
+    );
+    const cycle = context.repository.cycle(firstReport.planningCycleId)!;
+    await context.service.submitTurn({
+      idempotencyKey: 'answer-storage',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.submit_turn',
+        projectId: context.fixture.project.id,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+        message: 'Yes, items must persist.',
+      },
+    });
+    const secondExecution = context.latestExecution();
+    const assignment = secondExecution.assignment as PmDiscoveryAssignment;
+    const duplicateReport = {
+      schema: PM_DISCOVERY_REPORT_SCHEMA,
+      planningCycleId: assignment.planningCycleId,
+      humanTurnId: assignment.humanTurnId,
+      expectedCycleRevision: assignment.expectedCycleRevision,
+      expectedProposalRevision: assignment.expectedProposalRevision,
+      assistantMessage: 'I will ask that again.',
+      result: {
+        kind: 'questions' as const,
+        questions: [
+          {
+            key: 'storage',
+            prompt: 'Should items persist?',
+            rationale: 'This key already exists.',
+          },
+        ],
+      },
+    };
+
+    context.consumer.consume(
+      secondExecution,
+      runtimeEventFor(context, secondExecution, duplicateReport),
+    );
+
+    expect(context.repository.receipt(secondExecution.id)).toMatchObject({
+      status: 'rejected',
+      rejectionReason: 'duplicate_question_key',
+    });
+    const view = context.repository.cycleView(cycle.id)!;
+    expect(view.cycle.lifecycle).toBe('attention_required');
+    expect(view.questions.map(({ key }) => key)).toEqual(['storage']);
+    expect(view.turns.filter(({ actor }) => actor === 'pm')).toHaveLength(1);
+    expect(context.consumerBarrier.status).toBe('healthy');
   });
 
   it('re-reads the durable execution assignment inside receipt consumption', async () => {
@@ -424,6 +503,28 @@ describe('PmReportConsumer', () => {
     expect(
       context.fixture.database.prepare('SELECT * FROM ledger_records').all(),
     ).toEqual([]);
+  });
+
+  it('rejects duplicate provenance turn IDs before persisting a proposal', async () => {
+    const context = await setup();
+    const report = proposalReport(context);
+    report.result.projectIntent.provenance.push({
+      ...report.result.projectIntent.provenance[0],
+      rationale: 'The same turn must not be repeated.',
+    });
+
+    context.consumer.consume(context.execution, runtimeEvent(context, report));
+
+    expect(context.repository.receipt(context.execution.id)).toMatchObject({
+      status: 'rejected',
+      rejectionReason: 'duplicate_provenance_turn',
+    });
+    expect(
+      context.fixture.database
+        .prepare('SELECT * FROM planning_proposals')
+        .all(),
+    ).toEqual([]);
+    expect(context.consumerBarrier.status).toBe('healthy');
   });
 
   it('stores a rejected receipt and attention event for malformed or wrongly bound output', async () => {
@@ -678,5 +779,83 @@ describe('PmReportConsumer', () => {
       ok: false,
       error: { code: 'planning_cycle_revision_conflict' },
     });
+  });
+
+  it('returns planning_proposal_invalid for defensive approval semantics without partial writes', async () => {
+    const context = await setup();
+    const assignment = context.execution.assignment as PmDiscoveryAssignment;
+    const report = proposalReport(context);
+    report.result.records.push({
+      operation: 'create',
+      key: 'persist-items',
+      content: {
+        type: 'requirement',
+        kind: 'operational',
+        status: 'proposed',
+        priority: 'must',
+        statement: 'Todo items persist.',
+        rationale: 'Durability is required.',
+      },
+      provenance: [
+        {
+          kind: 'conversation_turn',
+          turnId: assignment.humanTurnId,
+          rationale: 'Initial request.',
+        },
+      ],
+    });
+    report.result.relationships.push({
+      kind: 'depends_on',
+      from: { proposalKey: 'add-items' },
+      to: { proposalKey: 'persist-items' },
+    });
+    context.consumer.consume(context.execution, runtimeEvent(context, report));
+    const view = context.repository.cycleView(assignment.planningCycleId)!;
+    const proposal = view.proposals[0];
+    context.fixture.database
+      .prepare(
+        `DELETE FROM planning_proposal_records
+         WHERE proposal_id = ? AND proposal_key = 'persist-items'`,
+      )
+      .run(proposal.id);
+    const eventCursor = context.fixture.events.cursors(
+      context.fixture.project.id,
+    ).domain;
+
+    const result = context.service.approveProposal({
+      idempotencyKey: 'approve-invalid-proposal',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_proposal.approve',
+        projectId: context.fixture.project.id,
+        planningCycleId: view.cycle.id,
+        proposalId: proposal.id,
+        expectedCycleRevision: view.cycle.revision,
+        expectedProposalRevision: proposal.revision,
+        expectedProjectIntentRevision: null,
+        expectedLedgerRevision: null,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'planning_proposal_invalid' },
+    });
+    expect(
+      context.fixture.database.prepare('SELECT * FROM ledger_records').all(),
+    ).toEqual([]);
+    expect(
+      context.repository.approvedIntentLedger(context.fixture.project.id),
+    ).toBeUndefined();
+    expect(context.repository.cycle(view.cycle.id)?.lifecycle).toBe(
+      'awaiting_approval',
+    );
+    expect(
+      context.fixture.events.cursors(context.fixture.project.id).domain,
+    ).toBe(eventCursor);
+    expect(
+      context.fixture.commands.find('approve-invalid-proposal')?.result,
+    ).toEqual(result);
+    expect(context.serviceBarrier.status).toBe('healthy');
   });
 });

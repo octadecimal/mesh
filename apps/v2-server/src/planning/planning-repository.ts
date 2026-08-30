@@ -232,6 +232,27 @@ const approvedContent = (content: LedgerRecordContent): LedgerRecordContent =>
     ? { ...content, status: 'approved' }
     : content;
 
+export class PlanningProposalInvalidError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PlanningProposalInvalidError';
+  }
+}
+
+const assertUniqueProvenance = (
+  provenance: readonly { turnId: string }[],
+): void => {
+  const turnIds = new Set<string>();
+  for (const item of provenance) {
+    if (turnIds.has(item.turnId)) {
+      throw new PlanningProposalInvalidError(
+        'Planning proposal contains duplicate provenance',
+      );
+    }
+    turnIds.add(item.turnId);
+  }
+};
+
 export type PlanningSnapshot = Readonly<{
   planningCycles: readonly PlanningCycleView[];
   planningHistoryTruncated: boolean;
@@ -329,9 +350,12 @@ export class PlanningRepository {
     return (
       this.database
         .prepare(
-          `SELECT * FROM planning_turns
-           WHERE launch_state = 'launch_pending'
-           ORDER BY created_at, id`,
+          `SELECT t.* FROM planning_turns t
+           JOIN planning_cycles c ON c.id = t.planning_cycle_id
+             AND c.project_id = t.project_id
+           WHERE t.launch_state = 'launch_pending'
+             AND c.lifecycle NOT IN ('approved', 'proposal_rejected', 'abandoned')
+           ORDER BY t.created_at, t.id`,
         )
         .all() as TurnRow[]
     ).map(toTurn);
@@ -611,7 +635,9 @@ export class PlanningRepository {
         (current?.projectIntent.revision ?? null) ||
       proposal.baseLedgerRevision !== (current?.ledger.revision ?? null)
     ) {
-      throw new Error('Planning canonical base conflict');
+      throw new PlanningProposalInvalidError(
+        'Planning canonical base conflict',
+      );
     }
     const base = new Map(
       (current?.records ?? []).map((record) => [record.recordId, record]),
@@ -622,19 +648,48 @@ export class PlanningRepository {
       ),
     );
     if ([...base.keys()].some((recordId) => !proposedExisting.has(recordId))) {
-      throw new Error('Planning proposal omitted a canonical ledger member');
+      throw new PlanningProposalInvalidError(
+        'Planning proposal omitted a canonical ledger member',
+      );
     }
 
+    const assertOwnedProvenance = (
+      provenance: readonly { turnId: string }[],
+    ) => {
+      assertUniqueProvenance(provenance);
+      for (const item of provenance) {
+        const turn = this.turn(item.turnId);
+        if (
+          !turn ||
+          turn.projectId !== proposal.projectId ||
+          turn.planningCycleId !== proposal.planningCycleId
+        ) {
+          throw new PlanningProposalInvalidError(
+            'Planning proposal provenance is outside the cycle',
+          );
+        }
+      }
+    };
+    assertOwnedProvenance(proposal.projectIntent.provenance);
+    const reservations = new Map(
+      this.proposalRecordReservations(proposal.id).map(({ key, recordId }) => [
+        key,
+        recordId,
+      ]),
+    );
     const records: LedgerRecordRevision[] = [];
     for (const member of proposal.records) {
       if (member.operation === 'reuse') {
         const existing = base.get(member.recordId);
         if (!existing || existing.revision !== member.expectedRevision) {
-          throw new Error('Planning record revision conflict');
+          throw new PlanningProposalInvalidError(
+            'Planning record revision conflict',
+          );
         }
         records.push(existing);
         continue;
       }
+      assertOwnedProvenance(member.provenance);
       const revision =
         member.operation === 'create' ? 1 : member.expectedRevision + 1;
       if (member.operation === 'revise') {
@@ -644,22 +699,14 @@ export class PlanningRepository {
           existing.revision !== member.expectedRevision ||
           existing.content.type !== member.content.type
         ) {
-          throw new Error('Planning record revision conflict');
-        }
-      } else {
-        this.database
-          .prepare(
-            `INSERT INTO ledger_records (
-              id, project_id, type, created_proposal_id, created_at
-            ) VALUES (?, ?, ?, ?, ?)`,
-          )
-          .run(
-            member.recordId,
-            proposal.projectId,
-            member.content.type,
-            proposal.id,
-            approvedAt,
+          throw new PlanningProposalInvalidError(
+            'Planning record revision conflict',
           );
+        }
+      } else if (reservations.get(member.key) !== member.recordId) {
+        throw new PlanningProposalInvalidError(
+          'Planning proposal record reservation does not match',
+        );
       }
       const record = ledgerRecordRevisionSchema.parse({
         recordId: member.recordId,
@@ -671,7 +718,6 @@ export class PlanningRepository {
         approvedBy: 'human',
         approvedAt,
       });
-      this.insertRecordRevisionInTransaction(record);
       records.push(record);
     }
 
@@ -684,8 +730,6 @@ export class PlanningRepository {
       approvedBy: 'human',
       approvedAt,
     });
-    this.insertProjectIntentRevisionInTransaction(projectIntent);
-
     const ledger = ledgerRevisionSchema.parse({
       id: current?.ledger.id ?? randomUUID(),
       projectId: proposal.projectId,
@@ -694,6 +738,62 @@ export class PlanningRepository {
       approvedBy: 'human',
       approvedAt,
     });
+    const recordIds = new Set(records.map(({ recordId }) => recordId));
+    const relationships = proposal.relationships.map((relationship) => {
+      const endpoint = (value: typeof relationship.from) =>
+        'recordId' in value
+          ? value.recordId
+          : reservations.get(value.proposalKey);
+      const fromRecordId = endpoint(relationship.from);
+      const toRecordId = endpoint(relationship.to);
+      if (
+        !fromRecordId ||
+        !toRecordId ||
+        !recordIds.has(fromRecordId) ||
+        !recordIds.has(toRecordId)
+      ) {
+        throw new PlanningProposalInvalidError(
+          'Planning relationship endpoint was not reserved',
+        );
+      }
+      return ledgerRelationshipSchema.parse({
+        kind: relationship.kind,
+        fromRecordId,
+        toRecordId,
+      });
+    });
+    const approved = approvedIntentLedgerSchema.parse({
+      projectIntent,
+      ledger,
+      records,
+      relationships,
+    });
+
+    for (const member of proposal.records) {
+      if (member.operation !== 'create') continue;
+      this.database
+        .prepare(
+          `INSERT INTO ledger_records (
+            id, project_id, type, created_proposal_id, created_at
+          ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          member.recordId,
+          proposal.projectId,
+          member.content.type,
+          proposal.id,
+          approvedAt,
+        );
+    }
+    for (const record of records) {
+      const member = proposal.records.find(
+        (candidate) =>
+          candidate.operation !== 'reuse' &&
+          candidate.recordId === record.recordId,
+      );
+      if (member) this.insertRecordRevisionInTransaction(record);
+    }
+    this.insertProjectIntentRevisionInTransaction(projectIntent);
     this.database
       .prepare(
         `INSERT INTO ledger_revisions (
@@ -716,29 +816,6 @@ export class PlanningRepository {
         index + 1,
       ),
     );
-
-    const reservations = new Map(
-      this.proposalRecordReservations(proposal.id).map(({ key, recordId }) => [
-        key,
-        recordId,
-      ]),
-    );
-    const relationships = proposal.relationships.map((relationship) => {
-      const endpoint = (value: typeof relationship.from) =>
-        'recordId' in value
-          ? value.recordId
-          : reservations.get(value.proposalKey);
-      const fromRecordId = endpoint(relationship.from);
-      const toRecordId = endpoint(relationship.to);
-      if (!fromRecordId || !toRecordId) {
-        throw new Error('Planning relationship endpoint was not reserved');
-      }
-      return ledgerRelationshipSchema.parse({
-        kind: relationship.kind,
-        fromRecordId,
-        toRecordId,
-      });
-    });
     const relationshipInsert = this.database.prepare(
       `INSERT INTO ledger_revision_relationships (
         ledger_id, ledger_revision, project_id, ordinal,
@@ -756,12 +833,7 @@ export class PlanningRepository {
         relationship.toRecordId,
       ),
     );
-    return approvedIntentLedgerSchema.parse({
-      projectIntent,
-      ledger,
-      records,
-      relationships,
-    });
+    return approved;
   }
 
   approvedIntentLedger(projectId: string): ApprovedIntentLedger | undefined {

@@ -122,6 +122,15 @@ export class PmReportConsumer {
           }
           if (
             report.result.kind === 'questions' &&
+            this.hasDuplicateQuestionKey(
+              view.questions.map(({ key }) => key),
+              report.result.questions.map(({ key }) => key),
+            )
+          ) {
+            throw new RejectedReport('duplicate_question_key');
+          }
+          if (
+            report.result.kind === 'questions' &&
             view.questions.length + report.result.questions.length > 20
           ) {
             throw new RejectedReport('question_history_limit');
@@ -377,11 +386,7 @@ export class PmReportConsumer {
     );
     const seenBase = new Set<string>();
     const turnIds = new Set(view.turns.map(({ id }) => id));
-    for (const provenance of result.projectIntent.provenance) {
-      if (!turnIds.has(provenance.turnId)) {
-        throw new RejectedReport('provenance_outside_cycle');
-      }
-    }
+    this.assertProvenance(result.projectIntent.provenance, turnIds);
 
     const records = result.records.map((member) => {
       if (member.operation === 'create') {
@@ -511,9 +516,28 @@ export class PmReportConsumer {
     provenance: readonly { turnId: string }[],
     turnIds: Set<string>,
   ): void {
-    if (provenance.some(({ turnId }) => !turnIds.has(turnId))) {
-      throw new RejectedReport('provenance_outside_cycle');
+    const seen = new Set<string>();
+    for (const { turnId } of provenance) {
+      if (seen.has(turnId)) {
+        throw new RejectedReport('duplicate_provenance_turn');
+      }
+      seen.add(turnId);
+      if (!turnIds.has(turnId)) {
+        throw new RejectedReport('provenance_outside_cycle');
+      }
     }
+  }
+
+  private hasDuplicateQuestionKey(
+    existing: readonly string[],
+    proposed: readonly string[],
+  ): boolean {
+    const keys = new Set(existing);
+    return proposed.some((key) => {
+      if (keys.has(key)) return true;
+      keys.add(key);
+      return false;
+    });
   }
 
   private isValidationError(error: unknown): boolean {
