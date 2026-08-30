@@ -97,6 +97,7 @@ export const v2ProjectSnapshotSchema = z
     cursors: projectEventCursorsSchema,
   })
   .superRefine((value, context) => {
+    const planningCycleIds = new Set<string>();
     const planningTurnIds = new Set<string>();
     value.profiles.forEach((profile, index) => {
       if (
@@ -120,6 +121,14 @@ export const v2ProjectSnapshotSchema = z
       }
     });
     value.planningCycles.forEach((planningCycle, index) => {
+      if (planningCycleIds.has(planningCycle.cycle.id)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['planningCycles', index, 'cycle', 'id'],
+          message: 'Planning cycle IDs must be unique',
+        });
+      }
+      planningCycleIds.add(planningCycle.cycle.id);
       if (planningCycle.cycle.projectId !== value.project.id) {
         context.addIssue({
           code: 'custom',

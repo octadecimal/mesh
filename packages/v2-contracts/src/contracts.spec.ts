@@ -2565,6 +2565,124 @@ describe('V2 intent ledger contracts', () => {
     );
   });
 
+  it.each([
+    ['launch_pending', 'launch_pending', null],
+    ['execution_active', 'execution_bound', randomUUID()],
+    ['attention_required', 'launch_pending', null],
+    ['attention_required', 'execution_bound', randomUUID()],
+  ] as const)(
+    'preserves an awaiting proposal during a %s revision request',
+    (lifecycle, launchState, revisionExecutionId) => {
+      const revisionTurn = {
+        ...cycleView.turns[0],
+        id: randomUUID(),
+        ordinal: 3,
+        message: 'Revise the current proposal.',
+        launchState,
+        executionId: revisionExecutionId,
+      };
+      const view = {
+        ...cycleView,
+        cycle: {
+          ...cycleView.cycle,
+          lifecycle,
+          activeExecutionId:
+            lifecycle === 'execution_active' ? revisionExecutionId : null,
+        },
+        turns: [...cycleView.turns, revisionTurn],
+      };
+
+      expect(planningCycleViewSchema.parse(view)).toEqual(view);
+    },
+  );
+
+  it('rejects unrelated recovery state for an awaiting proposal', () => {
+    expect(
+      issueText(
+        planningCycleViewSchema.safeParse({
+          ...cycleView,
+          cycle: {
+            ...cycleView.cycle,
+            lifecycle: 'attention_required',
+          },
+        }),
+      ),
+    ).toMatch(/awaiting proposal recovery requires a trailing human turn/i);
+  });
+
+  it.each([
+    ['awaiting approval', cycleView],
+    ['approved', approvedCycleView],
+    [
+      'proposal rejected',
+      {
+        ...cycleView,
+        cycle: {
+          ...cycleView.cycle,
+          lifecycle: 'proposal_rejected' as const,
+          endedAt: now,
+        },
+        proposals: [
+          {
+            ...proposal,
+            lifecycle: 'rejected' as const,
+            rejectionFeedback: 'Needs revision.',
+            decidedAt: now,
+          },
+        ],
+      },
+    ],
+  ] as const)(
+    'requires the %s cycle to end at its proposal-producing PM turn',
+    (_label, view) => {
+      const trailingHuman = {
+        ...cycleView.turns[0],
+        id: randomUUID(),
+        ordinal: 3,
+        message: 'A stale trailing request.',
+        launchState: 'launch_pending' as const,
+        executionId: null,
+      };
+
+      expect(
+        issueText(
+          planningCycleViewSchema.safeParse({
+            ...view,
+            turns: [...view.turns, trailingHuman],
+          }),
+        ),
+      ).toMatch(/cycle must end at the proposal-producing PM turn/i);
+    },
+  );
+
+  it('rejects another PM response after the proposal-producing PM turn', () => {
+    const laterExecutionId = randomUUID();
+    expect(
+      issueText(
+        planningCycleViewSchema.safeParse({
+          ...cycleView,
+          turns: [
+            ...cycleView.turns,
+            {
+              ...cycleView.turns[0],
+              id: randomUUID(),
+              ordinal: 3,
+              message: 'A later request.',
+              executionId: laterExecutionId,
+            },
+            {
+              ...cycleView.turns[1],
+              id: randomUUID(),
+              ordinal: 4,
+              message: 'A later response.',
+              executionId: laterExecutionId,
+            },
+          ],
+        }),
+      ),
+    ).toMatch(/cycle must end at the proposal-producing PM turn/i);
+  });
+
   it('requires current PM question output for awaiting-human cycles', () => {
     const awaitingHumanView = {
       ...cycleView,
@@ -2817,7 +2935,7 @@ describe('V2 intent ledger contracts', () => {
     }
   });
 
-  it('requires planning turn ids to be globally unique across snapshot cycles', () => {
+  it('requires planning cycle and turn ids to be globally unique in snapshots', () => {
     const historicalCycleId = randomUUID();
     const historicalHumanTurnId = randomUUID();
     const historicalPmTurnId = randomUUID();
@@ -2884,6 +3002,23 @@ describe('V2 intent ledger contracts', () => {
         }),
       ),
     ).toMatch(/planning turn ids must be unique across cycles/i);
+
+    const duplicateCycleId = {
+      ...distinctCycle,
+      cycle: { ...distinctCycle.cycle, id: historicalCycleId },
+      turns: distinctCycle.turns.map((turn) => ({
+        ...turn,
+        planningCycleId: historicalCycleId,
+      })),
+    };
+    expect(
+      issueText(
+        v2ProjectSnapshotSchema.safeParse({
+          ...snapshot,
+          planningCycles: [historicalCycle, duplicateCycleId],
+        }),
+      ),
+    ).toMatch(/planning cycle ids must be unique/i);
   });
 
   it('requires exact projected lifecycles in planning command successes', () => {
@@ -3048,6 +3183,26 @@ describe('V2 intent ledger contracts', () => {
         humanTurnId: latestHumanTurnId,
       }).success,
     ).toBe(true);
+
+    expect(
+      issueText(
+        pmDiscoveryAssignmentSchema.safeParse({
+          ...assignment,
+          humanTurnId: latestHumanTurnId,
+          input: {
+            ...assignment.input,
+            conversation: [
+              ...assignment.input.conversation,
+              {
+                turnId: randomUUID(),
+                actor: 'pm' as const,
+                message: 'A stale trailing response.',
+              },
+            ],
+          },
+        }),
+      ),
+    ).toMatch(/assignment conversation must end at its target human turn/i);
   });
 
   it('bounds human and PM turns separately at 32 in assignments and cycle views', () => {
@@ -3093,7 +3248,16 @@ describe('V2 intent ledger contracts', () => {
       baseProjectIntentRevision: null,
       baseLedgerRevision: null,
       input: {
-        conversation: conversation(humanCount, pmCount),
+        conversation: (() => {
+          const grouped = conversation(humanCount, pmCount);
+          return humanCount === 0
+            ? grouped
+            : [
+                ...grouped.slice(0, humanCount - 1),
+                ...grouped.slice(humanCount),
+                grouped[humanCount - 1],
+              ];
+        })(),
         latestProposal: null,
         approvedIntentLedger: null,
       },

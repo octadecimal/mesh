@@ -1044,13 +1044,36 @@ export const planningCycleViewSchema = z
       });
     }
     const cycleLifecycleForProposal = {
-      awaiting_approval: 'awaiting_approval',
       approved: 'approved',
       rejected: 'proposal_rejected',
     } as const;
+    const awaitingProposalMatchesCycle =
+      latestProposal?.lifecycle === 'awaiting_approval' &&
+      (value.cycle.lifecycle === 'awaiting_approval' ||
+        value.cycle.lifecycle === 'launch_pending' ||
+        value.cycle.lifecycle === 'execution_active' ||
+        (value.cycle.lifecycle === 'attention_required' &&
+          latestTurn?.actor === 'human' &&
+          (latestTurn.launchState === 'launch_pending' ||
+            latestTurn.launchState === 'execution_bound')));
+    if (
+      latestProposal?.lifecycle === 'awaiting_approval' &&
+      value.cycle.lifecycle === 'attention_required' &&
+      (latestTurn?.actor !== 'human' ||
+        (latestTurn.launchState !== 'launch_pending' &&
+          latestTurn.launchState !== 'execution_bound'))
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['turns'],
+        message: 'Awaiting proposal recovery requires a trailing human turn',
+      });
+    }
     if (
       latestProposal !== null &&
       latestProposal.lifecycle !== 'superseded' &&
+      !awaitingProposalMatchesCycle &&
+      latestProposal.lifecycle !== 'awaiting_approval' &&
       value.cycle.lifecycle !==
         cycleLifecycleForProposal[latestProposal.lifecycle]
     ) {
@@ -1058,6 +1081,29 @@ export const planningCycleViewSchema = z
         code: 'custom',
         path: ['proposals', value.proposals.length - 1, 'lifecycle'],
         message: 'Latest proposal lifecycle must match the cycle lifecycle',
+      });
+    }
+    if (
+      latestProposal?.lifecycle === 'awaiting_approval' &&
+      !awaitingProposalMatchesCycle
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['proposals', value.proposals.length - 1, 'lifecycle'],
+        message: 'Latest proposal lifecycle must match the cycle lifecycle',
+      });
+    }
+    if (
+      latestProposal !== null &&
+      (value.cycle.lifecycle === 'awaiting_approval' ||
+        value.cycle.lifecycle === 'approved' ||
+        value.cycle.lifecycle === 'proposal_rejected') &&
+      latestTurn?.id !== latestProposal.createdByTurnId
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['turns'],
+        message: 'Cycle must end at the proposal-producing PM turn',
       });
     }
     if (
@@ -1517,6 +1563,15 @@ export const pmDiscoveryAssignmentSchema = z
         path: ['humanTurnId'],
         message:
           'Assignment human turn must be the latest human conversation turn',
+      });
+    } else if (
+      value.input.conversation.at(-1)?.turnId !== value.humanTurnId ||
+      value.input.conversation.at(-1)?.actor !== 'human'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['input', 'conversation'],
+        message: 'Assignment conversation must end at its target human turn',
       });
     }
     if (
