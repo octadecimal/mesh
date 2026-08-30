@@ -30,6 +30,9 @@ export const legalExecutionTransitions = new Set<string>([
   'interrupting:attention_required',
 ]);
 
+export const PLANNING_INTERRUPT_OPERATION_VERSION =
+  'mesh.v2.planning-interrupt/v1' as const;
+
 export const assertLegalExecutionTransition = (
   from: WorkerExecutionLifecycle,
   to: WorkerExecutionLifecycle,

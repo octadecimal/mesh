@@ -60,6 +60,26 @@ export class OperationRepository {
     ).map(toOperation);
   }
 
+  findStartReservation(
+    idempotencyKey: string,
+    requestHash: string,
+  ): ExecutionOperation | undefined {
+    const rows = this.database
+      .prepare(
+        `
+        SELECT * FROM execution_operations
+        WHERE kind = 'start'
+          AND json_extract(request_json, '$.idempotencyKey') = ?
+          AND json_extract(request_json, '$.requestHash') = ?
+        ORDER BY created_at, id
+      `,
+      )
+      .all(idempotencyKey, requestHash) as OperationRow[];
+    if (rows.length > 1)
+      throw new Error('Conflicting start reservations found');
+    return rows[0] ? toOperation(rows[0]) : undefined;
+  }
+
   listPending(): readonly ExecutionOperation[] {
     return (
       this.database

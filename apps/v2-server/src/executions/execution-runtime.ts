@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
   harnessCapabilitiesSchema,
   harnessEventEnvelopeSchema,
   type DomainEvent,
   type HarnessAdapter,
+  type HarnessCapabilities,
   type HarnessEventEnvelope,
+  type HarnessSkillDescriptor,
   type HarnessSession,
   type InterruptExecutionEnvelope,
   type Project,
@@ -14,17 +17,22 @@ import {
   type StartExecutionEnvelope,
   type V2CommandResult,
   type WorkerExecution,
+  type WorkerExecutionId,
 } from '@mesh/v2-contracts';
 
 import { inImmediateTransaction, type V2Database } from '../db/database.js';
 import {
   hashV2Command,
+  type StoredCommandResult,
   type V2CommandRepository,
 } from '../storage/command-repository.js';
 import type { V2EventStore } from '../storage/event-store.js';
 import { AuditBarrier } from './audit-barrier.js';
 import { ExecutionRepository } from './execution-repository.js';
-import { resolveSkillSnapshots } from './harness-adapter.js';
+import {
+  PLANNING_INTERRUPT_OPERATION_VERSION,
+  resolveSkillSnapshots,
+} from './harness-adapter.js';
 import { OperationRepository } from './operation-repository.js';
 
 export type ExecutionProjectReader = {
@@ -55,7 +63,70 @@ type Dependencies = {
   now: () => string;
 };
 
-type ActiveSession = { session: HarnessSession; task: Promise<void> };
+type ActiveSession = {
+  session: HarnessSession;
+  task: Promise<void>;
+  fenced: boolean;
+};
+
+export type ReservedExecutionStart = {
+  execution: WorkerExecution;
+  result: V2CommandResult;
+  activationRequired: boolean;
+};
+
+export class ExecutionReservationError extends Error {
+  constructor(readonly result: V2CommandResult) {
+    super(result.ok ? 'Execution reservation failed' : result.error.message);
+    this.name = 'ExecutionReservationError';
+  }
+}
+
+export type PlanningInterruptCleanupCode =
+  | 'planning_interrupt_not_running'
+  | 'planning_interrupt_unproven'
+  | 'planning_interrupt_audit_failure'
+  | 'planning_interrupt_quiescence_failure';
+
+export type PlanningInterruptCleanupDiagnostic = {
+  phase:
+    | 'adapter_interrupt'
+    | 'adapter_probe'
+    | 'session_close'
+    | 'consumer_join'
+    | 'consumer_removal'
+    | 'audit';
+  message: string;
+};
+
+const isPlanningInterruptCleanupDiagnostic = (
+  value: unknown,
+): value is PlanningInterruptCleanupDiagnostic =>
+  typeof value === 'object' &&
+  value !== null &&
+  'phase' in value &&
+  [
+    'adapter_interrupt',
+    'adapter_probe',
+    'session_close',
+    'consumer_join',
+    'consumer_removal',
+    'audit',
+  ].includes(String(value.phase)) &&
+  'message' in value &&
+  typeof value.message === 'string';
+
+export class PlanningInterruptCleanupError extends Error {
+  constructor(
+    readonly code: PlanningInterruptCleanupCode,
+    message: string,
+    readonly diagnostics: readonly PlanningInterruptCleanupDiagnostic[] = [],
+    readonly cause?: unknown,
+  ) {
+    super(message);
+    this.name = 'PlanningInterruptCleanupError';
+  }
+}
 
 const lifecycleDraft = (execution: WorkerExecution, occurredAt: string) => ({
   projectId: execution.projectId,
@@ -85,28 +156,103 @@ const trustedNextAdapterCursor = (
     : null;
 };
 
+const databaseActivations = new WeakMap<
+  V2Database,
+  Map<string, Promise<void>>
+>();
+
 export class ExecutionRuntime {
   private readonly active = new Map<string, ActiveSession>();
   private readonly contained = new WeakSet<HarnessSession>();
+  private readonly activations: Map<string, Promise<void>>;
+  private readonly planningInterrupts = new Map<string, Promise<void>>();
+  private readonly consumerContext = new AsyncLocalStorage<string>();
 
-  constructor(private readonly dependencies: Dependencies) {}
+  constructor(private readonly dependencies: Dependencies) {
+    let activations = databaseActivations.get(dependencies.database);
+    if (!activations) {
+      activations = new Map();
+      databaseActivations.set(dependencies.database, activations);
+    }
+    this.activations = activations;
+  }
 
-  async start(envelope: StartExecutionEnvelope): Promise<V2CommandResult> {
+  private reservedStartFromStored(
+    stored: StoredCommandResult,
+    idempotencyKey: string,
+    requestHash: string,
+  ): ReservedExecutionStart {
+    const operation = this.dependencies.operations.findStartReservation(
+      idempotencyKey,
+      requestHash,
+    );
+    if (!operation) throw new Error('Reserved start operation was not found');
+    const execution = requireExecution(
+      this.dependencies.executions,
+      operation.executionId,
+    );
+    if (
+      stored.result.ok &&
+      'execution' in stored.result &&
+      stored.result.execution.id !== execution.id
+    ) {
+      throw new Error('Reserved start execution does not match command result');
+    }
+    const activationRequired =
+      execution.lifecycle === 'starting' && operation.state === 'pending';
+    if (
+      (execution.lifecycle === 'starting') !==
+      (operation.state === 'pending')
+    ) {
+      throw new Error('Reserved start operation state is inconsistent');
+    }
+    return { execution, result: stored.result, activationRequired };
+  }
+
+  findReservedStart(
+    envelope: StartExecutionEnvelope,
+  ): ReservedExecutionStart | undefined {
     this.dependencies.barrier.assertHealthy();
     const requestHash = hashV2Command(envelope.command);
-    const replay = this.dependencies.commands.find(
+    const stored = this.dependencies.commands.find(
       envelope.idempotencyKey,
       requestHash,
     );
-    if (replay) return replay.result;
+    if (!stored) return undefined;
+    try {
+      return this.reservedStartFromStored(
+        stored,
+        envelope.idempotencyKey,
+        requestHash,
+      );
+    } catch (error) {
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      throw error;
+    }
+  }
+
+  async reserveStart(
+    envelope: StartExecutionEnvelope,
+  ): Promise<ReservedExecutionStart> {
+    return this.reserveStartAfterLookup(envelope, false);
+  }
+
+  private async reserveStartAfterLookup(
+    envelope: StartExecutionEnvelope,
+    commandLookupAlreadyMissed: boolean,
+  ): Promise<ReservedExecutionStart> {
+    if (!commandLookupAlreadyMissed) {
+      const replay = this.findReservedStart(envelope);
+      if (replay) return replay;
+    }
 
     const project = this.dependencies.projects.get(envelope.command.projectId);
     if (!project) {
-      return {
+      throw new ExecutionReservationError({
         ok: false,
         commandType: 'worker_execution.start',
         error: { code: 'project_not_found', message: 'Project was not found' },
-      };
+      });
     }
     let profile: ResolvedWorkerProfileSnapshot;
     try {
@@ -115,7 +261,7 @@ export class ExecutionRuntime {
         envelope.command.profileRevision,
       );
     } catch (error) {
-      return {
+      throw new ExecutionReservationError({
         ok: false,
         commandType: 'worker_execution.start',
         error: {
@@ -123,15 +269,33 @@ export class ExecutionRuntime {
           message:
             error instanceof Error ? error.message : 'Profile was not found',
         },
-      };
+      });
     }
-    let capabilities;
+
+    let capabilities: HarnessCapabilities;
+    let skillDescriptors: readonly HarnessSkillDescriptor[];
     try {
       capabilities = harnessCapabilitiesSchema.parse(
         await this.dependencies.adapter.capabilities(),
       );
+      this.dependencies.barrier.assertHealthy();
+      const preferred = profile.document.spec.skills.preferred;
+      const required = profile.document.spec.skills.required;
+      const missingCapabilities =
+        profile.document.spec.requiredCapabilities.filter(
+          (capability) => !capabilities.capabilities.includes(capability),
+        );
+      skillDescriptors =
+        missingCapabilities.length === 0
+          ? await this.dependencies.adapter.resolveSkills([
+              ...preferred,
+              ...required,
+            ])
+          : [];
+      this.dependencies.barrier.assertHealthy();
     } catch (error) {
-      return {
+      if (this.dependencies.barrier.status === 'tripped') throw error;
+      throw new ExecutionReservationError({
         ok: false,
         commandType: 'worker_execution.start',
         error: {
@@ -139,21 +303,15 @@ export class ExecutionRuntime {
           message:
             error instanceof Error ? error.message : 'Adapter is unavailable',
         },
-      };
+      });
     }
+
     const missingCapabilities =
       profile.document.spec.requiredCapabilities.filter(
         (capability) => !capabilities.capabilities.includes(capability),
       );
     const preferred = profile.document.spec.skills.preferred;
     const required = profile.document.spec.skills.required;
-    const skillDescriptors =
-      missingCapabilities.length === 0
-        ? await this.dependencies.adapter.resolveSkills([
-            ...preferred,
-            ...required,
-          ])
-        : [];
     const resolvedSkills =
       missingCapabilities.length === 0
         ? resolveSkillSnapshots(
@@ -170,6 +328,7 @@ export class ExecutionRuntime {
       .map((skill) => skill.requested.id);
     const occurredAt = this.dependencies.now();
     const executionId = randomUUID();
+    const failed = missingCapabilities.length > 0 || missingSkills.length > 0;
     const initial: WorkerExecution = {
       id: executionId,
       projectId: project.id,
@@ -183,12 +342,8 @@ export class ExecutionRuntime {
       adapterId: capabilities.adapterId,
       model: profile.document.spec.preferredRuntime.model,
       nativeHandle: null,
-      lifecycle:
-        missingCapabilities.length > 0 || missingSkills.length > 0
-          ? 'failed'
-          : 'starting',
-      revision:
-        missingCapabilities.length > 0 || missingSkills.length > 0 ? 1 : 0,
+      lifecycle: failed ? 'failed' : 'starting',
+      revision: failed ? 1 : 0,
       lastAdapterCursor: 0,
       lastRuntimeSequence: 0,
       replacementForExecutionId: null,
@@ -208,37 +363,52 @@ export class ExecutionRuntime {
             : null,
       createdAt: occurredAt,
       updatedAt: occurredAt,
-      endedAt:
-        missingCapabilities.length > 0 || missingSkills.length > 0
-          ? occurredAt
-          : null,
+      endedAt: failed ? occurredAt : null,
     };
-
-    let operationId: string | undefined;
+    const requestHash = hashV2Command(envelope.command);
+    let reservation: ReservedExecutionStart | undefined;
     let domainEvent: DomainEvent | undefined;
-    let reservationWritesStarted = false;
-    let acceptance: V2CommandResult;
+    let writesStarted = false;
+    let replayObserved = false;
     try {
-      acceptance = inImmediateTransaction(this.dependencies.database, () => {
+      inImmediateTransaction(this.dependencies.database, () => {
         const stored = this.dependencies.commands.find(
           envelope.idempotencyKey,
           requestHash,
         );
-        if (stored) return stored.result;
+        if (stored) {
+          replayObserved = true;
+          reservation = this.reservedStartFromStored(
+            stored,
+            envelope.idempotencyKey,
+            requestHash,
+          );
+          return;
+        }
         this.dependencies.barrier.assertHealthy();
-        reservationWritesStarted = true;
+        writesStarted = true;
         const execution =
           this.dependencies.executions.insertInTransaction(initial);
         domainEvent = this.dependencies.events.appendDomainInTransaction(
           execution.projectId,
           lifecycleDraft(execution, occurredAt),
         );
+        const operation =
+          this.dependencies.operations.createPendingInTransaction({
+            executionId: execution.id,
+            kind: 'start',
+            request: {
+              version: 'mesh.v2.execution-start/v1',
+              idempotencyKey: envelope.idempotencyKey,
+              requestHash,
+              request: envelope.command,
+            },
+            createdAt: occurredAt,
+          });
         let result: V2CommandResult;
         if (execution.lifecycle === 'failed') {
           if (!execution.failure) {
-            throw new Error(
-              'Failed execution requires structured failure evidence',
-            );
+            throw new Error('Failed execution requires failure evidence');
           }
           result = {
             ok: false,
@@ -248,27 +418,18 @@ export class ExecutionRuntime {
               message: execution.failure.message,
             },
           };
+          this.dependencies.operations.finishInTransaction(
+            operation.id,
+            'failed',
+            { reason: execution.failure.message },
+            occurredAt,
+          );
         } else {
           result = {
             ok: true,
             commandType: 'worker_execution.start',
             execution,
           };
-        }
-        if (execution.lifecycle === 'starting') {
-          operationId = this.dependencies.operations.createPendingInTransaction(
-            {
-              executionId: execution.id,
-              kind: 'start',
-              request: {
-                version: 'mesh.v2.execution-start/v1',
-                idempotencyKey: envelope.idempotencyKey,
-                requestHash,
-                request: envelope.command,
-              },
-              createdAt: occurredAt,
-            },
-          ).id;
         }
         this.dependencies.commands.storeInTransaction({
           idempotencyKey: envelope.idempotencyKey,
@@ -277,29 +438,151 @@ export class ExecutionRuntime {
           result,
           createdAt: occurredAt,
         });
-        return result;
+        reservation = {
+          execution,
+          result,
+          activationRequired: execution.lifecycle === 'starting',
+        };
       });
     } catch (error) {
-      if (reservationWritesStarted) {
+      if (writesStarted || replayObserved) {
         this.dependencies.barrier.trip(error, occurredAt);
       }
       throw error;
     }
+    if (!reservation) throw new Error('Execution reservation was not stored');
     if (domainEvent) this.publishDomain(domainEvent);
-    if (!acceptance.ok || operationId === undefined) return acceptance;
-    const acceptedOperationId = operationId;
+    return reservation;
+  }
+
+  async activateReserved(executionId: WorkerExecutionId): Promise<void> {
+    const active = this.activations.get(executionId);
+    if (active) return active;
+    const activation = this.activate(executionId).finally(() => {
+      if (this.activations.get(executionId) === activation) {
+        this.activations.delete(executionId);
+      }
+    });
+    this.activations.set(executionId, activation);
+    return activation;
+  }
+
+  async cancelReserved(
+    executionId: WorkerExecutionId,
+  ): Promise<WorkerExecution> {
+    const activation = this.activations.get(executionId);
+    if (activation) {
+      await activation;
+      return requireExecution(this.dependencies.executions, executionId);
+    }
+    this.dependencies.barrier.assertHealthy();
+    const occurredAt = this.dependencies.now();
+    let domainEvent: DomainEvent | undefined;
+    let cancelled: WorkerExecution | undefined;
+    let writesStarted = false;
+    try {
+      inImmediateTransaction(this.dependencies.database, () => {
+        const current = requireExecution(
+          this.dependencies.executions,
+          executionId,
+        );
+        const operations = this.dependencies.operations
+          .listForExecution(executionId)
+          .filter((operation) => operation.kind === 'start');
+        if (operations.length !== 1) {
+          throw new Error('Exact reserved start operation was not found');
+        }
+        const operation = operations[0];
+        if (!operation)
+          throw new Error('Reserved start operation was not found');
+        if (current.lifecycle !== 'starting' || operation.state !== 'pending') {
+          cancelled = current;
+          return;
+        }
+        this.dependencies.barrier.assertHealthy();
+        writesStarted = true;
+        cancelled = this.dependencies.executions.transitionInTransaction(
+          current.id,
+          current.revision,
+          'failed',
+          occurredAt,
+          {
+            failure: {
+              code: 'startup_interrupted_before_start',
+              message: 'Execution start was cancelled before adapter startup',
+            },
+          },
+        );
+        this.dependencies.operations.finishInTransaction(
+          operation.id,
+          'failed',
+          { reason: 'planning_cycle_abandoned' },
+          occurredAt,
+        );
+        domainEvent = this.dependencies.events.appendDomainInTransaction(
+          current.projectId,
+          lifecycleDraft(cancelled, occurredAt),
+        );
+      });
+    } catch (error) {
+      if (writesStarted) this.dependencies.barrier.trip(error, occurredAt);
+      throw error;
+    }
+    if (!cancelled) throw new Error('Reserved cancellation did not settle');
+    if (domainEvent) this.publishDomain(domainEvent);
+    return cancelled;
+  }
+
+  async start(envelope: StartExecutionEnvelope): Promise<V2CommandResult> {
+    this.dependencies.barrier.assertHealthy();
+    const stored = this.dependencies.commands.find(
+      envelope.idempotencyKey,
+      hashV2Command(envelope.command),
+    );
+    if (stored) return stored.result;
+    try {
+      const reservation = await this.reserveStartAfterLookup(envelope, true);
+      if (reservation.activationRequired) {
+        await this.activateReserved(reservation.execution.id);
+      }
+      return reservation.result;
+    } catch (error) {
+      if (error instanceof ExecutionReservationError) return error.result;
+      throw error;
+    }
+  }
+
+  private async activate(executionId: string): Promise<void> {
+    this.dependencies.barrier.assertHealthy();
+    const execution = requireExecution(
+      this.dependencies.executions,
+      executionId,
+    );
+    if (execution.lifecycle !== 'starting') return;
+    const startOperations = this.dependencies.operations
+      .listForExecution(executionId)
+      .filter((operation) => operation.kind === 'start');
+    if (
+      startOperations.length !== 1 ||
+      startOperations[0]?.state !== 'pending'
+    ) {
+      throw new Error('Pending reserved start operation was not found');
+    }
+    const operation = startOperations[0];
+    const project = this.dependencies.projects.get(execution.projectId);
+    if (!project) throw new Error('Reserved execution project was not found');
 
     let session: HarnessSession;
     try {
       session = await this.dependencies.adapter.start({
         executionId,
         project,
-        assignment: envelope.command.assignment,
-        profile,
-        resolvedSkills,
+        assignment: execution.assignment,
+        profile: execution.profileSnapshot,
+        resolvedSkills: execution.resolvedSkills,
       });
     } catch (error) {
-      if (await this.stopIfBarrierTripped()) return acceptance;
+      if (await this.stopIfBarrierTripped()) return;
       const failedAt = this.dependencies.now();
       let failedEvent: DomainEvent;
       try {
@@ -325,11 +608,9 @@ export class ExecutionRuntime {
             },
           );
           this.dependencies.operations.finishInTransaction(
-            acceptedOperationId,
+            operation.id,
             'failed',
-            {
-              reason: failed.failure?.message,
-            },
+            { reason: failed.failure?.message },
             failedAt,
           );
           return this.dependencies.events.appendDomainInTransaction(
@@ -341,12 +622,12 @@ export class ExecutionRuntime {
         if (this.dependencies.barrier.status === 'healthy') {
           this.dependencies.barrier.trip(auditError, failedAt);
         }
-        return acceptance;
+        return;
       }
       this.publishDomain(failedEvent);
-      return acceptance;
+      return;
     }
-    if (await this.stopIfBarrierTripped(session)) return acceptance;
+    if (await this.stopIfBarrierTripped(session)) return;
 
     const runningAt = this.dependencies.now();
     let runningEvent: DomainEvent;
@@ -357,6 +638,9 @@ export class ExecutionRuntime {
           this.dependencies.executions,
           executionId,
         );
+        if (current.lifecycle !== 'starting') {
+          throw new Error('Reserved execution no longer owns activation');
+        }
         const running = this.dependencies.executions.transitionInTransaction(
           executionId,
           current.revision,
@@ -365,11 +649,9 @@ export class ExecutionRuntime {
           { nativeHandle: session.nativeHandle },
         );
         this.dependencies.operations.finishInTransaction(
-          acceptedOperationId,
+          operation.id,
           'succeeded',
-          {
-            nativeHandle: session.nativeHandle,
-          },
+          { nativeHandle: session.nativeHandle },
           runningAt,
         );
         return this.dependencies.events.appendDomainInTransaction(
@@ -383,11 +665,346 @@ export class ExecutionRuntime {
       } else {
         await this.contain(session, error);
       }
-      return acceptance;
+      return;
     }
     this.publishDomain(runningEvent);
-    this.attach(executionId, session);
-    return acceptance;
+    try {
+      this.attach(executionId, session);
+    } catch (error) {
+      await this.persistAdapterFailure(executionId, undefined, error, session);
+    }
+  }
+
+  async interruptForPlanning(executionId: WorkerExecutionId): Promise<void> {
+    const active = this.planningInterrupts.get(executionId);
+    if (active) return active;
+    const interrupt = this.performPlanningInterrupt(executionId).finally(() => {
+      if (this.planningInterrupts.get(executionId) === interrupt) {
+        this.planningInterrupts.delete(executionId);
+      }
+    });
+    this.planningInterrupts.set(executionId, interrupt);
+    return interrupt;
+  }
+
+  private async performPlanningInterrupt(executionId: string): Promise<void> {
+    const activation = this.activations.get(executionId);
+    if (activation) await activation;
+    this.dependencies.barrier.assertHealthy();
+    if (this.consumerContext.getStore() === executionId) {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_quiescence_failure',
+        'Planning interruption cannot await its own consumer task',
+        [
+          {
+            phase: 'consumer_join',
+            message: 'Self-wait was rejected before fencing',
+          },
+        ],
+      );
+    }
+
+    const tagged = this.dependencies.operations
+      .listForExecution(executionId)
+      .filter(
+        (operation) =>
+          operation.kind === 'interrupt' &&
+          typeof operation.request === 'object' &&
+          operation.request !== null &&
+          'version' in operation.request &&
+          operation.request.version === PLANNING_INTERRUPT_OPERATION_VERSION,
+      );
+    if (tagged.length > 1) {
+      const error = new Error(
+        'Conflicting planning interrupt operations found',
+      );
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_audit_failure',
+        error.message,
+        [{ phase: 'audit', message: error.message }],
+        error,
+      );
+    }
+    const prior = tagged[0];
+    const current = this.dependencies.executions.get(executionId);
+    if (!current) {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_not_running',
+        'Planning execution was not found',
+      );
+    }
+    if (current.assignment.kind !== 'pm_discovery') {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_not_running',
+        'Execution is not a planning runtime',
+      );
+    }
+    if (prior?.state === 'succeeded') {
+      if (current.lifecycle === 'interrupted') return;
+      const error = new Error(
+        'Planning interrupt operation does not match execution lifecycle',
+      );
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_audit_failure',
+        error.message,
+        [{ phase: 'audit', message: error.message }],
+        error,
+      );
+    }
+    if (
+      prior?.state === 'unknown' ||
+      prior?.state === 'failed' ||
+      current.lifecycle === 'attention_required'
+    ) {
+      const replayDiagnostics =
+        prior?.result &&
+        typeof prior.result === 'object' &&
+        'diagnostics' in prior.result &&
+        Array.isArray(prior.result.diagnostics)
+          ? prior.result.diagnostics.filter(
+              isPlanningInterruptCleanupDiagnostic,
+            )
+          : [];
+      const cleanupFailed = replayDiagnostics.some((diagnostic) =>
+        ['session_close', 'consumer_join', 'consumer_removal'].includes(
+          diagnostic.phase,
+        ),
+      );
+      throw new PlanningInterruptCleanupError(
+        cleanupFailed
+          ? 'planning_interrupt_quiescence_failure'
+          : 'planning_interrupt_unproven',
+        cleanupFailed
+          ? 'Planning session cleanup was not fully proven'
+          : 'Planning interruption was not proven',
+        replayDiagnostics.length > 0
+          ? replayDiagnostics
+          : [
+              {
+                phase: 'adapter_interrupt',
+                message: 'A prior planning interruption settled without proof',
+              },
+            ],
+      );
+    }
+    if (
+      (prior === undefined && current.lifecycle !== 'running') ||
+      (prior?.state === 'pending' && current.lifecycle !== 'interrupting')
+    ) {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_not_running',
+        'Execution is not an active planning runtime',
+      );
+    }
+
+    const owned = this.active.get(executionId);
+    if (
+      !owned ||
+      current.nativeHandle === null ||
+      owned.session.nativeHandle !== current.nativeHandle
+    ) {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_quiescence_failure',
+        'The exact active planning session is unavailable',
+        [
+          {
+            phase: 'consumer_removal',
+            message: 'The durable native handle has no exact active session',
+          },
+        ],
+      );
+    }
+    owned.fenced = true;
+
+    let operationId = prior?.id;
+    if (!prior) {
+      const occurredAt = this.dependencies.now();
+      let interruptingEvent: DomainEvent;
+      let writesStarted = false;
+      try {
+        interruptingEvent = inImmediateTransaction(
+          this.dependencies.database,
+          () => {
+            this.dependencies.barrier.assertHealthy();
+            writesStarted = true;
+            const exact = requireExecution(
+              this.dependencies.executions,
+              executionId,
+            );
+            if (
+              exact.lifecycle !== 'running' ||
+              exact.nativeHandle !== owned.session.nativeHandle
+            ) {
+              throw new Error('Planning session ownership changed');
+            }
+            const interrupting =
+              this.dependencies.executions.transitionInTransaction(
+                exact.id,
+                exact.revision,
+                'interrupting',
+                occurredAt,
+              );
+            operationId =
+              this.dependencies.operations.createPendingInTransaction({
+                executionId,
+                kind: 'interrupt',
+                request: {
+                  version: PLANNING_INTERRUPT_OPERATION_VERSION,
+                },
+                createdAt: occurredAt,
+              }).id;
+            return this.dependencies.events.appendDomainInTransaction(
+              exact.projectId,
+              lifecycleDraft(interrupting, occurredAt),
+            );
+          },
+        );
+      } catch (error) {
+        if (writesStarted && this.dependencies.barrier.status === 'healthy') {
+          this.dependencies.barrier.trip(error, occurredAt);
+        }
+        await this.containAfterBarrier(owned.session);
+        await this.quiescePlanningSession(executionId, owned, false);
+        const message =
+          error instanceof Error ? error.message : 'Planning audit failed';
+        throw new PlanningInterruptCleanupError(
+          'planning_interrupt_audit_failure',
+          message,
+          [{ phase: 'audit', message }],
+          error,
+        );
+      }
+      this.publishDomain(interruptingEvent);
+    }
+    if (!operationId) {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_audit_failure',
+        'Planning interrupt operation was not reserved',
+        [
+          {
+            phase: 'audit',
+            message: 'Planning interrupt operation was not reserved',
+          },
+        ],
+      );
+    }
+
+    const diagnostics: PlanningInterruptCleanupDiagnostic[] = [];
+    let interruptProof: unknown;
+    let proven = false;
+    try {
+      const interrupted = await this.dependencies.adapter.interrupt(
+        owned.session.nativeHandle,
+      );
+      this.dependencies.barrier.assertHealthy();
+      interruptProof = interrupted;
+      if (interrupted.status === 'succeeded') {
+        proven = true;
+      } else if (interrupted.status === 'already_terminal') {
+        try {
+          const probe = await this.dependencies.adapter.probe(
+            owned.session.nativeHandle,
+          );
+          this.dependencies.barrier.assertHealthy();
+          interruptProof = { interrupted, probe };
+          proven =
+            probe.status === 'terminal' && probe.outcome === 'interrupted';
+          if (!proven) {
+            diagnostics.push({
+              phase: 'adapter_probe',
+              message:
+                probe.status === 'terminal'
+                  ? `Adapter reported terminal ${probe.outcome}`
+                  : probe.status === 'resumable'
+                    ? 'Adapter session remains resumable'
+                    : probe.reason,
+            });
+          }
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          diagnostics.push({ phase: 'adapter_probe', message });
+          interruptProof = { interrupted, probeError: message };
+        }
+      } else {
+        diagnostics.push({
+          phase: 'adapter_interrupt',
+          message: interrupted.reason ?? 'Adapter interruption is unknown',
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      diagnostics.push({ phase: 'adapter_interrupt', message });
+      interruptProof = { error: message };
+    }
+
+    const cleanupDiagnostics = await this.quiescePlanningSession(
+      executionId,
+      owned,
+      true,
+    );
+    diagnostics.push(...cleanupDiagnostics);
+    const settled = proven && cleanupDiagnostics.length === 0;
+    const completedAt = this.dependencies.now();
+    let finishedEvent: DomainEvent;
+    try {
+      finishedEvent = inImmediateTransaction(this.dependencies.database, () => {
+        this.dependencies.barrier.assertHealthy();
+        const exact = requireExecution(
+          this.dependencies.executions,
+          executionId,
+        );
+        if (exact.lifecycle !== 'interrupting') {
+          throw new Error('Planning interruption lost lifecycle ownership');
+        }
+        const finished = this.dependencies.executions.transitionInTransaction(
+          exact.id,
+          exact.revision,
+          settled ? 'interrupted' : 'attention_required',
+          completedAt,
+        );
+        this.dependencies.operations.finishInTransaction(
+          operationId,
+          settled ? 'succeeded' : 'unknown',
+          { proof: interruptProof, diagnostics },
+          completedAt,
+        );
+        return this.dependencies.events.appendDomainInTransaction(
+          exact.projectId,
+          lifecycleDraft(finished, completedAt),
+        );
+      });
+    } catch (error) {
+      if (this.dependencies.barrier.status === 'healthy') {
+        this.dependencies.barrier.trip(error, completedAt);
+      }
+      const message =
+        error instanceof Error ? error.message : 'Planning audit failed';
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_audit_failure',
+        message,
+        [...diagnostics, { phase: 'audit', message }],
+        error,
+      );
+    }
+    this.publishDomain(finishedEvent);
+
+    if (cleanupDiagnostics.length > 0) {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_quiescence_failure',
+        'Planning session cleanup was not fully proven',
+        diagnostics,
+      );
+    }
+    if (!proven) {
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_unproven',
+        'Planning interruption was not proven',
+        diagnostics,
+      );
+    }
   }
 
   async interrupt(
@@ -555,10 +1172,19 @@ export class ExecutionRuntime {
   attach(executionId: string, session: HarnessSession): void {
     if (this.active.has(executionId))
       throw new Error('Execution already has an active session');
-    const task = this.consume(executionId, session).finally(() => {
-      this.active.delete(executionId);
-    });
-    this.active.set(executionId, { session, task });
+    const owned: ActiveSession = {
+      session,
+      fenced: false,
+      task: Promise.resolve(),
+    };
+    this.active.set(executionId, owned);
+    owned.task = this.consumerContext
+      .run(executionId, () => this.consume(executionId, owned))
+      .finally(() => {
+        if (this.active.get(executionId) === owned) {
+          this.active.delete(executionId);
+        }
+      });
   }
 
   async drain(): Promise<void> {
@@ -588,10 +1214,46 @@ export class ExecutionRuntime {
     await this.drain();
   }
 
+  private async quiescePlanningSession(
+    executionId: string,
+    owned: ActiveSession,
+    close: boolean,
+  ): Promise<PlanningInterruptCleanupDiagnostic[]> {
+    const diagnostics: PlanningInterruptCleanupDiagnostic[] = [];
+    if (close) {
+      try {
+        await owned.session.close();
+      } catch (error) {
+        diagnostics.push({
+          phase: 'session_close',
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    try {
+      await owned.task;
+    } catch (error) {
+      diagnostics.push({
+        phase: 'consumer_join',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (this.active.get(executionId) === owned) {
+      this.active.delete(executionId);
+      diagnostics.push({
+        phase: 'consumer_removal',
+        message:
+          'Consumer task settled without removing exact session ownership',
+      });
+    }
+    return diagnostics;
+  }
+
   private async consume(
     executionId: string,
-    session: HarnessSession,
+    owned: ActiveSession,
   ): Promise<void> {
+    const { session } = owned;
     const starting = this.dependencies.executions.get(executionId);
     if (!starting) throw new Error('Execution was not found for attach');
     try {
@@ -604,6 +1266,7 @@ export class ExecutionRuntime {
         try {
           next = await iterator.next();
         } catch (error) {
+          if (owned.fenced) return;
           if (await this.stopIfBarrierTripped(session)) return;
           await this.persistAdapterFailure(
             executionId,
@@ -613,6 +1276,7 @@ export class ExecutionRuntime {
           );
           return;
         }
+        if (owned.fenced) return;
         if (await this.stopIfBarrierTripped(session)) return;
         if (next.done) {
           await this.closeAfterSuccess(
@@ -626,6 +1290,7 @@ export class ExecutionRuntime {
         try {
           envelope = harnessEventEnvelopeSchema.parse(candidate);
         } catch (error) {
+          if (owned.fenced) return;
           await this.persistAdapterFailure(
             executionId,
             candidate,
@@ -634,11 +1299,13 @@ export class ExecutionRuntime {
           );
           return;
         }
+        if (owned.fenced) return;
         const current = requireExecution(
           this.dependencies.executions,
           executionId,
         );
         if (envelope.adapterCursor !== current.lastAdapterCursor + 1) {
+          if (owned.fenced) return;
           await this.persistAdapterFailure(
             executionId,
             candidate,
@@ -699,10 +1366,13 @@ export class ExecutionRuntime {
             },
           ));
         } catch (error) {
+          if (owned.fenced) return;
           await this.contain(session, error);
           return;
         }
+        if (owned.fenced) return;
         this.publishRuntime(runtimeEvent);
+        if (owned.fenced) return;
         if (domainEvent) {
           this.publishDomain(domainEvent);
           await this.closeAfterSuccess(
@@ -713,6 +1383,7 @@ export class ExecutionRuntime {
         }
       }
     } catch (error) {
+      if (owned.fenced) return;
       if (await this.stopIfBarrierTripped(session)) return;
       await this.persistAdapterFailure(executionId, undefined, error, session);
     }

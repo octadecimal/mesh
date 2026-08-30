@@ -11,8 +11,14 @@ import type {
   ResolvedWorkerProfileSnapshot,
   RuntimeEvent,
   StartExecutionEnvelope,
+  WorkerExecution,
+} from '@mesh/v2-contracts';
+import {
+  PM_DISCOVERY_REPORT_SCHEMA,
+  pmDiscoveryReportSchema,
 } from '@mesh/v2-contracts';
 
+import { inImmediateTransaction } from '../db/database.js';
 import {
   hashV2Command,
   V2IdempotencyConflictError,
@@ -23,8 +29,11 @@ import {
 } from '../test/create-v2-test-database.js';
 import { AuditBarrier } from './audit-barrier.js';
 import { ExecutionRepository } from './execution-repository.js';
-import { ExecutionRuntime } from './execution-runtime.js';
-import { FakeHarnessAdapter } from './fake-harness.js';
+import {
+  ExecutionRuntime,
+  PlanningInterruptCleanupError,
+} from './execution-runtime.js';
+import { FakeHarnessAdapter, type FakeHarnessOptions } from './fake-harness.js';
 import { OperationRepository } from './operation-repository.js';
 
 const fixtures: V2TestDatabase[] = [];
@@ -153,6 +162,55 @@ const normalizedOutput = (
   payload: { text: 'malformed input fixture' },
 });
 
+const createPmRuntime = (
+  scenario: 'todo' | 'malformed',
+  fakeOptions: Omit<FakeHarnessOptions, 'pmScenario'> = {},
+  publisher?: {
+    domain(event: DomainEvent): void;
+    runtime(event: RuntimeEvent): void;
+  },
+) => {
+  const context = createRuntime({
+    fake: new FakeHarnessAdapter({ ...fakeOptions, pmScenario: scenario }),
+    publisher,
+    profile: (profile) => ({
+      ...profile,
+      document: {
+        ...profile.document,
+        spec: {
+          ...profile.document.spec,
+          assignmentKinds: ['pm_discovery'],
+          outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+        },
+      },
+    }),
+  });
+  const humanTurnId = randomUUID();
+  context.start.command.assignment = {
+    kind: 'pm_discovery',
+    projectId: context.fixture.project.id,
+    outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+    planningCycleId: randomUUID(),
+    humanTurnId,
+    expectedCycleRevision: 1,
+    expectedProposalRevision: 1,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    input: {
+      conversation: [
+        {
+          turnId: humanTurnId,
+          actor: 'human',
+          message: 'Build a Todo application.',
+        },
+      ],
+      latestProposal: null,
+      approvedIntentLedger: null,
+    },
+  };
+  return context;
+};
+
 const durableReservationState = (fixture: V2TestDatabase) => ({
   executions: fixture.database
     .prepare('SELECT * FROM worker_executions ORDER BY id')
@@ -178,7 +236,912 @@ const durableRuntimeState = (fixture: V2TestDatabase) => ({
     .all(),
 });
 
+const attachBlockedPlanningSession = async (
+  context: ReturnType<typeof createPmRuntime>,
+  running: WorkerExecution,
+  closeThrows = false,
+) => {
+  let releaseNext: (() => void) | undefined;
+  const blockedNext = new Promise<void>((resolve) => {
+    releaseNext = resolve;
+  });
+  let nextCalledResolve: (() => void) | undefined;
+  const nextCalled = new Promise<void>((resolve) => {
+    nextCalledResolve = resolve;
+  });
+  const state = { closeCount: 0 };
+  const session: HarnessSession = {
+    nativeHandle: required(running.nativeHandle, 'Expected a native handle'),
+    events: () => ({
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<HarnessEventEnvelope>> {
+            nextCalledResolve?.();
+            await blockedNext;
+            return { done: true, value: undefined };
+          },
+        };
+      },
+    }),
+    async close() {
+      state.closeCount += 1;
+      releaseNext?.();
+      if (closeThrows) throw new Error('planning close failure');
+    },
+  };
+  context.runtime.attach(running.id, session);
+  await nextCalled;
+  return { session, state };
+};
+
 describe('ExecutionRuntime', () => {
+  it('audits and publishes a strict PM structured output before completion', async () => {
+    const published: RuntimeEvent[] = [];
+    let contextRef: ReturnType<typeof createPmRuntime> | undefined;
+    const context = createPmRuntime(
+      'todo',
+      {},
+      {
+        domain: () => undefined,
+        runtime: (event) => {
+          const current = required(contextRef, 'Expected runtime context');
+          expect(
+            current.fixture.database
+              .prepare('SELECT id FROM raw_diagnostics WHERE id = ?')
+              .get(event.diagnosticId),
+          ).toEqual({ id: event.diagnosticId });
+          published.push(event);
+        },
+      },
+    );
+    contextRef = context;
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'completed',
+      lastAdapterCursor: 2,
+      lastRuntimeSequence: 2,
+    });
+    const runtime = context.fixture.events.runtimeAfter(
+      context.fixture.project.id,
+      0,
+    ).events;
+    expect(runtime.map((event) => event.type)).toEqual([
+      'worker_execution.structured_output',
+      'worker_execution.completed',
+    ]);
+    expect(runtime[0]).toMatchObject({
+      payload: {
+        schema: PM_DISCOVERY_REPORT_SCHEMA,
+        value: { schema: PM_DISCOVERY_REPORT_SCHEMA },
+      },
+    });
+    expect(published).toEqual(runtime);
+    expect(
+      context.fixture.database
+        .prepare(
+          'SELECT COUNT(*) AS count FROM raw_diagnostics WHERE execution_id = ?',
+        )
+        .get(executionId),
+    ).toEqual({ count: 2 });
+    expect(context.fake.sessions[0]?.closeCount).toBe(1);
+  });
+
+  it('audits and publishes malformed PM value for strict consumer validation', async () => {
+    const context = createPmRuntime('malformed');
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'completed',
+      lastAdapterCursor: 2,
+      lastRuntimeSequence: 2,
+    });
+    const runtime = context.fixture.events.runtimeAfter(
+      context.fixture.project.id,
+      0,
+    ).events;
+    expect(runtime.map((event) => event.type)).toEqual([
+      'worker_execution.structured_output',
+      'worker_execution.completed',
+    ]);
+    const output = runtime[0];
+    if (output?.type !== 'worker_execution.structured_output') {
+      throw new Error('Expected malformed structured output');
+    }
+    expect(
+      pmDiscoveryReportSchema.safeParse(output.payload.value).success,
+    ).toBe(false);
+    expect(context.published.runtime).toEqual(runtime);
+    expect(
+      context.fixture.database
+        .prepare(
+          'SELECT payload_json FROM raw_diagnostics WHERE execution_id = ?',
+        )
+        .all(executionId),
+    ).toHaveLength(2);
+    expect(context.fake.sessions[0]?.closeCount).toBe(1);
+  });
+
+  it('reserves an exact linked execution without starting or consuming it', async () => {
+    const context = createRuntime();
+
+    const reservation = await context.runtime.reserveStart(context.start);
+
+    expect(reservation).toMatchObject({
+      activationRequired: true,
+      result: { ok: true, commandType: 'worker_execution.start' },
+      execution: { lifecycle: 'starting', nativeHandle: null },
+    });
+    expect(context.fake.startCount).toBe(0);
+    expect(context.fake.sessions).toEqual([]);
+    expect(context.published.runtime).toEqual([]);
+    expect(
+      context.operations.listForExecution(reservation.execution.id),
+    ).toMatchObject([
+      {
+        executionId: reservation.execution.id,
+        kind: 'start',
+        state: 'pending',
+        request: {
+          version: 'mesh.v2.execution-start/v1',
+          idempotencyKey: context.start.idempotencyKey,
+          requestHash: hashV2Command(context.start.command),
+        },
+      },
+    ]);
+    expect(context.runtime.findReservedStart(context.start)).toEqual(
+      reservation,
+    );
+    await expect(context.runtime.reserveStart(context.start)).resolves.toEqual(
+      reservation,
+    );
+
+    await context.runtime.activateReserved(reservation.execution.id);
+    await context.runtime.drain();
+    expect(context.fake.startCount).toBe(1);
+    expect(context.executions.get(reservation.execution.id)).toMatchObject({
+      lifecycle: 'running',
+      nativeHandle: expect.stringMatching(/^fake:v1:/),
+    });
+  });
+
+  it('preserves public pre-migration replay but fails direct reservation closed', async () => {
+    const context = createRuntime();
+    const requestHash = hashV2Command(context.start.command);
+    const storedResult = {
+      ok: false,
+      commandType: 'worker_execution.start',
+      error: {
+        code: 'required_capability_unavailable',
+        message: 'Stored terminal result',
+      },
+    } as const;
+    inImmediateTransaction(context.fixture.database, () => {
+      context.fixture.commands.storeInTransaction({
+        idempotencyKey: context.start.idempotencyKey,
+        commandType: context.start.command.type,
+        requestHash,
+        result: storedResult,
+        createdAt: '2026-08-28T01:00:00.000Z',
+      });
+    });
+
+    await expect(context.runtime.start(context.start)).resolves.toEqual(
+      storedResult,
+    );
+    expect(context.fake.startCount).toBe(0);
+    expect(
+      context.fixture.database
+        .prepare('SELECT * FROM execution_operations')
+        .all(),
+    ).toEqual([]);
+    expect(() => context.runtime.findReservedStart(context.start)).toThrow(
+      'Reserved start operation was not found',
+    );
+    expect(context.barrier.status).toBe('tripped');
+  });
+
+  it('fails exact reservation lookup closed when its durable link is missing', async () => {
+    const context = createRuntime();
+    const reservation = await context.runtime.reserveStart(context.start);
+    const operation = required(
+      context.operations.listForExecution(reservation.execution.id)[0],
+      'Expected start operation',
+    );
+    context.fixture.database
+      .prepare('DELETE FROM execution_operations WHERE id = ?')
+      .run(operation.id);
+
+    expect(() => context.runtime.findReservedStart(context.start)).toThrow(
+      'Reserved start operation was not found',
+    );
+    expect(context.barrier.status).toBe('tripped');
+    expect(context.fake.startCount).toBe(0);
+  });
+
+  it('links terminal capability reservations and never activates them', async () => {
+    const fake = new FakeHarnessAdapter();
+    fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
+    const context = createRuntime({ fake });
+
+    const reservation = await context.runtime.reserveStart(context.start);
+
+    expect(reservation).toMatchObject({
+      activationRequired: false,
+      result: {
+        ok: false,
+        error: { code: 'required_capability_unavailable' },
+      },
+      execution: {
+        lifecycle: 'failed',
+        failure: { code: 'required_capability_unavailable' },
+      },
+    });
+    expect(
+      context.operations.listForExecution(reservation.execution.id),
+    ).toMatchObject([
+      {
+        kind: 'start',
+        state: 'failed',
+        request: {
+          idempotencyKey: context.start.idempotencyKey,
+          requestHash: hashV2Command(context.start.command),
+        },
+      },
+    ]);
+    expect(context.runtime.findReservedStart(context.start)).toEqual(
+      reservation,
+    );
+    await context.runtime.activateReserved(reservation.execution.id);
+    expect(fake.startCount).toBe(0);
+  });
+
+  it('coalesces concurrent activation before adapter start and attachment', async () => {
+    const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
+    fake.blockStart();
+    const context = createRuntime({ fake });
+    const reservation = await context.runtime.reserveStart(context.start);
+
+    const first = context.runtime.activateReserved(reservation.execution.id);
+    await fake.waitUntilStartCalled();
+    const replay = context.runtime.activateReserved(reservation.execution.id);
+    fake.releaseStart();
+    await Promise.all([first, replay]);
+    await context.runtime.drain();
+
+    expect(fake.startCount).toBe(1);
+    expect(fake.sessions).toHaveLength(1);
+    expect(
+      context.operations.listForExecution(reservation.execution.id),
+    ).toMatchObject([{ kind: 'start', state: 'succeeded' }]);
+  });
+
+  it('cancels the exact unactivated reservation without adapter work', async () => {
+    const context = createRuntime();
+    const reservation = await context.runtime.reserveStart(context.start);
+
+    const cancelling = context.runtime.cancelReserved(reservation.execution.id);
+    const activation = context.runtime.activateReserved(
+      reservation.execution.id,
+    );
+    const cancelled = await cancelling;
+    await activation;
+
+    expect(cancelled).toMatchObject({
+      lifecycle: 'failed',
+      failure: { code: 'startup_interrupted_before_start' },
+    });
+    expect(
+      context.operations.listForExecution(reservation.execution.id),
+    ).toMatchObject([
+      {
+        kind: 'start',
+        state: 'failed',
+        result: { reason: 'planning_cycle_abandoned' },
+      },
+    ]);
+    expect({
+      starts: context.fake.startCount,
+      sessions: context.fake.sessions.length,
+      interrupts: context.fake.interruptCalls.length,
+    }).toEqual({ starts: 0, sessions: 0, interrupts: 0 });
+    await expect(
+      context.runtime.cancelReserved(reservation.execution.id),
+    ).resolves.toEqual(cancelled);
+  });
+
+  it('waits for activation that owns the reservation interlock first', async () => {
+    const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
+    fake.blockStart();
+    const context = createRuntime({ fake });
+    const reservation = await context.runtime.reserveStart(context.start);
+
+    const activation = context.runtime.activateReserved(
+      reservation.execution.id,
+    );
+    await fake.waitUntilStartCalled();
+    const cancellation = context.runtime.cancelReserved(
+      reservation.execution.id,
+    );
+    fake.releaseStart();
+    await activation;
+    const settled = await cancellation;
+    await context.runtime.drain();
+
+    expect(settled).toMatchObject({ lifecycle: 'running' });
+    expect(fake.startCount).toBe(1);
+    expect(context.operations.listForExecution(settled.id)).toMatchObject([
+      { kind: 'start', state: 'succeeded' },
+    ]);
+  });
+
+  it('trips the barrier when reserved cancellation cannot commit', async () => {
+    const context = createRuntime();
+    const reservation = await context.runtime.reserveStart(context.start);
+    const publishedBefore = context.published.domain.length;
+    context.fixture.database.exec(`
+      CREATE TRIGGER fail_reserved_cancellation
+      BEFORE UPDATE ON worker_executions
+      WHEN NEW.lifecycle = 'failed'
+      BEGIN SELECT RAISE(ABORT, 'fail reserved cancellation'); END
+    `);
+
+    await expect(
+      context.runtime.cancelReserved(reservation.execution.id),
+    ).rejects.toThrow('fail reserved cancellation');
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(context.executions.get(reservation.execution.id)).toMatchObject({
+      lifecycle: 'starting',
+    });
+    expect(
+      context.operations.listForExecution(reservation.execution.id),
+    ).toMatchObject([{ kind: 'start', state: 'pending' }]);
+    expect(context.published.domain).toHaveLength(publishedBefore);
+    expect(context.fake.startCount).toBe(0);
+  });
+
+  it.each(['structured_output', 'completion', 'failure'] as const)(
+    'fences and joins the exact planning session before late %s settles',
+    async (late) => {
+      const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const running = required(
+        context.executions.get(
+          started.ok && 'execution' in started ? started.execution.id : '',
+        ),
+        'Expected a running execution',
+      );
+      let releaseNext: (() => void) | undefined;
+      const blockedNext = new Promise<void>((resolve) => {
+        releaseNext = resolve;
+      });
+      let nextCalledResolve: (() => void) | undefined;
+      const nextCalled = new Promise<void>((resolve) => {
+        nextCalledResolve = resolve;
+      });
+      let closeCount = 0;
+      const session: HarnessSession = {
+        nativeHandle: required(
+          running.nativeHandle,
+          'Expected a native handle',
+        ),
+        events: () => ({
+          [Symbol.asyncIterator]() {
+            let delivered = false;
+            return {
+              async next(): Promise<IteratorResult<HarnessEventEnvelope>> {
+                if (delivered) return { done: true, value: undefined };
+                delivered = true;
+                nextCalledResolve?.();
+                await blockedNext;
+                if (late === 'failure') {
+                  throw new Error('late planning iterator failure');
+                }
+                const normalized: HarnessEventEnvelope['normalized'] =
+                  late === 'completion'
+                    ? {
+                        projectId: running.projectId,
+                        executionId: running.id,
+                        adapterCursor: running.lastAdapterCursor + 1,
+                        occurredAt: '2026-08-28T01:00:03.000Z',
+                        type: 'worker_execution.completed',
+                        payload: { outcome: 'completed' },
+                      }
+                    : {
+                        projectId: running.projectId,
+                        executionId: running.id,
+                        adapterCursor: running.lastAdapterCursor + 1,
+                        occurredAt: '2026-08-28T01:00:03.000Z',
+                        type: 'worker_execution.structured_output',
+                        payload: {
+                          schema: PM_DISCOVERY_REPORT_SCHEMA,
+                          value: { late: true },
+                        },
+                      };
+                return {
+                  done: false,
+                  value: {
+                    adapterCursor: running.lastAdapterCursor + 1,
+                    raw: { source: `late planning ${late}` },
+                    normalized,
+                  },
+                };
+              },
+            };
+          },
+        }),
+        async close() {
+          closeCount += 1;
+          releaseNext?.();
+        },
+      };
+      context.runtime.attach(running.id, session);
+      await nextCalled;
+      const before = durableRuntimeState(context.fixture);
+      const publishedBefore = {
+        domain: context.published.domain.length,
+        runtime: context.published.runtime.length,
+      };
+      const commandCount = context.fixture.database
+        .prepare('SELECT COUNT(*) AS count FROM command_results')
+        .get() as { count: number };
+
+      await context.runtime.interruptForPlanning(running.id);
+
+      expect(closeCount).toBe(1);
+      expect(context.fake.interruptCalls).toContain(session.nativeHandle);
+      expect(context.executions.get(running.id)).toMatchObject({
+        lifecycle: 'interrupted',
+        lastAdapterCursor: running.lastAdapterCursor,
+      });
+      expect(
+        context.fixture.database
+          .prepare('SELECT * FROM raw_diagnostics ORDER BY id')
+          .all(),
+      ).toEqual(before.diagnostics);
+      expect(durableRuntimeState(context.fixture).runtime).toEqual(
+        before.runtime,
+      );
+      expect(context.published.runtime).toHaveLength(publishedBefore.runtime);
+      expect(context.published.domain).toHaveLength(publishedBefore.domain + 2);
+      expect(
+        context.operations
+          .listForExecution(running.id)
+          .find(
+            (operation) =>
+              operation.kind === 'interrupt' &&
+              typeof operation.request === 'object' &&
+              operation.request !== null &&
+              'version' in operation.request &&
+              operation.request.version === 'mesh.v2.planning-interrupt/v1',
+          ),
+      ).toMatchObject({
+        kind: 'interrupt',
+        state: 'succeeded',
+        request: { version: 'mesh.v2.planning-interrupt/v1' },
+      });
+      expect(
+        context.fixture.database
+          .prepare('SELECT COUNT(*) AS count FROM command_results')
+          .get(),
+      ).toEqual(commandCount);
+      const interruptCount = context.fake.interruptCalls.length;
+      await context.runtime.interruptForPlanning(running.id);
+      expect(context.fake.interruptCalls).toHaveLength(interruptCount);
+    },
+  );
+
+  it('coalesces concurrent planning interruption around one exact session', async () => {
+    const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const { state } = await attachBlockedPlanningSession(context, running);
+    context.fake.blockInterrupt();
+
+    const first = context.runtime.interruptForPlanning(running.id);
+    await context.fake.waitUntilInterruptCalled();
+    const second = context.runtime.interruptForPlanning(running.id);
+    context.fake.releaseInterrupt({ status: 'succeeded' });
+    await Promise.all([first, second]);
+
+    expect(state.closeCount).toBe(1);
+    expect(context.fake.interruptCalls).toHaveLength(1);
+    expect(context.executions.get(running.id)).toMatchObject({
+      lifecycle: 'interrupted',
+    });
+    expect(
+      context.operations
+        .listForExecution(running.id)
+        .filter((operation) => operation.kind === 'interrupt'),
+    ).toMatchObject([{ state: 'succeeded' }]);
+  });
+
+  it('records an unproven already-terminal probe before rejecting cleanup', async () => {
+    const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const { state } = await attachBlockedPlanningSession(context, running);
+    context.fake.blockInterrupt();
+
+    const cleanup = context.runtime.interruptForPlanning(running.id);
+    await context.fake.waitUntilInterruptCalled();
+    context.fake.releaseInterrupt({ status: 'already_terminal' });
+    await expect(cleanup).rejects.toMatchObject({
+      code: 'planning_interrupt_unproven',
+      diagnostics: [
+        {
+          phase: 'adapter_probe',
+          message: 'Adapter session remains resumable',
+        },
+      ],
+    });
+
+    expect(state.closeCount).toBe(1);
+    expect(context.executions.get(running.id)).toMatchObject({
+      lifecycle: 'attention_required',
+    });
+    expect(
+      context.operations
+        .listForExecution(running.id)
+        .find((operation) => operation.kind === 'interrupt'),
+    ).toMatchObject({
+      state: 'unknown',
+      result: {
+        proof: {
+          interrupted: { status: 'already_terminal' },
+          probe: { status: 'resumable', afterAdapterCursor: 1 },
+        },
+      },
+    });
+  });
+
+  it('returns durable typed diagnostics when planning interruption is unproven', async () => {
+    const context = createPmRuntime('todo', {
+      holdAfterAdapterCursor: 1,
+      interruptThrows: true,
+    });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const { state } = await attachBlockedPlanningSession(context, running);
+
+    await expect(
+      context.runtime.interruptForPlanning(running.id),
+    ).rejects.toMatchObject({
+      name: PlanningInterruptCleanupError.name,
+      code: 'planning_interrupt_unproven',
+      diagnostics: [
+        {
+          phase: 'adapter_interrupt',
+          message: 'fake interrupt failure',
+        },
+      ],
+    });
+
+    expect(state.closeCount).toBe(1);
+    expect(context.executions.get(running.id)).toMatchObject({
+      lifecycle: 'attention_required',
+    });
+    expect(
+      context.operations
+        .listForExecution(running.id)
+        .find((operation) => operation.kind === 'interrupt'),
+    ).toMatchObject({
+      state: 'unknown',
+      result: {
+        diagnostics: [
+          {
+            phase: 'adapter_interrupt',
+            message: 'fake interrupt failure',
+          },
+        ],
+      },
+    });
+    const interruptCount = context.fake.interruptCalls.length;
+    await expect(
+      context.runtime.interruptForPlanning(running.id),
+    ).rejects.toMatchObject({
+      code: 'planning_interrupt_unproven',
+    });
+    expect(context.fake.interruptCalls).toHaveLength(interruptCount);
+  });
+
+  it('returns durable typed diagnostics when exact session close fails', async () => {
+    const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const { state } = await attachBlockedPlanningSession(
+      context,
+      running,
+      true,
+    );
+
+    await expect(
+      context.runtime.interruptForPlanning(running.id),
+    ).rejects.toMatchObject({
+      name: PlanningInterruptCleanupError.name,
+      code: 'planning_interrupt_quiescence_failure',
+      diagnostics: [
+        {
+          phase: 'session_close',
+          message: 'planning close failure',
+        },
+      ],
+    });
+
+    expect(state.closeCount).toBe(1);
+    expect(context.executions.get(running.id)).toMatchObject({
+      lifecycle: 'attention_required',
+    });
+    expect(
+      context.operations
+        .listForExecution(running.id)
+        .find((operation) => operation.kind === 'interrupt'),
+    ).toMatchObject({
+      state: 'unknown',
+      result: {
+        diagnostics: [
+          {
+            phase: 'session_close',
+            message: 'planning close failure',
+          },
+        ],
+      },
+    });
+    const interruptCount = context.fake.interruptCalls.length;
+    await expect(
+      context.runtime.interruptForPlanning(running.id),
+    ).rejects.toMatchObject({
+      code: 'planning_interrupt_quiescence_failure',
+    });
+    expect(context.fake.interruptCalls).toHaveLength(interruptCount);
+  });
+
+  it.each([
+    [
+      'reservation_transition',
+      `BEFORE UPDATE ON worker_executions
+       WHEN NEW.lifecycle = 'interrupting'`,
+      'running',
+      0,
+    ],
+    [
+      'operation_insert',
+      `BEFORE INSERT ON execution_operations
+       WHEN NEW.kind = 'interrupt'`,
+      'running',
+      0,
+    ],
+    ['interrupting_event', 'BEFORE INSERT ON domain_events', 'running', 0],
+    [
+      'terminal_execution',
+      `BEFORE UPDATE ON worker_executions
+       WHEN NEW.lifecycle = 'interrupted'`,
+      'interrupting',
+      1,
+    ],
+    [
+      'operation_proof',
+      `BEFORE UPDATE ON execution_operations
+       WHEN OLD.kind = 'interrupt'`,
+      'interrupting',
+      1,
+    ],
+  ] as const)(
+    'contains a planning interrupt %s audit failure after fencing',
+    async (fault, triggerTarget, expectedLifecycle, publishedDomainDelta) => {
+      const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+      const started = await context.runtime.start(context.start);
+      await context.runtime.drain();
+      const running = required(
+        context.executions.get(
+          started.ok && 'execution' in started ? started.execution.id : '',
+        ),
+        'Expected a running execution',
+      );
+      const { session, state } = await attachBlockedPlanningSession(
+        context,
+        running,
+      );
+      const publishedBefore = context.published.domain.length;
+      context.fixture.database.exec(`
+        CREATE TRIGGER fail_planning_interrupt_${fault}
+        ${triggerTarget}
+        BEGIN SELECT RAISE(ABORT, 'fail planning ${fault}'); END
+      `);
+
+      await expect(
+        context.runtime.interruptForPlanning(running.id),
+      ).rejects.toMatchObject({
+        name: PlanningInterruptCleanupError.name,
+        code: 'planning_interrupt_audit_failure',
+        diagnostics: [
+          {
+            phase: 'audit',
+            message: `fail planning ${fault}`,
+          },
+        ],
+      });
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(state.closeCount).toBe(1);
+      expect(context.fake.interruptCalls).toContain(session.nativeHandle);
+      expect(context.executions.get(running.id)).toMatchObject({
+        lifecycle: expectedLifecycle,
+      });
+      expect(context.published.domain).toHaveLength(
+        publishedBefore + publishedDomainDelta,
+      );
+      expect(
+        context.operations
+          .listForExecution(running.id)
+          .filter((operation) => operation.kind === 'interrupt'),
+      ).toMatchObject(
+        expectedLifecycle === 'running' ? [] : [{ state: 'pending' }],
+      );
+    },
+  );
+
+  it('contains a terminal planning event audit failure after adapter proof', async () => {
+    const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const { state } = await attachBlockedPlanningSession(context, running);
+    context.fake.blockInterrupt();
+    const publishedBefore = context.published.domain.length;
+
+    const cleanup = context.runtime.interruptForPlanning(running.id);
+    await context.fake.waitUntilInterruptCalled();
+    context.fixture.database.exec(`
+      CREATE TRIGGER fail_planning_terminal_event
+      BEFORE INSERT ON domain_events
+      BEGIN SELECT RAISE(ABORT, 'fail planning terminal event'); END
+    `);
+    context.fake.releaseInterrupt({ status: 'succeeded' });
+    await expect(cleanup).rejects.toMatchObject({
+      code: 'planning_interrupt_audit_failure',
+      diagnostics: [
+        {
+          phase: 'audit',
+          message: 'fail planning terminal event',
+        },
+      ],
+    });
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(state.closeCount).toBe(1);
+    expect(context.executions.get(running.id)).toMatchObject({
+      lifecycle: 'interrupting',
+    });
+    expect(context.published.domain).toHaveLength(publishedBefore + 1);
+    expect(
+      context.operations
+        .listForExecution(running.id)
+        .find((operation) => operation.kind === 'interrupt'),
+    ).toMatchObject({ state: 'pending' });
+  });
+
+  it('rejects consumer-task self-wait before fencing or interruption', async () => {
+    const domain: DomainEvent[] = [];
+    const runtimeEvents: RuntimeEvent[] = [];
+    let runtime: ExecutionRuntime | undefined;
+    let cleanup: Promise<void> | undefined;
+    let cleanupStartedResolve: (() => void) | undefined;
+    const cleanupStarted = new Promise<void>((resolve) => {
+      cleanupStartedResolve = resolve;
+    });
+    const context = createPmRuntime(
+      'todo',
+      {},
+      {
+        domain: (event) => domain.push(event),
+        runtime: (event) => {
+          runtimeEvents.push(event);
+          if (event.type === 'worker_execution.structured_output') {
+            cleanup = required(
+              runtime,
+              'Expected runtime',
+            ).interruptForPlanning(event.executionId);
+            cleanupStartedResolve?.();
+          }
+        },
+      },
+    );
+    runtime = context.runtime;
+
+    const started = await context.runtime.start(context.start);
+    await cleanupStarted;
+    await expect(
+      required(cleanup, 'Expected planning cleanup'),
+    ).rejects.toMatchObject({
+      code: 'planning_interrupt_quiescence_failure',
+      diagnostics: [
+        {
+          phase: 'consumer_join',
+          message: 'Self-wait was rejected before fencing',
+        },
+      ],
+    });
+    await context.runtime.drain();
+
+    const executionId =
+      started.ok && 'execution' in started ? started.execution.id : '';
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'completed',
+      lastAdapterCursor: 2,
+      lastRuntimeSequence: 2,
+    });
+    expect(runtimeEvents.map((event) => event.type)).toEqual([
+      'worker_execution.structured_output',
+      'worker_execution.completed',
+    ]);
+    expect(domain.at(-1)).toMatchObject({
+      type: 'worker_execution.lifecycle_changed',
+      payload: { execution: { lifecycle: 'completed' } },
+    });
+    expect(context.fake.sessions[0]?.closeCount).toBe(1);
+    expect(context.fake.interruptCalls).toEqual([]);
+    expect(
+      context.operations
+        .listForExecution(executionId)
+        .filter((operation) => operation.kind === 'interrupt'),
+    ).toEqual([]);
+  });
+
+  it('rejects planning interruption for unrelated non-running executions', async () => {
+    const context = createRuntime();
+    const before = durableRuntimeState(context.fixture);
+
+    await expect(
+      context.runtime.interruptForPlanning(context.fixture.execution.id),
+    ).rejects.toMatchObject({
+      name: PlanningInterruptCleanupError.name,
+      code: 'planning_interrupt_not_running',
+    });
+
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+    expect(context.fake.interruptCalls).toEqual([]);
+  });
+
   it('durably rejects missing required capabilities before operation or adapter start', async () => {
     const fake = new FakeHarnessAdapter();
     fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
@@ -201,7 +1164,9 @@ describe('ExecutionRuntime', () => {
         missing: ['execution.stream'],
       },
     });
-    expect(context.operations.listForExecution(failed.id)).toEqual([]);
+    expect(context.operations.listForExecution(failed.id)).toMatchObject([
+      { kind: 'start', state: 'failed' },
+    ]);
     expect(fake.startCount).toBe(0);
     expect(fake.resolveSkillsCount).toBe(0);
     expect(context.published.domain).toHaveLength(1);
@@ -239,7 +1204,9 @@ describe('ExecutionRuntime', () => {
       { mode: 'preferred', resolution: { kind: 'mesh-native-fallback' } },
       { mode: 'required', resolution: { kind: 'unavailable' } },
     ]);
-    expect(context.operations.listForExecution(failed.id)).toEqual([]);
+    expect(context.operations.listForExecution(failed.id)).toMatchObject([
+      { kind: 'start', state: 'failed' },
+    ]);
     expect(context.fake.startCount).toBe(0);
   });
 
@@ -319,7 +1286,9 @@ describe('ExecutionRuntime', () => {
     expect(
       context.fixture.commands.find(context.start.idempotencyKey)?.result,
     ).toEqual(result);
-    expect(context.operations.listForExecution(failed.id)).toEqual([]);
+    expect(context.operations.listForExecution(failed.id)).toMatchObject([
+      { kind: 'start', state: 'failed' },
+    ]);
     expect(fake.startCount).toBe(0);
   });
 
@@ -566,7 +1535,7 @@ describe('ExecutionRuntime', () => {
         .prepare('SELECT * FROM raw_diagnostics ORDER BY id')
         .all(),
     }).toEqual(before);
-    expect(fake.resolveSkillsCount).toBe(1);
+    expect(fake.resolveSkillsCount).toBe(0);
     expect(fake.startCount).toBe(0);
     expect(fake.interruptCalls).toEqual([]);
   });
