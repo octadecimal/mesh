@@ -17,8 +17,14 @@ import { inImmediateTransaction } from '../db/database.js';
 import { AuditBarrier } from '../executions/audit-barrier.js';
 import { ExecutionRepository } from '../executions/execution-repository.js';
 import { OperationRepository } from '../executions/operation-repository.js';
-import { hashV2Command } from '../storage/command-repository.js';
-import { createV2TestDatabase } from '../test/create-v2-test-database.js';
+import {
+  hashV2Command,
+  V2IdempotencyConflictError,
+} from '../storage/command-repository.js';
+import {
+  createV2TestDatabase,
+  insertV2TestProject,
+} from '../test/create-v2-test-database.js';
 import { PlanningRepository } from './planning-repository.js';
 import {
   PlanningService,
@@ -753,6 +759,130 @@ describe('PlanningService', () => {
       name: 'V2IdempotencyConflictError',
       code: 'idempotency_conflict',
     });
+  });
+
+  it('keeps concurrent cross-project digest conflict outside audit failure', async () => {
+    const context = setup();
+    const secondProject = insertV2TestProject(context.fixture.database, {
+      id: randomUUID(),
+      displayName: 'Notes',
+      repositoryIdentity: 'notes-repository',
+    });
+    vi.spyOn(context.launcher, 'reserve').mockRejectedValue(
+      new Error('reservation transport stopped'),
+    );
+    await expect(
+      context.service.submitTurn(firstTurn(context.fixture)),
+    ).rejects.toThrow('reservation transport stopped');
+    await expect(
+      context.service.submitTurn({
+        idempotencyKey: 'planning-second-project',
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.submit_turn',
+          projectId: secondProject.id,
+          expectedCycleRevision: null,
+          profileId: context.fixture.pmProfileRevision.profileId,
+          profileRevision: context.fixture.pmProfileRevision.revision,
+          message: 'Build a persistent Notes application.',
+        },
+      }),
+    ).rejects.toThrow('reservation transport stopped');
+    const winningCycle = context.repository.activeCycle(
+      context.fixture.project.id,
+    );
+    const losingCycle = context.repository.activeCycle(secondProject.id);
+    if (!winningCycle || !losingCycle) {
+      throw new Error('Expected both project cycles to be active');
+    }
+    const beforeWinningCursor = context.fixture.events.cursors(
+      winningCycle.projectId,
+    ).domain;
+    const beforeLosingCursor = context.fixture.events.cursors(
+      losingCycle.projectId,
+    ).domain;
+    const beforePublish = context.publish.mock.calls.length;
+    const idempotencyKey = 'abandon-cross-project-race';
+
+    const results = await Promise.allSettled([
+      context.service.abandonCycle({
+        idempotencyKey,
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.abandon',
+          projectId: winningCycle.projectId,
+          planningCycleId: winningCycle.id,
+          expectedCycleRevision: winningCycle.revision,
+        },
+      }),
+      context.service.abandonCycle({
+        idempotencyKey,
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.abandon',
+          projectId: losingCycle.projectId,
+          planningCycleId: losingCycle.id,
+          expectedCycleRevision: losingCycle.revision,
+        },
+      }),
+    ]);
+
+    expect(results[0]).toMatchObject({
+      status: 'fulfilled',
+      value: {
+        ok: true,
+        planningCycle: { cycle: { lifecycle: 'abandoned' } },
+      },
+    });
+    expect(results[1]).toMatchObject({
+      status: 'rejected',
+      reason: expect.any(V2IdempotencyConflictError),
+    });
+    if (results[0].status !== 'fulfilled') {
+      throw new Error('Expected first abandonment to win');
+    }
+    expect(context.fixture.commands.find(idempotencyKey)?.result).toEqual(
+      results[0].value,
+    );
+    expect(
+      context.fixture.database
+        .prepare(
+          'SELECT COUNT(*) AS count FROM command_results WHERE idempotency_key = ?',
+        )
+        .get(idempotencyKey),
+    ).toEqual({ count: 1 });
+    expect(context.fixture.events.cursors(winningCycle.projectId).domain).toBe(
+      beforeWinningCursor + 1,
+    );
+    expect(context.fixture.events.cursors(losingCycle.projectId).domain).toBe(
+      beforeLosingCursor,
+    );
+    expect(context.publish).toHaveBeenCalledTimes(beforePublish + 1);
+    expect(context.repository.cycle(losingCycle.id)).toEqual(losingCycle);
+    expect(() => context.barrier.assertHealthy()).not.toThrow();
+
+    context.fixture.database.exec(`
+      CREATE TRIGGER fail_planning_cycle_audit_write
+      BEFORE UPDATE ON planning_cycles
+      BEGIN
+        SELECT RAISE(ABORT, 'forced planning audit failure');
+      END
+    `);
+    await expect(
+      context.service.abandonCycle({
+        idempotencyKey: 'abandon-real-audit-failure',
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.abandon',
+          projectId: losingCycle.projectId,
+          planningCycleId: losingCycle.id,
+          expectedCycleRevision: losingCycle.revision,
+        },
+      }),
+    ).rejects.toThrow('forced planning audit failure');
+    expect(() => context.barrier.assertHealthy()).toThrow(
+      'Audit barrier is tripped',
+    );
   });
 
   it('does not reopen a failed launch after abandonment and restart', async () => {

@@ -27,6 +27,7 @@ import type { AuditBarrier } from '../executions/audit-barrier.js';
 import type { ExecutionRepository } from '../executions/execution-repository.js';
 import {
   hashV2Command,
+  V2IdempotencyConflictError,
   type V2CommandRepository,
 } from '../storage/command-repository.js';
 import { canonicalJson } from '../storage/canonical-json.js';
@@ -995,6 +996,7 @@ export class PlanningService {
     try {
       return inImmediateTransaction(this.dependencies.database, work);
     } catch (error) {
+      if (error instanceof V2IdempotencyConflictError) throw error;
       this.dependencies.barrier.trip(error, this.now());
       throw error;
     }
