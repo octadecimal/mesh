@@ -165,6 +165,33 @@ const trustedNextAdapterCursor = (
 const sameDurableValue = (left: unknown, right: unknown): boolean =>
   canonicalJson(left) === canonicalJson(right);
 
+const terminalReservationFailure = (execution: WorkerExecution) => {
+  const failure = execution.failure;
+  return failure?.code === 'required_capability_unavailable'
+    ? {
+        code: failure.code,
+        message: 'Required adapter capabilities are unavailable',
+        missing:
+          execution.profileSnapshot.document.spec.requiredCapabilities.filter(
+            (capability) =>
+              !execution.capabilitySnapshot.capabilities.includes(capability),
+          ),
+      }
+    : failure?.code === 'required_skill_unavailable'
+      ? {
+          code: failure.code,
+          message: 'Required skills are unavailable',
+          missing: execution.resolvedSkills
+            .filter(
+              (skill) =>
+                skill.mode === 'required' &&
+                skill.resolution.kind === 'unavailable',
+            )
+            .map((skill) => skill.requested.id),
+        }
+      : undefined;
+};
+
 const databaseActivations = new WeakMap<
   V2Database,
   Map<string, Promise<void>>
@@ -184,6 +211,60 @@ export class ExecutionRuntime {
       databaseActivations.set(dependencies.database, activations);
     }
     this.activations = activations;
+  }
+
+  private isLegacyFoundationTerminalReplay(
+    stored: StoredCommandResult,
+    envelope: StartExecutionEnvelope,
+  ): boolean {
+    if (
+      envelope.command.assignment.kind !== 'foundation-check' ||
+      stored.commandType !== 'worker_execution.start' ||
+      stored.result.commandType !== 'worker_execution.start'
+    ) {
+      return false;
+    }
+    if (stored.result.ok) return false;
+    const terminalResult = stored.result;
+    const candidates = this.dependencies.executions
+      .list(envelope.command.projectId)
+      .filter((execution) => {
+        const failure = terminalReservationFailure(execution);
+        return (
+          execution.projectId === envelope.command.projectId &&
+          execution.profileId === envelope.command.profileId &&
+          execution.profileRevision === envelope.command.profileRevision &&
+          execution.profileSnapshot.profileId === execution.profileId &&
+          execution.profileSnapshot.profileRevision ===
+            execution.profileRevision &&
+          (execution.profileSnapshot.projectId === null ||
+            execution.profileSnapshot.projectId === execution.projectId) &&
+          sameDurableValue(execution.assignment, envelope.command.assignment) &&
+          sameDurableValue(execution.skillRequests, {
+            preferred: execution.profileSnapshot.document.spec.skills.preferred,
+            required: execution.profileSnapshot.document.spec.skills.required,
+          }) &&
+          execution.capabilitySnapshot.adapterId === execution.adapterId &&
+          execution.model ===
+            execution.profileSnapshot.document.spec.preferredRuntime.model &&
+          execution.lifecycle === 'failed' &&
+          execution.revision === 1 &&
+          execution.nativeHandle === null &&
+          execution.lastAdapterCursor === 0 &&
+          execution.lastRuntimeSequence === 0 &&
+          execution.replacementForExecutionId === null &&
+          execution.createdAt === stored.createdAt &&
+          execution.updatedAt === stored.createdAt &&
+          execution.endedAt === stored.createdAt &&
+          failure !== undefined &&
+          sameDurableValue(execution.failure, failure) &&
+          terminalResult.error.code === failure.code &&
+          terminalResult.error.message === failure.message &&
+          this.dependencies.operations.listForExecution(execution.id).length ===
+            0
+        );
+      });
+    return candidates.length === 1;
   }
 
   private reservedStartFromStored(
@@ -365,32 +446,7 @@ export class ExecutionRuntime {
                 'attention_required',
               ].includes(execution.lifecycle);
     const failure = execution.failure;
-    const expectedTerminalFailure =
-      failure?.code === 'required_capability_unavailable'
-        ? {
-            code: failure.code,
-            message: 'Required adapter capabilities are unavailable',
-            missing:
-              execution.profileSnapshot.document.spec.requiredCapabilities.filter(
-                (capability) =>
-                  !execution.capabilitySnapshot.capabilities.includes(
-                    capability,
-                  ),
-              ),
-          }
-        : failure?.code === 'required_skill_unavailable'
-          ? {
-              code: failure.code,
-              message: 'Required skills are unavailable',
-              missing: execution.resolvedSkills
-                .filter(
-                  (skill) =>
-                    skill.mode === 'required' &&
-                    skill.resolution.kind === 'unavailable',
-                )
-                .map((skill) => skill.requested.id),
-            }
-          : undefined;
+    const expectedTerminalFailure = terminalReservationFailure(execution);
     const failedReceiptCoherent = stored.result.ok
       ? true
       : operation.state === 'failed' &&
@@ -409,17 +465,40 @@ export class ExecutionRuntime {
         sameDurableValue(failure, expectedTerminalFailure) &&
         stored.result.error.code === failure.code &&
         stored.result.error.message === failure.message;
-    const expectedFailedResult =
-      operation.state === 'failed' && failure !== null
+    const expectedSuccessfulReceiptFailure =
+      successfulReceipt !== undefined &&
+      operation.state === 'failed' &&
+      failure?.code === 'adapter_unavailable'
         ? {
-            reason:
-              stored.result.ok &&
-              failure.code === 'startup_interrupted_before_start'
-                ? 'planning_cycle_abandoned'
-                : failure.message,
-            failure,
+            reason: failure.message,
+            failure: { code: failure.code, message: failure.message },
           }
-        : undefined;
+        : successfulReceipt !== undefined &&
+            operation.state === 'failed' &&
+            failure?.code === 'startup_interrupted_before_start'
+          ? {
+              reason: 'planning_cycle_abandoned',
+              failure: {
+                code: failure.code,
+                message: 'Execution start was cancelled before adapter startup',
+              },
+            }
+          : undefined;
+    const successfulReceiptFailureCoherent =
+      successfulReceipt === undefined || operation.state !== 'failed'
+        ? true
+        : execution.lifecycle === 'failed' &&
+          execution.revision === 1 &&
+          execution.nativeHandle === null &&
+          execution.lastAdapterCursor === 0 &&
+          execution.lastRuntimeSequence === 0 &&
+          execution.replacementForExecutionId === null &&
+          execution.endedAt === execution.updatedAt &&
+          operation.createdAt === execution.createdAt &&
+          operation.updatedAt === execution.updatedAt &&
+          expectedSuccessfulReceiptFailure !== undefined &&
+          sameDurableValue(failure, expectedSuccessfulReceiptFailure.failure) &&
+          sameDurableValue(operation.result, expectedSuccessfulReceiptFailure);
     const operationResultCoherent =
       operation.state === 'pending'
         ? operation.result === null
@@ -429,8 +508,13 @@ export class ExecutionRuntime {
               nativeHandle: execution.nativeHandle,
             })
           : operation.state === 'failed'
-            ? expectedFailedResult !== undefined &&
-              sameDurableValue(operation.result, expectedFailedResult)
+            ? stored.result.ok
+              ? successfulReceiptFailureCoherent
+              : failure !== null &&
+                sameDurableValue(operation.result, {
+                  reason: failure.message,
+                  failure,
+                })
             : execution.nativeHandle === null &&
               sameDurableValue(operation.result, {
                 probe: {
@@ -438,7 +522,12 @@ export class ExecutionRuntime {
                   reason: 'Execution has no native handle',
                 },
               });
-    if (!coherent || !failedReceiptCoherent || !operationResultCoherent) {
+    if (
+      !coherent ||
+      !failedReceiptCoherent ||
+      !successfulReceiptFailureCoherent ||
+      !operationResultCoherent
+    ) {
       throw new Error('Reserved start operation state is inconsistent');
     }
     return operation;
@@ -812,7 +901,12 @@ export class ExecutionRuntime {
           envelope.idempotencyKey,
           requestHash,
         );
-        if (!operation) return stored.result;
+        if (!operation) {
+          if (this.isLegacyFoundationTerminalReplay(stored, envelope)) {
+            return stored.result;
+          }
+          throw new Error('Reserved start operation was not found');
+        }
         return this.reservedStartFromStored(
           stored,
           envelope,

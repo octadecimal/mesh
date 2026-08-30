@@ -478,23 +478,64 @@ describe('ExecutionRuntime', () => {
   });
 
   it('preserves public pre-migration replay but fails direct reservation closed', async () => {
-    const context = createRuntime();
+    const fake = new FakeHarnessAdapter();
+    fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
+    const context = createRuntime({ fake });
     const requestHash = hashV2Command(context.start.command);
+    const occurredAt = '2026-08-28T01:00:00.000Z';
+    const failure = {
+      code: 'required_capability_unavailable' as const,
+      message: 'Required adapter capabilities are unavailable',
+      missing: ['execution.stream'],
+    };
+    const legacyExecution: WorkerExecution = {
+      id: randomUUID(),
+      projectId: context.fixture.project.id,
+      profileId: context.fixture.profileRevision.profileId,
+      profileRevision: context.fixture.profileRevision.revision,
+      assignment: context.start.command.assignment,
+      profileSnapshot: {
+        profileId: context.fixture.profileRevision.profileId,
+        projectId: context.fixture.profileRevision.projectId,
+        profileRevision: context.fixture.profileRevision.revision,
+        baseProfileId: context.fixture.profileRevision.baseProfileId,
+        baseRevision: context.fixture.profileRevision.baseRevision,
+        document: context.fixture.profileRevision.document,
+        digest: context.fixture.profileRevision.digest,
+      },
+      skillRequests: { preferred: [], required: [] },
+      resolvedSkills: [],
+      capabilitySnapshot: fake.capabilitiesValue,
+      adapterId: fake.capabilitiesValue.adapterId,
+      model:
+        context.fixture.profileRevision.document.spec.preferredRuntime.model,
+      nativeHandle: null,
+      lifecycle: 'failed',
+      revision: 1,
+      lastAdapterCursor: 0,
+      lastRuntimeSequence: 0,
+      replacementForExecutionId: null,
+      failure,
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+      endedAt: occurredAt,
+    };
     const storedResult = {
       ok: false,
       commandType: 'worker_execution.start',
       error: {
         code: 'required_capability_unavailable',
-        message: 'Stored terminal result',
+        message: failure.message,
       },
     } as const;
     inImmediateTransaction(context.fixture.database, () => {
+      context.executions.insertInTransaction(legacyExecution);
       context.fixture.commands.storeInTransaction({
         idempotencyKey: context.start.idempotencyKey,
         commandType: context.start.command.type,
         requestHash,
         result: storedResult,
-        createdAt: '2026-08-28T01:00:00.000Z',
+        createdAt: occurredAt,
       });
     });
 
@@ -511,6 +552,60 @@ describe('ExecutionRuntime', () => {
       'Reserved start operation was not found',
     );
     expect(context.barrier.status).toBe('tripped');
+  });
+
+  it('fails unproven legacy terminal replay closed', async () => {
+    const context = createRuntime();
+    const requestHash = hashV2Command(context.start.command);
+    inImmediateTransaction(context.fixture.database, () => {
+      context.fixture.commands.storeInTransaction({
+        idempotencyKey: context.start.idempotencyKey,
+        commandType: context.start.command.type,
+        requestHash,
+        result: {
+          ok: false,
+          commandType: 'worker_execution.start',
+          error: {
+            code: 'required_capability_unavailable',
+            message: 'Required adapter capabilities are unavailable',
+          },
+        },
+        createdAt: '2026-08-28T01:00:00.000Z',
+      });
+    });
+    const before = durableReservationState(context.fixture);
+
+    await expect(context.runtime.start(context.start)).rejects.toThrow(
+      'Reserved start operation was not found',
+    );
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(context.fake.startCount).toBe(0);
+  });
+
+  it('fails public replay closed when a successful reservation loses its operation', async () => {
+    const context = createRuntime();
+    const reservation = await context.runtime.reserveStart(context.start);
+    const operation = required(
+      context.operations.listForExecution(reservation.execution.id)[0],
+      'Expected start operation',
+    );
+    context.fixture.database
+      .prepare('DELETE FROM execution_operations WHERE id = ?')
+      .run(operation.id);
+    const before = durableReservationState(context.fixture);
+
+    await expect(context.runtime.start(context.start)).rejects.toThrow(
+      'Reserved start operation was not found',
+    );
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(durableReservationState(context.fixture)).toEqual(before);
+    expect(context.executions.get(reservation.execution.id)).toMatchObject({
+      lifecycle: 'starting',
+    });
+    expect(context.fake.startCount).toBe(0);
   });
 
   it('fails exact reservation lookup closed when its durable link is missing', async () => {
@@ -693,6 +788,117 @@ describe('ExecutionRuntime', () => {
     expect(context.barrier.status).toBe('tripped');
     expect(durableReservationState(context.fixture)).toEqual(before);
     expect(fake.startCount).toBe(0);
+  });
+
+  it.each([
+    {
+      name: 'forged internal failure',
+      failure: { code: 'internal_error', message: 'forged start failure' },
+      reason: 'forged start failure',
+    },
+    {
+      name: 'adapter failure with missing evidence',
+      failure: {
+        code: 'adapter_unavailable',
+        message: 'adapter start failed',
+        missing: ['forged.missing'],
+      },
+      reason: 'adapter start failed',
+    },
+    {
+      name: 'cancel failure with forged message',
+      failure: {
+        code: 'startup_interrupted_before_start',
+        message: 'forged cancellation message',
+      },
+      reason: 'planning_cycle_abandoned',
+    },
+    {
+      name: 'cancel failure with adapter reason',
+      failure: {
+        code: 'startup_interrupted_before_start',
+        message: 'Execution start was cancelled before adapter startup',
+      },
+      reason: 'Execution start was cancelled before adapter startup',
+    },
+  ])(
+    'fails successful receipt replay closed for $name',
+    async ({ failure, reason }) => {
+      const context = createRuntime();
+      const reservation = await context.runtime.reserveStart(context.start);
+      const operation = required(
+        context.operations.listForExecution(reservation.execution.id)[0],
+        'Expected start operation',
+      );
+      inImmediateTransaction(context.fixture.database, () => {
+        const failed = context.executions.transitionInTransaction(
+          reservation.execution.id,
+          reservation.execution.revision,
+          'failed',
+          '2026-08-28T01:00:01.000Z',
+          { failure },
+        );
+        context.operations.finishInTransaction(
+          operation.id,
+          'failed',
+          { reason, failure: failed.failure },
+          '2026-08-28T01:00:01.000Z',
+        );
+      });
+      const before = durableReservationState(context.fixture);
+
+      expect(() => context.runtime.findReservedStart(context.start)).toThrow(
+        'Reserved start operation state is inconsistent',
+      );
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.fake.startCount).toBe(0);
+    },
+  );
+
+  it('replays exact adapter-start failure evidence from a successful receipt', async () => {
+    const fake = new FakeHarnessAdapter();
+    const start = vi
+      .spyOn(fake, 'start')
+      .mockRejectedValueOnce(new Error('fixture adapter start failure'));
+    const context = createRuntime({ fake });
+
+    const receipt = await context.runtime.start(context.start);
+    if (!receipt.ok || !('execution' in receipt)) {
+      throw new Error('Expected successful starting receipt');
+    }
+    const failed = required(
+      context.executions.get(receipt.execution.id),
+      'Expected failed execution',
+    );
+    expect(failed).toMatchObject({
+      lifecycle: 'failed',
+      failure: {
+        code: 'adapter_unavailable',
+        message: 'fixture adapter start failure',
+      },
+    });
+    expect(context.operations.listForExecution(failed.id)).toMatchObject([
+      {
+        kind: 'start',
+        state: 'failed',
+        result: {
+          reason: 'fixture adapter start failure',
+          failure: failed.failure,
+        },
+      },
+    ]);
+    expect(context.runtime.findReservedStart(context.start)).toEqual({
+      execution: failed,
+      result: receipt,
+      activationRequired: false,
+    });
+    await expect(context.runtime.start(context.start)).resolves.toEqual(
+      receipt,
+    );
+    expect(context.barrier.status).toBe('healthy');
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   it('fails linked replay closed for a forged successful operation result', async () => {
@@ -895,6 +1101,15 @@ describe('ExecutionRuntime', () => {
     await expect(
       context.runtime.cancelReserved(reservation.execution.id),
     ).resolves.toEqual(cancelled);
+    expect(context.runtime.findReservedStart(context.start)).toEqual({
+      execution: cancelled,
+      result: reservation.result,
+      activationRequired: false,
+    });
+    await expect(context.runtime.start(context.start)).resolves.toEqual(
+      reservation.result,
+    );
+    expect(context.barrier.status).toBe('healthy');
   });
 
   it.each(['missing', 'multiple', 'wrong'] as const)(
