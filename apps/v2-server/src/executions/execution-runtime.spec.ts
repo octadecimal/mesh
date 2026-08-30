@@ -244,12 +244,27 @@ const recordPlanningMigration = (
   fixture: V2TestDatabase,
   appliedAt: string,
 ): void => {
+  const existing = fixture.database
+    .prepare(
+      `UPDATE v2_schema_migrations
+       SET applied_at = ?
+       WHERE version = 2`,
+    )
+    .run(appliedAt);
+  if (existing.changes > 0) return;
+
   fixture.database
     .prepare(
       `INSERT INTO v2_schema_migrations (version, name, applied_at)
        VALUES (2, '002_intent_ledger', ?)`,
     )
     .run(appliedAt);
+};
+
+const removePlanningMigrationAuthority = (fixture: V2TestDatabase): void => {
+  fixture.database
+    .prepare('DELETE FROM v2_schema_migrations WHERE version = 2')
+    .run();
 };
 
 const seedLegacyTerminalFoundationStart = (
@@ -556,6 +571,7 @@ describe('ExecutionRuntime', () => {
     fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
     const context = createRuntime({ fake });
     const { result: storedResult } = seedLegacyTerminalFoundationStart(context);
+    removePlanningMigrationAuthority(context.fixture);
     recordPlanningMigration(context.fixture, '2026-08-28T01:00:00.001Z');
 
     await expect(context.runtime.start(context.start)).resolves.toEqual(
@@ -577,6 +593,7 @@ describe('ExecutionRuntime', () => {
     const fake = new FakeHarnessAdapter();
     fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };
     const context = createRuntime({ fake });
+    removePlanningMigrationAuthority(context.fixture);
     seedLegacyTerminalFoundationStart(context);
     const before = durableReservationState(context.fixture);
 
