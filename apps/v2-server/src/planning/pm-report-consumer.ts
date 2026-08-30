@@ -2,8 +2,12 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import {
   PM_DISCOVERY_REPORT_SCHEMA,
+  ledgerRecordIdSchema,
   pmDiscoveryAssignmentSchema,
   pmDiscoveryReportSchema,
+  planningProposalIdSchema,
+  planningQuestionIdSchema,
+  planningTurnIdSchema,
   type DomainEvent,
   type LedgerRecordContent,
   type PmDiscoveryAssignment,
@@ -152,6 +156,7 @@ export class PmReportConsumer {
           if (report.result.kind === 'proposal') {
             proposal = this.projectProposal(
               authoritative,
+              assignment,
               report,
               report.result,
               at,
@@ -170,7 +175,7 @@ export class PmReportConsumer {
             createdAt: at,
           });
           const pmTurn = this.dependencies.repository.insertTurnInTransaction({
-            id: randomUUID(),
+            id: planningTurnIdSchema.parse(randomUUID()),
             projectId: authoritative.projectId,
             planningCycleId: assignment.planningCycleId,
             ordinal: view.turns.length + 1,
@@ -184,7 +189,7 @@ export class PmReportConsumer {
           if (report.result.kind === 'questions') {
             this.dependencies.repository.insertQuestionsInTransaction(
               report.result.questions.map((question) => ({
-                id: randomUUID(),
+                id: planningQuestionIdSchema.parse(randomUUID()),
                 projectId: authoritative.projectId,
                 planningCycleId: assignment.planningCycleId,
                 turnId: pmTurn.id,
@@ -369,11 +374,11 @@ export class PmReportConsumer {
 
   private projectProposal(
     execution: WorkerExecution,
+    assignment: PmDiscoveryAssignment,
     report: PmDiscoveryReport,
     result: ProposalReport,
     at: string,
   ): PlanningProposal {
-    const assignment = execution.assignment as PmDiscoveryAssignment;
     const view = this.dependencies.repository.cycleView(
       assignment.planningCycleId,
     )!;
@@ -397,7 +402,10 @@ export class PmReportConsumer {
     const records = result.records.map((member) => {
       if (member.operation === 'create') {
         this.assertProvenance(member.provenance, turnIds);
-        return { ...member, recordId: randomUUID() };
+        return {
+          ...member,
+          recordId: ledgerRecordIdSchema.parse(randomUUID()),
+        };
       }
       const current = baseRecords.get(member.recordId);
       if (
@@ -456,7 +464,7 @@ export class PmReportConsumer {
     const finalKeys = new Set(normalizedRelationships.map(relationshipKey));
     const projectIntentBase = canonical?.projectIntent.content;
     return {
-      id: randomUUID(),
+      id: planningProposalIdSchema.parse(randomUUID()),
       projectId: execution.projectId,
       planningCycleId: assignment.planningCycleId,
       revision: report.expectedProposalRevision,
@@ -500,14 +508,15 @@ export class PmReportConsumer {
 
   private endpointType(
     endpoint: Endpoint,
-    records: ProposalReport['records'],
+    records: PlanningProposal['records'],
     base: Map<string, { content: LedgerRecordContent }>,
   ): LedgerRecordContent['type'] | undefined {
     if ('proposalKey' in endpoint) {
-      return records.find(
+      const member = records.find(
         (record) =>
           record.operation === 'create' && record.key === endpoint.proposalKey,
-      )?.content.type;
+      );
+      return member?.operation === 'create' ? member.content.type : undefined;
     }
     const member = records.find(
       (record) =>

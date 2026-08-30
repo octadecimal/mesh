@@ -4,6 +4,8 @@ import {
   abandonPlanningCycleEnvelopeSchema,
   approvePlanningProposalEnvelopeSchema,
   PM_DISCOVERY_REPORT_SCHEMA,
+  planningCycleIdSchema,
+  planningTurnIdSchema,
   rejectPlanningProposalEnvelopeSchema,
   startExecutionEnvelopeSchema,
   submitPlanningTurnEnvelopeSchema,
@@ -139,9 +141,13 @@ export class PlanningService {
             at,
           );
         }
+        const { profileId, profileRevision } = envelope.command;
+        if (profileId === undefined || profileRevision === undefined) {
+          throw new Error('Parsed new planning cycle command lacks a profile');
+        }
         const profile = this.resolvePmProfile(
-          envelope.command.profileId,
-          envelope.command.profileRevision,
+          profileId,
+          profileRevision,
           envelope.command.projectId,
         );
         if (!profile) {
@@ -157,7 +163,7 @@ export class PlanningService {
           envelope.command.projectId,
         );
         cycle = this.dependencies.repository.insertCycleInTransaction({
-          id: randomUUID(),
+          id: planningCycleIdSchema.parse(randomUUID()),
           projectId: envelope.command.projectId,
           lifecycle: 'launch_pending',
           revision: 1,
@@ -227,7 +233,7 @@ export class PlanningService {
       }
 
       turn = this.dependencies.repository.insertTurnInTransaction({
-        id: randomUUID(),
+        id: planningTurnIdSchema.parse(randomUUID()),
         projectId: cycle.projectId,
         planningCycleId: cycle.id,
         ordinal: turnOrdinal,
@@ -956,7 +962,7 @@ export class PlanningService {
     return profile.profileId === profileId &&
       profile.profileRevision === revision &&
       (profile.projectId === null || profile.projectId === projectId) &&
-      spec.assignmentKinds.includes('pm_discovery') &&
+      spec.assignmentKinds[0] === 'pm_discovery' &&
       spec.outputSchema === PM_DISCOVERY_REPORT_SCHEMA
       ? profile
       : undefined;

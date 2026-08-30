@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 import {
   approvedIntentLedgerSchema,
+  ledgerRecordIdSchema,
   ledgerRecordContentSchema,
   ledgerRecordRevisionSchema,
   ledgerRelationshipSchema,
@@ -545,14 +546,18 @@ export class PlanningRepository {
 
   proposalRecordReservations(
     proposalId: string,
-  ): readonly { key: string; recordId: string }[] {
-    return this.database
+  ): readonly { key: string; recordId: LedgerRecordRevision['recordId'] }[] {
+    const rows = this.database
       .prepare(
         `SELECT proposal_key AS key, record_id AS recordId
            FROM planning_proposal_records
            WHERE proposal_id = ? ORDER BY proposal_key`,
       )
       .all(proposalId) as { key: string; recordId: string }[];
+    return rows.map(({ key, recordId }) => ({
+      key,
+      recordId: ledgerRecordIdSchema.parse(recordId),
+    }));
   }
 
   receipt(executionId: string): PmOutputReceipt | undefined {
