@@ -219,27 +219,37 @@ const proposedRecordContentSchema = ledgerRecordContentSchema.refine(
   { message: 'Proposals cannot directly create approved requirements' },
 );
 
+const reusedLedgerMemberSchema = z.strictObject({
+  operation: z.literal('reuse'),
+  recordId: ledgerRecordIdSchema,
+  expectedRevision: positiveIntegerSchema,
+});
+const revisedLedgerMemberSchema = z.strictObject({
+  operation: z.literal('revise'),
+  recordId: ledgerRecordIdSchema,
+  expectedRevision: positiveIntegerSchema,
+  content: proposedRecordContentSchema,
+  provenance: provenanceListSchema,
+});
+const createdLedgerMemberSchema = z.strictObject({
+  operation: z.literal('create'),
+  key: boundedKeySchema,
+  content: proposedRecordContentSchema,
+  provenance: provenanceListSchema,
+});
+
 export const proposedLedgerMemberSchema = z.discriminatedUnion('operation', [
-  z.strictObject({
-    operation: z.literal('reuse'),
-    recordId: ledgerRecordIdSchema,
-    expectedRevision: positiveIntegerSchema,
-  }),
-  z.strictObject({
-    operation: z.literal('revise'),
-    recordId: ledgerRecordIdSchema,
-    expectedRevision: positiveIntegerSchema,
-    content: proposedRecordContentSchema,
-    provenance: provenanceListSchema,
-  }),
-  z.strictObject({
-    operation: z.literal('create'),
-    key: boundedKeySchema,
-    content: proposedRecordContentSchema,
-    provenance: provenanceListSchema,
-  }),
+  reusedLedgerMemberSchema,
+  revisedLedgerMemberSchema,
+  createdLedgerMemberSchema,
 ]);
 export type ProposedLedgerMember = z.infer<typeof proposedLedgerMemberSchema>;
+
+const projectedLedgerMemberSchema = z.discriminatedUnion('operation', [
+  reusedLedgerMemberSchema,
+  revisedLedgerMemberSchema,
+  createdLedgerMemberSchema.extend({ recordId: ledgerRecordIdSchema }),
+]);
 
 export const proposedLedgerRelationshipSchema = z.strictObject({
   kind: z.union([requirementRelationshipKindSchema, z.literal('constrains')]),
@@ -255,14 +265,20 @@ const endpointKey = (endpoint: ProposedLedgerEndpoint) =>
     ? `record:${endpoint.recordId}`
     : `proposal:${endpoint.proposalKey}`;
 
+const relationshipKey = (
+  kind: ProposedLedgerRelationship['kind'],
+  from: string,
+  to: string,
+) => {
+  const symmetric = kind === 'conflicts_with' || kind === 'duplicates';
+  const [first, second] = symmetric && from > to ? [to, from] : [from, to];
+  return `${kind}:${first}:${second}`;
+};
+
 const proposedRelationshipKey = (relationship: ProposedLedgerRelationship) => {
   const from = endpointKey(relationship.from);
   const to = endpointKey(relationship.to);
-  const symmetric =
-    relationship.kind === 'conflicts_with' ||
-    relationship.kind === 'duplicates';
-  const [first, second] = symmetric && from > to ? [to, from] : [from, to];
-  return `${relationship.kind}:${first}:${second}`;
+  return relationshipKey(relationship.kind, from, to);
 };
 
 export const pmQuestionResultSchema = z
@@ -617,7 +633,7 @@ export const planningProposalSchema = z
     baseLedgerRevision: positiveIntegerSchema.nullable(),
     summary: boundedNarrativeSchema,
     projectIntent: projectIntentContentSchema,
-    records: z.array(proposedLedgerMemberSchema).max(100).readonly(),
+    records: z.array(projectedLedgerMemberSchema).max(100).readonly(),
     relationships: z
       .array(proposedLedgerRelationshipSchema)
       .max(200)
@@ -644,7 +660,16 @@ export const planningProposalSchema = z
       kind: 'proposal',
       summary: value.summary,
       projectIntent: value.projectIntent,
-      records: value.records,
+      records: value.records.map((record) =>
+        record.operation === 'create'
+          ? {
+              operation: record.operation,
+              key: record.key,
+              content: record.content,
+              provenance: record.provenance,
+            }
+          : record,
+      ),
       relationships: value.relationships,
     });
     if (!result.success) {
@@ -653,8 +678,17 @@ export const planningProposalSchema = z
       }
     }
     const recordChanges = { create: 0, revise: 0, reuse: 0 };
+    const projectedRecordIds = new Set<string>();
     value.records.forEach((record) => {
       recordChanges[record.operation] += 1;
+      if (projectedRecordIds.has(record.recordId)) {
+        context.addIssue({
+          code: 'custom',
+          path: ['records'],
+          message: 'Projected record IDs must be unique',
+        });
+      }
+      projectedRecordIds.add(record.recordId);
     });
     if (
       recordChanges.create !== value.diff.recordChanges.create ||
@@ -936,22 +970,48 @@ export const planningCycleViewSchema = z
           'Launch-pending cycles require the latest turn to be a launch-pending human turn',
       });
     }
-    const latestBoundHumanTurn = value.turns.reduce<PlanningTurn | null>(
-      (latest, turn) =>
-        turn.actor === 'human' && turn.launchState === 'execution_bound'
-          ? turn
-          : latest,
-      null,
-    );
     if (
       value.cycle.lifecycle === 'execution_active' &&
-      value.cycle.activeExecutionId !== latestBoundHumanTurn?.executionId
+      (latestTurn?.actor !== 'human' ||
+        latestTurn.launchState !== 'execution_bound')
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['turns'],
+        message:
+          'Execution-active cycles require the latest turn to be the active bound human',
+      });
+    } else if (
+      value.cycle.lifecycle === 'execution_active' &&
+      value.cycle.activeExecutionId !== latestTurn?.executionId
     ) {
       context.addIssue({
         code: 'custom',
         path: ['cycle', 'activeExecutionId'],
         message:
           'Active execution must match the latest bound human turn execution',
+      });
+    }
+    if (
+      value.cycle.lifecycle === 'awaiting_human' &&
+      latestTurn?.actor !== 'pm'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['turns'],
+        message:
+          'Awaiting-human cycles require the latest turn to be PM-authored',
+      });
+    }
+    if (
+      value.cycle.lifecycle === 'awaiting_human' &&
+      !value.questions.some((question) => question.turnId === latestTurn?.id)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['questions'],
+        message:
+          'Awaiting-human cycles require questions from the latest PM turn',
       });
     }
     const awaitingProposals = value.proposals.filter(
@@ -1301,6 +1361,7 @@ export const approvedPlanningOutcomeSchema = z
         if (member.operation !== 'create') continue;
         const candidateIndex = createCandidates.findIndex(
           (record) =>
+            record.recordId === member.recordId &&
             record.revision === 1 &&
             record.proposalId === latestProposal.id &&
             JSON.stringify(record.content) ===
@@ -1320,6 +1381,57 @@ export const approvedPlanningOutcomeSchema = z
           code: 'custom',
           path: ['intentLedger', 'records'],
           message: 'Proposal operations must match canonical ledger members',
+        });
+      }
+
+      const createdRecordIds = new Map(
+        latestProposal.records.flatMap((record) =>
+          record.operation === 'create'
+            ? [[record.key, record.recordId] as const]
+            : [],
+        ),
+      );
+      const proposalRelationshipKeys = new Set<string>();
+      let relationshipsMatch =
+        latestProposal.relationships.length ===
+        value.intentLedger.relationships.length;
+      for (const relationship of latestProposal.relationships) {
+        const from =
+          'recordId' in relationship.from
+            ? relationship.from.recordId
+            : createdRecordIds.get(relationship.from.proposalKey);
+        const to =
+          'recordId' in relationship.to
+            ? relationship.to.recordId
+            : createdRecordIds.get(relationship.to.proposalKey);
+        if (from === undefined || to === undefined) {
+          relationshipsMatch = false;
+          continue;
+        }
+        proposalRelationshipKeys.add(
+          relationshipKey(relationship.kind, from, to),
+        );
+      }
+      const canonicalRelationshipKeys = new Set(
+        value.intentLedger.relationships.map((relationship) =>
+          relationshipKey(
+            relationship.kind,
+            relationship.fromRecordId,
+            relationship.toRecordId,
+          ),
+        ),
+      );
+      if (
+        !relationshipsMatch ||
+        proposalRelationshipKeys.size !== canonicalRelationshipKeys.size ||
+        [...proposalRelationshipKeys].some(
+          (relationship) => !canonicalRelationshipKeys.has(relationship),
+        )
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['intentLedger', 'relationships'],
+          message: 'Proposal relationships must match canonical ledger edges',
         });
       }
     }

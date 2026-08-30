@@ -152,6 +152,68 @@ export const v2ProjectSnapshotSchema = z
           'A snapshot can contain at most one nonterminal planning cycle',
       });
     }
+    const newestApprovedCycle = value.planningCycles
+      .filter(({ cycle }) => cycle.lifecycle === 'approved')
+      .reduce<(typeof value.planningCycles)[number] | null>(
+        (newest, candidate) => {
+          if (newest === null) return candidate;
+          const candidateIntentRevision =
+            (candidate.cycle.baseProjectIntentRevision ?? 0) + 1;
+          const newestIntentRevision =
+            (newest.cycle.baseProjectIntentRevision ?? 0) + 1;
+          if (candidateIntentRevision !== newestIntentRevision) {
+            return candidateIntentRevision > newestIntentRevision
+              ? candidate
+              : newest;
+          }
+          const candidateLedgerRevision =
+            (candidate.cycle.baseLedgerRevision ?? 0) + 1;
+          const newestLedgerRevision =
+            (newest.cycle.baseLedgerRevision ?? 0) + 1;
+          return candidateLedgerRevision > newestLedgerRevision
+            ? candidate
+            : newest;
+        },
+        null,
+      );
+    if (newestApprovedCycle !== null && value.intentLedger === null) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger'],
+        message: 'Approved snapshot history requires an intent ledger',
+      });
+    }
+    if (
+      newestApprovedCycle === null &&
+      !value.planningHistoryTruncated &&
+      value.intentLedger !== null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['intentLedger'],
+        message:
+          'Untruncated snapshot without approval cannot have an intent ledger',
+      });
+    }
+    if (newestApprovedCycle !== null && value.intentLedger !== null) {
+      const latestProposal = newestApprovedCycle.proposals.at(-1);
+      if (
+        latestProposal === undefined ||
+        value.intentLedger.projectIntent.proposalId !== latestProposal.id ||
+        value.intentLedger.ledger.proposalId !== latestProposal.id ||
+        value.intentLedger.projectIntent.revision !==
+          (newestApprovedCycle.cycle.baseProjectIntentRevision ?? 0) + 1 ||
+        value.intentLedger.ledger.revision !==
+          (newestApprovedCycle.cycle.baseLedgerRevision ?? 0) + 1
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['intentLedger'],
+          message:
+            'Snapshot intent ledger must match the newest approved cycle',
+        });
+      }
+    }
     if (
       value.intentLedger !== null &&
       value.intentLedger.projectIntent.projectId !== value.project.id
