@@ -1027,7 +1027,7 @@ describe('ExecutionRuntime', () => {
   });
 
   it('fails activation closed when the loaded project identity changes', async () => {
-    let loadedProjectId: string | undefined;
+    let loadedProjectId: string | undefined = undefined;
     const context = createRuntime({
       project: (project) =>
         new Proxy(project, {
