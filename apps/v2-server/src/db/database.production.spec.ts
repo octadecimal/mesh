@@ -93,31 +93,14 @@ afterAll(() => {
 });
 
 it('opens a fresh identified database through emitted JavaScript and packaged SQL', () => {
-  const builtDatabase = join(
-    builtRoot,
-    'apps',
-    'v2-server',
-    'src',
-    'db',
-    'database.js',
-  );
+  const builtDatabase = join(builtRoot, 'db', 'database.js');
   expect(existsSync(builtDatabase)).toBe(true);
   expect(
     existsSync(join(builtRoot, 'db', 'migrations', '001_foundation.sql')),
   ).toBe(true);
-  expect(
-    existsSync(
-      join(
-        builtRoot,
-        'apps',
-        'v2-server',
-        'src',
-        'db',
-        'migrations',
-        '001_foundation.sql',
-      ),
-    ),
-  ).toBe(true);
+  expect(existsSync(join(builtRoot, 'migrations', '001_foundation.sql'))).toBe(
+    true,
+  );
 
   const built = createRequire(__filename)(builtDatabase) as {
     openV2Database(path: string): V2Database;
@@ -134,6 +117,16 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
         )
         .get(),
     ).toEqual({ name: 'worker_executions' });
+    expect(
+      database
+        .prepare(
+          'SELECT version, name FROM v2_schema_migrations ORDER BY version',
+        )
+        .all(),
+    ).toEqual([
+      { version: 1, name: '001_foundation' },
+      { version: 2, name: '002_intent_ledger' },
+    ]);
   } finally {
     database.close();
   }

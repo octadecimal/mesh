@@ -13,7 +13,7 @@
         "platform": "node",
         "outputPath": "dist/apps/v2-server",
         "format": ["cjs"],
-        "bundle": false,
+        "bundle": true,
         "main": "apps/v2-server/src/main.ts",
         "additionalEntryPoints": ["apps/v2-server/src/db/database.ts"],
         "tsConfig": "apps/v2-server/tsconfig.app.json",
@@ -26,7 +26,7 @@
           {
             "input": "apps/v2-server/src/db/migrations",
             "glob": "**/*.sql",
-            "output": "apps/v2-server/src/db/migrations"
+            "output": "migrations"
           }
         ],
         "generatePackageJson": true,
