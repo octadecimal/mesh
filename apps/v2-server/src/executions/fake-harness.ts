@@ -41,6 +41,15 @@ type FakeHandle = {
   checkpointCursor: number;
 };
 
+const terminalCursor = (handle: FakeHandle): number =>
+  handle.scenario === FOUNDATION_SCENARIO
+    ? 6
+    : handle.pmScenario === 'duplicate'
+      ? 3
+      : handle.pmScenario === 'todo' || handle.pmScenario === 'malformed'
+        ? 2
+        : 1;
+
 export type FakeHarnessOptions = {
   holdAfterAdapterCursor?: number;
   malformedAtAdapterCursor?: number;
@@ -138,7 +147,8 @@ const decodeHandle = (
         candidate.pmScenario !== undefined) ||
       !Number.isInteger(candidate.checkpointCursor) ||
       (candidate.checkpointCursor as number) < 0 ||
-      (candidate.checkpointCursor as number) > 6 ||
+      (candidate.checkpointCursor as number) >
+        terminalCursor(candidate as FakeHandle) ||
       canonicalJson(value) !== decoded
     ) {
       return {
@@ -620,16 +630,7 @@ export class FakeHarnessAdapter implements HarnessAdapter {
     if (this.interruptedExecutions.has(parsed.value.executionId)) {
       return { status: 'terminal', outcome: 'interrupted' };
     }
-    const terminalCursor =
-      parsed.value.scenario === FOUNDATION_SCENARIO
-        ? 6
-        : parsed.value.pmScenario === 'duplicate'
-          ? 3
-          : parsed.value.pmScenario === 'todo' ||
-              parsed.value.pmScenario === 'malformed'
-            ? 2
-            : 1;
-    if (parsed.value.checkpointCursor === terminalCursor) {
+    if (parsed.value.checkpointCursor === terminalCursor(parsed.value)) {
       return { status: 'terminal', outcome: 'completed' };
     }
     return {

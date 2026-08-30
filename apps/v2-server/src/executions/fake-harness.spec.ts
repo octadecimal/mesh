@@ -389,6 +389,42 @@ describe('FakeHarnessAdapter', () => {
     });
   });
 
+  it.each([
+    ['todo', 3],
+    ['malformed', 3],
+    ['duplicate', 4],
+    ['missing_output', 2],
+  ] as const)(
+    'rejects a %s PM handle beyond its scenario terminal cursor',
+    async (pmScenario, checkpointCursor) => {
+      const fixture = createV2TestDatabase();
+      try {
+        const request = pmRequest(fixture, 1);
+        const nativeHandle = rawHandle({
+          checkpointCursor,
+          executionId: request.executionId,
+          pmScenario,
+          scenario: 'pm-discovery-v1',
+        });
+        const fake = new FakeHarnessAdapter({ pmScenario });
+
+        await expect(fake.probe(nativeHandle)).resolves.toMatchObject({
+          status: 'missing',
+        });
+        await expect(
+          fake.resume({
+            ...request,
+            nativeHandle,
+            afterAdapterCursor: checkpointCursor,
+          }),
+        ).rejects.toThrow('invalid');
+        expect(fake.resumeCount).toBe(0);
+      } finally {
+        fixture.close();
+      }
+    },
+  );
+
   it('rejects malformed, oversized, mismatched, and unknown-version handles', async () => {
     const fake = new FakeHarnessAdapter();
     await expect(fake.probe('not-a-handle')).resolves.toMatchObject({

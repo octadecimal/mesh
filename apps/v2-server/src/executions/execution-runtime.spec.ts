@@ -277,14 +277,17 @@ const attachBlockedPlanningSession = async (
 describe('ExecutionRuntime', () => {
   it('audits and publishes a strict PM structured output before completion', async () => {
     const published: RuntimeEvent[] = [];
-    let contextRef: ReturnType<typeof createPmRuntime> | undefined;
+    const contextRef: { current?: ReturnType<typeof createPmRuntime> } = {};
     const context = createPmRuntime(
       'todo',
       {},
       {
         domain: () => undefined,
         runtime: (event) => {
-          const current = required(contextRef, 'Expected runtime context');
+          const current = required(
+            contextRef.current,
+            'Expected runtime context',
+          );
           expect(
             current.fixture.database
               .prepare('SELECT id FROM raw_diagnostics WHERE id = ?')
@@ -294,7 +297,7 @@ describe('ExecutionRuntime', () => {
         },
       },
     );
-    contextRef = context;
+    contextRef.current = context;
 
     const result = await context.runtime.start(context.start);
     await context.runtime.drain();
@@ -466,6 +469,56 @@ describe('ExecutionRuntime', () => {
     expect(context.barrier.status).toBe('tripped');
     expect(context.fake.startCount).toBe(0);
   });
+
+  it.each(['version', 'embedded-request', 'receipt'] as const)(
+    'fails exact reservation lookup closed for a corrupted %s authority field',
+    async (fault) => {
+      const context = createRuntime();
+      const reservation = await context.runtime.reserveStart(context.start);
+      const operation = required(
+        context.operations.listForExecution(reservation.execution.id)[0],
+        'Expected start operation',
+      );
+      if (fault === 'receipt') {
+        context.fixture.database
+          .prepare(
+            'UPDATE command_results SET result_json = ? WHERE idempotency_key = ?',
+          )
+          .run(
+            JSON.stringify({
+              ok: false,
+              commandType: 'worker_execution.start',
+              error: { code: 'internal_error', message: 'corrupted receipt' },
+            }),
+            context.start.idempotencyKey,
+          );
+      } else {
+        const request = operation.request as Record<string, unknown>;
+        context.fixture.database
+          .prepare(
+            'UPDATE execution_operations SET request_json = ? WHERE id = ?',
+          )
+          .run(
+            JSON.stringify({
+              ...request,
+              ...(fault === 'version'
+                ? { version: 'mesh.v2.execution-start/v0' }
+                : {
+                    request: {
+                      ...context.start.command,
+                      projectId: randomUUID(),
+                    },
+                  }),
+            }),
+            operation.id,
+          );
+      }
+
+      expect(() => context.runtime.findReservedStart(context.start)).toThrow();
+      expect(context.barrier.status).toBe('tripped');
+      expect(context.fake.startCount).toBe(0);
+    },
+  );
 
   it('links terminal capability reservations and never activates them', async () => {
     const fake = new FakeHarnessAdapter();
@@ -982,6 +1035,110 @@ describe('ExecutionRuntime', () => {
     ).toMatchObject([{ state: 'succeeded' }]);
   });
 
+  it('coalesces synchronous planning interruption reentry during publication', async () => {
+    const runtimeRef: { current?: ExecutionRuntime } = {};
+    let reentry: Promise<void> | undefined;
+    const context = createPmRuntime(
+      'todo',
+      { holdAfterAdapterCursor: 1 },
+      {
+        domain: (event) => {
+          if (
+            event.type === 'worker_execution.lifecycle_changed' &&
+            event.payload.execution.lifecycle === 'interrupting'
+          ) {
+            reentry = required(
+              runtimeRef.current,
+              'Expected planning runtime',
+            ).interruptForPlanning(event.payload.execution.id);
+          }
+        },
+        runtime: () => undefined,
+      },
+    );
+    runtimeRef.current = context.runtime;
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const { state } = await attachBlockedPlanningSession(context, running);
+    context.fake.blockInterrupt();
+
+    const first = context.runtime.interruptForPlanning(running.id);
+    await context.fake.waitUntilInterruptCalled();
+    const coalesced = required(reentry, 'Expected synchronous reentry');
+    expect(context.fake.interruptCalls).toHaveLength(1);
+    context.fake.releaseInterrupt({ status: 'succeeded' });
+    await Promise.all([first, coalesced]);
+
+    expect(state.closeCount).toBe(1);
+    expect(context.fake.interruptCalls).toHaveLength(1);
+    expect(
+      context.operations
+        .listForExecution(running.id)
+        .filter((operation) => operation.kind === 'interrupt'),
+    ).toMatchObject([{ state: 'succeeded' }]);
+  });
+
+  it('contains the exact blocked session before rejecting conflicting planning audit tags', async () => {
+    const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    const { session, state } = await attachBlockedPlanningSession(
+      context,
+      running,
+    );
+    inImmediateTransaction(context.fixture.database, () => {
+      const first = context.operations.createPendingInTransaction({
+        executionId: running.id,
+        kind: 'interrupt',
+        request: { version: 'mesh.v2.planning-interrupt/v1' },
+        createdAt: '2026-08-28T01:00:01.000Z',
+      });
+      context.operations.finishInTransaction(
+        first.id,
+        'unknown',
+        { reason: 'conflicting audit tag' },
+        '2026-08-28T01:00:02.000Z',
+      );
+      context.operations.createPendingInTransaction({
+        executionId: running.id,
+        kind: 'interrupt',
+        request: { version: 'mesh.v2.planning-interrupt/v1' },
+        createdAt: '2026-08-28T01:00:03.000Z',
+      });
+    });
+    const before = durableRuntimeState(context.fixture);
+
+    await expect(
+      context.runtime.interruptForPlanning(running.id),
+    ).rejects.toMatchObject({
+      code: 'planning_interrupt_audit_failure',
+      diagnostics: [
+        {
+          phase: 'audit',
+          message: 'Conflicting planning interrupt operations found',
+        },
+      ],
+    });
+
+    expect(context.barrier.status).toBe('tripped');
+    expect(state.closeCount).toBe(1);
+    expect(context.fake.interruptCalls).toContain(session.nativeHandle);
+    await context.runtime.drain();
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+  });
+
   it('records an unproven already-terminal probe before rejecting cleanup', async () => {
     const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
     const started = await context.runtime.start(context.start);
@@ -1273,7 +1430,7 @@ describe('ExecutionRuntime', () => {
   it('rejects consumer-task self-wait before fencing or interruption', async () => {
     const domain: DomainEvent[] = [];
     const runtimeEvents: RuntimeEvent[] = [];
-    let runtime: ExecutionRuntime | undefined;
+    const runtimeRef: { current?: ExecutionRuntime } = {};
     let cleanup: Promise<void> | undefined;
     let cleanupStartedResolve: (() => void) | undefined;
     const cleanupStarted = new Promise<void>((resolve) => {
@@ -1288,7 +1445,7 @@ describe('ExecutionRuntime', () => {
           runtimeEvents.push(event);
           if (event.type === 'worker_execution.structured_output') {
             cleanup = required(
-              runtime,
+              runtimeRef.current,
               'Expected runtime',
             ).interruptForPlanning(event.executionId);
             cleanupStartedResolve?.();
@@ -1296,7 +1453,7 @@ describe('ExecutionRuntime', () => {
         },
       },
     );
-    runtime = context.runtime;
+    runtimeRef.current = context.runtime;
 
     const started = await context.runtime.start(context.start);
     await cleanupStarted;
