@@ -14,6 +14,7 @@ import type {
   ExecutionRepository,
 } from '../executions/execution-repository.js';
 import type { WorkerProfileService } from '../profiles/profile-service.js';
+import type { PlanningRepository } from '../planning/planning-repository.js';
 import type { V2EventStore } from '../storage/event-store.js';
 
 type ProjectReader = {
@@ -28,6 +29,7 @@ export type V2SnapshotDependencies = {
     'approvedGlobal' | 'approvedForProject' | 'resolveApproved'
   >;
   executions: Pick<ExecutionRepository, 'list' | 'listAttentionDetails'>;
+  planning: Pick<PlanningRepository, 'planningSnapshot'>;
   events: Pick<V2EventStore, 'cursors'>;
   barrier: Pick<AuditBarrier, 'health'>;
 };
@@ -102,6 +104,7 @@ export const createV2Snapshots = (dependencies: V2SnapshotDependencies) => ({
       attentionItems: dependencies.executions
         .listAttentionDetails(projectId)
         .map(attentionItem),
+      ...dependencies.planning.planningSnapshot(projectId),
       cursors: dependencies.events.cursors(projectId),
     });
   },

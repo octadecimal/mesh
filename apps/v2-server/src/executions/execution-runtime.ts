@@ -20,6 +20,7 @@ import {
   type V2CommandResult,
   type WorkerExecution,
   type WorkerExecutionId,
+  type WorkerExecutionStructuredOutputRuntimeEvent,
 } from '@mesh/v2-contracts';
 
 import { inImmediateTransaction, type V2Database } from '../db/database.js';
@@ -54,6 +55,13 @@ export type ExecutionPublisher = {
   domain(event: DomainEvent): void;
   runtime(event: RuntimeEvent): void;
 };
+export type ExecutionRuntimeObserver = {
+  structuredOutput(
+    execution: WorkerExecution,
+    event: WorkerExecutionStructuredOutputRuntimeEvent,
+  ): void;
+  terminal(execution: WorkerExecution): void;
+};
 
 type Dependencies = {
   database: V2Database;
@@ -67,6 +75,7 @@ type Dependencies = {
   publisher: ExecutionPublisher;
   barrier: AuditBarrier;
   now: () => string;
+  observer?: ExecutionRuntimeObserver;
 };
 
 type ActiveSession = {
@@ -1968,6 +1977,14 @@ export class ExecutionRuntime {
     } catch (error) {
       this.dependencies.barrier.record('Domain publication failed', error);
     }
+    if (
+      event.type === 'worker_execution.lifecycle_changed' &&
+      ['completed', 'failed', 'interrupted', 'attention_required'].includes(
+        event.payload.execution.lifecycle,
+      )
+    ) {
+      this.dependencies.observer?.terminal(event.payload.execution);
+    }
   }
 
   private publishRuntime(event: RuntimeEvent): void {
@@ -1975,6 +1992,12 @@ export class ExecutionRuntime {
       this.dependencies.publisher.runtime(event);
     } catch (error) {
       this.dependencies.barrier.record('Runtime publication failed', error);
+    }
+    if (event.type === 'worker_execution.structured_output') {
+      this.dependencies.observer?.structuredOutput(
+        requireExecution(this.dependencies.executions, event.executionId),
+        event,
+      );
     }
   }
 

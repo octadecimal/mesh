@@ -34,6 +34,7 @@ import {
   ExecutionReservationError,
   ExecutionRuntime,
   PlanningInterruptCleanupError,
+  type ExecutionRuntimeObserver,
 } from './execution-runtime.js';
 import { FakeHarnessAdapter, type FakeHarnessOptions } from './fake-harness.js';
 import { OperationRepository } from './operation-repository.js';
@@ -60,6 +61,7 @@ const createRuntime = (
       domain(event: DomainEvent): void;
       runtime(event: RuntimeEvent): void;
     };
+    observer?: ExecutionRuntimeObserver;
   } = {},
 ) => {
   const fixture = createV2TestDatabase();
@@ -98,6 +100,7 @@ const createRuntime = (
     },
     barrier,
     now: () => '2026-08-28T01:00:00.000Z',
+    observer: options.observer,
   });
   const start: StartExecutionEnvelope = {
     idempotencyKey: randomUUID(),
@@ -173,10 +176,12 @@ const createPmRuntime = (
     domain(event: DomainEvent): void;
     runtime(event: RuntimeEvent): void;
   },
+  observer?: ExecutionRuntimeObserver,
 ) => {
   const context = createRuntime({
     fake: new FakeHarnessAdapter({ ...fakeOptions, pmScenario: scenario }),
     publisher,
+    observer,
     profile: (profile) => ({
       ...profile,
       document: {
@@ -214,6 +219,58 @@ const createPmRuntime = (
   };
   return context;
 };
+
+describe('planning observer', () => {
+  it('notifies after durable runtime and terminal publication exactly once', async () => {
+    const trace: string[] = [];
+    const observer: ExecutionRuntimeObserver = {
+      structuredOutput: vi.fn((execution, event) => {
+        expect(
+          context.fixture.events.runtimeAfter(execution.projectId, 0).events,
+        ).toContainEqual(event);
+        trace.push('consume');
+      }),
+      terminal: vi.fn((execution) => {
+        expect(context.executions.get(execution.id)?.lifecycle).toBe(
+          'completed',
+        );
+        trace.push('terminal');
+      }),
+    };
+    const context = createPmRuntime(
+      'todo',
+      {},
+      {
+        runtime: (event) => {
+          if (event.type === 'worker_execution.structured_output') {
+            trace.push('publish-output');
+          }
+        },
+        domain: (event) => {
+          if (
+            event.type === 'worker_execution.lifecycle_changed' &&
+            event.payload.execution.lifecycle === 'completed'
+          ) {
+            trace.push('publish-terminal');
+          }
+        },
+      },
+      observer,
+    );
+
+    await context.runtime.start(context.start);
+    await context.runtime.drain();
+
+    expect(observer.structuredOutput).toHaveBeenCalledTimes(1);
+    expect(observer.terminal).toHaveBeenCalledTimes(1);
+    expect(trace).toEqual([
+      'publish-output',
+      'consume',
+      'publish-terminal',
+      'terminal',
+    ]);
+  });
+});
 
 const durableReservationState = (fixture: V2TestDatabase) => ({
   executions: fixture.database

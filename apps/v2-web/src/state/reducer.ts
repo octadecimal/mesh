@@ -1,5 +1,7 @@
 import type {
   DomainEvent,
+  ApprovedIntentLedger,
+  PlanningCycleView,
   Project,
   RetainedRuntimeWindow,
   ResolvedWorkerProfileSnapshot,
@@ -9,6 +11,8 @@ import type {
   WorkerExecution,
 } from '@mesh/v2-contracts';
 import {
+  approvedPlanningOutcomeSchema,
+  planningCycleViewSchema,
   resolvedWorkerProfileSnapshotSchema,
   v2AttentionItemSchema,
   workerProfileSpecSchema,
@@ -32,6 +36,9 @@ export type ProjectProjection = {
   profiles: readonly ResolvedWorkerProfileSnapshot[];
   executions: readonly WorkerExecution[];
   attentionItems: readonly V2AttentionItem[];
+  planningCycles: readonly PlanningCycleView[];
+  planningHistoryTruncated: boolean;
+  intentLedger: ApprovedIntentLedger | null;
   activity: readonly RuntimeEvent[];
   domainCursor: number;
   runtimeCursor: number;
@@ -68,6 +75,9 @@ export const createInitialProjectProjection = (
   profiles: [],
   executions: [],
   attentionItems: [],
+  planningCycles: [],
+  planningHistoryTruncated: false,
+  intentLedger: null,
   activity: [],
   domainCursor: 0,
   runtimeCursor: 0,
@@ -112,6 +122,11 @@ const replaceProfile = (
     position === index ? next : profile,
   );
 };
+
+const replacePlanningCycle = (
+  cycles: readonly PlanningCycleView[],
+  next: PlanningCycleView,
+) => [next, ...cycles.filter(({ cycle }) => cycle.id !== next.cycle.id)];
 
 const projectApprovedProfile = (
   event: Extract<DomainEvent, { type: 'worker_profile.revision_approved' }>,
@@ -192,6 +207,33 @@ const applyDomainEvent = (
         ? { ...state, profiles: replaceProfile(state.profiles, profile) }
         : undefined;
     }
+    case 'planning_cycle.changed': {
+      const planningCycle = planningCycleViewSchema.safeParse(
+        event.payload.planningCycle,
+      );
+      return planningCycle.success
+        ? {
+            ...state,
+            planningCycles: replacePlanningCycle(
+              state.planningCycles,
+              planningCycle.data,
+            ),
+          }
+        : undefined;
+    }
+    case 'intent_ledger.approved': {
+      const outcome = approvedPlanningOutcomeSchema.safeParse(event.payload);
+      return outcome.success
+        ? {
+            ...state,
+            planningCycles: replacePlanningCycle(
+              state.planningCycles,
+              outcome.data.planningCycle,
+            ),
+            intentLedger: outcome.data.intentLedger,
+          }
+        : undefined;
+    }
   }
 };
 
@@ -217,7 +259,15 @@ const reduceEvent = (
       return stale(state, 'attention_projection_incomplete');
     }
     const projected = applyDomainEvent(state, domainEvent);
-    if (!projected) return stale(state, 'profile_projection_incomplete');
+    if (!projected) {
+      return stale(
+        state,
+        domainEvent.type === 'planning_cycle.changed' ||
+          domainEvent.type === 'intent_ledger.approved'
+          ? 'planning_projection_incomplete'
+          : 'profile_projection_incomplete',
+      );
+    }
     return {
       ...projected,
       domainCursor: event.sequence,
@@ -241,6 +291,9 @@ const replaceSnapshot = (
   profiles: snapshot.profiles,
   executions: snapshot.executions,
   attentionItems: snapshot.attentionItems,
+  planningCycles: snapshot.planningCycles,
+  planningHistoryTruncated: snapshot.planningHistoryTruncated,
+  intentLedger: snapshot.intentLedger,
   activity,
   domainCursor: snapshot.cursors.domain,
   runtimeCursor,

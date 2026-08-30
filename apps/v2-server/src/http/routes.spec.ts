@@ -5,6 +5,7 @@ import { join, relative, resolve } from 'node:path';
 
 import {
   V2_PROTOCOL_VERSION,
+  planningCycleSchema,
   type V2CommandResult,
   type V2ProjectSnapshot,
   type V2SystemSnapshot,
@@ -14,9 +15,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createV2HttpApp } from './app';
 import type { V2RouteDependencies } from './routes';
 import { createV2Snapshots } from './snapshots';
+import { inImmediateTransaction } from '../db/database';
 import { AuditBarrier } from '../executions/audit-barrier';
 import { ExecutionRepository } from '../executions/execution-repository';
 import { auditAwareRepositoryIdentityResolver } from '../main';
+import { PlanningRepository } from '../planning/planning-repository';
 import { ProjectRepository } from '../projects/project-repository';
 import { ProjectService } from '../projects/project-service';
 import { WorkerProfileService } from '../profiles/profile-service';
@@ -25,6 +28,8 @@ import { createV2TestDatabase } from '../test/create-v2-test-database';
 const projectId = '11111111-1111-4111-8111-111111111111';
 const profileId = '22222222-2222-4222-8222-222222222222';
 const executionId = '33333333-3333-4333-8333-333333333333';
+const planningCycleId = '44444444-4444-4444-8444-444444444444';
+const proposalId = '55555555-5555-4555-8555-555555555555';
 const timestamp = '2026-08-28T00:00:00.000Z';
 
 const systemSnapshot: V2SystemSnapshot = {
@@ -50,6 +55,9 @@ const projectSnapshot: V2ProjectSnapshot = {
   profiles: [],
   executions: [],
   attentionItems: [],
+  planningCycles: [],
+  planningHistoryTruncated: false,
+  intentLedger: null,
   cursors: { domain: 0, runtime: 0 },
 };
 
@@ -78,6 +86,16 @@ const createDependencies = (): V2RouteDependencies => ({
     start: async () => failed('worker_execution.start', 'start route'),
     interrupt: async () =>
       failed('worker_execution.interrupt', 'interrupt route'),
+  },
+  planning: {
+    submitTurn: async () =>
+      failed('planning_cycle.submit_turn', 'submit turn route'),
+    approveProposal: () =>
+      failed('planning_proposal.approve', 'approve proposal route'),
+    rejectProposal: () =>
+      failed('planning_proposal.reject', 'reject proposal route'),
+    abandonCycle: async () =>
+      failed('planning_cycle.abandon', 'abandon cycle route'),
   },
   snapshots: {
     system: () => systemSnapshot,
@@ -182,6 +200,51 @@ describe('V2 HTTP routes', () => {
         expectedRevision: 1,
       },
     ],
+    [
+      'submit turn route',
+      {
+        type: 'planning_cycle.submit_turn',
+        projectId,
+        expectedCycleRevision: null,
+        profileId,
+        profileRevision: 1,
+        message: 'Plan the Todo feature.',
+      },
+    ],
+    [
+      'approve proposal route',
+      {
+        type: 'planning_proposal.approve',
+        projectId,
+        planningCycleId,
+        proposalId,
+        expectedCycleRevision: 2,
+        expectedProposalRevision: 1,
+        expectedProjectIntentRevision: null,
+        expectedLedgerRevision: null,
+      },
+    ],
+    [
+      'reject proposal route',
+      {
+        type: 'planning_proposal.reject',
+        projectId,
+        planningCycleId,
+        proposalId,
+        expectedCycleRevision: 2,
+        expectedProposalRevision: 1,
+        feedback: 'Narrow the acceptance criteria.',
+      },
+    ],
+    [
+      'abandon cycle route',
+      {
+        type: 'planning_cycle.abandon',
+        projectId,
+        planningCycleId,
+        expectedCycleRevision: 2,
+      },
+    ],
   ])('dispatches the strict command to the %s', async (message, command) => {
     const response = await createApp().inject({
       method: 'POST',
@@ -216,6 +279,102 @@ describe('V2 HTTP routes', () => {
     expect(response.statusCode).toBe(400);
     expect(response.json()).toEqual({
       error: { code: 'invalid_request', message: 'Request is invalid.' },
+    });
+  });
+
+  it('rejects a non-human planning command without dispatching', async () => {
+    const dependencies = createDependencies();
+    const submitTurn = vi.spyOn(dependencies.planning, 'submitTurn');
+    const response = await createApp(dependencies).inject({
+      method: 'POST',
+      url: '/api/v2/commands',
+      payload: {
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'runtime', executionId },
+        command: {
+          type: 'planning_cycle.submit_turn',
+          projectId,
+          expectedCycleRevision: null,
+          profileId,
+          profileRevision: 1,
+          message: 'Plan the Todo feature.',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: { code: 'invalid_request', message: 'Request is invalid.' },
+    });
+    expect(submitTurn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'planning_canonical_base_conflict',
+    'planning_cycle_active_conflict',
+    'planning_cycle_history_limit',
+    'planning_cycle_not_found',
+    'planning_cycle_revision_conflict',
+    'planning_profile_incompatible',
+    'planning_proposal_invalid',
+    'planning_proposal_not_found',
+    'planning_proposal_revision_conflict',
+  ] as const)(
+    'keeps expected planning failure %s at HTTP 200',
+    async (code) => {
+      const dependencies = createDependencies();
+      dependencies.planning.submitTurn = async () => ({
+        ok: false,
+        commandType: 'planning_cycle.submit_turn',
+        error: { code, message: code },
+      });
+      const response = await createApp(dependencies).inject({
+        method: 'POST',
+        url: '/api/v2/commands',
+        payload: {
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'planning_cycle.submit_turn',
+            projectId,
+            expectedCycleRevision: null,
+            profileId,
+            profileRevision: 1,
+            message: 'Plan the Todo feature.',
+          },
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ ok: false, error: { code } });
+    },
+  );
+
+  it('maps an unexpected planning failure to HTTP 500', async () => {
+    const dependencies = createDependencies();
+    dependencies.planning.submitTurn = async () => {
+      throw new Error('unexpected planning failure');
+    };
+    const response = await createApp(dependencies).inject({
+      method: 'POST',
+      url: '/api/v2/commands',
+      payload: {
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.submit_turn',
+          projectId,
+          expectedCycleRevision: null,
+          profileId,
+          profileRevision: 1,
+          message: 'Plan the Todo feature.',
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({
+      error: { code: 'internal_error', message: 'Internal server error.' },
     });
   });
 
@@ -433,6 +592,7 @@ describe('V2 snapshots', () => {
         projects,
         profiles,
         executions: new ExecutionRepository(fixture.database),
+        planning: new PlanningRepository(fixture.database),
         events: fixture.events,
         barrier: new AuditBarrier(),
       });
@@ -446,6 +606,14 @@ describe('V2 snapshots', () => {
           displayName: 'Foundation worker',
           approvedRevision: 1,
         },
+        {
+          profileId: fixture.pmProfileRevision.profileId,
+          projectId: null,
+          scope: 'global',
+          name: 'project-manager',
+          displayName: 'Project manager',
+          approvedRevision: 1,
+        },
       ]);
       expect(snapshots.project(fixture.project.id)).toMatchObject({
         project: fixture.project,
@@ -454,11 +622,103 @@ describe('V2 snapshots', () => {
             profileId: fixture.profileRevision.profileId,
             profileRevision: 1,
           },
+          {
+            profileId: fixture.pmProfileRevision.profileId,
+            profileRevision: 1,
+          },
         ],
         executions: [{ id: fixture.execution.id }],
         attentionItems: [],
+        planningCycles: [],
+        planningHistoryTruncated: false,
+        intentLedger: null,
         cursors: { domain: 0, runtime: 0 },
       });
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it('returns one open cycle and the latest 19 terminal cycles with truncation', () => {
+    const fixture = createV2TestDatabase();
+    try {
+      const planning = new PlanningRepository(fixture.database);
+      inImmediateTransaction(fixture.database, () => {
+        for (let index = 0; index < 20; index += 1) {
+          const occurredAt = `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`;
+          planning.insertCycleInTransaction(
+            planningCycleSchema.parse({
+              id: randomUUID(),
+              projectId: fixture.project.id,
+              lifecycle: 'abandoned',
+              revision: 1,
+              profileId: fixture.pmProfileRevision.profileId,
+              profileRevision: fixture.pmProfileRevision.revision,
+              baseProjectIntentRevision: null,
+              baseLedgerRevision: null,
+              latestProposalRevision: 0,
+              activeExecutionId: null,
+              createdAt: occurredAt,
+              updatedAt: occurredAt,
+              endedAt: occurredAt,
+            }),
+          );
+        }
+        planning.insertCycleInTransaction(
+          planningCycleSchema.parse({
+            id: planningCycleId,
+            projectId: fixture.project.id,
+            lifecycle: 'execution_active',
+            revision: 1,
+            profileId: fixture.pmProfileRevision.profileId,
+            profileRevision: fixture.pmProfileRevision.revision,
+            baseProjectIntentRevision: null,
+            baseLedgerRevision: null,
+            latestProposalRevision: 0,
+            activeExecutionId: fixture.execution.id,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+            endedAt: null,
+          }),
+        );
+        planning.insertTurnInTransaction({
+          id: randomUUID(),
+          projectId: fixture.project.id,
+          planningCycleId,
+          ordinal: 1,
+          actor: 'human',
+          message: 'Plan Todo.',
+          launchState: 'execution_bound',
+          executionId: fixture.execution.id,
+          createdAt: timestamp,
+        });
+      });
+      const snapshots = createV2Snapshots({
+        projects: new ProjectRepository(fixture.database),
+        profiles: new WorkerProfileService({
+          database: fixture.database,
+          commands: fixture.commands,
+          events: fixture.events,
+          projects: { exists: () => true },
+          publishDomain: () => undefined,
+          now: () => timestamp,
+        }),
+        executions: new ExecutionRepository(fixture.database),
+        planning,
+        events: fixture.events,
+        barrier: new AuditBarrier(),
+      });
+
+      const snapshot = snapshots.project(fixture.project.id)!;
+      expect(snapshot.planningCycles).toHaveLength(20);
+      expect(snapshot.planningCycles[0]?.cycle.id).toBe(planningCycleId);
+      expect(
+        snapshot.planningCycles.filter(
+          ({ cycle }) => cycle.lifecycle === 'abandoned',
+        ),
+      ).toHaveLength(19);
+      expect(snapshot.planningHistoryTruncated).toBe(true);
+      expect(snapshot.intentLedger).toBeNull();
     } finally {
       fixture.close();
     }

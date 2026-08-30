@@ -19,6 +19,7 @@ import { OperationRepository } from './executions/operation-repository.js';
 import { reconcileExecutions } from './executions/reconcile-executions.js';
 import { createV2HttpApp } from './http/app.js';
 import { createV2Snapshots } from './http/snapshots.js';
+import { createPlanningRuntime } from './planning/planning-runtime.js';
 import {
   approveV2GitExecutable,
   createV2GitProcessRunner,
@@ -41,12 +42,22 @@ export type RunningV2Server = {
   releaseFakeHold(): void;
 };
 
+type V2StartupPhase =
+  | 'executions_reconciled'
+  | 'planning_bound_cycles_reconciled'
+  | 'planning_pending_reservations_reconciled'
+  | 'recovery_window_published'
+  | 'recovered_sessions_attached'
+  | 'pending_launches_drained'
+  | 'accepting_commands';
+
 export type StartV2ServerOptions = {
   environment?: Readonly<Record<string, string | undefined>>;
   test?: {
     adapter?: HarnessAdapter;
     webRoot?: string;
     onPublished?: (message: ServerRealtimeMessage) => void;
+    onStartupPhase?: (phase: V2StartupPhase) => void;
   };
 };
 
@@ -195,8 +206,10 @@ export const startV2Server = async (
     });
     const executions = new ExecutionRepository(database);
     const operations = new OperationRepository(database);
+    let recovering = true;
     const fakeHold = createFakeHoldController(
-      options.test?.adapter ?? new FakeHarnessAdapter(),
+      options.test?.adapter ??
+        new FakeHarnessAdapter({ pmScenario: config.testFakePmScenario }),
       config.testFakeHoldAfterAdapterCursor,
     );
     const adapter = fakeHold.adapter;
@@ -215,7 +228,26 @@ export const startV2Server = async (
       },
       barrier,
       now: () => new Date().toISOString(),
+      observer: {
+        structuredOutput: (execution, event) =>
+          planningObserver.structuredOutput(execution, event),
+        terminal: (execution) => planningObserver.terminal(execution),
+      },
     });
+    const planning = createPlanningRuntime({
+      database,
+      commands,
+      events,
+      executions,
+      profiles,
+      executionRuntime: runtime,
+      barrier,
+      now: () => new Date().toISOString(),
+      publishDomain: (event) => {
+        if (!recovering) publisher.domain(event);
+      },
+    });
+    const planningObserver = planning.observer;
 
     const beforeReconciliation = new Map(
       projectsRepository
@@ -236,15 +268,25 @@ export const startV2Server = async (
         recoveredSessions.push({ executionId, session });
       },
     });
+    options.test?.onStartupPhase?.('executions_reconciled');
+    planning.service.reconcileBoundCycles();
+    options.test?.onStartupPhase?.('planning_bound_cycles_reconciled');
+    planning.service.reconcilePendingReservations();
+    options.test?.onStartupPhase?.('planning_pending_reservations_reconciled');
     publishCommittedSince(
       projectsRepository,
       events,
       publisher,
       beforeReconciliation,
     );
+    options.test?.onStartupPhase?.('recovery_window_published');
+    recovering = false;
     for (const { executionId, session } of recoveredSessions) {
       runtime.attach(executionId, session);
     }
+    options.test?.onStartupPhase?.('recovered_sessions_attached');
+    await planning.service.drainPendingLaunches();
+    options.test?.onStartupPhase?.('pending_launches_drained');
 
     const allowedOrigins = new Set<string>();
     if (config.developmentOrigin) allowedOrigins.add(config.developmentOrigin);
@@ -252,6 +294,7 @@ export const startV2Server = async (
       projects: projectsRepository,
       profiles,
       executions,
+      planning: planning.repository,
       events,
       barrier,
     });
@@ -263,6 +306,7 @@ export const startV2Server = async (
         projects,
         profiles,
         runtime,
+        planning: planning.service,
         snapshots,
         events,
       },
@@ -281,6 +325,7 @@ export const startV2Server = async (
     const origin = await app.listen({ host: config.host, port: config.port });
     allowedOrigins.add(origin);
     accepting = true;
+    options.test?.onStartupPhase?.('accepting_commands');
 
     let closePromise: Promise<void> | undefined;
     return {

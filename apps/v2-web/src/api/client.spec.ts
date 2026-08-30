@@ -16,6 +16,8 @@ const systemSnapshot: V2SystemSnapshot = {
 };
 
 const projectId = '00000000-0000-4000-8000-000000000001';
+const planningCycleId = '00000000-0000-4000-8000-000000000005';
+const proposalId = '00000000-0000-4000-8000-000000000006';
 
 const projectSnapshot = {
   protocolVersion: V2_PROTOCOL_VERSION,
@@ -33,6 +35,9 @@ const projectSnapshot = {
   profiles: [],
   executions: [],
   attentionItems: [],
+  planningCycles: [],
+  planningHistoryTruncated: false,
+  intentLedger: null,
   cursors: { domain: 2, runtime: 5 },
 } satisfies V2ProjectSnapshot;
 
@@ -212,6 +217,85 @@ describe('createV2Api', () => {
       signal: controller.signal,
     });
   });
+
+  it.each<V2CommandEnvelope>([
+    {
+      idempotencyKey: 'planning-submit-1',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.submit_turn',
+        projectId,
+        expectedCycleRevision: null,
+        profileId: '00000000-0000-4000-8000-000000000007',
+        profileRevision: 1,
+        message: 'Plan Todo.',
+      },
+    },
+    {
+      idempotencyKey: 'planning-approve-1',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_proposal.approve',
+        projectId,
+        planningCycleId,
+        proposalId,
+        expectedCycleRevision: 2,
+        expectedProposalRevision: 1,
+        expectedProjectIntentRevision: null,
+        expectedLedgerRevision: null,
+      },
+    },
+    {
+      idempotencyKey: 'planning-reject-1',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_proposal.reject',
+        projectId,
+        planningCycleId,
+        proposalId,
+        expectedCycleRevision: 2,
+        expectedProposalRevision: 1,
+        feedback: 'Narrow the scope.',
+      },
+    },
+    {
+      idempotencyKey: 'planning-abandon-1',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.abandon',
+        projectId,
+        planningCycleId,
+        expectedCycleRevision: 2,
+      },
+    },
+  ])(
+    'serializes planning command $command.type through command()',
+    async (command) => {
+      const result = {
+        ok: false as const,
+        commandType: command.command.type,
+        error: {
+          code: 'invalid_request' as const,
+          message: 'Expected fixture.',
+        },
+      };
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(JSON.stringify(result), { status: 200 }),
+        );
+
+      await expect(createV2Api({ fetcher }).command(command)).resolves.toEqual(
+        result,
+      );
+      expect(fetcher).toHaveBeenCalledWith('/api/v2/commands', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(command),
+        signal: undefined,
+      });
+    },
+  );
 
   it('does not translate an abort rejection', async () => {
     const aborted = new DOMException('Stopped', 'AbortError');

@@ -15,6 +15,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import {
   V2_PROTOCOL_VERSION,
   serverRealtimeMessageSchema,
+  v2CommandResultSchema,
   v2ProjectSnapshotSchema,
   type HarnessAdapter,
   type ServerRealtimeMessage,
@@ -510,6 +511,159 @@ describe('startV2Server', () => {
     }
   });
 
+  it('composes Todo planning commands, runtime output, and snapshots durably', async () => {
+    const fixture = createV2TestDatabase();
+    let awaitingHumanResolve!: () => void;
+    let awaitingApprovalResolve!: () => void;
+    const awaitingHuman = new Promise<void>(
+      (resolve) => (awaitingHumanResolve = resolve),
+    );
+    const awaitingApproval = new Promise<void>(
+      (resolve) => (awaitingApprovalResolve = resolve),
+    );
+    let structuredOutputCount = 0;
+    fixture.database.close();
+    try {
+      const server = await startV2Server({
+        environment: {
+          ...(await environment(fixture.directory, fixture.path)),
+          MESH_V2_TEST_FAKE_PM_SCENARIO: 'todo',
+        },
+        test: {
+          onPublished: (message) => {
+            if (
+              message.type === 'v2.runtime_event' &&
+              message.event.type === 'worker_execution.structured_output'
+            ) {
+              structuredOutputCount += 1;
+            }
+            if (
+              message.type === 'v2.domain_event' &&
+              message.event.type === 'planning_cycle.changed'
+            ) {
+              if (
+                message.event.payload.planningCycle.cycle.lifecycle ===
+                'awaiting_human'
+              ) {
+                awaitingHumanResolve();
+              }
+              if (
+                message.event.payload.planningCycle.cycle.lifecycle ===
+                'awaiting_approval'
+              ) {
+                awaitingApprovalResolve();
+              }
+            }
+          },
+        },
+      });
+      servers.push(server);
+      const command = (body: unknown) =>
+        fetch(`${server.origin}/api/v2/commands`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }).then(async (response) => ({
+          status: response.status,
+          body: v2CommandResultSchema.parse(await response.json()),
+        }));
+
+      const firstEnvelope = {
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.submit_turn',
+          projectId: fixture.project.id,
+          expectedCycleRevision: null,
+          profileId: fixture.pmProfileRevision.profileId,
+          profileRevision: fixture.pmProfileRevision.revision,
+          message: 'Build a Todo application.',
+        },
+      };
+      const first = await command(firstEnvelope);
+      expect(first.status).toBe(200);
+      expect(first.body).toMatchObject({
+        ok: true,
+        commandType: 'planning_cycle.submit_turn',
+      });
+      await expect(command(firstEnvelope)).resolves.toEqual(first);
+      await awaitingHuman;
+      const questionSnapshot = v2ProjectSnapshotSchema.parse(
+        await fetch(
+          `${server.origin}/api/v2/projects/${fixture.project.id}/snapshot`,
+        ).then((response) => response.json()),
+      );
+      const questionCycle = questionSnapshot.planningCycles[0]!;
+      expect(questionCycle.cycle.lifecycle).toBe('awaiting_human');
+      expect(questionCycle.questions).toHaveLength(2);
+
+      const secondEnvelope = (message: string) => ({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' as const },
+        command: {
+          type: 'planning_cycle.submit_turn' as const,
+          projectId: fixture.project.id,
+          planningCycleId: questionCycle.cycle.id,
+          expectedCycleRevision: questionCycle.cycle.revision,
+          message,
+        },
+      });
+      const raced = await Promise.all([
+        command(
+          secondEnvelope('Persist locally and support keyboard controls.'),
+        ),
+        command(secondEnvelope('A distinct stale second answer.')),
+      ]);
+      expect(raced.map(({ status }) => status)).toEqual([200, 200]);
+      expect(raced.filter(({ body }) => body.ok)).toHaveLength(1);
+      expect(raced.find(({ body }) => !body.ok)?.body).toMatchObject({
+        ok: false,
+        error: { code: 'planning_cycle_revision_conflict' },
+      });
+      await awaitingApproval;
+      const proposalSnapshot = v2ProjectSnapshotSchema.parse(
+        await fetch(
+          `${server.origin}/api/v2/projects/${fixture.project.id}/snapshot`,
+        ).then((response) => response.json()),
+      );
+      const proposalCycle = proposalSnapshot.planningCycles[0]!;
+      const proposal = proposalCycle.proposals.at(-1)!;
+      expect(proposalCycle.cycle.lifecycle).toBe('awaiting_approval');
+
+      const approved = await command({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_proposal.approve',
+          projectId: fixture.project.id,
+          planningCycleId: proposalCycle.cycle.id,
+          proposalId: proposal.id,
+          expectedCycleRevision: proposalCycle.cycle.revision,
+          expectedProposalRevision: proposal.revision,
+          expectedProjectIntentRevision: proposal.baseProjectIntentRevision,
+          expectedLedgerRevision: proposal.baseLedgerRevision,
+        },
+      });
+      expect(approved).toMatchObject({
+        status: 200,
+        body: { ok: true, commandType: 'planning_proposal.approve' },
+      });
+      const approvedSnapshot = v2ProjectSnapshotSchema.parse(
+        await fetch(
+          `${server.origin}/api/v2/projects/${fixture.project.id}/snapshot`,
+        ).then((response) => response.json()),
+      );
+      expect(approvedSnapshot.planningCycles[0]?.cycle.lifecycle).toBe(
+        'approved',
+      );
+      expect(approvedSnapshot.intentLedger?.ledger.revision).toBe(1);
+      expect(structuredOutputCount).toBe(2);
+    } finally {
+      await Promise.all(servers.splice(0).map((server) => server.close()));
+      fixture.close();
+    }
+  });
+
   it('runs the built entrypoint with one ready line, V2 routes, and signal shutdown', async () => {
     const fixture = createV2TestDatabase();
     const webRoot = temporaryDirectory();
@@ -574,6 +728,7 @@ describe('startV2Server', () => {
   it('reconstructs and resumes a held execution after process loss before listen', async () => {
     const fixture = createV2TestDatabase();
     const restartedFake = new FakeHarnessAdapter();
+    const startupPhases: string[] = [];
     const publications: Array<{
       message: ServerRealtimeMessage;
       beforeListen: boolean;
@@ -660,6 +815,7 @@ describe('startV2Server', () => {
         environment: await environment(fixture.directory, fixture.path),
         test: {
           adapter: immediatelyResolvingResumeAdapter(restartedFake),
+          onStartupPhase: (phase) => startupPhases.push(phase),
           onPublished: (message) => {
             publications.push({ message, beforeListen: !secondStarted });
             if (
@@ -712,6 +868,32 @@ describe('startV2Server', () => {
           (execution) => execution.id === executionId,
         ),
       ).toMatchObject({ lifecycle: 'completed', lastAdapterCursor: 6 });
+      const commandResponse = await fetch(`${second.origin}/api/v2/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'worker_execution.interrupt',
+            projectId: fixture.project.id,
+            executionId,
+            expectedRevision: recoveredSnapshot.executions.find(
+              (execution) => execution.id === executionId,
+            )!.revision,
+          },
+        }),
+      });
+      expect(commandResponse.status).toBe(200);
+      expect(startupPhases).toEqual([
+        'executions_reconciled',
+        'planning_bound_cycles_reconciled',
+        'planning_pending_reservations_reconciled',
+        'recovery_window_published',
+        'recovered_sessions_attached',
+        'pending_launches_drained',
+        'accepting_commands',
+      ]);
     } finally {
       if (
         first &&

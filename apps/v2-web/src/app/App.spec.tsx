@@ -1,7 +1,9 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  PM_DISCOVERY_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
+  resolvedWorkerProfileSnapshotSchema,
   runtimeEventSchema,
   v2ProjectSnapshotSchema,
   v2SystemSnapshotSchema,
@@ -111,6 +113,25 @@ const execution = workerExecutionSchema.parse({
   endedAt: null,
 });
 
+const pmProfile = resolvedWorkerProfileSnapshotSchema.parse({
+  ...execution.profileSnapshot,
+  profileId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  document: {
+    ...execution.profileSnapshot.document,
+    metadata: {
+      ...execution.profileSnapshot.document.metadata,
+      name: 'project-manager',
+      displayName: 'Project manager',
+    },
+    spec: {
+      ...execution.profileSnapshot.document.spec,
+      assignmentKinds: ['pm_discovery'],
+      outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+    },
+  },
+  digest: 'c'.repeat(64),
+});
+
 const systemSnapshot = v2SystemSnapshotSchema.parse({
   protocolVersion: V2_PROTOCOL_VERSION,
   health: { status: 'ok' },
@@ -139,6 +160,9 @@ const projectSnapshot = v2ProjectSnapshotSchema.parse({
       message: 'Required verification skill is unavailable.',
     },
   ],
+  planningCycles: [],
+  planningHistoryTruncated: false,
+  intentLedger: null,
   cursors: { domain: 3, runtime: 5 },
 });
 
@@ -268,6 +292,49 @@ const subscribed = (): ServerRealtimeMessage => ({
 afterEach(() => vi.restoreAllMocks());
 
 describe('App', () => {
+  it('submits planning through the generic command API without optimistic transcript changes', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => ({
+      ...projectSnapshot,
+      profiles: [...projectSnapshot.profiles, pmProfile],
+    }));
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+    await user.selectOptions(
+      screen.getByLabelText('Project manager profile'),
+      pmProfile.profileId,
+    );
+    await user.type(
+      screen.getByLabelText('Message to project manager'),
+      'Plan a durable Todo product.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+
+    await waitFor(() => expect(api.command).toHaveBeenCalledOnce());
+    expect(api.command).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor: { kind: 'human' },
+        command: {
+          type: 'planning_cycle.submit_turn',
+          projectId,
+          expectedCycleRevision: null,
+          profileId: pmProfile.profileId,
+          profileRevision: pmProfile.profileRevision,
+          message: 'Plan a durable Todo product.',
+        },
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(screen.getByLabelText('Message to project manager')).toHaveValue(
+      'Plan a durable Todo product.',
+    );
+  });
+
   it('registers a repository, navigates from the parsed success, and subscribes from snapshot cursors', async () => {
     const user = userEvent.setup();
     const { api, history, sockets, urls } = renderApp();
@@ -607,7 +674,9 @@ describe('App', () => {
       name: 'Interrupt execution',
     });
     expect(button).toBeDisabled();
-    expect(screen.getByText('Connecting to project events.')).toBeVisible();
+    expect(
+      screen.getAllByText('Connecting to project events.')[0],
+    ).toBeVisible();
     expect(
       screen.queryByText('Reconnect before interrupting an execution.'),
     ).not.toBeInTheDocument();
@@ -672,7 +741,7 @@ describe('App', () => {
     );
   });
 
-  it('shows attention, fallback, required-skill, child activity, diagnostics, and inert future panes', async () => {
+  it('shows attention, activity, diagnostics, planning, and the Board placeholder', async () => {
     const user = userEvent.setup();
     const app = renderApp({ pathname: `/projects/${projectId}` });
     expect(await screen.findByText('Preferred skill fallback')).toBeVisible();
@@ -681,7 +750,7 @@ describe('App', () => {
       screen.getByText('Required verification skill is unavailable.'),
     ).toBeVisible();
     expect(screen.getAllByText('Available in a later milestone')).toHaveLength(
-      3,
+      1,
     );
     expect(
       screen.queryByRole('button', { name: /start|approve|create/i }),

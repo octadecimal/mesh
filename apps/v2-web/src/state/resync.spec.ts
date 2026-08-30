@@ -41,6 +41,9 @@ const snapshot = (
   profiles: [],
   executions: [],
   attentionItems: [],
+  planningCycles: [],
+  planningHistoryTruncated: false,
+  intentLedger: null,
   cursors: { domain, runtime },
 });
 

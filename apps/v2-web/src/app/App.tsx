@@ -146,6 +146,9 @@ function ProjectConnection({
             profiles: projection.profiles,
             executions: projection.executions,
             attentionItems: projection.attentionItems,
+            planningCycles: projection.planningCycles,
+            planningHistoryTruncated: projection.planningHistoryTruncated,
+            intentLedger: projection.intentLedger,
             cursors: {
               domain: projection.domainCursor,
               runtime: projection.runtimeCursor,
@@ -191,37 +194,31 @@ function ProjectConnection({
     [],
   );
 
-  const interruptExecution = useCallback(
-    async (execution: WorkerExecution) => {
-      const intent = `${execution.id}:${execution.revision}`;
+  const runCommand = useCallback(
+    async (
+      intent: string,
+      envelope: V2CommandEnvelope,
+      expectedType: V2CommandEnvelope['command']['type'],
+    ) => {
       activeCommand.current?.controller.abort();
       if (pending.current && pending.current.intent !== intent) {
         pending.current = undefined;
       }
-      const envelope =
+      const request =
         pending.current?.intent === intent
           ? pending.current.envelope
-          : {
-              idempotencyKey: crypto.randomUUID(),
-              actor: { kind: 'human' as const },
-              command: {
-                type: 'worker_execution.interrupt' as const,
-                projectId,
-                executionId: execution.id,
-                expectedRevision: execution.revision,
-              },
-            };
-      pending.current = { intent, envelope };
+          : envelope;
+      pending.current = { intent, envelope: request };
       const controller = new AbortController();
-      const token = Symbol('worker_execution.interrupt');
+      const token = Symbol(expectedType);
       activeCommand.current = { controller, token };
       setSubmitting(true);
       setCommandError(undefined);
       try {
-        const result = await api.command(envelope, controller.signal);
+        const result = await api.command(request, controller.signal);
         if (activeCommand.current?.token !== token) return;
         pending.current = undefined;
-        if (!result.ok || result.commandType !== 'worker_execution.interrupt') {
+        if (!result.ok || result.commandType !== expectedType) {
           if (!result.ok && result.error.code === 'audit_barrier_tripped') {
             onAuditBarrier(result.error.message);
           }
@@ -245,7 +242,145 @@ function ProjectConnection({
         }
       }
     },
-    [api, onAuditBarrier, projectId],
+    [api, onAuditBarrier],
+  );
+
+  const interruptExecution = useCallback(
+    (execution: WorkerExecution) => {
+      void runCommand(
+        `worker_execution.interrupt:${execution.id}:${execution.revision}`,
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'worker_execution.interrupt',
+            projectId,
+            executionId: execution.id,
+            expectedRevision: execution.revision,
+          },
+        },
+        'worker_execution.interrupt',
+      );
+    },
+    [projectId, runCommand],
+  );
+
+  const submitPlanningTurn = useCallback(
+    (
+      message: string,
+      profile?: { profileId: string; profileRevision: number },
+    ) => {
+      const cycle = snapshot?.planningCycles[0];
+      const command = profile
+        ? {
+            type: 'planning_cycle.submit_turn' as const,
+            projectId,
+            expectedCycleRevision: null,
+            profileId: profile.profileId,
+            profileRevision: profile.profileRevision,
+            message,
+          }
+        : cycle
+          ? {
+              type: 'planning_cycle.submit_turn' as const,
+              projectId,
+              planningCycleId: cycle.cycle.id,
+              expectedCycleRevision: cycle.cycle.revision,
+              message,
+            }
+          : undefined;
+      if (!command) {
+        setCommandError('Select a project manager profile.');
+        return;
+      }
+      void runCommand(
+        `planning_cycle.submit_turn:${cycle?.cycle.id ?? 'new'}:${message}`,
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command,
+        },
+        'planning_cycle.submit_turn',
+      );
+    },
+    [projectId, runCommand, snapshot],
+  );
+
+  const approvePlanningProposal = useCallback(
+    (proposalId: string) => {
+      const cycle = snapshot?.planningCycles[0];
+      const proposal = cycle?.proposals.find(({ id }) => id === proposalId);
+      if (!cycle || !proposal) return;
+      void runCommand(
+        `planning_proposal.approve:${proposal.id}:${proposal.revision}`,
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'planning_proposal.approve',
+            projectId,
+            planningCycleId: cycle.cycle.id,
+            proposalId: proposal.id,
+            expectedCycleRevision: cycle.cycle.revision,
+            expectedProposalRevision: proposal.revision,
+            expectedProjectIntentRevision: proposal.baseProjectIntentRevision,
+            expectedLedgerRevision: proposal.baseLedgerRevision,
+          },
+        },
+        'planning_proposal.approve',
+      );
+    },
+    [projectId, runCommand, snapshot],
+  );
+
+  const rejectPlanningProposal = useCallback(
+    (proposalId: string, feedback: string) => {
+      const cycle = snapshot?.planningCycles[0];
+      const proposal = cycle?.proposals.find(({ id }) => id === proposalId);
+      if (!cycle || !proposal) return;
+      void runCommand(
+        `planning_proposal.reject:${proposal.id}:${proposal.revision}:${feedback}`,
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'planning_proposal.reject',
+            projectId,
+            planningCycleId: cycle.cycle.id,
+            proposalId: proposal.id,
+            expectedCycleRevision: cycle.cycle.revision,
+            expectedProposalRevision: proposal.revision,
+            feedback,
+          },
+        },
+        'planning_proposal.reject',
+      );
+    },
+    [projectId, runCommand, snapshot],
+  );
+
+  const abandonPlanningCycle = useCallback(
+    (planningCycleId: string) => {
+      const cycle = snapshot?.planningCycles.find(
+        ({ cycle }) => cycle.id === planningCycleId,
+      );
+      if (!cycle) return;
+      void runCommand(
+        `planning_cycle.abandon:${cycle.cycle.id}:${cycle.cycle.revision}`,
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'planning_cycle.abandon',
+            projectId,
+            planningCycleId: cycle.cycle.id,
+            expectedCycleRevision: cycle.cycle.revision,
+          },
+        },
+        'planning_cycle.abandon',
+      );
+    },
+    [projectId, runCommand, snapshot],
   );
 
   return (
@@ -258,6 +393,16 @@ function ProjectConnection({
         onDeselect={onDeselect}
         onInterrupt={interruptExecution}
         activityByExecutionId={activityByExecutionId}
+        planning={{
+          submitting,
+          error: commandError,
+          enabled: auditHealthy,
+          disabledReason: 'Audit barrier is active.',
+          onSubmitTurn: submitPlanningTurn,
+          onApprove: approvePlanningProposal,
+          onReject: rejectPlanningProposal,
+          onAbandon: abandonPlanningCycle,
+        }}
       />
     </>
   );

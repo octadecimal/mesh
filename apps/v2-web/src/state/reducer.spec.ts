@@ -1,5 +1,7 @@
 import {
   V2_PROTOCOL_VERSION,
+  approvedPlanningOutcomeSchema,
+  planningCycleViewSchema,
   type DomainEvent,
   type RetainedRuntimeWindow,
   type RuntimeEvent,
@@ -16,6 +18,146 @@ const projectId = '00000000-0000-4000-8000-000000000001';
 const otherProjectId = '00000000-0000-4000-8000-000000000002';
 const profileId = '00000000-0000-4000-8000-000000000003';
 const executionId = '00000000-0000-4000-8000-000000000004';
+const planningCycleId = '00000000-0000-4000-8000-000000000010';
+const planningTurnId = '00000000-0000-4000-8000-000000000011';
+
+const planningCycle = planningCycleViewSchema.parse({
+  cycle: {
+    id: planningCycleId,
+    projectId,
+    lifecycle: 'execution_active',
+    revision: 2,
+    profileId,
+    profileRevision: 1,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    latestProposalRevision: 0,
+    activeExecutionId: executionId,
+    createdAt: '2026-08-28T00:00:00.000Z',
+    updatedAt: '2026-08-28T00:00:01.000Z',
+    endedAt: null,
+  },
+  turns: [
+    {
+      id: planningTurnId,
+      projectId,
+      planningCycleId,
+      ordinal: 1,
+      actor: 'human',
+      message: 'Plan Todo.',
+      launchState: 'execution_bound',
+      executionId,
+      createdAt: '2026-08-28T00:00:00.000Z',
+    },
+  ],
+  questions: [],
+  proposals: [],
+});
+
+const approvedOutcome = approvedPlanningOutcomeSchema.parse({
+  planningCycle: {
+    cycle: {
+      ...planningCycle.cycle,
+      lifecycle: 'approved',
+      revision: 4,
+      latestProposalRevision: 1,
+      activeExecutionId: null,
+      updatedAt: '2026-08-28T00:00:03.000Z',
+      endedAt: '2026-08-28T00:00:03.000Z',
+    },
+    turns: [
+      ...planningCycle.turns,
+      {
+        id: '00000000-0000-4000-8000-000000000014',
+        projectId,
+        planningCycleId,
+        ordinal: 2,
+        actor: 'pm',
+        message: 'Approve this Todo intent.',
+        launchState: null,
+        executionId,
+        createdAt: '2026-08-28T00:00:02.000Z',
+      },
+    ],
+    questions: [],
+    proposals: [
+      {
+        id: '00000000-0000-4000-8000-000000000015',
+        projectId,
+        planningCycleId,
+        revision: 1,
+        lifecycle: 'approved',
+        baseProjectIntentRevision: null,
+        baseLedgerRevision: null,
+        summary: 'A focused Todo product.',
+        projectIntent: {
+          goal: 'Track Todo items.',
+          targetUsers: ['Individuals'],
+          desiredCapabilities: ['Add Todo items'],
+          constraints: [],
+          nonGoals: [],
+          successConditions: ['Todo items can be completed'],
+          rationale: 'The operator requested Todo.',
+          provenance: [
+            {
+              kind: 'conversation_turn',
+              turnId: planningTurnId,
+              rationale: 'Initial request.',
+            },
+          ],
+        },
+        records: [],
+        relationships: [],
+        diff: {
+          intentChanges: [],
+          recordChanges: { create: 0, revise: 0, reuse: 0 },
+          relationshipChanges: { added: [], removed: [] },
+        },
+        createdByTurnId: '00000000-0000-4000-8000-000000000014',
+        createdByExecutionId: executionId,
+        rejectionFeedback: null,
+        createdAt: '2026-08-28T00:00:02.000Z',
+        decidedAt: '2026-08-28T00:00:03.000Z',
+      },
+    ],
+  },
+  intentLedger: {
+    projectIntent: {
+      id: '00000000-0000-4000-8000-000000000016',
+      projectId,
+      revision: 1,
+      proposalId: '00000000-0000-4000-8000-000000000015',
+      approvedBy: 'human',
+      approvedAt: '2026-08-28T00:00:03.000Z',
+      content: {
+        goal: 'Track Todo items.',
+        targetUsers: ['Individuals'],
+        desiredCapabilities: ['Add Todo items'],
+        constraints: [],
+        nonGoals: [],
+        successConditions: ['Todo items can be completed'],
+        rationale: 'The operator requested Todo.',
+        provenance: [
+          {
+            kind: 'conversation_turn',
+            turnId: planningTurnId,
+            rationale: 'Initial request.',
+          },
+        ],
+      },
+    },
+    ledger: {
+      id: '00000000-0000-4000-8000-000000000017',
+      projectId,
+      revision: 1,
+      proposalId: '00000000-0000-4000-8000-000000000015',
+      approvedBy: 'human',
+      approvedAt: '2026-08-28T00:00:03.000Z',
+    },
+    records: [],
+    relationships: [],
+  },
+});
 
 const execution = {
   id: executionId,
@@ -93,6 +235,9 @@ const snapshot = {
   profiles: [],
   executions: [execution],
   attentionItems: [],
+  planningCycles: [],
+  planningHistoryTruncated: false,
+  intentLedger: null,
   cursors: { domain: 2, runtime: 5 },
 } satisfies V2ProjectSnapshot;
 
@@ -176,6 +321,171 @@ const independentProjectProfileApproved = {
 } satisfies DomainEvent;
 
 describe('reduceProjectProjection', () => {
+  it('hydrates planning truth, preserves the local draft, and applies a complete cycle event', () => {
+    const withDraft = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      { type: 'local.repository_draft_changed', draft: 'human draft' },
+    );
+    const hydrated = reduceProjectProjection(withDraft, {
+      type: 'snapshot.received',
+      snapshot: {
+        ...snapshot,
+        planningCycles: [planningCycle],
+        planningHistoryTruncated: true,
+      },
+    });
+    const changed = {
+      ...planningCycle,
+      cycle: { ...planningCycle.cycle, revision: 3 },
+    };
+    const next = reduceProjectProjection(hydrated, {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000012',
+        projectId,
+        sequence: 3,
+        occurredAt: '2026-08-28T00:00:02.000Z',
+        type: 'planning_cycle.changed',
+        payload: { planningCycle: changed },
+      } as DomainEvent,
+    });
+
+    expect(next.planningCycles).toEqual([changed]);
+    expect(next.planningHistoryTruncated).toBe(true);
+    expect(next.local.repositoryDraft).toBe('human draft');
+    expect(next.domainCursor).toBe(3);
+    expect(next.resyncRequested).toBe(false);
+  });
+
+  it('requests resync for an incomplete planning projection', () => {
+    const next = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000013',
+        projectId,
+        sequence: 3,
+        occurredAt: '2026-08-28T00:00:02.000Z',
+        type: 'planning_cycle.changed',
+        payload: { planningCycle: { cycle: planningCycle.cycle } },
+      } as unknown as DomainEvent,
+    });
+
+    expect(next.resyncRequested).toBe(true);
+    expect(next.domainCursor).toBe(2);
+  });
+
+  it('converges an approved ledger event with a fresh final snapshot', () => {
+    const event = {
+      id: '00000000-0000-4000-8000-000000000018',
+      projectId,
+      sequence: 3,
+      occurredAt: '2026-08-28T00:00:03.000Z',
+      type: 'intent_ledger.approved',
+      payload: approvedOutcome,
+    } as DomainEvent;
+    const incremental = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event,
+    });
+    const refreshed = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'snapshot.received',
+        snapshot: {
+          ...snapshot,
+          planningCycles: [approvedOutcome.planningCycle],
+          intentLedger: approvedOutcome.intentLedger,
+          cursors: { ...snapshot.cursors, domain: 3 },
+        },
+      },
+    );
+
+    expect(incremental).toEqual(refreshed);
+    expect(incremental.intentLedger?.ledger.revision).toBe(1);
+  });
+
+  it('converges append, proposal supersede, reject, and abandon events with a fresh snapshot', () => {
+    const firstProposal = {
+      ...approvedOutcome.planningCycle.proposals[0]!,
+      lifecycle: 'superseded' as const,
+      decidedAt: '2026-08-28T00:00:03.000Z',
+    };
+    const latestProposal = {
+      ...firstProposal,
+      id: '00000000-0000-4000-8000-000000000019',
+      revision: 2,
+      lifecycle: 'awaiting_approval' as const,
+      decidedAt: null,
+    };
+    const superseded = planningCycleViewSchema.parse({
+      ...approvedOutcome.planningCycle,
+      cycle: {
+        ...approvedOutcome.planningCycle.cycle,
+        lifecycle: 'awaiting_approval',
+        revision: 5,
+        latestProposalRevision: 2,
+        endedAt: null,
+      },
+      proposals: [firstProposal, latestProposal],
+    });
+    const rejected = planningCycleViewSchema.parse({
+      ...superseded,
+      cycle: {
+        ...superseded.cycle,
+        lifecycle: 'proposal_rejected',
+        revision: 6,
+        endedAt: '2026-08-28T00:00:05.000Z',
+      },
+      proposals: [
+        firstProposal,
+        {
+          ...latestProposal,
+          lifecycle: 'rejected',
+          rejectionFeedback: 'Keep the scope smaller.',
+          decidedAt: '2026-08-28T00:00:05.000Z',
+        },
+      ],
+    });
+    const abandoned = planningCycleViewSchema.parse({
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'abandoned',
+        revision: 7,
+        activeExecutionId: null,
+        endedAt: '2026-08-28T00:00:06.000Z',
+      },
+    });
+    const views = [planningCycle, superseded, rejected, abandoned];
+    const incremental = views.reduce(
+      (state, planningCycleView, index) =>
+        reduceProjectProjection(state, {
+          type: 'domain.event',
+          event: {
+            id: `00000000-0000-4000-8000-${String(20 + index).padStart(12, '0')}`,
+            projectId,
+            sequence: 3 + index,
+            occurredAt: `2026-08-28T00:00:0${3 + index}.000Z`,
+            type: 'planning_cycle.changed',
+            payload: { planningCycle: planningCycleView },
+          } as DomainEvent,
+        }),
+      ready(),
+    );
+    const refreshed = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'snapshot.received',
+        snapshot: {
+          ...snapshot,
+          planningCycles: [abandoned],
+          cursors: { ...snapshot.cursors, domain: 6 },
+        },
+      },
+    );
+
+    expect(incremental).toEqual(refreshed);
+  });
   it('atomically replaces old activity with the complete retained window', () => {
     const withOldActivity = reduceProjectProjection(ready(), {
       type: 'runtime.event',

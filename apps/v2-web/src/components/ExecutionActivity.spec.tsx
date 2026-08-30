@@ -1,5 +1,9 @@
 import { render, screen } from '@testing-library/react';
-import type { RuntimeEvent, WorkerExecution } from '@mesh/v2-contracts';
+import {
+  PM_DISCOVERY_REPORT_SCHEMA,
+  type RuntimeEvent,
+  type WorkerExecution,
+} from '@mesh/v2-contracts';
 import { describe, expect, it } from 'vitest';
 
 import { ExecutionActivity, type ChildActivity } from './ExecutionActivity';
@@ -91,6 +95,62 @@ const children: readonly ChildActivity[] = [
 ];
 
 describe('ExecutionActivity', () => {
+  it('uses the deterministic PM discovery label across accessible activity', () => {
+    const pmExecution: WorkerExecution = {
+      ...execution,
+      assignment: {
+        kind: 'pm_discovery',
+        projectId: execution.projectId,
+        outputSchema: PM_DISCOVERY_REPORT_SCHEMA,
+        planningCycleId: '99999999-9999-4999-8999-999999999999',
+        humanTurnId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        baseProjectIntentRevision: null,
+        baseLedgerRevision: null,
+        input: {
+          conversation: [
+            {
+              turnId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+              actor: 'human',
+              message: 'Plan Todo.',
+            },
+          ],
+          latestProposal: null,
+          approvedIntentLedger: null,
+        },
+      },
+    };
+    const structured = {
+      id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      projectId: execution.projectId,
+      executionId: execution.id,
+      diagnosticId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      sequence: 13,
+      adapterCursor: 1,
+      occurredAt: '2026-08-29T00:00:01.000Z',
+      type: 'worker_execution.structured_output',
+      payload: { schema: PM_DISCOVERY_REPORT_SCHEMA, value: {} },
+    } satisfies RuntimeEvent;
+
+    render(
+      <ExecutionActivity
+        execution={pmExecution}
+        runtimeActivity={[structured]}
+        projectCursors={{ domain: 4, runtime: 13 }}
+      />,
+    );
+
+    expect(
+      screen.getByRole('article', { name: 'Project manager discovery' }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole('list', {
+        name: 'Runtime activity for Project manager discovery',
+      }),
+    ).toHaveTextContent('Structured output mesh.dev/pm-discovery-report/v1');
+  });
+
   it('renders skill outcomes and nested child activity without provider details by default', () => {
     render(
       <ExecutionActivity

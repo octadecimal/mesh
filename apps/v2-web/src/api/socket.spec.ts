@@ -173,7 +173,7 @@ describe('createV2Socket', () => {
     });
   });
 
-  it('projects replay and live completion once through the real store', () => {
+  it('preserves planning snapshot truth through runtime events and rejects incomplete planning events', () => {
     const sockets: FakeSocket[] = [];
     const store = createV2Store(projectId);
     const execution = {
@@ -251,6 +251,9 @@ describe('createV2Socket', () => {
       profiles: [],
       executions: [execution],
       attentionItems: [],
+      planningCycles: [],
+      planningHistoryTruncated: false,
+      intentLedger: null,
       cursors: { domain: 2, runtime: 5 },
     } satisfies V2ProjectSnapshot;
     store.dispatch({ type: 'snapshot.received', snapshot });
@@ -289,6 +292,31 @@ describe('createV2Socket', () => {
     expect(store.getState().runtimeCursor).toBe(6);
     expect(store.getState().activity).toEqual([completion.event]);
     expect(store.getState().executions[0]?.lifecycle).toBe('running');
+    expect(store.getState().planningCycles).toEqual(snapshot.planningCycles);
+    expect(store.getState().planningHistoryTruncated).toBe(
+      snapshot.planningHistoryTruncated,
+    );
+    expect(store.getState().intentLedger).toEqual(snapshot.intentLedger);
+
+    sockets[0]?.message({
+      type: 'v2.domain_event',
+      protocolVersion: V2_PROTOCOL_VERSION,
+      projectId,
+      event: {
+        id: '00000000-0000-4000-8000-000000000011',
+        projectId,
+        sequence: 3,
+        occurredAt: '2026-08-28T00:00:07.000Z',
+        type: 'planning_cycle.changed',
+        payload: { planningCycle: { cycle: { id: projectId } } },
+      },
+    });
+
+    expect(store.getState().connection).toEqual({
+      status: 'stale',
+      reason: 'invalid_payload',
+    });
+    expect(store.getState().planningCycles).toEqual(snapshot.planningCycles);
   });
 
   it('does not advertise a schema-valid event rejected by the store', () => {

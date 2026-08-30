@@ -1,8 +1,15 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
 
-import type { RuntimeEvent, WorkerExecution } from '@mesh/v2-contracts';
+import type {
+  PlanningCycleView,
+  PlanningProposal,
+  RuntimeEvent,
+  WorkerExecution,
+} from '@mesh/v2-contracts';
 
 import { ExecutionActivity, type ChildActivity } from './ExecutionActivity';
+import { PlanningPane } from './PlanningPane';
+import { RequirementsPane } from './RequirementsPane';
 import type { ProjectShellViewModel } from './shell-state';
 
 const futurePanes = [
@@ -19,6 +26,29 @@ export type ExecutionActivityProjection = {
   runtimeActivity?: readonly RuntimeEvent[];
 };
 
+export type PlanningCommandProjection = {
+  submitting: boolean;
+  error?: string;
+  enabled: boolean;
+  disabledReason?: string;
+  onSubmitTurn(
+    message: string,
+    profile?: { profileId: string; profileRevision: number },
+  ): void;
+  onApprove(proposalId: PlanningProposal['id']): void;
+  onReject(proposalId: PlanningProposal['id'], feedback: string): void;
+  onAbandon(cycleId: PlanningCycleView['cycle']['id']): void;
+};
+
+const inertPlanning: PlanningCommandProjection = {
+  submitting: false,
+  enabled: true,
+  onSubmitTurn: () => undefined,
+  onApprove: () => undefined,
+  onReject: () => undefined,
+  onAbandon: () => undefined,
+};
+
 function disabledInterruptReason(status: ProjectShellViewModel['status']) {
   if (status === 'stale')
     return 'Wait for a fresh project snapshot before interrupting.';
@@ -32,11 +62,13 @@ export function FocusedProjectShell({
   onDeselect,
   onInterrupt,
   activityByExecutionId = {},
+  planning = inertPlanning,
 }: {
   model: ProjectShellViewModel;
   onDeselect: () => void;
   onInterrupt: (execution: WorkerExecution) => void;
   activityByExecutionId?: Readonly<Record<string, ExecutionActivityProjection>>;
+  planning?: PlanningCommandProjection;
 }) {
   const [activePane, setActivePane] = useState<FuturePaneSlug>('board');
   const tabRefs = useRef<Record<FuturePaneSlug, HTMLButtonElement | null>>({
@@ -72,6 +104,36 @@ export function FocusedProjectShell({
         ? undefined
         : model.interrupt.disabledReason
       : disabledInterruptReason(model.status);
+  const planningConnection =
+    model.status === 'ready' && planning.enabled
+      ? ({ status: 'ready' } as const)
+      : model.status === 'ready'
+        ? ({
+            status: 'stale' as const,
+            message: planning.disabledReason ?? 'Planning is unavailable.',
+          } as const)
+        : model.status === 'stale'
+          ? ({ status: 'stale' as const, message: model.message } as const)
+          : model.status === 'disconnected'
+            ? ({
+                status: 'disconnected' as const,
+                message: model.message,
+              } as const)
+            : ({ status: 'loading' } as const);
+  const planningProfiles = snapshot.profiles
+    .filter((profile) =>
+      profile.document.spec.assignmentKinds.some(
+        (kind) => kind === 'pm_discovery',
+      ),
+    )
+    .map((profile) => ({
+      profileId: profile.profileId,
+      projectId: profile.projectId,
+      scope: profile.document.metadata.scope,
+      name: profile.document.metadata.name,
+      displayName: profile.document.metadata.displayName,
+      approvedRevision: profile.profileRevision,
+    }));
   function activatePane(pane: FuturePane) {
     setActivePane(pane.slug);
     tabRefs.current[pane.slug]?.focus();
@@ -113,8 +175,20 @@ export function FocusedProjectShell({
       </p>
       <div className="v2-project-layout">
         <aside className="v2-pm-pane" aria-label="PM Chat">
-          <h2>PM Chat</h2>
-          <p>Available in a later milestone</p>
+          <PlanningPane
+            cycle={snapshot.planningCycles[0]}
+            connection={planningConnection}
+            profiles={planningProfiles}
+            submitting={planning.submitting}
+            error={planning.error}
+            historyTruncated={snapshot.planningHistoryTruncated}
+            executions={snapshot.executions}
+            approvedIntentLedger={snapshot.intentLedger}
+            onSubmitTurn={planning.onSubmitTurn}
+            onApprove={planning.onApprove}
+            onReject={planning.onReject}
+            onAbandon={planning.onAbandon}
+          />
         </aside>
         <div className="v2-project-content">
           <section aria-label="Future workflow panes">
@@ -138,18 +212,23 @@ export function FocusedProjectShell({
                 </button>
               ))}
             </div>
-            {futurePanes.map((pane) => (
-              <section
-                key={pane.slug}
-                id={`project-pane-panel-${pane.slug}`}
-                role="tabpanel"
-                aria-labelledby={`project-pane-tab-${pane.slug}`}
-                hidden={activePane !== pane.slug}
-              >
-                <h2>{pane.label}</h2>
-                <p>Available in a later milestone</p>
-              </section>
-            ))}
+            <section
+              id="project-pane-panel-board"
+              role="tabpanel"
+              aria-labelledby="project-pane-tab-board"
+              hidden={activePane !== 'board'}
+            >
+              <h2>Board</h2>
+              <p>Available in a later milestone</p>
+            </section>
+            <section
+              id="project-pane-panel-requirements"
+              role="tabpanel"
+              aria-labelledby="project-pane-tab-requirements"
+              hidden={activePane !== 'requirements'}
+            >
+              <RequirementsPane intentLedger={snapshot.intentLedger} />
+            </section>
           </section>
           <section aria-labelledby="profiles-heading">
             <h2 id="profiles-heading">Approved profiles</h2>

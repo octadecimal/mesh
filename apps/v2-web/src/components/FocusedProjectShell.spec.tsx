@@ -45,6 +45,9 @@ const snapshot: V2ProjectSnapshot = {
       message: 'Required skill is unavailable.',
     },
   ],
+  planningCycles: [],
+  planningHistoryTruncated: false,
+  intentLedger: null,
   cursors: { domain: 4, runtime: 12 },
 };
 
@@ -86,11 +89,11 @@ describe('FocusedProjectShell', () => {
     );
 
     expect(screen.getAllByText('Available in a later milestone')).toHaveLength(
-      3,
+      1,
     );
     expect(
       screen.getByRole('complementary', { name: 'PM Chat' }),
-    ).toBeVisible();
+    ).toHaveTextContent('Project manager');
     const boardTab = screen.getByRole('tab', { name: 'Board' });
     await user.click(boardTab);
     await user.keyboard('{ArrowRight}');
@@ -99,6 +102,9 @@ describe('FocusedProjectShell', () => {
       'true',
     );
     expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
+    expect(
+      screen.getByRole('tabpanel', { name: 'Requirements' }),
+    ).toHaveTextContent('No approved intent or requirements yet.');
     await user.keyboard('{Home}');
     expect(screen.getByRole('tab', { name: 'Board' })).toHaveFocus();
     await user.keyboard('{End}');
@@ -183,7 +189,7 @@ describe('FocusedProjectShell', () => {
     expect(
       screen.getByRole('button', { name: 'Interrupt execution' }),
     ).toBeDisabled();
-    expect(screen.getByText('Resyncing project')).toBeVisible();
+    expect(screen.getAllByText('Resyncing project')[0]).toBeVisible();
     expect(
       screen.getByText(
         'Wait for a fresh project snapshot before interrupting.',

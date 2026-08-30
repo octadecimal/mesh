@@ -108,6 +108,44 @@ describe('loadV2ServerConfig', () => {
     );
   });
 
+  it('accepts the Todo fake PM scenario only in tests and omits it by default', () => {
+    expect(loadV2ServerConfig({}, root).testFakePmScenario).toBeUndefined();
+    expect(
+      loadV2ServerConfig(
+        { NODE_ENV: 'test', MESH_V2_TEST_FAKE_PM_SCENARIO: 'todo' },
+        root,
+      ).testFakePmScenario,
+    ).toBe('todo');
+    for (const NODE_ENV of [undefined, 'production']) {
+      expect(() =>
+        loadV2ServerConfig(
+          { NODE_ENV, MESH_V2_TEST_FAKE_PM_SCENARIO: 'todo' },
+          root,
+        ),
+      ).toThrowError(
+        expect.objectContaining<V2ConfigError>({
+          code: 'invalid_v2_test_option',
+        }),
+      );
+    }
+  });
+
+  it.each(['malformed', 'duplicate', 'missing_output', 'unknown'])(
+    'rejects unsupported fake PM scenario %s',
+    (scenario) => {
+      expect(() =>
+        loadV2ServerConfig(
+          { NODE_ENV: 'test', MESH_V2_TEST_FAKE_PM_SCENARIO: scenario },
+          root,
+        ),
+      ).toThrowError(
+        expect.objectContaining<V2ConfigError>({
+          code: 'invalid_v2_test_option',
+        }),
+      );
+    },
+  );
+
   it.each(['https://example.com', 'http://localhost:4300'])(
     'rejects non-loopback development origin %s',
     (origin) => {

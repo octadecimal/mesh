@@ -37,8 +37,15 @@ function runtimeActivityLabel(activity: RuntimeEvent) {
       return `Execution failed: ${activity.payload.message}`;
     case 'worker_execution.completed':
       return 'Execution completed';
+    case 'worker_execution.structured_output':
+      return `Structured output ${activity.payload.schema}`;
   }
 }
+
+const assignmentLabel = (execution: WorkerExecution) =>
+  execution.assignment.kind === 'pm_discovery'
+    ? 'Project manager discovery'
+    : execution.assignment.title;
 
 function ChildActivityTree({
   activities,
@@ -73,10 +80,11 @@ export function ExecutionActivity({
   projectCursors: ProjectEventCursors;
 }) {
   const headingId = `execution-${execution.id}`;
+  const label = assignmentLabel(execution);
   return (
     <article className="v2-execution" aria-labelledby={headingId}>
       <header>
-        <h3 id={headingId}>{execution.assignment.title}</h3>
+        <h3 id={headingId}>{label}</h3>
         <p role="status">{execution.lifecycle}</p>
       </header>
       <section aria-label="Skill outcomes">
@@ -90,21 +98,19 @@ export function ExecutionActivity({
           ))}
         </ul>
       </section>
-      <section aria-label={`Child activity for ${execution.assignment.title}`}>
+      <section aria-label={`Child activity for ${label}`}>
         <h4>Child activity</h4>
         <ChildActivityTree
           activities={childActivities}
-          label={`Child activity for ${execution.assignment.title}`}
+          label={`Child activity for ${label}`}
         />
       </section>
-      <section
-        aria-label={`Runtime activity for ${execution.assignment.title}`}
-      >
+      <section aria-label={`Runtime activity for ${label}`}>
         <h4>Runtime activity</h4>
         {runtimeActivity.length === 0 ? (
           <p>No runtime activity reported.</p>
         ) : (
-          <ul aria-label={`Runtime activity for ${execution.assignment.title}`}>
+          <ul aria-label={`Runtime activity for ${label}`}>
             {runtimeActivity.map((activity) => (
               <li key={activity.id}>{runtimeActivityLabel(activity)}</li>
             ))}
