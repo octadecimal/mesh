@@ -396,7 +396,7 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
     const proposedRecords = page.getByRole('region', {
       name: 'Proposed records for revision 1',
     });
-    for (const statement of [
+    const recordStatements = [
       'Users can add and complete Todo items.',
       'Every Todo control is keyboard operable.',
       'Todo items persist across application reloads.',
@@ -404,7 +404,8 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
       'Store Todo items locally in the application.',
       'How long should completed Todo items remain visible?',
       'Local browser data can be cleared by the user.',
-    ]) {
+    ];
+    for (const statement of recordStatements) {
       await expect(proposedRecords.getByText(statement)).toBeVisible();
     }
 
@@ -421,9 +422,10 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
       ledger: { revision: 1 },
     });
     expect(approved.planningCycles[0]?.cycle.lifecycle).toBe('approved');
-    const humanTurnIds = approved.planningCycles[0]?.turns
-      .filter(({ actor }) => actor === 'human')
-      .map(({ id }) => id);
+    const humanTurnIds =
+      approved.planningCycles[0]?.turns
+        .filter(({ actor }) => actor === 'human')
+        .map(({ id }) => id) ?? [];
     expect(humanTurnIds).toHaveLength(2);
     expect(
       approved.intentLedger?.projectIntent.content.provenance.map(
@@ -439,50 +441,92 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
       approved.intentLedger?.relationships.map(({ kind }) => kind),
     ).toEqual(['depends_on', 'constrains']);
 
-    await page.getByRole('tab', { name: 'Requirements' }).click();
-    const requirements = page.getByRole('tabpanel', { name: 'Requirements' });
-    await expect(
-      requirements.getByRole('heading', {
-        name: 'Approved intent · revision 1',
-      }),
-    ).toBeVisible();
-    await expect(requirements.getByText('Ledger revision 1')).toBeVisible();
-    for (const heading of [
-      'Requirements',
-      'Decisions',
-      'Assumptions',
-      'Questions',
-      'Risks',
-    ]) {
+    const expectRequirementsProjection = async () => {
+      const requirements = page.getByRole('tabpanel', {
+        name: 'Requirements',
+      });
       await expect(
         requirements.getByRole('heading', {
-          name: heading,
-          exact: true,
-          level: 3,
+          name: 'Approved intent · revision 1',
         }),
       ).toBeVisible();
-    }
-    await expect(
-      requirements.getByText('Requirement · Functional · Approved · Must'),
-    ).toBeVisible();
-    await expect(
-      requirements.getByText('Requirement · Ux · Approved · Must'),
-    ).toBeVisible();
-    await expect(
-      requirements.getByText('Requirement · Operational · Approved · Must'),
-    ).toBeVisible();
-    await expect(
-      requirements.getByText(
-        /Users can add and complete Todo items.*depends on.*Todo items persist across application reloads/u,
-      ),
-    ).toBeVisible();
-    await expect(
-      requirements.getByText(
-        /Store Todo items locally in the application.*constrains.*Todo items persist across application reloads/u,
-      ),
-    ).toBeVisible();
+      await expect(requirements.getByText('Ledger revision 1')).toBeVisible();
+      for (const heading of [
+        'Requirements',
+        'Decisions',
+        'Assumptions',
+        'Questions',
+        'Risks',
+      ]) {
+        await expect(
+          requirements.getByRole('heading', {
+            name: heading,
+            exact: true,
+            level: 3,
+          }),
+        ).toBeVisible();
+      }
+      await expect(
+        requirements.getByText('Requirement · Functional · Approved · Must'),
+      ).toBeVisible();
+      await expect(
+        requirements.getByText('Requirement · Ux · Approved · Must'),
+      ).toBeVisible();
+      await expect(
+        requirements.getByText('Requirement · Operational · Approved · Must'),
+      ).toBeVisible();
+      await expect(
+        requirements.getByText(
+          /Users can add and complete Todo items.*depends on.*Todo items persist across application reloads/u,
+        ),
+      ).toBeVisible();
+      await expect(
+        requirements.getByText(
+          /Store Todo items locally in the application.*constrains.*Todo items persist across application reloads/u,
+        ),
+      ).toBeVisible();
+      const intentProvenance = requirements.getByRole('list', {
+        name: 'Approved intent provenance',
+      });
+      for (const turnId of humanTurnIds) {
+        await expect(intentProvenance).toContainText(turnId);
+        for (const statement of recordStatements) {
+          await expect(
+            requirements.getByRole('list', {
+              name: `Provenance for ${statement}`,
+            }),
+          ).toContainText(turnId);
+        }
+      }
+    };
+
+    await page.getByRole('tab', { name: 'Requirements' }).click();
+    await expectRequirementsProjection();
 
     const resynced = await fixture.forceProjectResync(page);
+    const resyncedConversation = page.getByRole('list', {
+      name: 'Planning conversation',
+    });
+    for (const message of [
+      firstDescription,
+      'I need two details before proposing Todo intent.',
+      answer,
+    ]) {
+      await expect(resyncedConversation).toContainText(message);
+    }
+    const resyncedQuestions = page.getByRole('region', {
+      name: 'Planning questions',
+    });
+    for (const prompt of [
+      'How should Todo items persist?',
+      'Should all Todo controls be keyboard operable?',
+    ]) {
+      await expect(
+        resyncedQuestions.getByRole('heading', { name: prompt }),
+      ).toBeVisible();
+    }
+    await page.getByRole('tab', { name: 'Requirements' }).click();
+    await expectRequirementsProjection();
     expect(resynced.intentLedger).toEqual(approved.intentLedger);
     expect(resynced.planningCycles[0]?.turns).toEqual(
       approved.planningCycles[0]?.turns,
