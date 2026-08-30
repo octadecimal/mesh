@@ -558,6 +558,122 @@ describe('ExecutionRuntime', () => {
     ).resolves.toEqual(cancelled);
   });
 
+  it.each(['missing', 'multiple', 'wrong'] as const)(
+    'fails reserved cancellation closed for a %s durable start link',
+    async (fault) => {
+      const context = createRuntime();
+      const reservation = await context.runtime.reserveStart(context.start);
+      const operation = required(
+        context.operations.listForExecution(reservation.execution.id)[0],
+        'Expected start operation',
+      );
+      if (fault === 'missing') {
+        context.fixture.database
+          .prepare('DELETE FROM execution_operations WHERE id = ?')
+          .run(operation.id);
+      } else if (fault === 'multiple') {
+        inImmediateTransaction(context.fixture.database, () => {
+          context.operations.finishInTransaction(
+            operation.id,
+            'failed',
+            { reason: 'conflicting test link' },
+            '2026-08-28T01:00:01.000Z',
+          );
+          context.operations.createPendingInTransaction({
+            executionId: reservation.execution.id,
+            kind: 'start',
+            request: {
+              version: 'mesh.v2.execution-start/v1',
+              idempotencyKey: randomUUID(),
+              requestHash: hashV2Command(context.start.command),
+              request: context.start.command,
+            },
+            createdAt: '2026-08-28T01:00:02.000Z',
+          });
+        });
+      } else {
+        const request = operation.request as Record<string, unknown>;
+        context.fixture.database
+          .prepare(
+            'UPDATE execution_operations SET request_json = ? WHERE id = ?',
+          )
+          .run(
+            JSON.stringify({ ...request, idempotencyKey: randomUUID() }),
+            operation.id,
+          );
+      }
+      const before = durableReservationState(context.fixture);
+      const publishedBefore = context.published.domain.length;
+
+      await expect(
+        context.runtime.cancelReserved(reservation.execution.id),
+      ).rejects.toThrow();
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.published.domain).toHaveLength(publishedBefore);
+      expect(context.fake.startCount).toBe(0);
+    },
+  );
+
+  it.each([
+    'terminal-pending',
+    'starting-failed',
+    'created-succeeded',
+  ] as const)(
+    'fails reserved cancellation closed for %s state mismatch',
+    async (fault) => {
+      const context = createRuntime();
+      const reservation = await context.runtime.reserveStart(context.start);
+      const operation = required(
+        context.operations.listForExecution(reservation.execution.id)[0],
+        'Expected start operation',
+      );
+      inImmediateTransaction(context.fixture.database, () => {
+        if (fault === 'terminal-pending') {
+          context.executions.transitionInTransaction(
+            reservation.execution.id,
+            reservation.execution.revision,
+            'failed',
+            '2026-08-28T01:00:01.000Z',
+            {
+              failure: {
+                code: 'internal_error',
+                message: 'inconsistent test lifecycle',
+              },
+            },
+          );
+          return;
+        }
+        const state = fault === 'starting-failed' ? 'failed' : 'succeeded';
+        context.operations.finishInTransaction(
+          operation.id,
+          state,
+          { reason: 'inconsistent test operation' },
+          '2026-08-28T01:00:01.000Z',
+        );
+        if (fault === 'created-succeeded') {
+          context.fixture.database
+            .prepare(
+              "UPDATE worker_executions SET lifecycle = 'created' WHERE id = ?",
+            )
+            .run(reservation.execution.id);
+        }
+      });
+      const before = durableReservationState(context.fixture);
+      const publishedBefore = context.published.domain.length;
+
+      await expect(
+        context.runtime.cancelReserved(reservation.execution.id),
+      ).rejects.toThrow('Reserved start operation state is inconsistent');
+
+      expect(context.barrier.status).toBe('tripped');
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.published.domain).toHaveLength(publishedBefore);
+      expect(context.fake.startCount).toBe(0);
+    },
+  );
+
   it('waits for activation that owns the reservation interlock first', async () => {
     const fake = new FakeHarnessAdapter({ holdAfterAdapterCursor: 2 });
     fake.blockStart();
@@ -740,6 +856,100 @@ describe('ExecutionRuntime', () => {
       expect(context.fake.interruptCalls).toHaveLength(interruptCount);
     },
   );
+
+  it('contains and joins a blocked planning session when the barrier is already tripped', async () => {
+    const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });
+    const started = await context.runtime.start(context.start);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(
+        started.ok && 'execution' in started ? started.execution.id : '',
+      ),
+      'Expected a running execution',
+    );
+    let releaseNext: (() => void) | undefined;
+    const blockedNext = new Promise<void>((resolve) => {
+      releaseNext = resolve;
+    });
+    let nextCalledResolve: (() => void) | undefined;
+    const nextCalled = new Promise<void>((resolve) => {
+      nextCalledResolve = resolve;
+    });
+    let closeCount = 0;
+    const session: HarnessSession = {
+      nativeHandle: required(running.nativeHandle, 'Expected native handle'),
+      events: () => ({
+        [Symbol.asyncIterator]() {
+          let delivered = false;
+          return {
+            async next(): Promise<IteratorResult<HarnessEventEnvelope>> {
+              if (delivered) return { done: true, value: undefined };
+              delivered = true;
+              nextCalledResolve?.();
+              await blockedNext;
+              return {
+                done: false,
+                value: {
+                  adapterCursor: running.lastAdapterCursor + 1,
+                  raw: { source: 'late after pre-tripped planning barrier' },
+                  normalized: {
+                    projectId: running.projectId,
+                    executionId: running.id,
+                    adapterCursor: running.lastAdapterCursor + 1,
+                    occurredAt: '2026-08-28T01:00:03.000Z',
+                    type: 'worker_execution.structured_output',
+                    payload: {
+                      schema: PM_DISCOVERY_REPORT_SCHEMA,
+                      value: { late: true },
+                    },
+                  },
+                },
+              };
+            },
+          };
+        },
+      }),
+      async close() {
+        closeCount += 1;
+        releaseNext?.();
+      },
+    };
+    context.runtime.attach(running.id, session);
+    await nextCalled;
+    const before = durableRuntimeState(context.fixture);
+    const publishedBefore = {
+      domain: context.published.domain.length,
+      runtime: context.published.runtime.length,
+    };
+    context.barrier.trip(new Error('pre-existing planning audit failure'));
+
+    let cleanupError: unknown;
+    try {
+      await context.runtime.interruptForPlanning(running.id);
+    } catch (error) {
+      cleanupError = error;
+    }
+    const closeCountAtRejection = closeCount;
+    releaseNext?.();
+    await context.runtime.drain();
+
+    expect(cleanupError).toMatchObject({
+      name: PlanningInterruptCleanupError.name,
+      code: 'planning_interrupt_audit_failure',
+      diagnostics: [
+        {
+          phase: 'audit',
+          message: 'pre-existing planning audit failure',
+        },
+      ],
+    });
+    expect(closeCountAtRejection).toBe(1);
+    expect(closeCount).toBe(1);
+    expect(context.fake.interruptCalls).toContain(session.nativeHandle);
+    expect(durableRuntimeState(context.fixture)).toEqual(before);
+    expect(context.published.domain).toHaveLength(publishedBefore.domain);
+    expect(context.published.runtime).toHaveLength(publishedBefore.runtime);
+  });
 
   it('coalesces concurrent planning interruption around one exact session', async () => {
     const context = createPmRuntime('todo', { holdAfterAdapterCursor: 1 });

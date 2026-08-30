@@ -33,7 +33,10 @@ import {
   PLANNING_INTERRUPT_OPERATION_VERSION,
   resolveSkillSnapshots,
 } from './harness-adapter.js';
-import { OperationRepository } from './operation-repository.js';
+import {
+  OperationRepository,
+  type ExecutionOperation,
+} from './operation-repository.js';
 
 export type ExecutionProjectReader = {
   get(projectId: string): Project | undefined;
@@ -207,6 +210,54 @@ export class ExecutionRuntime {
       throw new Error('Reserved start operation state is inconsistent');
     }
     return { execution, result: stored.result, activationRequired };
+  }
+
+  private exactStartOperation(executionId: string): ExecutionOperation {
+    const operations = this.dependencies.operations
+      .listForExecution(executionId)
+      .filter((operation) => operation.kind === 'start');
+    if (operations.length !== 1) {
+      throw new Error('Exact reserved start operation was not found');
+    }
+    const operation = operations[0];
+    if (!operation) throw new Error('Reserved start operation was not found');
+    const request = operation.request;
+    if (
+      typeof request !== 'object' ||
+      request === null ||
+      !('version' in request) ||
+      request.version !== 'mesh.v2.execution-start/v1' ||
+      !('idempotencyKey' in request) ||
+      typeof request.idempotencyKey !== 'string' ||
+      !('requestHash' in request) ||
+      typeof request.requestHash !== 'string' ||
+      !('request' in request)
+    ) {
+      throw new Error('Reserved start operation link is invalid');
+    }
+    const linked = this.dependencies.operations.findStartReservation(
+      request.idempotencyKey,
+      request.requestHash,
+    );
+    const stored = this.dependencies.commands.find(
+      request.idempotencyKey,
+      request.requestHash,
+    );
+    if (
+      !linked ||
+      linked.id !== operation.id ||
+      linked.executionId !== executionId ||
+      !stored ||
+      stored.commandType !== 'worker_execution.start' ||
+      hashV2Command(request.request as StartExecutionEnvelope['command']) !==
+        request.requestHash ||
+      (stored.result.ok &&
+        'execution' in stored.result &&
+        stored.result.execution.id !== executionId)
+    ) {
+      throw new Error('Reserved start operation is not durably linked');
+    }
+    return operation;
   }
 
   findReservedStart(
@@ -471,36 +522,43 @@ export class ExecutionRuntime {
     executionId: WorkerExecutionId,
   ): Promise<WorkerExecution> {
     const activation = this.activations.get(executionId);
-    if (activation) {
-      await activation;
-      return requireExecution(this.dependencies.executions, executionId);
-    }
+    if (activation) await activation;
     this.dependencies.barrier.assertHealthy();
     const occurredAt = this.dependencies.now();
     let domainEvent: DomainEvent | undefined;
     let cancelled: WorkerExecution | undefined;
-    let writesStarted = false;
+    let authorityReadStarted = false;
     try {
       inImmediateTransaction(this.dependencies.database, () => {
+        authorityReadStarted = true;
         const current = requireExecution(
           this.dependencies.executions,
           executionId,
         );
-        const operations = this.dependencies.operations
-          .listForExecution(executionId)
-          .filter((operation) => operation.kind === 'start');
-        if (operations.length !== 1) {
-          throw new Error('Exact reserved start operation was not found');
+        const operation = this.exactStartOperation(executionId);
+        const coherent =
+          operation.state === 'pending'
+            ? current.lifecycle === 'starting'
+            : operation.state === 'failed'
+              ? current.lifecycle === 'failed'
+              : operation.state === 'unknown'
+                ? current.lifecycle === 'attention_required'
+                : [
+                    'running',
+                    'interrupting',
+                    'completed',
+                    'failed',
+                    'interrupted',
+                    'attention_required',
+                  ].includes(current.lifecycle);
+        if (!coherent) {
+          throw new Error('Reserved start operation state is inconsistent');
         }
-        const operation = operations[0];
-        if (!operation)
-          throw new Error('Reserved start operation was not found');
         if (current.lifecycle !== 'starting' || operation.state !== 'pending') {
           cancelled = current;
           return;
         }
         this.dependencies.barrier.assertHealthy();
-        writesStarted = true;
         cancelled = this.dependencies.executions.transitionInTransaction(
           current.id,
           current.revision,
@@ -525,7 +583,12 @@ export class ExecutionRuntime {
         );
       });
     } catch (error) {
-      if (writesStarted) this.dependencies.barrier.trip(error, occurredAt);
+      if (
+        authorityReadStarted &&
+        this.dependencies.barrier.status === 'healthy'
+      ) {
+        this.dependencies.barrier.trip(error, occurredAt);
+      }
       throw error;
     }
     if (!cancelled) throw new Error('Reserved cancellation did not settle');
@@ -688,9 +751,6 @@ export class ExecutionRuntime {
   }
 
   private async performPlanningInterrupt(executionId: string): Promise<void> {
-    const activation = this.activations.get(executionId);
-    if (activation) await activation;
-    this.dependencies.barrier.assertHealthy();
     if (this.consumerContext.getStore() === executionId) {
       throw new PlanningInterruptCleanupError(
         'planning_interrupt_quiescence_failure',
@@ -703,6 +763,8 @@ export class ExecutionRuntime {
         ],
       );
     }
+    const activation = this.activations.get(executionId);
+    if (activation) await activation;
 
     const tagged = this.dependencies.operations
       .listForExecution(executionId)
@@ -817,6 +879,28 @@ export class ExecutionRuntime {
       );
     }
     owned.fenced = true;
+    try {
+      this.dependencies.barrier.assertHealthy();
+    } catch (error) {
+      const recorded = this.dependencies.barrier.diagnostics.at(-1);
+      const message =
+        recorded?.cause ??
+        recorded?.message ??
+        (error instanceof Error ? error.message : 'Planning audit failed');
+      const diagnostics: PlanningInterruptCleanupDiagnostic[] = [
+        { phase: 'audit', message },
+      ];
+      await this.containAfterBarrier(owned.session, diagnostics);
+      diagnostics.push(
+        ...(await this.quiescePlanningSession(executionId, owned, false)),
+      );
+      throw new PlanningInterruptCleanupError(
+        'planning_interrupt_audit_failure',
+        message,
+        diagnostics,
+        error,
+      );
+    }
 
     let operationId = prior?.id;
     if (!prior) {
@@ -1507,12 +1591,22 @@ export class ExecutionRuntime {
     }
   }
 
-  private async containAfterBarrier(session: HarnessSession): Promise<void> {
+  private async containAfterBarrier(
+    session: HarnessSession,
+    diagnostics?: PlanningInterruptCleanupDiagnostic[],
+  ): Promise<void> {
     if (this.contained.has(session)) return;
     this.contained.add(session);
     try {
       await this.dependencies.adapter.interrupt(session.nativeHandle);
     } catch (interruptError) {
+      diagnostics?.push({
+        phase: 'adapter_interrupt',
+        message:
+          interruptError instanceof Error
+            ? interruptError.message
+            : String(interruptError),
+      });
       this.dependencies.barrier.record(
         'Adapter interrupt failed during containment',
         interruptError,
@@ -1521,6 +1615,13 @@ export class ExecutionRuntime {
       try {
         await session.close();
       } catch (closeError) {
+        diagnostics?.push({
+          phase: 'session_close',
+          message:
+            closeError instanceof Error
+              ? closeError.message
+              : String(closeError),
+        });
         this.dependencies.barrier.record(
           'Session close failed during containment',
           closeError,
