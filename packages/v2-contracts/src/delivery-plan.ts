@@ -302,19 +302,6 @@ export const proposedDeliveryPlanSchema = z
       });
     }
 
-    const milestoneOrdinals = value.milestones
-      .filter((member) => member.operation !== 'reuse')
-      .map((member) => member.content.ordinal)
-      .sort((a, b) => a - b);
-    if (milestoneOrdinals.some((ordinal, index) => ordinal !== index + 1)) {
-      context.addIssue({
-        code: 'custom',
-        path: ['milestones'],
-        message: 'Milestone ordinals must be contiguous',
-      });
-    }
-
-    const ordinalsByMilestone = new Map<string, number[]>();
     value.tasks.forEach((member, index) => {
       if (member.operation === 'reuse') return;
       const milestone = milestoneRefIdentity(member.content.milestone);
@@ -325,20 +312,7 @@ export const proposedDeliveryPlanSchema = z
           message: 'Task milestone must resolve inside the complete proposal',
         });
       }
-      const ordinals = ordinalsByMilestone.get(milestone) ?? [];
-      ordinals.push(member.content.ordinal);
-      ordinalsByMilestone.set(milestone, ordinals);
     });
-    for (const ordinals of ordinalsByMilestone.values()) {
-      ordinals.sort((a, b) => a - b);
-      if (ordinals.some((ordinal, index) => ordinal !== index + 1)) {
-        context.addIssue({
-          code: 'custom',
-          path: ['tasks'],
-          message: 'Task ordinals must be contiguous within each milestone',
-        });
-      }
-    }
 
     const edges = new Set<string>();
     value.dependencies.forEach((member, index) => {
@@ -593,6 +567,71 @@ export const deliveryPlanProposalSchema = z
         });
       }
     }
+    const proposedCollections = {
+      milestones: value.proposedPlan.milestones,
+      tasks: value.proposedPlan.tasks,
+      dependencies: value.proposedPlan.dependencies,
+    } as const;
+    for (const [name, members] of Object.entries(proposedCollections)) {
+      const expected = {
+        create: members.filter(({ operation }) => operation === 'create')
+          .length,
+        reuse: members.filter(({ operation }) => operation === 'reuse').length,
+        revise: members.filter(({ operation }) => operation === 'revise')
+          .length,
+      };
+      const actual = value.diff[name as keyof typeof proposedCollections];
+      if (
+        actual.create !== expected.create ||
+        actual.reuse !== expected.reuse ||
+        actual.revise + actual.retire + actual.reactivate !== expected.revise
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['diff', name],
+          message: 'Proposal diff counts must classify every member exactly',
+        });
+      }
+    }
+    if (
+      value.base.deliveryPlan.id === null &&
+      (Object.values(proposedCollections).some((members) =>
+        members.some(({ operation }) => operation !== 'create'),
+      ) ||
+        value.proposedPlan.tasks.some(
+          (member) =>
+            member.operation !== 'reuse' &&
+            member.content.milestone.kind === 'canonical',
+        ) ||
+        value.proposedPlan.dependencies.some(
+          (member) =>
+            member.operation === 'create' &&
+            (member.prerequisite.kind === 'canonical' ||
+              member.dependent.kind === 'canonical'),
+        ) ||
+        value.proposedPlan.traces.some((trace) =>
+          trace.kind === 'milestone_covers'
+            ? trace.milestone.kind === 'canonical'
+            : trace.task.kind === 'canonical',
+        ))
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['proposedPlan'],
+        message: 'A null plan base forbids canonical operations and references',
+      });
+    }
+    if (
+      value.base.deliveryPlan.id === null &&
+      (value.diff.traceCreateCount !== value.proposedPlan.traces.length ||
+        value.diff.traceRemoveCount !== 0)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['diff'],
+        message: 'Initial plan trace diff must exactly match proposal traces',
+      });
+    }
   });
 export type DeliveryPlanProposal = z.infer<typeof deliveryPlanProposalSchema>;
 
@@ -827,16 +866,11 @@ export const approvedDeliveryPlanSchema = z
         });
       }
       records.forEach((record, index) => {
-        if (
-          record.projectId !== value.plan.projectId ||
-          ('deliveryPlanRevision' in record &&
-            record.deliveryPlanRevision !== value.plan.revision)
-        ) {
+        if (record.projectId !== value.plan.projectId) {
           context.addIssue({
             code: 'custom',
             path: [name, index],
-            message:
-              'Approved plan members must match the plan project and revision',
+            message: 'Approved plan members must match the plan project',
           });
         }
       });
@@ -846,8 +880,7 @@ export const approvedDeliveryPlanSchema = z
         task.revisionKind !== 'plan_contract' ||
         task.contractRevision !== task.revision ||
         task.source.kind !== 'plan' ||
-        task.source.proposalId !== value.plan.proposalId ||
-        task.source.deliveryPlanRevision !== value.plan.revision
+        task.source.deliveryPlanRevision > value.plan.revision
       ) {
         context.addIssue({
           code: 'custom',
@@ -863,11 +896,11 @@ export const approvedDeliveryPlanSchema = z
       value.taskContracts.map((task) => [task.id, task] as const),
     );
     value.milestones.forEach((milestone, index) => {
-      if (milestone.proposalId !== value.plan.proposalId) {
+      if (milestone.deliveryPlanRevision > value.plan.revision) {
         context.addIssue({
           code: 'custom',
-          path: ['milestones', index, 'proposalId'],
-          message: 'Milestone provenance must match the approved plan proposal',
+          path: ['milestones', index, 'deliveryPlanRevision'],
+          message: 'Milestone provenance cannot follow the approved plan',
         });
       }
       if (milestone.ordinal !== index + 1) {
@@ -903,7 +936,7 @@ export const approvedDeliveryPlanSchema = z
     value.dependencies.forEach((dependency, index) => {
       const edge = `${dependency.prerequisiteTaskId}->${dependency.dependentTaskId}`;
       if (
-        dependency.proposalId !== value.plan.proposalId ||
+        dependency.deliveryPlanRevision > value.plan.revision ||
         !tasks.has(dependency.prerequisiteTaskId) ||
         !tasks.has(dependency.dependentTaskId) ||
         dependencyEdges.has(edge)
@@ -1104,6 +1137,340 @@ export const approvedDeliveryPlanSchema = z
     }
   });
 export type ApprovedDeliveryPlan = z.infer<typeof approvedDeliveryPlanSchema>;
+
+const sameJson = (left: unknown, right: unknown) =>
+  JSON.stringify(left) === JSON.stringify(right);
+
+const matchesApprovedMaterialization = (
+  proposal: DeliveryPlanProposal,
+  deliveryPlan: ApprovedDeliveryPlan,
+) => {
+  const { plan } = deliveryPlan;
+  const expectedPlanRevision = (proposal.base.deliveryPlan.revision ?? 0) + 1;
+  if (
+    plan.proposalId !== proposal.id ||
+    plan.projectId !== proposal.projectId ||
+    plan.revision !== expectedPlanRevision ||
+    plan.projectIntentId !== proposal.base.projectIntentId ||
+    plan.projectIntentRevision !== proposal.base.projectIntentRevision ||
+    plan.ledgerId !== proposal.base.ledgerId ||
+    plan.ledgerRevision !== proposal.base.ledgerRevision ||
+    plan.baseDeliveryPlanRevision !== proposal.base.deliveryPlan.revision ||
+    (proposal.base.deliveryPlan.id !== null &&
+      plan.id !== proposal.base.deliveryPlan.id) ||
+    plan.summary !== proposal.proposedPlan.summary
+  ) {
+    return false;
+  }
+
+  const milestoneReservations = new Map(
+    proposal.reservations.milestones.map(({ key, id }) => [key, id]),
+  );
+  const taskReservations = new Map(
+    proposal.reservations.tasks.map(({ key, id }) => [key, id]),
+  );
+  const dependencyReservations = new Map(
+    proposal.reservations.dependencies.map(({ key, id }) => [key, id]),
+  );
+  const resolveMilestoneId = (ref: ProposedMilestoneRef) =>
+    ref.kind === 'canonical'
+      ? ref.milestoneId
+      : milestoneReservations.get(ref.key);
+  const resolveTaskId = (ref: ProposedTaskRef) =>
+    ref.kind === 'canonical' ? ref.taskId : taskReservations.get(ref.key);
+
+  if (
+    deliveryPlan.milestones.length !==
+      proposal.proposedPlan.milestones.length ||
+    deliveryPlan.taskContracts.length !== proposal.proposedPlan.tasks.length ||
+    deliveryPlan.dependencies.length !==
+      proposal.proposedPlan.dependencies.length
+  ) {
+    return false;
+  }
+
+  for (const [index, member] of proposal.proposedPlan.milestones.entries()) {
+    const materialized = deliveryPlan.milestones[index];
+    const id =
+      member.operation === 'create'
+        ? milestoneReservations.get(member.key)
+        : member.milestoneId;
+    if (materialized?.id !== id) return false;
+    if (member.operation === 'reuse') {
+      if (materialized.revision !== member.expectedRevision) return false;
+      continue;
+    }
+    if (
+      materialized.revision !==
+        (member.operation === 'create' ? 1 : member.expectedRevision + 1) ||
+      materialized.lifecycle !==
+        (member.operation === 'create' ? 'active' : member.lifecycle) ||
+      materialized.title !== member.content.title ||
+      materialized.outcome !== member.content.outcome ||
+      materialized.stopCondition !== member.content.stopCondition ||
+      !sameJson(materialized.exclusions, member.content.exclusions) ||
+      materialized.ordinal !== member.content.ordinal ||
+      materialized.proposalId !== proposal.id ||
+      materialized.deliveryPlanRevision !== plan.revision ||
+      materialized.approvedAt !== plan.approvedAt
+    ) {
+      return false;
+    }
+  }
+
+  for (const [index, member] of proposal.proposedPlan.tasks.entries()) {
+    const materialized = deliveryPlan.taskContracts[index];
+    const id =
+      member.operation === 'create'
+        ? taskReservations.get(member.key)
+        : member.taskId;
+    if (materialized?.id !== id) return false;
+    if (member.operation === 'reuse') {
+      if (materialized.revision !== member.expectedContractRevision)
+        return false;
+      continue;
+    }
+    const expectedRevision =
+      member.operation === 'create' ? 1 : member.expectedCurrentRevision + 1;
+    if (
+      materialized.revision !== expectedRevision ||
+      materialized.contractRevision !== expectedRevision ||
+      materialized.lifecycle !==
+        (member.operation === 'create' ? 'pending' : member.lifecycle) ||
+      materialized.milestoneId !==
+        resolveMilestoneId(member.content.milestone) ||
+      materialized.title !== member.content.title ||
+      materialized.outcome !== member.content.outcome ||
+      !sameJson(
+        materialized.acceptanceCriteria,
+        member.content.acceptanceCriteria,
+      ) ||
+      !sameJson(
+        materialized.verificationCriteria,
+        member.content.verificationCriteria,
+      ) ||
+      materialized.priority !== member.content.priority ||
+      !sameJson(materialized.labels, member.content.labels) ||
+      !sameJson(materialized.ownedSurfaces, member.content.ownedSurfaces) ||
+      !sameJson(
+        materialized.prohibitedSurfaces,
+        member.content.prohibitedSurfaces,
+      ) ||
+      !sameJson(
+        materialized.expectedArtifacts,
+        member.content.expectedArtifacts,
+      ) ||
+      materialized.ordinal !== member.content.ordinal ||
+      materialized.source.kind !== 'plan' ||
+      materialized.source.proposalId !== proposal.id ||
+      materialized.source.deliveryPlanRevision !== plan.revision ||
+      materialized.createdAt !== plan.approvedAt
+    ) {
+      return false;
+    }
+  }
+
+  const dependencies = new Map(
+    deliveryPlan.dependencies.map((dependency) => [dependency.id, dependency]),
+  );
+  for (const member of proposal.proposedPlan.dependencies) {
+    const id =
+      member.operation === 'create'
+        ? dependencyReservations.get(member.key)
+        : member.dependencyId;
+    const materialized = id === undefined ? undefined : dependencies.get(id);
+    if (materialized === undefined) return false;
+    if (member.operation === 'reuse') {
+      if (materialized.revision !== member.expectedRevision) return false;
+      continue;
+    }
+    if (
+      materialized.revision !==
+        (member.operation === 'create' ? 1 : member.expectedRevision + 1) ||
+      materialized.lifecycle !==
+        (member.operation === 'create' ? 'active' : member.lifecycle) ||
+      (member.operation === 'create' &&
+        (materialized.prerequisiteTaskId !==
+          resolveTaskId(member.prerequisite) ||
+          materialized.dependentTaskId !== resolveTaskId(member.dependent))) ||
+      materialized.proposalId !== proposal.id ||
+      materialized.deliveryPlanRevision !== plan.revision ||
+      materialized.approvedAt !== plan.approvedAt
+    ) {
+      return false;
+    }
+  }
+
+  const milestoneRevisions = new Map(
+    deliveryPlan.milestones.map(({ id, revision }) => [id, revision]),
+  );
+  const taskRevisions = new Map(
+    deliveryPlan.taskContracts.map(({ id, contractRevision }) => [
+      id,
+      contractRevision,
+    ]),
+  );
+  const expectedTraces = proposal.proposedPlan.traces.map((trace) => {
+    if (trace.kind === 'milestone_covers') {
+      const milestoneId = resolveMilestoneId(trace.milestone);
+      const milestoneRevision =
+        milestoneId === undefined
+          ? undefined
+          : milestoneRevisions.get(milestoneId);
+      return `milestone_covers:${milestoneId}:${milestoneRevision}:${trace.requirement.recordId}:${trace.requirement.recordRevision}`;
+    }
+    const taskId = resolveTaskId(trace.task);
+    const taskRevision =
+      taskId === undefined ? undefined : taskRevisions.get(taskId);
+    return `task_satisfies:${taskId}:${taskRevision}:${trace.requirement.recordId}:${trace.requirement.recordRevision}`;
+  });
+  const actualTraces = deliveryPlan.traces.map((trace) =>
+    trace.kind === 'milestone_covers'
+      ? `milestone_covers:${trace.milestoneId}:${trace.milestoneRevision}:${trace.requirement.recordId}:${trace.requirement.recordRevision}`
+      : `task_satisfies:${trace.taskId}:${trace.taskContractRevision}:${trace.requirement.recordId}:${trace.requirement.recordRevision}`,
+  );
+  return (
+    new Set(expectedTraces).size === expectedTraces.length &&
+    expectedTraces.length === actualTraces.length &&
+    expectedTraces.every((trace) => actualTraces.includes(trace))
+  );
+};
+
+export const approvedDeliveryPlanMaterializationSchema = z
+  .strictObject({
+    proposal: deliveryPlanProposalSchema,
+    deliveryPlan: approvedDeliveryPlanSchema,
+  })
+  .refine(
+    ({ proposal, deliveryPlan }) =>
+      matchesApprovedMaterialization(proposal, deliveryPlan),
+    {
+      path: ['deliveryPlan'],
+      message:
+        'Approved delivery plan must exactly materialize its plan proposal',
+    },
+  );
+
+const proposalDiffMatchesBase = (
+  proposal: DeliveryPlanProposal,
+  base: ApprovedDeliveryPlan,
+) => {
+  const baseCollections = {
+    milestones: new Map(base.milestones.map((member) => [member.id, member])),
+    tasks: new Map(base.taskContracts.map((member) => [member.id, member])),
+    dependencies: new Map(
+      base.dependencies.map((member) => [member.id, member]),
+    ),
+  };
+  const expected = {
+    milestones: { create: 0, reuse: 0, revise: 0, retire: 0, reactivate: 0 },
+    tasks: { create: 0, reuse: 0, revise: 0, retire: 0, reactivate: 0 },
+    dependencies: {
+      create: 0,
+      reuse: 0,
+      revise: 0,
+      retire: 0,
+      reactivate: 0,
+    },
+  };
+  for (const [name, members] of [
+    ['milestones', proposal.proposedPlan.milestones],
+    ['tasks', proposal.proposedPlan.tasks],
+    ['dependencies', proposal.proposedPlan.dependencies],
+  ] as const) {
+    for (const member of members) {
+      if (member.operation === 'create') {
+        expected[name].create += 1;
+        continue;
+      }
+      const id =
+        'milestoneId' in member
+          ? member.milestoneId
+          : 'taskId' in member
+            ? member.taskId
+            : member.dependencyId;
+      const prior = baseCollections[name].get(id as never) as
+        | { revision: number; lifecycle: string }
+        | undefined;
+      const guardedRevision =
+        'expectedContractRevision' in member
+          ? member.expectedContractRevision
+          : member.expectedRevision;
+      if (prior?.revision !== guardedRevision) return false;
+      if (member.operation === 'reuse') {
+        expected[name].reuse += 1;
+      } else if (prior.lifecycle === member.lifecycle) {
+        expected[name].revise += 1;
+      } else if (member.lifecycle === 'retired') {
+        expected[name].retire += 1;
+      } else {
+        expected[name].reactivate += 1;
+      }
+    }
+  }
+
+  const milestoneReservations = new Map(
+    proposal.reservations.milestones.map(({ key, id }) => [key, id]),
+  );
+  const taskReservations = new Map(
+    proposal.reservations.tasks.map(({ key, id }) => [key, id]),
+  );
+  const milestoneRevisions = new Map(
+    proposal.proposedPlan.milestones.map((member) => [
+      member.operation === 'create'
+        ? milestoneReservations.get(member.key)
+        : member.milestoneId,
+      member.operation === 'create'
+        ? 1
+        : member.expectedRevision + (member.operation === 'revise' ? 1 : 0),
+    ]),
+  );
+  const taskRevisions = new Map(
+    proposal.proposedPlan.tasks.map((member) => [
+      member.operation === 'create'
+        ? taskReservations.get(member.key)
+        : member.taskId,
+      member.operation === 'create'
+        ? 1
+        : member.operation === 'reuse'
+          ? member.expectedContractRevision
+          : member.expectedCurrentRevision + 1,
+    ]),
+  );
+  const proposedTraceKeys = new Set(
+    proposal.proposedPlan.traces.map((trace) => {
+      if (trace.kind === 'milestone_covers') {
+        const id =
+          trace.milestone.kind === 'canonical'
+            ? trace.milestone.milestoneId
+            : milestoneReservations.get(trace.milestone.key);
+        return `${trace.kind}:${id}:${milestoneRevisions.get(id)}:${trace.requirement.recordId}:${trace.requirement.recordRevision}`;
+      }
+      const id =
+        trace.task.kind === 'canonical'
+          ? trace.task.taskId
+          : taskReservations.get(trace.task.key);
+      return `${trace.kind}:${id}:${taskRevisions.get(id)}:${trace.requirement.recordId}:${trace.requirement.recordRevision}`;
+    }),
+  );
+  const baseTraceKeys = new Set(
+    base.traces.map((trace) =>
+      trace.kind === 'milestone_covers'
+        ? `${trace.kind}:${trace.milestoneId}:${trace.milestoneRevision}:${trace.requirement.recordId}:${trace.requirement.recordRevision}`
+        : `${trace.kind}:${trace.taskId}:${trace.taskContractRevision}:${trace.requirement.recordId}:${trace.requirement.recordRevision}`,
+    ),
+  );
+  return (
+    sameJson(proposal.diff.milestones, expected.milestones) &&
+    sameJson(proposal.diff.tasks, expected.tasks) &&
+    sameJson(proposal.diff.dependencies, expected.dependencies) &&
+    proposal.diff.traceCreateCount ===
+      [...proposedTraceKeys].filter((trace) => !baseTraceKeys.has(trace))
+        .length &&
+    proposal.diff.traceRemoveCount ===
+      [...baseTraceKeys].filter((trace) => !proposedTraceKeys.has(trace)).length
+  );
+};
 
 export const taskReadinessBlockerSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('plan_not_approved') }),
@@ -1704,7 +2071,8 @@ export const pmPlanAssignmentSchema = z
         message: 'Plan assignments require an approved current requirement',
       });
     }
-    const approvedPlan = value.input.approvedDeliveryPlan?.plan ?? null;
+    const approvedDeliveryPlan = value.input.approvedDeliveryPlan;
+    const approvedPlan = approvedDeliveryPlan?.plan ?? null;
     if (
       (approvedPlan?.id ?? null) !== value.baseDeliveryPlanId ||
       (approvedPlan?.revision ?? null) !== value.baseDeliveryPlanRevision ||
@@ -1741,6 +2109,17 @@ export const pmPlanAssignmentSchema = z
         code: 'custom',
         path: ['expectedProposalRevision'],
         message: 'Expected proposal revision must follow this cycle history',
+      });
+    }
+    if (
+      latestProposal !== null &&
+      approvedDeliveryPlan !== null &&
+      !proposalDiffMatchesBase(latestProposal, approvedDeliveryPlan)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['input', 'latestProposal', 'diff'],
+        message: 'Proposal diff must exactly match its frozen approved plan',
       });
     }
   });

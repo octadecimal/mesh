@@ -16,6 +16,7 @@ import {
   legacyM2PlanningCycleViewSchema,
 } from './intent';
 import {
+  approvedDeliveryPlanMaterializationSchema,
   approvedDeliveryPlanSchema,
   deliveryPlanPlanningCycleViewSchema,
   planningCycleViewSchema,
@@ -160,6 +161,19 @@ export const deliveryPlanApprovedPayloadSchema = z
         path: ['deliveryPlan'],
         message: 'Plan approval event cycle, plan, and Board must agree',
       });
+    }
+    if (latest !== undefined) {
+      const materialized = approvedDeliveryPlanMaterializationSchema.safeParse({
+        proposal: latest,
+        deliveryPlan: value.deliveryPlan,
+      });
+      if (!materialized.success) {
+        context.addIssue({
+          code: 'custom',
+          path: ['deliveryPlan'],
+          message: 'Plan approval event must exactly materialize its proposal',
+        });
+      }
     }
   });
 export const boardFilterChangedPayloadSchema = z.strictObject({

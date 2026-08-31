@@ -15,6 +15,7 @@ import {
 } from './intent';
 import { boardViewSchema, type BoardView } from './board';
 import {
+  approvedDeliveryPlanMaterializationSchema,
   approvedDeliveryPlanSchema,
   deliveryPlanPlanningCycleViewSchema,
   intentPlanningCycleViewSchema,
@@ -310,6 +311,20 @@ export const v2ProjectSnapshotSchema = z
             'Snapshot delivery plan must match the newest approved plan cycle',
         });
       }
+      if (
+        latestProposal !== undefined &&
+        !approvedDeliveryPlanMaterializationSchema.safeParse({
+          proposal: latestProposal,
+          deliveryPlan: value.deliveryPlan,
+        }).success
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['deliveryPlan'],
+          message:
+            'Snapshot delivery plan must exactly materialize its approved proposal',
+        });
+      }
     }
     if (value.deliveryPlan !== null) {
       if (
@@ -603,6 +618,19 @@ const versionedPlanApproveResultSchema = z
         path: ['deliveryPlan'],
         message:
           'Plan approval cycle, proposal, canonical plan, and Board must agree',
+      });
+    }
+    if (
+      latest !== undefined &&
+      !approvedDeliveryPlanMaterializationSchema.safeParse({
+        proposal: latest,
+        deliveryPlan: value.deliveryPlan,
+      }).success
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['deliveryPlan'],
+        message: 'Plan approval result must exactly materialize its proposal',
       });
     }
   });
