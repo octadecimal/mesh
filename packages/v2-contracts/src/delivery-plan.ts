@@ -156,27 +156,40 @@ export type ProposedMilestoneMember = z.infer<
   typeof proposedMilestoneMemberSchema
 >;
 
-export const proposedTaskMemberSchema = z.discriminatedUnion('operation', [
-  z.strictObject({
-    operation: z.literal('create'),
-    key: proposalKeySchema,
-    content: taskContractInputSchema,
-  }),
-  z.strictObject({
-    operation: z.literal('reuse'),
-    taskId: taskIdSchema,
-    expectedContractRevision: positiveIntegerSchema,
-    expectedCurrentRevision: positiveIntegerSchema,
-  }),
-  z.strictObject({
-    operation: z.literal('revise'),
-    taskId: taskIdSchema,
-    expectedContractRevision: positiveIntegerSchema,
-    expectedCurrentRevision: positiveIntegerSchema,
-    lifecycle: z.enum(['pending', 'retired']),
-    content: taskContractInputSchema,
-  }),
-]);
+export const proposedTaskMemberSchema = z
+  .discriminatedUnion('operation', [
+    z.strictObject({
+      operation: z.literal('create'),
+      key: proposalKeySchema,
+      content: taskContractInputSchema,
+    }),
+    z.strictObject({
+      operation: z.literal('reuse'),
+      taskId: taskIdSchema,
+      expectedContractRevision: positiveIntegerSchema,
+      expectedCurrentRevision: positiveIntegerSchema,
+    }),
+    z.strictObject({
+      operation: z.literal('revise'),
+      taskId: taskIdSchema,
+      expectedContractRevision: positiveIntegerSchema,
+      expectedCurrentRevision: positiveIntegerSchema,
+      lifecycle: z.enum(['pending', 'retired']),
+      content: taskContractInputSchema,
+    }),
+  ])
+  .superRefine((value, context) => {
+    if (
+      value.operation !== 'create' &&
+      value.expectedCurrentRevision < value.expectedContractRevision
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['expectedCurrentRevision'],
+        message: 'Current task revision cannot precede its contract anchor',
+      });
+    }
+  });
 export type ProposedTaskMember = z.infer<typeof proposedTaskMemberSchema>;
 
 export const proposedDependencyMemberSchema = z.discriminatedUnion(
@@ -1616,13 +1629,6 @@ export const approvedDeliveryPlanMaterializationSchema = z
             baseDeliveryPlan.plan.id === base.id &&
             baseDeliveryPlan.plan.revision === base.revision &&
             baseDeliveryPlan.plan.projectId === proposal.projectId &&
-            baseDeliveryPlan.plan.projectIntentId ===
-              proposal.base.projectIntentId &&
-            baseDeliveryPlan.plan.projectIntentRevision ===
-              proposal.base.projectIntentRevision &&
-            baseDeliveryPlan.plan.ledgerId === proposal.base.ledgerId &&
-            baseDeliveryPlan.plan.ledgerRevision ===
-              proposal.base.ledgerRevision &&
             proposalDiffMatchesBase(proposal, baseDeliveryPlan);
       return (
         baseMatches &&
@@ -2240,13 +2246,7 @@ export const pmPlanAssignmentSchema = z
     if (
       (approvedPlan?.id ?? null) !== value.baseDeliveryPlanId ||
       (approvedPlan?.revision ?? null) !== value.baseDeliveryPlanRevision ||
-      (approvedPlan !== null &&
-        (approvedPlan.projectId !== value.projectId ||
-          approvedPlan.projectIntentId !== value.baseProjectIntentId ||
-          approvedPlan.projectIntentRevision !==
-            value.baseProjectIntentRevision ||
-          approvedPlan.ledgerId !== value.baseLedgerId ||
-          approvedPlan.ledgerRevision !== value.baseLedgerRevision))
+      (approvedPlan !== null && approvedPlan.projectId !== value.projectId)
     ) {
       context.addIssue({
         code: 'custom',
@@ -2273,6 +2273,24 @@ export const pmPlanAssignmentSchema = z
         code: 'custom',
         path: ['expectedProposalRevision'],
         message: 'Expected proposal revision must follow this cycle history',
+      });
+    }
+    if (
+      latestProposal !== null &&
+      latestProposal.proposedPlan.traces.some((trace) =>
+        approved.records.every(
+          (record) =>
+            record.recordId !== trace.requirement.recordId ||
+            record.revision !== trace.requirement.recordRevision ||
+            record.content.type !== 'requirement' ||
+            record.content.status !== 'approved',
+        ),
+      )
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['input', 'latestProposal', 'proposedPlan', 'traces'],
+        message: 'Proposal traces must target current approved requirements',
       });
     }
     if (

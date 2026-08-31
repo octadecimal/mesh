@@ -21,6 +21,7 @@ import {
   pmPlanReportSchema,
   proposalKeySchema,
   proposedDeliveryPlanSchema,
+  proposedTaskMemberSchema,
   taskReadinessSchema,
   taskDependencyIdSchema,
   taskIdSchema,
@@ -569,6 +570,63 @@ describe('planning and Board contracts', () => {
     ).toBe(false);
   });
 
+  it('keeps task current revision guards at or ahead of contract anchors', () => {
+    const taskContent = {
+      ...proposedPlan.tasks[0].content,
+      milestone: { kind: 'canonical' as const, milestoneId },
+    };
+    for (const member of [
+      {
+        operation: 'reuse',
+        taskId,
+        expectedContractRevision: 2,
+        expectedCurrentRevision: 1,
+      },
+      {
+        operation: 'revise',
+        taskId,
+        expectedContractRevision: 2,
+        expectedCurrentRevision: 1,
+        lifecycle: 'pending',
+        content: taskContent,
+      },
+    ]) {
+      expect(proposedTaskMemberSchema.safeParse(member).success).toBe(false);
+    }
+    for (const member of [
+      {
+        operation: 'reuse',
+        taskId,
+        expectedContractRevision: 2,
+        expectedCurrentRevision: 2,
+      },
+      {
+        operation: 'reuse',
+        taskId,
+        expectedContractRevision: 2,
+        expectedCurrentRevision: 3,
+      },
+      {
+        operation: 'revise',
+        taskId,
+        expectedContractRevision: 2,
+        expectedCurrentRevision: 2,
+        lifecycle: 'pending',
+        content: taskContent,
+      },
+      {
+        operation: 'revise',
+        taskId,
+        expectedContractRevision: 2,
+        expectedCurrentRevision: 3,
+        lifecycle: 'pending',
+        content: taskContent,
+      },
+    ]) {
+      expect(proposedTaskMemberSchema.safeParse(member).success).toBe(true);
+    }
+  });
+
   it('parses strict purpose-aware cycle views and forbids cross-purpose proposals', () => {
     expect(planningCycleViewSchema.parse(intentCycle).purpose.kind).toBe(
       'intent',
@@ -712,6 +770,24 @@ describe('planning and Board contracts', () => {
       },
       { ...approvedDeliveryPlan.plan, ledgerId: id('92') },
       { ...approvedDeliveryPlan.plan, ledgerRevision: 2 },
+    ]) {
+      expect(
+        pmPlanAssignmentSchema.safeParse({
+          ...assignmentWithPlan,
+          input: {
+            ...assignmentWithPlan.input,
+            approvedDeliveryPlan: { ...approvedDeliveryPlan, plan },
+          },
+        }).success,
+      ).toBe(true);
+    }
+    for (const plan of [
+      { ...approvedDeliveryPlan.plan, id: id('93') },
+      {
+        ...approvedDeliveryPlan.plan,
+        revision: 2,
+        baseDeliveryPlanRevision: 1,
+      },
     ]) {
       expect(
         pmPlanAssignmentSchema.safeParse({
@@ -934,6 +1010,148 @@ describe('planning and Board contracts', () => {
       },
     };
     expect(pmPlanAssignmentSchema.parse(assignment)).toEqual(assignment);
+    const currentIntentProposalId = id('81');
+    const currentApprovedIntentLedger = {
+      ...approvedIntentLedger,
+      projectIntent: {
+        ...approvedIntentLedger.projectIntent,
+        revision: 2,
+        proposalId: currentIntentProposalId,
+      },
+      ledger: {
+        ...approvedIntentLedger.ledger,
+        revision: 2,
+        proposalId: currentIntentProposalId,
+      },
+      records: approvedIntentLedger.records.map((record) => ({
+        ...record,
+        revision: 2,
+        proposalId: currentIntentProposalId,
+      })),
+    };
+    const staleReplanProposalId = id('82');
+    const staleReplanProposal = {
+      ...revisionProposal,
+      id: staleReplanProposalId,
+      base: {
+        ...revisionProposal.base,
+        projectIntentRevision: 2,
+        ledgerRevision: 2,
+      },
+      proposedPlan: {
+        ...revisionProposal.proposedPlan,
+        traces: revisionProposal.proposedPlan.traces.map((trace) => ({
+          ...trace,
+          requirement: { ...trace.requirement, recordRevision: 2 },
+        })),
+      },
+      diff: {
+        ...revisionProposal.diff,
+        traceCreateCount: 4,
+        traceRemoveCount: 4,
+      },
+    };
+    const staleReplanAssignment = {
+      ...assignment,
+      baseProjectIntentRevision: 2,
+      baseLedgerRevision: 2,
+      input: {
+        ...assignment.input,
+        approvedIntentLedger: currentApprovedIntentLedger,
+        latestProposal: staleReplanProposal,
+      },
+    };
+    expect(
+      pmPlanAssignmentSchema.safeParse(staleReplanAssignment).success,
+    ).toBe(true);
+    expect(
+      pmPlanAssignmentSchema.safeParse({
+        ...staleReplanAssignment,
+        input: {
+          ...staleReplanAssignment.input,
+          latestProposal: {
+            ...staleReplanProposal,
+            proposedPlan: revisionProposal.proposedPlan,
+            diff: {
+              ...staleReplanProposal.diff,
+              traceCreateCount: 0,
+              traceRemoveCount: 0,
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+
+    const approvedStaleReplanProposal = {
+      ...staleReplanProposal,
+      lifecycle: 'approved' as const,
+      decision: {
+        kind: 'approved' as const,
+        decidedBy: 'human' as const,
+        decidedAt: now,
+      },
+    };
+    const replannedDeliveryPlan = {
+      ...approvedPlanWithDependency,
+      plan: {
+        ...approvedPlanWithDependency.plan,
+        revision: 2,
+        projectIntentRevision: 2,
+        ledgerRevision: 2,
+        baseDeliveryPlanRevision: 1,
+        proposalId: staleReplanProposalId,
+        summary: staleReplanProposal.proposedPlan.summary,
+      },
+      traces: approvedPlanWithDependency.traces.map((trace) => ({
+        ...trace,
+        requirement: { ...trace.requirement, recordRevision: 2 },
+      })),
+    };
+    const staleMaterialization = {
+      proposal: approvedStaleReplanProposal,
+      baseDeliveryPlan: approvedPlanWithDependency,
+      deliveryPlan: replannedDeliveryPlan,
+    };
+    expect(
+      approvedDeliveryPlanMaterializationSchema.safeParse(staleMaterialization)
+        .success,
+    ).toBe(true);
+    for (const baseDeliveryPlan of [
+      {
+        ...approvedPlanWithDependency,
+        plan: { ...approvedPlanWithDependency.plan, id: id('83') },
+      },
+      {
+        ...approvedPlanWithDependency,
+        plan: {
+          ...approvedPlanWithDependency.plan,
+          revision: 2,
+          baseDeliveryPlanRevision: 1,
+        },
+      },
+      {
+        ...approvedPlanWithDependency,
+        plan: { ...approvedPlanWithDependency.plan, projectId: id('84') },
+        milestones: approvedPlanWithDependency.milestones.map((milestone) => ({
+          ...milestone,
+          projectId: id('84'),
+        })),
+        taskContracts: approvedPlanWithDependency.taskContracts.map((task) => ({
+          ...task,
+          projectId: id('84'),
+        })),
+        dependencies: approvedPlanWithDependency.dependencies.map(
+          (dependency) => ({ ...dependency, projectId: id('84') }),
+        ),
+      },
+    ]) {
+      expect(
+        approvedDeliveryPlanMaterializationSchema.safeParse({
+          ...staleMaterialization,
+          baseDeliveryPlan,
+        }).success,
+      ).toBe(false);
+    }
     for (const diff of [
       {
         ...revisionProposal.diff,
