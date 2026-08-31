@@ -6,6 +6,7 @@ import {
   harnessResumeRequestSchema,
   harnessStartRequestSchema,
   PM_DISCOVERY_REPORT_SCHEMA,
+  PM_PLAN_REPORT_SCHEMA,
   planningTurnIdSchema,
   workerExecutionIdSchema,
   type HarnessAdapter,
@@ -18,6 +19,8 @@ import {
   type LogicalSkillRequest,
   type PmDiscoveryAssignment,
   type PmDiscoveryReport,
+  type PmPlanAssignment,
+  type PmPlanReport,
   type PlanningTurnId,
 } from '@mesh/v2-contracts';
 
@@ -27,16 +30,21 @@ import { matchingSkill } from './harness-adapter.js';
 const MAX_HANDLE_BYTES = 4096;
 const FOUNDATION_SCENARIO = 'todo-foundation-v1' as const;
 const PM_SCENARIO = 'pm-discovery-v1' as const;
+const PM_PLAN_SCENARIO = 'pm-plan-v1' as const;
 
 export type FakePmScenario =
   | 'todo'
   | 'malformed'
   | 'duplicate'
+  | 'conflicting'
   | 'missing_output';
 
 type FakeHandle = {
   executionId: string;
-  scenario: typeof FOUNDATION_SCENARIO | typeof PM_SCENARIO;
+  scenario:
+    | typeof FOUNDATION_SCENARIO
+    | typeof PM_SCENARIO
+    | typeof PM_PLAN_SCENARIO;
   pmScenario?: FakePmScenario;
   checkpointCursor: number;
 };
@@ -44,7 +52,9 @@ type FakeHandle = {
 const terminalCursor = (handle: FakeHandle): number =>
   handle.scenario === FOUNDATION_SCENARIO
     ? 6
-    : handle.pmScenario === 'duplicate'
+    : handle.pmScenario === 'duplicate' ||
+        (handle.scenario === PM_PLAN_SCENARIO &&
+          handle.pmScenario === 'conflicting')
       ? 3
       : handle.pmScenario === 'todo' || handle.pmScenario === 'malformed'
         ? 2
@@ -138,11 +148,20 @@ const decodeHandle = (
     if (
       !workerExecutionIdSchema.safeParse(candidate.executionId).success ||
       (candidate.scenario !== FOUNDATION_SCENARIO &&
-        candidate.scenario !== PM_SCENARIO) ||
+        candidate.scenario !== PM_SCENARIO &&
+        candidate.scenario !== PM_PLAN_SCENARIO) ||
       (candidate.scenario === PM_SCENARIO &&
         !['todo', 'malformed', 'duplicate', 'missing_output'].includes(
           String(candidate.pmScenario),
         )) ||
+      (candidate.scenario === PM_PLAN_SCENARIO &&
+        ![
+          'todo',
+          'malformed',
+          'duplicate',
+          'conflicting',
+          'missing_output',
+        ].includes(String(candidate.pmScenario))) ||
       (candidate.scenario === FOUNDATION_SCENARIO &&
         candidate.pmScenario !== undefined) ||
       !Number.isInteger(candidate.checkpointCursor) ||
@@ -404,6 +423,180 @@ const todoReport = (assignment: PmDiscoveryAssignment): PmDiscoveryReport => {
   };
 };
 
+const todoPlanReport = (assignment: PmPlanAssignment): PmPlanReport => {
+  const requirements = assignment.input.approvedIntentLedger.records.filter(
+    (record) =>
+      record.content.type === 'requirement' &&
+      record.content.status === 'approved',
+  );
+  const todoRequirement = requirements[0];
+  if (!todoRequirement) {
+    throw new Error('Todo plan requires an approved requirement');
+  }
+  const requirement = (record: typeof todoRequirement) => ({
+    recordId: record.recordId,
+    recordRevision: record.revision,
+  });
+  const traces =
+    requirements.length >= 3
+      ? requirements.flatMap((record, index) => {
+          const milestoneKey =
+            index === 0 ? 'todo-integration' : 'todo-foundations';
+          const taskKey =
+            index === 0
+              ? 'todo-integrated'
+              : index === 1
+                ? 'todo-ui'
+                : 'todo-persistence';
+          return [
+            {
+              kind: 'milestone_covers' as const,
+              milestone: { kind: 'proposal' as const, key: milestoneKey },
+              requirement: requirement(record),
+            },
+            {
+              kind: 'task_satisfies' as const,
+              task: { kind: 'proposal' as const, key: taskKey },
+              requirement: requirement(record),
+            },
+          ];
+        })
+      : [
+          ...['todo-foundations', 'todo-integration'].map((key) => ({
+            kind: 'milestone_covers' as const,
+            milestone: { kind: 'proposal' as const, key },
+            requirement: requirement(todoRequirement),
+          })),
+          ...['todo-ui', 'todo-persistence', 'todo-integrated'].map((key) => ({
+            kind: 'task_satisfies' as const,
+            task: { kind: 'proposal' as const, key },
+            requirement: requirement(todoRequirement),
+          })),
+        ];
+  const revised = assignment.expectedProposalRevision > 1;
+  return {
+    schema: PM_PLAN_REPORT_SCHEMA,
+    planningCycleId: assignment.planningCycleId,
+    humanTurnId: assignment.humanTurnId,
+    expectedCycleRevision: assignment.expectedCycleRevision,
+    expectedProposalRevision: assignment.expectedProposalRevision,
+    assistantMessage: revised
+      ? 'The revised Todo delivery plan makes keyboard acceptance explicit and persistence verification isolated.'
+      : 'The complete Todo delivery plan is ready to review.',
+    result: {
+      kind: 'plan_proposal',
+      proposal: {
+        summary: 'Deliver a persistent, keyboard-operable Todo application.',
+        milestones: [
+          {
+            operation: 'create',
+            key: 'todo-foundations',
+            content: {
+              title: 'Todo foundations',
+              outcome: 'Todo controls and persistence work independently.',
+              stopCondition:
+                'Todo UI and storage tasks satisfy their traced requirements.',
+              exclusions: ['Integrated workflow verification'],
+              ordinal: 1,
+            },
+          },
+          {
+            operation: 'create',
+            key: 'todo-integration',
+            content: {
+              title: 'Todo integration',
+              outcome: 'Todo UI and persistence work together.',
+              stopCondition:
+                'The integrated Todo flow passes its acceptance and verification criteria.',
+              exclusions: ['Team collaboration'],
+              ordinal: 2,
+            },
+          },
+        ],
+        tasks: [
+          {
+            operation: 'create',
+            key: 'todo-ui',
+            content: {
+              milestone: { kind: 'proposal', key: 'todo-foundations' },
+              title: 'Build Todo controls',
+              outcome: 'People can add and complete Todo items.',
+              acceptanceCriteria: revised
+                ? [
+                    'Users can add and complete Todo items.',
+                    'A keyboard user can add and complete a Todo item without a pointer.',
+                  ]
+                : ['Users can add and complete Todo items.'],
+              verificationCriteria: ['Exercise the Todo UI flow.'],
+              priority: 'must',
+              labels: ['frontend', 'keyboard'],
+              ownedSurfaces: ['Todo UI'],
+              prohibitedSurfaces: ['Todo storage'],
+              expectedArtifacts: ['Todo interface'],
+              ordinal: 1,
+            },
+          },
+          {
+            operation: 'create',
+            key: 'todo-persistence',
+            content: {
+              milestone: { kind: 'proposal', key: 'todo-foundations' },
+              title: 'Persist Todo items',
+              outcome: 'Todo items survive application reload.',
+              acceptanceCriteria: ['Todo items survive application reload.'],
+              verificationCriteria: revised
+                ? ['Run the isolated Todo persistence verification.']
+                : ['Exercise persistence through the Todo application.'],
+              priority: 'must',
+              labels: ['persistence'],
+              ownedSurfaces: ['Todo storage'],
+              prohibitedSurfaces: ['Todo UI'],
+              expectedArtifacts: ['Todo persistence'],
+              ordinal: 2,
+            },
+          },
+          {
+            operation: 'create',
+            key: 'todo-integrated',
+            content: {
+              milestone: { kind: 'proposal', key: 'todo-integration' },
+              title: 'Integrate Todo workflow',
+              outcome: 'Todo controls and persistence work end to end.',
+              acceptanceCriteria: [
+                'Adding, reloading, and completing a Todo item works end to end.',
+              ],
+              verificationCriteria: [
+                'Run the integrated Todo acceptance journey.',
+              ],
+              priority: 'must',
+              labels: ['integration'],
+              ownedSurfaces: ['Todo integration'],
+              prohibitedSurfaces: [],
+              expectedArtifacts: ['Integrated Todo workflow'],
+              ordinal: 1,
+            },
+          },
+        ],
+        dependencies: [
+          {
+            operation: 'create',
+            key: 'ui-before-integrated',
+            prerequisite: { kind: 'proposal', key: 'todo-ui' },
+            dependent: { kind: 'proposal', key: 'todo-integrated' },
+          },
+          {
+            operation: 'create',
+            key: 'persistence-before-integrated',
+            prerequisite: { kind: 'proposal', key: 'todo-persistence' },
+            dependent: { kind: 'proposal', key: 'todo-integrated' },
+          },
+        ],
+        traces,
+      },
+    },
+  };
+};
+
 const pmEnvelope = (
   request: HarnessStartRequest & { assignment: PmDiscoveryAssignment },
   adapterCursor: number,
@@ -452,6 +645,60 @@ const pmEnvelope = (
   });
 };
 
+const planEnvelope = (
+  request: HarnessStartRequest & { assignment: PmPlanAssignment },
+  adapterCursor: number,
+  scenario: FakePmScenario | undefined,
+): HarnessEventEnvelope => {
+  const base = {
+    projectId: request.project.id,
+    executionId: request.executionId,
+    adapterCursor,
+    occurredAt: new Date(
+      Date.UTC(2026, 7, 30, 0, 0, adapterCursor),
+    ).toISOString(),
+  };
+  const outputCount =
+    scenario === 'duplicate' || scenario === 'conflicting'
+      ? 2
+      : scenario === 'todo' || scenario === 'malformed'
+        ? 1
+        : 0;
+  const report = todoPlanReport(request.assignment);
+  const normalized =
+    adapterCursor <= outputCount
+      ? {
+          ...base,
+          type: 'worker_execution.structured_output' as const,
+          payload: {
+            schema: PM_PLAN_REPORT_SCHEMA,
+            value:
+              scenario === 'malformed'
+                ? { schema: PM_PLAN_REPORT_SCHEMA, malformed: true }
+                : scenario === 'conflicting' && adapterCursor === 2
+                  ? {
+                      ...report,
+                      assistantMessage: `${report.assistantMessage} Conflicting output.`,
+                    }
+                  : report,
+          },
+        }
+      : {
+          ...base,
+          type: 'worker_execution.completed' as const,
+          payload: { outcome: 'completed' as const },
+        };
+  return harnessEventEnvelopeSchema.parse({
+    adapterCursor,
+    raw: {
+      source: 'fake',
+      scenario: scenario ?? 'missing_output',
+      adapterCursor,
+    },
+    normalized,
+  });
+};
+
 const scriptEnvelope = (
   request: HarnessStartRequest,
   adapterCursor: number,
@@ -463,7 +710,13 @@ const scriptEnvelope = (
         adapterCursor,
         options.pmScenario,
       )
-    : foundationEnvelope(request, adapterCursor);
+    : request.assignment.kind === 'pm_plan'
+      ? planEnvelope(
+          request as HarnessStartRequest & { assignment: PmPlanAssignment },
+          adapterCursor,
+          options.pmScenario,
+        )
+      : foundationEnvelope(request, adapterCursor);
 
 const scriptLength = (
   assignment: HarnessStartRequest['assignment'],
@@ -471,7 +724,8 @@ const scriptLength = (
 ): number =>
   assignment.kind === 'foundation-check'
     ? 6
-    : scenario === 'duplicate'
+    : scenario === 'duplicate' ||
+        (assignment.kind === 'pm_plan' && scenario === 'conflicting')
       ? 3
       : scenario === 'todo' || scenario === 'malformed'
         ? 2
@@ -497,8 +751,11 @@ class FakeHarnessSession implements HarnessSession {
       scenario:
         this.request.assignment.kind === 'pm_discovery'
           ? PM_SCENARIO
-          : FOUNDATION_SCENARIO,
-      ...(this.request.assignment.kind === 'pm_discovery'
+          : this.request.assignment.kind === 'pm_plan'
+            ? PM_PLAN_SCENARIO
+            : FOUNDATION_SCENARIO,
+      ...(this.request.assignment.kind === 'pm_discovery' ||
+      this.request.assignment.kind === 'pm_plan'
         ? { pmScenario: this.options.pmScenario ?? 'missing_output' }
         : {}),
       checkpointCursor: this.checkpointCursor,
@@ -633,6 +890,12 @@ export class FakeHarnessAdapter implements HarnessAdapter {
     if (parsed.value.checkpointCursor === terminalCursor(parsed.value)) {
       return { status: 'terminal', outcome: 'completed' };
     }
+    if (parsed.value.scenario === PM_PLAN_SCENARIO) {
+      return {
+        status: 'unknown',
+        reason: 'Plan executions are finite and cannot resume',
+      };
+    }
     return {
       status: 'resumable',
       afterAdapterCursor: parsed.value.checkpointCursor,
@@ -641,6 +904,9 @@ export class FakeHarnessAdapter implements HarnessAdapter {
 
   async resume(input: HarnessResumeRequest): Promise<FakeHarnessSession> {
     const request = harnessResumeRequestSchema.parse(input);
+    if (request.assignment.kind === 'pm_plan') {
+      throw new Error('Plan executions are finite and cannot resume');
+    }
     const parsed = decodeHandle(request.nativeHandle);
     if (!parsed.ok) throw new Error(parsed.reason);
     if (parsed.value.executionId !== request.executionId) {

@@ -8,8 +8,11 @@ import type {
   HarnessStartRequest,
 } from '@mesh/v2-contracts';
 import {
+  approvedIntentLedgerSchema,
   PM_DISCOVERY_REPORT_SCHEMA,
+  PM_PLAN_REPORT_SCHEMA,
   pmDiscoveryReportSchema,
+  pmPlanReportSchema,
 } from '@mesh/v2-contracts';
 
 import { createV2TestDatabase } from '../test/create-v2-test-database.js';
@@ -121,10 +124,408 @@ const pmRequest = (
   };
 };
 
+const planRequest = async (
+  fixture: ReturnType<typeof createV2TestDatabase>,
+  revision: 1 | 2,
+): Promise<HarnessStartRequest> => {
+  const planningCycleId = randomUUID();
+  const firstHumanTurnId = randomUUID();
+  const pmTurnId = randomUUID();
+  const humanTurnId = revision === 1 ? firstHumanTurnId : randomUUID();
+  const intentId = randomUUID();
+  const ledgerId = randomUUID();
+  const proposalId = randomUUID();
+  const requirementIds = {
+    todo: randomUUID(),
+    keyboard: randomUUID(),
+    persistence: randomUUID(),
+  };
+  const provenance = [
+    {
+      kind: 'conversation_turn' as const,
+      turnId: firstHumanTurnId,
+      rationale: 'The operator approved the Todo requirement.',
+    },
+  ];
+  const approvedIntentLedger = approvedIntentLedgerSchema.parse({
+    projectIntent: {
+      id: intentId,
+      projectId: fixture.project.id,
+      revision: 1,
+      content: {
+        goal: 'Track Todo items.',
+        targetUsers: ['Individuals'],
+        desiredCapabilities: ['Add and complete Todo items'],
+        constraints: ['Every control is keyboard operable.'],
+        nonGoals: ['Team collaboration'],
+        successConditions: ['Todo items persist after reload.'],
+        rationale: 'Deliver the accepted Todo scope.',
+        provenance,
+      },
+      proposalId,
+      approvedBy: 'human',
+      approvedAt: '2026-08-30T00:00:00.000Z',
+    },
+    ledger: {
+      id: ledgerId,
+      projectId: fixture.project.id,
+      revision: 1,
+      proposalId,
+      approvedBy: 'human',
+      approvedAt: '2026-08-30T00:00:00.000Z',
+    },
+    records: [
+      {
+        recordId: requirementIds.todo,
+        projectId: fixture.project.id,
+        revision: 1,
+        content: {
+          type: 'requirement',
+          kind: 'functional',
+          status: 'approved',
+          priority: 'must',
+          statement: 'Users can add and complete Todo items.',
+          rationale: 'This is the core Todo workflow.',
+        },
+        provenance,
+        proposalId,
+        approvedBy: 'human',
+        approvedAt: '2026-08-30T00:00:00.000Z',
+      },
+      {
+        recordId: requirementIds.keyboard,
+        projectId: fixture.project.id,
+        revision: 1,
+        content: {
+          type: 'requirement',
+          kind: 'ux',
+          status: 'approved',
+          priority: 'must',
+          statement: 'Every Todo control is keyboard operable.',
+          rationale: 'Keyboard operation is required.',
+        },
+        provenance,
+        proposalId,
+        approvedBy: 'human',
+        approvedAt: '2026-08-30T00:00:00.000Z',
+      },
+      {
+        recordId: requirementIds.persistence,
+        projectId: fixture.project.id,
+        revision: 1,
+        content: {
+          type: 'requirement',
+          kind: 'operational',
+          status: 'approved',
+          priority: 'must',
+          statement: 'Todo items persist across application reloads.',
+          rationale: 'Reloading must preserve the list.',
+        },
+        provenance,
+        proposalId,
+        approvedBy: 'human',
+        approvedAt: '2026-08-30T00:00:00.000Z',
+      },
+    ],
+    relationships: [],
+  });
+  const firstAssignment = {
+    kind: 'pm_plan' as const,
+    projectId: fixture.project.id,
+    outputSchema: PM_PLAN_REPORT_SCHEMA,
+    planningCycleId,
+    humanTurnId: firstHumanTurnId,
+    expectedCycleRevision: 1,
+    expectedProposalRevision: 1,
+    baseProjectIntentId: intentId,
+    baseProjectIntentRevision: 1,
+    baseLedgerId: ledgerId,
+    baseLedgerRevision: 1,
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+    input: {
+      conversation: [
+        {
+          turnId: firstHumanTurnId,
+          actor: 'human' as const,
+          message: 'Propose a delivery plan for the approved Todo intent.',
+        },
+      ],
+      approvedIntentLedger,
+      latestProposal: null,
+      approvedDeliveryPlan: null,
+    },
+  };
+  const profile = {
+    profileId: fixture.profileRevision.profileId,
+    projectId: fixture.profileRevision.projectId,
+    profileRevision: fixture.profileRevision.revision,
+    baseProfileId: fixture.profileRevision.baseProfileId,
+    baseRevision: fixture.profileRevision.baseRevision,
+    document: {
+      ...fixture.profileRevision.document,
+      spec: {
+        ...fixture.profileRevision.document.spec,
+        assignmentKinds: ['pm_plan'] as const,
+        outputSchema: PM_PLAN_REPORT_SCHEMA,
+      },
+    },
+    digest: fixture.profileRevision.digest,
+  };
+  let assignment = firstAssignment;
+  if (revision === 2) {
+    const firstSession = await new FakeHarnessAdapter({
+      pmScenario: 'todo',
+    }).start({
+      executionId: randomUUID(),
+      project: fixture.project,
+      assignment: firstAssignment,
+      profile,
+      resolvedSkills: [],
+    });
+    const firstOutput = (await collect(firstSession.events(0)))[0]?.normalized;
+    if (firstOutput?.type !== 'worker_execution.structured_output') {
+      throw new Error('Expected initial Todo plan output');
+    }
+    const firstReport = pmPlanReportSchema.parse(firstOutput.payload.value);
+    if (firstReport.result.kind !== 'plan_proposal') {
+      throw new Error('Expected initial Todo plan proposal');
+    }
+    assignment = {
+      ...firstAssignment,
+      humanTurnId,
+      expectedCycleRevision: 3,
+      expectedProposalRevision: 2,
+      input: {
+        ...firstAssignment.input,
+        conversation: [
+          ...firstAssignment.input.conversation,
+          {
+            turnId: pmTurnId,
+            actor: 'pm' as const,
+            message: firstReport.assistantMessage,
+          },
+          {
+            turnId: humanTurnId,
+            actor: 'human' as const,
+            message:
+              'Make keyboard acceptance explicit and persistence verification isolated.',
+          },
+        ],
+        latestProposal: {
+          id: randomUUID(),
+          projectId: fixture.project.id,
+          planningCycleId,
+          revision: 1,
+          lifecycle: 'awaiting_approval' as const,
+          base: {
+            projectIntentId: intentId,
+            projectIntentRevision: 1,
+            ledgerId,
+            ledgerRevision: 1,
+            deliveryPlan: { id: null, revision: null },
+          },
+          proposedPlan: firstReport.result.proposal,
+          reservations: {
+            milestones: [
+              { key: 'todo-foundations', id: randomUUID() },
+              { key: 'todo-integration', id: randomUUID() },
+            ],
+            tasks: [
+              { key: 'todo-ui', id: randomUUID() },
+              { key: 'todo-persistence', id: randomUUID() },
+              { key: 'todo-integrated', id: randomUUID() },
+            ],
+            dependencies: [
+              { key: 'ui-before-integrated', id: randomUUID() },
+              { key: 'persistence-before-integrated', id: randomUUID() },
+            ],
+          },
+          diff: {
+            milestones: {
+              create: 2,
+              reuse: 0,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            tasks: {
+              create: 3,
+              reuse: 0,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            dependencies: {
+              create: 2,
+              reuse: 0,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            traceCreateCount: 6,
+            traceRemoveCount: 0,
+          },
+          createdByTurnId: pmTurnId,
+          createdByExecutionId: randomUUID(),
+          createdAt: '2026-08-30T00:00:01.000Z',
+          decision: { kind: 'pending' as const },
+        },
+      },
+    };
+  }
+  return {
+    executionId: randomUUID(),
+    project: fixture.project,
+    assignment,
+    profile,
+    resolvedSkills: [],
+  };
+};
+
 const rawHandle = (payload: unknown, encoding: BufferEncoding = 'base64url') =>
   `fake:v1:${Buffer.from(JSON.stringify(payload)).toString(encoding)}`;
 
 describe('FakeHarnessAdapter', () => {
+  it('emits deterministic complete Todo plan revisions', async () => {
+    const fixture = createV2TestDatabase();
+    const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });
+    try {
+      const firstRequest = await planRequest(fixture, 1);
+      const first = await collect((await fake.start(firstRequest)).events(0));
+      const firstOutput = first[0]?.normalized;
+      if (firstOutput?.type !== 'worker_execution.structured_output') {
+        throw new Error('Expected initial Todo plan output');
+      }
+      const firstReport = pmPlanReportSchema.parse(firstOutput.payload.value);
+      expect(firstReport.result.kind).toBe('plan_proposal');
+      if (firstReport.result.kind !== 'plan_proposal') {
+        throw new Error('Expected initial Todo plan proposal');
+      }
+      expect({
+        milestones: firstReport.result.proposal.milestones.length,
+        tasks: firstReport.result.proposal.tasks.length,
+        dependencies: firstReport.result.proposal.dependencies.length,
+        traces: firstReport.result.proposal.traces.length,
+      }).toEqual({ milestones: 2, tasks: 3, dependencies: 2, traces: 6 });
+      const repeated = await collect(
+        (
+          await new FakeHarnessAdapter({ pmScenario: 'todo' }).start(
+            firstRequest,
+          )
+        ).events(0),
+      );
+      expect(repeated[0]?.normalized).toEqual(firstOutput);
+
+      const revisedRequest = await planRequest(fixture, 2);
+      const revised = await collect(
+        (await fake.start(revisedRequest)).events(0),
+      );
+      const revisedOutput = revised[0]?.normalized;
+      if (revisedOutput?.type !== 'worker_execution.structured_output') {
+        throw new Error('Expected revised Todo plan output');
+      }
+      const revisedReport = pmPlanReportSchema.parse(
+        revisedOutput.payload.value,
+      );
+      expect(revisedReport).toMatchObject({
+        schema: PM_PLAN_REPORT_SCHEMA,
+        expectedProposalRevision: 2,
+        result: { kind: 'plan_proposal' },
+      });
+      if (revisedReport.result.kind !== 'plan_proposal') {
+        throw new Error('Expected revised Todo plan proposal');
+      }
+      expect({
+        milestones: revisedReport.result.proposal.milestones.length,
+        tasks: revisedReport.result.proposal.tasks.length,
+        dependencies: revisedReport.result.proposal.dependencies.length,
+        traces: revisedReport.result.proposal.traces.length,
+      }).toEqual({ milestones: 2, tasks: 3, dependencies: 2, traces: 6 });
+      expect(revisedReport.result.proposal.tasks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            key: 'todo-ui',
+            content: expect.objectContaining({
+              acceptanceCriteria: expect.arrayContaining([
+                'A keyboard user can add and complete a Todo item without a pointer.',
+              ]),
+            }),
+          }),
+          expect.objectContaining({
+            key: 'todo-persistence',
+            content: expect.objectContaining({
+              verificationCriteria: [
+                'Run the isolated Todo persistence verification.',
+              ],
+            }),
+          }),
+        ]),
+      );
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it('keeps plan executions finite and refuses native resume', async () => {
+    const fixture = createV2TestDatabase();
+    try {
+      const request = await planRequest(fixture, 1);
+      const fake = new FakeHarnessAdapter({
+        pmScenario: 'todo',
+        holdAfterAdapterCursor: 1,
+      });
+      const session = await fake.start(request);
+      await collect(session.events(0));
+      await expect(fake.probe(session.nativeHandle)).resolves.toMatchObject({
+        status: 'unknown',
+      });
+      await expect(
+        fake.resume({
+          ...request,
+          nativeHandle: session.nativeHandle,
+          afterAdapterCursor: 1,
+        }),
+      ).rejects.toThrow('finite');
+      expect(fake.resumeCount).toBe(0);
+    } finally {
+      fixture.close();
+    }
+  });
+
+  it.each([
+    [
+      'malformed' as const,
+      ['worker_execution.structured_output', 'worker_execution.completed'],
+    ],
+    ['missing_output' as const, ['worker_execution.completed']],
+  ])(
+    'emits the finite plan failure variant %s',
+    async (pmScenario, expectedTypes) => {
+      const fixture = createV2TestDatabase();
+      try {
+        const session = await new FakeHarnessAdapter({ pmScenario }).start(
+          await planRequest(fixture, 1),
+        );
+        const events = await collect(session.events(0));
+        expect(events.map(({ normalized }) => normalized.type)).toEqual(
+          expectedTypes,
+        );
+        if (pmScenario === 'malformed') {
+          const output = events[0]?.normalized;
+          if (output?.type !== 'worker_execution.structured_output') {
+            throw new Error('Expected malformed plan output');
+          }
+          expect(
+            pmPlanReportSchema.safeParse(output.payload.value).success,
+          ).toBe(false);
+        }
+      } finally {
+        fixture.close();
+      }
+    },
+  );
+
   it('emits finite assignment-bound Todo questions and proposal reports', async () => {
     const fixture = createV2TestDatabase();
     const fake = new FakeHarnessAdapter({ pmScenario: 'todo' });

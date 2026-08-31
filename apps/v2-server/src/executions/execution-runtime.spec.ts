@@ -15,8 +15,11 @@ import type {
   WorkerExecution,
 } from '@mesh/v2-contracts';
 import {
+  approvedIntentLedgerSchema,
   PM_DISCOVERY_REPORT_SCHEMA,
+  PM_PLAN_REPORT_SCHEMA,
   pmDiscoveryReportSchema,
+  pmPlanReportSchema,
 } from '@mesh/v2-contracts';
 
 import { inImmediateTransaction } from '../db/database.js';
@@ -215,6 +218,125 @@ const createPmRuntime = (
       ],
       latestProposal: null,
       approvedIntentLedger: null,
+    },
+  };
+  return context;
+};
+
+const createPlanRuntime = (
+  scenario:
+    | 'todo'
+    | 'malformed'
+    | 'duplicate'
+    | 'conflicting'
+    | 'missing_output',
+  fakeOptions: Omit<FakeHarnessOptions, 'pmScenario'> = {},
+  publisher?: {
+    domain(event: DomainEvent): void;
+    runtime(event: RuntimeEvent): void;
+  },
+  observer?: ExecutionRuntimeObserver,
+) => {
+  const context = createRuntime({
+    fake: new FakeHarnessAdapter({ ...fakeOptions, pmScenario: scenario }),
+    publisher,
+    observer,
+    profile: (profile) => ({
+      ...profile,
+      document: {
+        ...profile.document,
+        spec: {
+          ...profile.document.spec,
+          assignmentKinds: ['pm_plan'],
+          outputSchema: PM_PLAN_REPORT_SCHEMA,
+        },
+      },
+    }),
+  });
+  const humanTurnId = randomUUID();
+  const intentId = randomUUID();
+  const ledgerId = randomUUID();
+  const proposalId = randomUUID();
+  const requirementId = randomUUID();
+  const provenance = [
+    {
+      kind: 'conversation_turn' as const,
+      turnId: humanTurnId,
+      rationale: 'The operator approved the Todo requirement.',
+    },
+  ];
+  context.start.command.assignment = {
+    kind: 'pm_plan',
+    projectId: context.fixture.project.id,
+    outputSchema: PM_PLAN_REPORT_SCHEMA,
+    planningCycleId: randomUUID(),
+    humanTurnId,
+    expectedCycleRevision: 1,
+    expectedProposalRevision: 1,
+    baseProjectIntentId: intentId,
+    baseProjectIntentRevision: 1,
+    baseLedgerId: ledgerId,
+    baseLedgerRevision: 1,
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+    input: {
+      conversation: [
+        {
+          turnId: humanTurnId,
+          actor: 'human',
+          message: 'Propose the approved Todo delivery plan.',
+        },
+      ],
+      approvedIntentLedger: approvedIntentLedgerSchema.parse({
+        projectIntent: {
+          id: intentId,
+          projectId: context.fixture.project.id,
+          revision: 1,
+          content: {
+            goal: 'Track Todo items.',
+            targetUsers: ['Individuals'],
+            desiredCapabilities: ['Add and complete Todo items'],
+            constraints: ['Keyboard controls'],
+            nonGoals: ['Collaboration'],
+            successConditions: ['Todo items persist'],
+            rationale: 'Approved Todo scope.',
+            provenance,
+          },
+          proposalId,
+          approvedBy: 'human',
+          approvedAt: '2026-08-30T00:00:00.000Z',
+        },
+        ledger: {
+          id: ledgerId,
+          projectId: context.fixture.project.id,
+          revision: 1,
+          proposalId,
+          approvedBy: 'human',
+          approvedAt: '2026-08-30T00:00:00.000Z',
+        },
+        records: [
+          {
+            recordId: requirementId,
+            projectId: context.fixture.project.id,
+            revision: 1,
+            content: {
+              type: 'requirement',
+              kind: 'functional',
+              status: 'approved',
+              priority: 'must',
+              statement: 'Users can add and complete Todo items.',
+              rationale: 'This is the core Todo workflow.',
+            },
+            provenance,
+            proposalId,
+            approvedBy: 'human',
+            approvedAt: '2026-08-30T00:00:00.000Z',
+          },
+        ],
+        relationships: [],
+      }),
+      latestProposal: null,
+      approvedDeliveryPlan: null,
     },
   };
   return context;
@@ -482,6 +604,133 @@ const attachLatePlanningSession = async (
 };
 
 describe('ExecutionRuntime', () => {
+  it('binds the exact plan assignment before one finite activation', async () => {
+    const context = createPlanRuntime('todo');
+
+    const reservation = await context.runtime.reserveStart(context.start);
+
+    expect(context.fake.startCount).toBe(0);
+    expect(reservation.execution).toMatchObject({
+      assignment: context.start.command.assignment,
+      lifecycle: 'starting',
+      nativeHandle: null,
+    });
+    await context.runtime.activateReserved(reservation.execution.id);
+    await context.runtime.drain();
+    expect(context.fake.startCount).toBe(1);
+    expect(context.fake.resumeCount).toBe(0);
+    expect(context.executions.get(reservation.execution.id)).toMatchObject({
+      lifecycle: 'completed',
+    });
+  });
+
+  it('audits the exact plan report before runtime publication', async () => {
+    const published: RuntimeEvent[] = [];
+    const contextRef: { current?: ReturnType<typeof createPlanRuntime> } = {};
+    const context = createPlanRuntime(
+      'todo',
+      {},
+      {
+        domain: () => undefined,
+        runtime: (event) => {
+          const current = required(contextRef.current, 'Expected plan runtime');
+          expect(
+            current.fixture.database
+              .prepare('SELECT id FROM raw_diagnostics WHERE id = ?')
+              .get(event.diagnosticId),
+          ).toEqual({ id: event.diagnosticId });
+          published.push(event);
+        },
+      },
+    );
+    contextRef.current = context;
+
+    await context.runtime.start(context.start);
+    await context.runtime.drain();
+
+    const runtime = context.fixture.events.runtimeAfter(
+      context.fixture.project.id,
+      0,
+    ).events;
+    const output = runtime[0];
+    expect(runtime.map(({ type }) => type)).toEqual([
+      'worker_execution.structured_output',
+      'worker_execution.completed',
+    ]);
+    if (output?.type !== 'worker_execution.structured_output') {
+      throw new Error('Expected plan structured output');
+    }
+    expect(output.payload.schema).toBe(PM_PLAN_REPORT_SCHEMA);
+    expect(pmPlanReportSchema.parse(output.payload.value)).toMatchObject({
+      schema: PM_PLAN_REPORT_SCHEMA,
+      result: { kind: 'plan_proposal' },
+    });
+    expect(published).toEqual(runtime);
+  });
+
+  it.each([
+    ['duplicate' as const, true],
+    ['conflicting' as const, false],
+  ])(
+    'forwards %s plan receipts without runtime deduplication',
+    async (scenario, same) => {
+      const receipts: unknown[] = [];
+      const observer: ExecutionRuntimeObserver = {
+        structuredOutput: (_execution, event) =>
+          receipts.push(event.payload.value),
+        terminal: () => undefined,
+      };
+      const context = createPlanRuntime(scenario, {}, undefined, observer);
+
+      await context.runtime.start(context.start);
+      await context.runtime.drain();
+
+      expect(receipts).toHaveLength(2);
+      expect(receipts[0] === receipts[1]).toBe(false);
+      if (same) expect(receipts[0]).toEqual(receipts[1]);
+      else expect(receipts[0]).not.toEqual(receipts[1]);
+    },
+  );
+
+  it('keeps terminal plan completion observable when no output was accepted', async () => {
+    const observer: ExecutionRuntimeObserver = {
+      structuredOutput: vi.fn(),
+      terminal: vi.fn(),
+    };
+    const context = createPlanRuntime(
+      'missing_output',
+      {},
+      undefined,
+      observer,
+    );
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'completed',
+    });
+    expect(observer.structuredOutput).not.toHaveBeenCalled();
+    expect(observer.terminal).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps plan adapter failure terminal and finite', async () => {
+    const context = createPlanRuntime('todo', { failAtAdapterCursor: 1 });
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'failed',
+      failure: { code: 'internal_error' },
+    });
+    expect(context.fake.resumeCount).toBe(0);
+  });
+
   it('audits and publishes a strict PM structured output before completion', async () => {
     const published: RuntimeEvent[] = [];
     const contextRef: { current?: ReturnType<typeof createPmRuntime> } = {};
