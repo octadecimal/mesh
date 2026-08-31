@@ -1148,6 +1148,151 @@ describe('PlanningRepository', () => {
     );
   });
 
+  it('round-trips nonlexical reservation membership without treating order as corruption', () => {
+    const { fixture, repository } = setup();
+    const { approved, proposal, recordId } = deliveryProposal(
+      fixture,
+      repository,
+    );
+    const milestoneTemplate = proposal.proposedPlan.milestones[0];
+    const taskTemplate = proposal.proposedPlan.tasks[0];
+    if (
+      milestoneTemplate?.operation !== 'create' ||
+      taskTemplate?.operation !== 'create'
+    ) {
+      throw new Error('Expected create-member proposal templates');
+    }
+    const milestone = (key: string, ordinal: number) => ({
+      ...milestoneTemplate,
+      key,
+      content: { ...milestoneTemplate.content, ordinal },
+    });
+    const task = (key: string, milestoneKey: string, ordinal: number) => ({
+      ...taskTemplate,
+      key,
+      content: {
+        ...taskTemplate.content,
+        milestone: { kind: 'proposal' as const, key: milestoneKey },
+        ordinal,
+      },
+    });
+    const milestones = [
+      milestone('z-milestone', 1),
+      milestone('a-milestone', 2),
+    ];
+    const tasks = [
+      task('z-task', 'z-milestone', 1),
+      task('middle-task', 'z-milestone', 2),
+      task('a-task', 'a-milestone', 1),
+    ];
+    const dependencies = [
+      {
+        operation: 'create' as const,
+        key: 'z-dependency',
+        prerequisite: { kind: 'proposal' as const, key: 'z-task' },
+        dependent: { kind: 'proposal' as const, key: 'middle-task' },
+      },
+      {
+        operation: 'create' as const,
+        key: 'a-dependency',
+        prerequisite: { kind: 'proposal' as const, key: 'middle-task' },
+        dependent: { kind: 'proposal' as const, key: 'a-task' },
+      },
+    ];
+    const successor = deliveryPlanProposalSchema.parse({
+      ...proposal,
+      id: randomUUID(),
+      revision: 2,
+      proposedPlan: {
+        summary: 'Two Todo milestones in proposal order.',
+        milestones,
+        tasks,
+        dependencies,
+        traces: [
+          ...milestones.map(({ key }) => ({
+            kind: 'milestone_covers' as const,
+            milestone: { kind: 'proposal' as const, key },
+            requirement: { recordId, recordRevision: 1 },
+          })),
+          ...tasks.map(({ key }) => ({
+            kind: 'task_satisfies' as const,
+            task: { kind: 'proposal' as const, key },
+            requirement: { recordId, recordRevision: 1 },
+          })),
+        ],
+      },
+      reservations: {
+        milestones: milestones.map(({ key }) => ({ key, id: randomUUID() })),
+        tasks: tasks.map(({ key }) => ({ key, id: randomUUID() })),
+        dependencies: dependencies.map(({ key }) => ({
+          key,
+          id: randomUUID(),
+        })),
+      },
+      diff: {
+        milestones: {
+          create: 2,
+          reuse: 0,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        tasks: {
+          create: 3,
+          reuse: 0,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        dependencies: {
+          create: 2,
+          reuse: 0,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        traceCreateCount: 5,
+        traceRemoveCount: 0,
+      },
+    });
+    inImmediateTransaction(fixture.database, () => {
+      repository.insertDeliveryPlanProposalInTransaction(successor);
+      expect(repository.deliveryPlanProposal(successor.id)).toEqual(successor);
+      repository.settleDeliveryPlanProposalInTransaction(proposal.id, {
+        kind: 'superseded',
+        reason: 'replacement_accepted',
+        supersededByProposalId: successor.id,
+        decidedAt: at,
+      });
+    });
+    expect(
+      fixture.database
+        .prepare(
+          'SELECT proposal_json FROM delivery_plan_proposals WHERE id = ?',
+        )
+        .pluck()
+        .get(successor.id),
+    ).toBe(canonicalJson(successor));
+
+    fixture.database
+      .prepare(
+        'UPDATE delivery_plan_proposals SET proposal_json = ? WHERE id = ?',
+      )
+      .run(
+        canonicalJson({
+          ...successor,
+          reservations: {
+            ...successor.reservations,
+            tasks: successor.reservations.tasks.slice(1),
+          },
+        }),
+        successor.id,
+      );
+    expect(() => repository.deliveryPlanProposal(successor.id)).toThrow(
+      /Reservations must exactly match created proposal members/,
+    );
+  });
+
   it('atomically applies canonical state, default filter, guarded lifecycle, and restart snapshot', () => {
     const { fixture, repository } = setup();
     const { approved, proposal, value, taskId, milestoneId } = deliveryProposal(

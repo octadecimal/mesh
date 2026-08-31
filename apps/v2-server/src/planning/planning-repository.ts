@@ -1466,6 +1466,17 @@ export class PlanningRepository {
     const stored = deliveryPlanProposalSchema.parse(
       JSON.parse(row.proposal_json),
     );
+    const byKey = <T extends { key: string }>(values: readonly T[]) =>
+      [...values].sort((left, right) =>
+        left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
+      );
+    const sortedReservations = (
+      reservations: DeliveryPlanProposal['reservations'],
+    ) => ({
+      milestones: byKey(reservations.milestones),
+      tasks: byKey(reservations.tasks),
+      dependencies: byKey(reservations.dependencies),
+    });
     if (
       canonicalJson(stored) !== row.proposal_json ||
       row.id !== stored.id ||
@@ -1481,8 +1492,9 @@ export class PlanningRepository {
       row.created_by_turn_id !== stored.createdByTurnId ||
       row.created_by_execution_id !== stored.createdByExecutionId ||
       row.created_at !== stored.createdAt ||
-      canonicalJson(this.deliveryPlanProposalReservations(id)) !==
-        canonicalJson(stored.reservations)
+      canonicalJson(
+        sortedReservations(this.deliveryPlanProposalReservations(id)),
+      ) !== canonicalJson(sortedReservations(stored.reservations))
     ) {
       throw new Error('Stored delivery plan proposal is corrupt');
     }
