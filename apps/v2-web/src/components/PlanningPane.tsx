@@ -608,15 +608,10 @@ function DeliveryProposalCard({
   deliveryPlan: ApprovedDeliveryPlan | null;
   headingRef?: (node: HTMLHeadingElement | null) => void;
 }) {
-  const baseDeliveryPlan =
-    proposal.base.deliveryPlan.id === deliveryPlan?.plan.id &&
-    proposal.base.deliveryPlan.revision === deliveryPlan.plan.revision
-      ? deliveryPlan
-      : null;
   const milestones = proposal.proposedPlan.milestones.map((member) => {
     const approved =
       member.operation === 'reuse'
-        ? baseDeliveryPlan?.milestones.find(
+        ? deliveryPlan?.milestones.find(
             ({ id, revision }) =>
               id === member.milestoneId && revision === member.expectedRevision,
           )
@@ -634,7 +629,7 @@ function DeliveryProposalCard({
   const tasks = proposal.proposedPlan.tasks.map((member) => {
     const approved =
       member.operation === 'reuse'
-        ? baseDeliveryPlan?.taskContracts.find(
+        ? deliveryPlan?.taskContracts.find(
             ({ id, contractRevision }) =>
               id === member.taskId &&
               contractRevision === member.expectedContractRevision,
@@ -774,8 +769,10 @@ function DeliveryProposalCard({
           <ul>
             {proposal.proposedPlan.dependencies.map((dependency) => {
               const taskName = (taskId: string) =>
-                baseDeliveryPlan?.taskContracts.find(({ id }) => id === taskId)
-                  ?.title ?? taskId;
+                tasks.find(
+                  ({ identity, content }) =>
+                    identity === taskId && content !== undefined,
+                )?.title ?? taskId;
               const refName = (
                 ref:
                   | { kind: 'proposal'; key: string }
@@ -789,7 +786,7 @@ function DeliveryProposalCard({
               const approvedDependency =
                 dependency.operation === 'create'
                   ? undefined
-                  : baseDeliveryPlan?.dependencies.find(
+                  : deliveryPlan?.dependencies.find(
                       ({ id, revision }) =>
                         id === dependency.dependencyId &&
                         revision === dependency.expectedRevision,
@@ -928,6 +925,9 @@ export function DeliveryPlanningPane({
   const selectedProfile = profiles.find(
     ({ profileId: id }) => id === profileId,
   );
+  const continuingProfile = cycle
+    ? profiles.find(({ profileId }) => profileId === cycle.cycle.profileId)
+    : undefined;
   const approvedRequirements =
     approvedIntentLedger?.records.filter(
       ({ content }) =>
@@ -944,6 +944,7 @@ export function DeliveryPlanningPane({
   const awaitingApproval =
     lifecycle === 'awaiting_approval' &&
     proposal?.lifecycle === 'awaiting_approval';
+  const decisionAllowed = awaitingApproval && !historyLimitReached;
   const retryable =
     lifecycle === 'attention_required' && recovery?.kind === 'retryable';
   const canContinue =
@@ -1026,7 +1027,7 @@ export function DeliveryPlanningPane({
   }
 
   function approveProposal() {
-    if (!cycle || !proposal || !selectedIsLatest) return;
+    if (!cycle || !proposal || !selectedIsLatest || !decisionAllowed) return;
     onApprove({
       type: 'plan_proposal.approve',
       projectId,
@@ -1048,6 +1049,7 @@ export function DeliveryPlanningPane({
       !cycle ||
       !proposal ||
       !selectedIsLatest ||
+      !decisionAllowed ||
       normalizedFeedback.length < 1 ||
       normalizedFeedback.length > 4096
     )
@@ -1107,6 +1109,13 @@ export function DeliveryPlanningPane({
         <p>No delivery plan is approved.</p>
       )}
       {planStale ? <p role="status">Approved plan is stale.</p> : null}
+      {cycle ? (
+        <p>
+          {continuingProfile
+            ? `Project manager: ${continuingProfile.displayName} · profile ${cycle.cycle.profileId} · revision ${cycle.cycle.profileRevision}`
+            : `Project manager profile ${cycle.cycle.profileId} · revision ${cycle.cycle.profileRevision} (no longer available)`}
+        </p>
+      ) : null}
       {historyLimitReached ? (
         <p>
           This cycle reached its history limit. Abandon it to begin a new cycle.
@@ -1212,13 +1221,13 @@ export function DeliveryPlanningPane({
           ) : null}
         </section>
       ) : null}
-      {awaitingApproval && proposal && !selectedIsLatest ? (
+      {decisionAllowed && proposal && !selectedIsLatest ? (
         <p role="status">
           Viewing historical proposal revision {selectedProposal?.revision}.
           Select proposal revision {proposal.revision} to make a decision.
         </p>
       ) : null}
-      {awaitingApproval && proposal && selectedIsLatest ? (
+      {decisionAllowed && proposal && selectedIsLatest ? (
         <section
           className="planning-board-actions"
           aria-label={`Decision controls for proposal revision ${proposal.revision}`}
@@ -1252,7 +1261,7 @@ export function DeliveryPlanningPane({
           </button>
         </section>
       ) : null}
-      {awaitingApproval && proposal && selectedIsLatest && rejecting ? (
+      {decisionAllowed && proposal && selectedIsLatest && rejecting ? (
         <section aria-label="Reject plan proposal">
           <label htmlFor="plan-rejection-feedback">Rejection feedback</label>
           <textarea

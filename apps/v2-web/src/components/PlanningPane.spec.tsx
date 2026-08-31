@@ -1740,6 +1740,158 @@ describe('DeliveryPlanningPane', () => {
         `Revise ${approvedDependencyId} · expected revision 7 · active · Existing Persistence (${approvedTaskIds[0]}) → Existing Interface (${approvedTaskIds[1]})`,
       ),
     ).toBeVisible();
+
+    const terminalReuseCycle = deliveryPlanPlanningCycleViewSchema.parse({
+      ...reuseCycle,
+      cycle: {
+        ...reuseCycle.cycle,
+        lifecycle: 'approved',
+        endedAt: '2026-08-30T00:00:05.000Z',
+      },
+      deliveryPlanProposals: [
+        {
+          ...reuseCycle.deliveryPlanProposals[0],
+          lifecycle: 'approved',
+          decision: {
+            kind: 'approved',
+            decidedBy: 'human',
+            decidedAt: '2026-08-30T00:00:05.000Z',
+          },
+        },
+      ],
+    });
+    const advancedPlan = approvedDeliveryPlanSchema.parse({
+      ...approvedDeliveryPlan,
+      plan: {
+        ...approvedDeliveryPlan.plan,
+        revision: 3,
+        baseDeliveryPlanRevision: 2,
+        proposalId: '27272727-2727-4727-8727-272727272727',
+        approvedAt: '2026-08-30T00:00:05.000Z',
+      },
+    });
+    rerender(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        cycle={terminalReuseCycle}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={advancedPlan}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Delivery plan approved.')).toBeVisible();
+    expect(screen.getByText('Existing Foundation')).toBeVisible();
+    expect(screen.getByText('Existing Persistence')).toBeVisible();
+    expect(
+      screen.getByText(
+        `Reuse ${approvedDependencyId} · expected revision 7 · Existing Persistence (${approvedTaskIds[0]}) → Existing Interface (${approvedTaskIds[1]})`,
+      ),
+    ).toBeVisible();
+  });
+
+  it('leaves abandon as the sole action when cycle history is exhausted', async () => {
+    const user = userEvent.setup();
+    const props = {
+      projectId,
+      cycle: deliveryCycle,
+      approvedIntentLedger,
+      deliveryPlan: null,
+      planStale: false,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmit: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const { rerender } = render(<DeliveryPlanningPane {...props} />);
+    await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
+    expect(screen.getByLabelText('Rejection feedback')).toBeVisible();
+
+    rerender(<DeliveryPlanningPane {...props} historyLimitReached />);
+
+    expect(
+      screen.getByText(
+        'This cycle reached its history limit. Abandon it to begin a new cycle.',
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Abandon cycle' })).toBeEnabled();
+    expect(
+      screen.queryByRole('button', { name: 'Approve full plan' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Request revision' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Reject proposal' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Rejection feedback'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Message to project manager'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows the frozen continuing profile without resending profile selection', async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const props = {
+      projectId,
+      cycle: deliveryCycle,
+      approvedIntentLedger,
+      deliveryPlan: null,
+      planStale: false,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmit,
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const { rerender } = render(<DeliveryPlanningPane {...props} />);
+
+    expect(
+      screen.getByText(
+        `Project manager: Todo PM · profile ${profile.profileId} · revision 1`,
+      ),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+    expect(
+      screen.queryByLabelText('Project manager profile'),
+    ).not.toBeInTheDocument();
+    await user.type(
+      screen.getByLabelText('Message to project manager'),
+      'Keep immutable history.',
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Send revision request' }),
+    );
+    const command = onSubmit.mock.calls[0]?.[0];
+    expect(command).toEqual(
+      expect.objectContaining({
+        planningCycleId: cycleId,
+        expectedCycleRevision: deliveryCycle.cycle.revision,
+      }),
+    );
+    expect(command).not.toHaveProperty('profileId');
+    expect(command).not.toHaveProperty('profileRevision');
+
+    rerender(<DeliveryPlanningPane {...props} profiles={[]} />);
+    expect(
+      screen.getByText(
+        `Project manager profile ${profile.profileId} · revision 1 (no longer available)`,
+      ),
+    ).toBeVisible();
   });
 
   it('focuses the action-specific control when a planning command fails', async () => {
