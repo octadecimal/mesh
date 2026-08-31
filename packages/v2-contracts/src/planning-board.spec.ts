@@ -759,6 +759,65 @@ describe('planning and Board contracts', () => {
   });
 
   it('validates revision proposal diffs against the frozen approved plan', () => {
+    const secondMilestoneId = id('70');
+    const secondTaskId = id('71');
+    const dependencyId = id('72');
+    const approvedPlanWithDependency = {
+      ...approvedDeliveryPlan,
+      milestones: [
+        approvedDeliveryPlan.milestones[0],
+        {
+          ...approvedDeliveryPlan.milestones[0],
+          id: secondMilestoneId,
+          title: 'Todo UI milestone',
+          ordinal: 2,
+        },
+      ],
+      taskContracts: [
+        approvedDeliveryPlan.taskContracts[0],
+        {
+          ...approvedDeliveryPlan.taskContracts[0],
+          id: secondTaskId,
+          milestoneId: secondMilestoneId,
+          title: 'Render Todo',
+        },
+      ],
+      dependencies: [
+        {
+          id: dependencyId,
+          projectId,
+          revision: 1,
+          prerequisiteTaskId: taskId,
+          dependentTaskId: secondTaskId,
+          lifecycle: 'active',
+          proposalId: planProposalId,
+          deliveryPlanRevision: 1,
+          approvedAt: now,
+        },
+      ],
+      traces: [
+        ...approvedDeliveryPlan.traces,
+        {
+          kind: 'milestone_covers',
+          milestoneId: secondMilestoneId,
+          milestoneRevision: 1,
+          requirement: { recordId: requirementId, recordRevision: 1 },
+        },
+        {
+          kind: 'task_satisfies',
+          taskId: secondTaskId,
+          taskContractRevision: 1,
+          requirement: { recordId: requirementId, recordRevision: 1 },
+        },
+      ],
+      milestoneDependencies: [
+        {
+          prerequisiteMilestoneId: milestoneId,
+          dependentMilestoneId: secondMilestoneId,
+          throughTaskDependencyIds: [dependencyId],
+        },
+      ],
+    };
     const revisionProposal = {
       ...pendingPlanProposal,
       base: {
@@ -773,6 +832,11 @@ describe('planning and Board contracts', () => {
             milestoneId,
             expectedRevision: 1,
           },
+          {
+            operation: 'reuse',
+            milestoneId: secondMilestoneId,
+            expectedRevision: 1,
+          },
         ],
         tasks: [
           {
@@ -781,8 +845,20 @@ describe('planning and Board contracts', () => {
             expectedContractRevision: 1,
             expectedCurrentRevision: 1,
           },
+          {
+            operation: 'reuse',
+            taskId: secondTaskId,
+            expectedContractRevision: 1,
+            expectedCurrentRevision: 1,
+          },
         ],
-        dependencies: [],
+        dependencies: [
+          {
+            operation: 'reuse',
+            dependencyId,
+            expectedRevision: 1,
+          },
+        ],
         traces: [
           {
             kind: 'milestone_covers',
@@ -794,27 +870,37 @@ describe('planning and Board contracts', () => {
             task: { kind: 'canonical', taskId },
             requirement: { recordId: requirementId, recordRevision: 1 },
           },
+          {
+            kind: 'milestone_covers',
+            milestone: { kind: 'canonical', milestoneId: secondMilestoneId },
+            requirement: { recordId: requirementId, recordRevision: 1 },
+          },
+          {
+            kind: 'task_satisfies',
+            task: { kind: 'canonical', taskId: secondTaskId },
+            requirement: { recordId: requirementId, recordRevision: 1 },
+          },
         ],
       },
       reservations: { milestones: [], tasks: [], dependencies: [] },
       diff: {
         milestones: {
           create: 0,
-          reuse: 1,
+          reuse: 2,
           revise: 0,
           retire: 0,
           reactivate: 0,
         },
         tasks: {
           create: 0,
-          reuse: 1,
+          reuse: 2,
           revise: 0,
           retire: 0,
           reactivate: 0,
         },
         dependencies: {
           create: 0,
-          reuse: 0,
+          reuse: 1,
           revise: 0,
           retire: 0,
           reactivate: 0,
@@ -843,7 +929,7 @@ describe('planning and Board contracts', () => {
         ],
         approvedIntentLedger,
         latestProposal: revisionProposal,
-        approvedDeliveryPlan,
+        approvedDeliveryPlan: approvedPlanWithDependency,
       },
     };
     expect(pmPlanAssignmentSchema.parse(assignment)).toEqual(assignment);
@@ -860,6 +946,329 @@ describe('planning and Board contracts', () => {
           input: {
             ...assignment.input,
             latestProposal: { ...revisionProposal, diff },
+          },
+        }).success,
+      ).toBe(false);
+    }
+
+    const withoutSecondMilestone = {
+      ...revisionProposal.proposedPlan,
+      milestones: revisionProposal.proposedPlan.milestones.slice(0, 1),
+      traces: revisionProposal.proposedPlan.traces.filter(
+        (trace) =>
+          trace.kind !== 'milestone_covers' ||
+          trace.milestone.milestoneId !== secondMilestoneId,
+      ),
+    };
+    const withoutSecondTask = {
+      ...revisionProposal.proposedPlan,
+      tasks: revisionProposal.proposedPlan.tasks.slice(0, 1),
+      traces: revisionProposal.proposedPlan.traces.filter(
+        (trace) =>
+          trace.kind !== 'task_satisfies' || trace.task.taskId !== secondTaskId,
+      ),
+    };
+    for (const [proposedPlan, diff] of [
+      [
+        withoutSecondMilestone,
+        {
+          ...revisionProposal.diff,
+          milestones: { ...revisionProposal.diff.milestones, reuse: 1 },
+          traceRemoveCount: 1,
+        },
+      ],
+      [
+        withoutSecondTask,
+        {
+          ...revisionProposal.diff,
+          tasks: { ...revisionProposal.diff.tasks, reuse: 1 },
+          traceRemoveCount: 1,
+        },
+      ],
+      [
+        { ...revisionProposal.proposedPlan, dependencies: [] },
+        {
+          ...revisionProposal.diff,
+          dependencies: { ...revisionProposal.diff.dependencies, reuse: 0 },
+        },
+      ],
+    ] as const) {
+      expect(
+        pmPlanAssignmentSchema.safeParse({
+          ...assignment,
+          input: {
+            ...assignment.input,
+            latestProposal: { ...revisionProposal, proposedPlan, diff },
+          },
+        }).success,
+      ).toBe(false);
+    }
+
+    const inventedMilestoneId = id('75');
+    const inventedTaskId = id('76');
+    const inventedDependencyId = id('77');
+    for (const proposedPlan of [
+      {
+        ...revisionProposal.proposedPlan,
+        milestones: revisionProposal.proposedPlan.milestones.map((milestone) =>
+          milestone.milestoneId === secondMilestoneId
+            ? { ...milestone, milestoneId: inventedMilestoneId }
+            : milestone,
+        ),
+        traces: revisionProposal.proposedPlan.traces.map((trace) =>
+          trace.kind === 'milestone_covers' &&
+          trace.milestone.milestoneId === secondMilestoneId
+            ? {
+                ...trace,
+                milestone: {
+                  kind: 'canonical' as const,
+                  milestoneId: inventedMilestoneId,
+                },
+              }
+            : trace,
+        ),
+      },
+      {
+        ...revisionProposal.proposedPlan,
+        tasks: revisionProposal.proposedPlan.tasks.map((task) =>
+          task.taskId === secondTaskId
+            ? { ...task, taskId: inventedTaskId }
+            : task,
+        ),
+        traces: revisionProposal.proposedPlan.traces.map((trace) =>
+          trace.kind === 'task_satisfies' && trace.task.taskId === secondTaskId
+            ? {
+                ...trace,
+                task: { kind: 'canonical' as const, taskId: inventedTaskId },
+              }
+            : trace,
+        ),
+      },
+      {
+        ...revisionProposal.proposedPlan,
+        dependencies: revisionProposal.proposedPlan.dependencies.map(
+          (dependency) => ({
+            ...dependency,
+            dependencyId: inventedDependencyId,
+          }),
+        ),
+      },
+    ]) {
+      expect(
+        pmPlanAssignmentSchema.safeParse({
+          ...assignment,
+          input: {
+            ...assignment.input,
+            latestProposal: { ...revisionProposal, proposedPlan },
+          },
+        }).success,
+      ).toBe(false);
+    }
+
+    const retiredDependencyProposal = {
+      ...revisionProposal,
+      proposedPlan: {
+        ...revisionProposal.proposedPlan,
+        dependencies: [
+          {
+            operation: 'revise',
+            dependencyId,
+            expectedRevision: 1,
+            lifecycle: 'retired',
+          },
+        ],
+      },
+      diff: {
+        ...revisionProposal.diff,
+        dependencies: {
+          create: 0,
+          reuse: 0,
+          revise: 0,
+          retire: 1,
+          reactivate: 0,
+        },
+      },
+    };
+    expect(
+      pmPlanAssignmentSchema.safeParse({
+        ...assignment,
+        input: {
+          ...assignment.input,
+          latestProposal: retiredDependencyProposal,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      pmPlanAssignmentSchema.safeParse({
+        ...assignment,
+        input: {
+          ...assignment.input,
+          latestProposal: {
+            ...retiredDependencyProposal,
+            proposedPlan: {
+              ...retiredDependencyProposal.proposedPlan,
+              dependencies: [
+                {
+                  ...retiredDependencyProposal.proposedPlan.dependencies[0],
+                  prerequisite: { kind: 'canonical', taskId: secondTaskId },
+                  dependent: { kind: 'canonical', taskId },
+                },
+              ],
+            },
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('validates effective ordinals against the frozen approved plan', () => {
+    const secondMilestoneId = id('73');
+    const secondTaskId = id('74');
+    const ordinalProposal = {
+      ...pendingPlanProposal,
+      base: {
+        ...pendingPlanProposal.base,
+        deliveryPlan: { id: planId, revision: 1 },
+      },
+      proposedPlan: {
+        summary: 'Extend the approved Todo plan.',
+        milestones: [
+          {
+            operation: 'reuse',
+            milestoneId,
+            expectedRevision: 1,
+          },
+          {
+            operation: 'create',
+            key: 'second-milestone',
+            content: {
+              ...proposedPlan.milestones[0].content,
+              title: 'Todo UI milestone',
+              ordinal: 2,
+            },
+          },
+        ],
+        tasks: [
+          {
+            operation: 'reuse',
+            taskId,
+            expectedContractRevision: 1,
+            expectedCurrentRevision: 1,
+          },
+          {
+            operation: 'create',
+            key: 'second-task',
+            content: {
+              ...proposedPlan.tasks[0].content,
+              milestone: { kind: 'canonical', milestoneId },
+              title: 'Render Todo',
+              ordinal: 2,
+            },
+          },
+        ],
+        dependencies: [],
+        traces: [
+          ...pendingPlanProposal.proposedPlan.traces.map((trace) =>
+            trace.kind === 'milestone_covers'
+              ? {
+                  ...trace,
+                  milestone: { kind: 'canonical', milestoneId },
+                }
+              : { ...trace, task: { kind: 'canonical', taskId } },
+          ),
+          {
+            kind: 'milestone_covers',
+            milestone: { kind: 'proposal', key: 'second-milestone' },
+            requirement: { recordId: requirementId, recordRevision: 1 },
+          },
+          {
+            kind: 'task_satisfies',
+            task: { kind: 'proposal', key: 'second-task' },
+            requirement: { recordId: requirementId, recordRevision: 1 },
+          },
+        ],
+      },
+      reservations: {
+        milestones: [{ key: 'second-milestone', id: secondMilestoneId }],
+        tasks: [{ key: 'second-task', id: secondTaskId }],
+        dependencies: [],
+      },
+      diff: {
+        milestones: {
+          create: 1,
+          reuse: 1,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        tasks: {
+          create: 1,
+          reuse: 1,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        dependencies: {
+          create: 0,
+          reuse: 0,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        traceCreateCount: 2,
+        traceRemoveCount: 0,
+      },
+    };
+    const assignment = {
+      kind: 'pm_plan',
+      projectId,
+      outputSchema: PM_PLAN_REPORT_SCHEMA,
+      planningCycleId: cycleId,
+      humanTurnId,
+      expectedCycleRevision: 2,
+      expectedProposalRevision: 2,
+      baseProjectIntentId: intentId,
+      baseProjectIntentRevision: 1,
+      baseLedgerId: ledgerId,
+      baseLedgerRevision: 1,
+      baseDeliveryPlanId: planId,
+      baseDeliveryPlanRevision: 1,
+      input: {
+        conversation: [
+          { turnId: humanTurnId, actor: 'human', message: 'Extend Todo.' },
+        ],
+        approvedIntentLedger,
+        latestProposal: ordinalProposal,
+        approvedDeliveryPlan,
+      },
+    };
+    expect(pmPlanAssignmentSchema.safeParse(assignment).success).toBe(true);
+
+    for (const [collection, ordinal] of [
+      ['milestones', 1],
+      ['milestones', 3],
+      ['tasks', 1],
+      ['tasks', 3],
+    ] as const) {
+      const members = ordinalProposal.proposedPlan[collection];
+      expect(
+        pmPlanAssignmentSchema.safeParse({
+          ...assignment,
+          input: {
+            ...assignment.input,
+            latestProposal: {
+              ...ordinalProposal,
+              proposedPlan: {
+                ...ordinalProposal.proposedPlan,
+                [collection]: [
+                  members[0],
+                  {
+                    ...members[1],
+                    content: { ...members[1].content, ordinal },
+                  },
+                ],
+              },
+            },
           },
         }).success,
       ).toBe(false);

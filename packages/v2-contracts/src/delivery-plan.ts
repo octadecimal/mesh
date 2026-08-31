@@ -1378,6 +1378,8 @@ const proposalDiffMatchesBase = (
     ['tasks', proposal.proposedPlan.tasks],
     ['dependencies', proposal.proposedPlan.dependencies],
   ] as const) {
+    const baseIds = new Set<string>(baseCollections[name].keys());
+    const representedBaseIds = new Set<string>();
     for (const member of members) {
       if (member.operation === 'create') {
         expected[name].create += 1;
@@ -1397,6 +1399,7 @@ const proposalDiffMatchesBase = (
           ? member.expectedContractRevision
           : member.expectedRevision;
       if (prior?.revision !== guardedRevision) return false;
+      representedBaseIds.add(id);
       if (member.operation === 'reuse') {
         expected[name].reuse += 1;
       } else if (prior.lifecycle === member.lifecycle) {
@@ -1407,6 +1410,12 @@ const proposalDiffMatchesBase = (
         expected[name].reactivate += 1;
       }
     }
+    if (
+      representedBaseIds.size !== baseIds.size ||
+      [...baseIds].some((id) => !representedBaseIds.has(id))
+    ) {
+      return false;
+    }
   }
 
   const milestoneReservations = new Map(
@@ -1415,6 +1424,57 @@ const proposalDiffMatchesBase = (
   const taskReservations = new Map(
     proposal.reservations.tasks.map(({ key, id }) => [key, id]),
   );
+  const effectiveMilestones = proposal.proposedPlan.milestones.map((member) => {
+    if (member.operation === 'create') {
+      return {
+        id: milestoneReservations.get(member.key),
+        ordinal: member.content.ordinal,
+      };
+    }
+    return {
+      id: member.milestoneId,
+      ordinal:
+        member.operation === 'reuse'
+          ? baseCollections.milestones.get(member.milestoneId)?.ordinal
+          : member.content.ordinal,
+    };
+  });
+  if (
+    effectiveMilestones.some(
+      (milestone, index) =>
+        milestone.id === undefined || milestone.ordinal !== index + 1,
+    )
+  ) {
+    return false;
+  }
+  const effectiveMilestoneIds = new Set(
+    effectiveMilestones.map(({ id }) => id as string),
+  );
+  const taskOrdinals = new Map<string, number>();
+  for (const member of proposal.proposedPlan.tasks) {
+    const prior =
+      member.operation === 'create'
+        ? undefined
+        : baseCollections.tasks.get(member.taskId);
+    const milestoneId =
+      member.operation === 'reuse'
+        ? prior?.milestoneId
+        : member.content.milestone.kind === 'canonical'
+          ? member.content.milestone.milestoneId
+          : milestoneReservations.get(member.content.milestone.key);
+    const ordinal =
+      member.operation === 'reuse' ? prior?.ordinal : member.content.ordinal;
+    const expectedOrdinal =
+      milestoneId === undefined ? 1 : (taskOrdinals.get(milestoneId) ?? 0) + 1;
+    if (
+      milestoneId === undefined ||
+      !effectiveMilestoneIds.has(milestoneId) ||
+      ordinal !== expectedOrdinal
+    ) {
+      return false;
+    }
+    taskOrdinals.set(milestoneId, expectedOrdinal);
+  }
   const milestoneRevisions = new Map(
     proposal.proposedPlan.milestones.map((member) => [
       member.operation === 'create'
