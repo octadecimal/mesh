@@ -1182,7 +1182,7 @@ const sameJson = (left: unknown, right: unknown) =>
 
 const matchesApprovedMaterialization = (
   proposal: DeliveryPlanProposal,
-  baseDeliveryPlan: ApprovedDeliveryPlan | null,
+  baseDeliveryPlan: ApprovedDeliveryPlan | null | undefined,
   deliveryPlan: ApprovedDeliveryPlan,
 ) => {
   const { plan } = deliveryPlan;
@@ -1242,8 +1242,8 @@ const matchesApprovedMaterialization = (
       );
       if (
         materialized.revision !== member.expectedRevision ||
-        prior === undefined ||
-        !sameJson(materialized, prior)
+        (baseDeliveryPlan !== undefined &&
+          (prior === undefined || !sameJson(materialized, prior)))
       ) {
         return false;
       }
@@ -1280,8 +1280,8 @@ const matchesApprovedMaterialization = (
       );
       if (
         materialized.revision !== member.expectedContractRevision ||
-        prior === undefined ||
-        !sameJson(materialized, prior)
+        (baseDeliveryPlan !== undefined &&
+          (prior === undefined || !sameJson(materialized, prior)))
       )
         return false;
       continue;
@@ -1342,8 +1342,8 @@ const matchesApprovedMaterialization = (
       );
       if (
         materialized.revision !== member.expectedRevision ||
-        prior === undefined ||
-        !sameJson(materialized, prior)
+        (baseDeliveryPlan !== undefined &&
+          (prior === undefined || !sameJson(materialized, prior)))
       ) {
         return false;
       }
@@ -1365,6 +1365,7 @@ const matchesApprovedMaterialization = (
           resolveTaskId(member.prerequisite) ||
           materialized.dependentTaskId !== resolveTaskId(member.dependent))) ||
       (member.operation === 'revise' &&
+        baseDeliveryPlan !== undefined &&
         (materialized.prerequisiteTaskId !== prior?.prerequisiteTaskId ||
           materialized.dependentTaskId !== prior?.dependentTaskId)) ||
       materialized.proposalId !== proposal.id ||
@@ -1639,6 +1640,21 @@ export const approvedDeliveryPlanMaterializationSchema = z
       path: ['deliveryPlan'],
       message:
         'Approved delivery plan must exactly materialize its plan proposal',
+    },
+  );
+
+export const approvedDeliveryPlanPublicMaterializationSchema = z
+  .strictObject({
+    proposal: deliveryPlanProposalSchema,
+    deliveryPlan: approvedDeliveryPlanSchema,
+  })
+  .refine(
+    ({ proposal, deliveryPlan }) =>
+      matchesApprovedMaterialization(proposal, undefined, deliveryPlan),
+    {
+      path: ['deliveryPlan'],
+      message:
+        'Approved delivery plan must locally materialize its plan proposal',
     },
   );
 

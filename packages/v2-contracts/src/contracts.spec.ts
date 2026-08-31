@@ -2323,7 +2323,143 @@ describe('V2 intent ledger contracts', () => {
         ...approvedPlanHistory,
         baseDeliveryPlan: null,
       }).success,
-    ).toBe(true);
+    ).toBe(false);
+
+    const replacementCycleId = randomUUID();
+    const replacementHumanTurnId = randomUUID();
+    const replacementPmTurnId = randomUUID();
+    const replacementExecutionId = randomUUID();
+    const replacementProposalId = randomUUID();
+    const replacementProposal = {
+      ...approvedPlanCycle.deliveryPlanProposals[0],
+      id: replacementProposalId,
+      planningCycleId: replacementCycleId,
+      base: {
+        ...approvedPlanCycle.deliveryPlanProposals[0].base,
+        deliveryPlan: { id: planId, revision: 1 },
+      },
+      proposedPlan: {
+        summary: 'Retain the approved Todo plan.',
+        milestones: [
+          {
+            operation: 'reuse' as const,
+            milestoneId: historicalMilestoneId,
+            expectedRevision: 1,
+          },
+        ],
+        tasks: [
+          {
+            operation: 'reuse' as const,
+            taskId: historicalTaskId,
+            expectedContractRevision: 1,
+            expectedCurrentRevision: 1,
+          },
+        ],
+        dependencies: [],
+        traces: [
+          {
+            kind: 'milestone_covers' as const,
+            milestone: {
+              kind: 'canonical' as const,
+              milestoneId: historicalMilestoneId,
+            },
+            requirement:
+              approvedPlanCycle.deliveryPlanProposals[0].proposedPlan.traces[0]
+                .requirement,
+          },
+          {
+            kind: 'task_satisfies' as const,
+            task: {
+              kind: 'canonical' as const,
+              taskId: historicalTaskId,
+            },
+            requirement:
+              approvedPlanCycle.deliveryPlanProposals[0].proposedPlan.traces[1]
+                .requirement,
+          },
+        ],
+      },
+      reservations: { milestones: [], tasks: [], dependencies: [] },
+      diff: {
+        milestones: {
+          create: 0,
+          reuse: 1,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        tasks: {
+          create: 0,
+          reuse: 1,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        dependencies: {
+          create: 0,
+          reuse: 0,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        traceCreateCount: 0,
+        traceRemoveCount: 0,
+      },
+      createdByTurnId: replacementPmTurnId,
+      createdByExecutionId: replacementExecutionId,
+    };
+    const replacementCycle = {
+      ...approvedPlanCycle,
+      cycle: {
+        ...approvedPlanCycle.cycle,
+        id: replacementCycleId,
+      },
+      purpose: {
+        kind: 'delivery_plan' as const,
+        baseDeliveryPlanId: planId,
+        baseDeliveryPlanRevision: 1,
+      },
+      turns: [
+        {
+          ...approvedPlanCycle.turns[0],
+          id: replacementHumanTurnId,
+          planningCycleId: replacementCycleId,
+          executionId: replacementExecutionId,
+        },
+        {
+          ...approvedPlanCycle.turns[1],
+          id: replacementPmTurnId,
+          planningCycleId: replacementCycleId,
+          executionId: replacementExecutionId,
+        },
+      ],
+      deliveryPlanProposals: [replacementProposal],
+    };
+    const replacementDeliveryPlan = {
+      ...approvedDeliveryPlan,
+      plan: {
+        ...approvedDeliveryPlan.plan,
+        revision: 2,
+        baseDeliveryPlanRevision: 1,
+        proposalId: replacementProposalId,
+        summary: replacementProposal.proposedPlan.summary,
+      },
+    };
+    const replacementSnapshot = {
+      ...approvedPlanHistory,
+      planningCycles: [...approvedPlanHistory.planningCycles, replacementCycle],
+      deliveryPlan: replacementDeliveryPlan,
+      board: { ...emptyApprovedBoard, deliveryPlanRevision: 2 },
+    };
+    expect(v2ProjectSnapshotSchema.parse(replacementSnapshot)).toEqual(
+      replacementSnapshot,
+    );
+    expect(
+      v2ProjectSnapshotSchema.safeParse({
+        ...replacementSnapshot,
+        baseDeliveryPlan: approvedDeliveryPlan,
+      }).success,
+    ).toBe(false);
     expect(
       v2ProjectSnapshotSchema.safeParse({
         ...approvedPlanHistory,

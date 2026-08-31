@@ -16,7 +16,7 @@ import {
   legacyM2PlanningCycleViewSchema,
 } from './intent';
 import {
-  approvedDeliveryPlanMaterializationSchema,
+  approvedDeliveryPlanPublicMaterializationSchema,
   approvedDeliveryPlanSchema,
   deliveryPlanPlanningCycleViewSchema,
   planningCycleViewSchema,
@@ -130,7 +130,6 @@ export const deliveryPlanApprovedPayloadSchema = z
   .strictObject({
     schemaVersion: z.literal(1),
     planningCycle: deliveryPlanPlanningCycleViewSchema,
-    baseDeliveryPlan: approvedDeliveryPlanSchema.nullable().optional(),
     deliveryPlan: approvedDeliveryPlanSchema,
     board: boardViewSchema,
   })
@@ -164,11 +163,11 @@ export const deliveryPlanApprovedPayloadSchema = z
       });
     }
     if (latest !== undefined) {
-      const materialized = approvedDeliveryPlanMaterializationSchema.safeParse({
-        proposal: latest,
-        baseDeliveryPlan: value.baseDeliveryPlan ?? null,
-        deliveryPlan: value.deliveryPlan,
-      });
+      const materialized =
+        approvedDeliveryPlanPublicMaterializationSchema.safeParse({
+          proposal: latest,
+          deliveryPlan: value.deliveryPlan,
+        });
       if (!materialized.success) {
         context.addIssue({
           code: 'custom',

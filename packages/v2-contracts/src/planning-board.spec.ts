@@ -1610,7 +1610,7 @@ describe('planning and Board contracts', () => {
         deliveryPlan: revisedDeliveryPlan,
         board: revisionBoard,
       }).success,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       v2CommandResultSchema.safeParse({
         ok: true,
@@ -1620,7 +1620,7 @@ describe('planning and Board contracts', () => {
         deliveryPlan: revisedDeliveryPlan,
         board: revisionBoard,
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       domainEventSchema.safeParse({
         id: id('79'),
@@ -1636,7 +1636,7 @@ describe('planning and Board contracts', () => {
           board: revisionBoard,
         },
       }).success,
-    ).toBe(true);
+    ).toBe(false);
     expect(
       domainEventSchema.safeParse({
         id: id('79'),
@@ -1651,7 +1651,7 @@ describe('planning and Board contracts', () => {
           board: revisionBoard,
         },
       }).success,
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it('validates effective ordinals against the frozen approved plan', () => {

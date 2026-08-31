@@ -15,7 +15,7 @@ import {
 } from './intent';
 import { boardViewSchema, type BoardView } from './board';
 import {
-  approvedDeliveryPlanMaterializationSchema,
+  approvedDeliveryPlanPublicMaterializationSchema,
   approvedDeliveryPlanSchema,
   deliveryPlanPlanningCycleViewSchema,
   intentPlanningCycleViewSchema,
@@ -104,7 +104,6 @@ export const v2ProjectSnapshotSchema = z
     planningCycles: z.array(planningCycleViewSchema).max(20).readonly(),
     planningHistoryTruncated: z.boolean(),
     intentLedger: approvedIntentLedgerSchema.nullable(),
-    baseDeliveryPlan: approvedDeliveryPlanSchema.nullable().optional(),
     deliveryPlan: approvedDeliveryPlanSchema.nullable(),
     board: boardViewSchema,
     cursors: projectEventCursorsSchema,
@@ -314,9 +313,8 @@ export const v2ProjectSnapshotSchema = z
       }
       if (
         latestProposal !== undefined &&
-        !approvedDeliveryPlanMaterializationSchema.safeParse({
+        !approvedDeliveryPlanPublicMaterializationSchema.safeParse({
           proposal: latestProposal,
-          baseDeliveryPlan: value.baseDeliveryPlan ?? null,
           deliveryPlan: value.deliveryPlan,
         }).success
       ) {
@@ -327,13 +325,6 @@ export const v2ProjectSnapshotSchema = z
             'Snapshot delivery plan must exactly materialize its approved proposal',
         });
       }
-    }
-    if (value.deliveryPlan === null && value.baseDeliveryPlan != null) {
-      context.addIssue({
-        code: 'custom',
-        path: ['baseDeliveryPlan'],
-        message: 'A snapshot plan base requires a canonical delivery plan',
-      });
     }
     if (value.deliveryPlan !== null) {
       if (
@@ -596,7 +587,6 @@ const versionedPlanApproveResultSchema = z
     schemaVersion: z.literal(2),
     commandType: z.literal('plan_proposal.approve'),
     planningCycle: deliveryPlanPlanningCycleViewSchema,
-    baseDeliveryPlan: approvedDeliveryPlanSchema.nullable().optional(),
     deliveryPlan: approvedDeliveryPlanSchema,
     board: boardViewSchema,
   })
@@ -632,9 +622,8 @@ const versionedPlanApproveResultSchema = z
     }
     if (
       latest !== undefined &&
-      !approvedDeliveryPlanMaterializationSchema.safeParse({
+      !approvedDeliveryPlanPublicMaterializationSchema.safeParse({
         proposal: latest,
-        baseDeliveryPlan: value.baseDeliveryPlan ?? null,
         deliveryPlan: value.deliveryPlan,
       }).success
     ) {
