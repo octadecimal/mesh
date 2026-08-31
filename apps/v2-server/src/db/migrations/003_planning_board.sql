@@ -74,6 +74,7 @@ CREATE TABLE delivery_plan_proposals (
   created_at TEXT NOT NULL CHECK (length(created_at) > 0),
   UNIQUE (planning_cycle_id, revision),
   UNIQUE (id, project_id),
+  UNIQUE (id, project_id, revision),
   UNIQUE (id, planning_cycle_id, revision),
   FOREIGN KEY (planning_cycle_id, project_id)
     REFERENCES planning_cycles(id, project_id),
@@ -127,7 +128,8 @@ CREATE TABLE delivery_plan_proposal_milestone_reservations (
   proposal_key TEXT NOT NULL CHECK (length(proposal_key) > 0),
   milestone_id TEXT NOT NULL CHECK (length(milestone_id) > 0),
   PRIMARY KEY (proposal_id, proposal_key),
-  UNIQUE (proposal_id, milestone_id)
+  UNIQUE (proposal_id, milestone_id),
+  UNIQUE (proposal_id, proposal_key, milestone_id)
 );
 
 CREATE TABLE delivery_plan_proposal_task_reservations (
@@ -135,7 +137,8 @@ CREATE TABLE delivery_plan_proposal_task_reservations (
   proposal_key TEXT NOT NULL CHECK (length(proposal_key) > 0),
   task_id TEXT NOT NULL CHECK (length(task_id) > 0),
   PRIMARY KEY (proposal_id, proposal_key),
-  UNIQUE (proposal_id, task_id)
+  UNIQUE (proposal_id, task_id),
+  UNIQUE (proposal_id, proposal_key, task_id)
 );
 
 CREATE TABLE delivery_plan_proposal_dependency_reservations (
@@ -143,7 +146,106 @@ CREATE TABLE delivery_plan_proposal_dependency_reservations (
   proposal_key TEXT NOT NULL CHECK (length(proposal_key) > 0),
   dependency_id TEXT NOT NULL CHECK (length(dependency_id) > 0),
   PRIMARY KEY (proposal_id, proposal_key),
-  UNIQUE (proposal_id, dependency_id)
+  UNIQUE (proposal_id, dependency_id),
+  UNIQUE (proposal_id, proposal_key, dependency_id)
+);
+
+CREATE TABLE delivery_plan_proposal_milestones (
+  proposal_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  proposal_revision INTEGER NOT NULL CHECK (proposal_revision > 0),
+  ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+  identity_key TEXT NOT NULL CHECK (length(identity_key) > 0),
+  proposal_key TEXT CHECK (proposal_key IS NULL OR length(proposal_key) > 0),
+  milestone_id TEXT NOT NULL CHECK (length(milestone_id) > 0),
+  member_json TEXT NOT NULL CHECK (json_valid(member_json)),
+  PRIMARY KEY (proposal_id, identity_key),
+  UNIQUE (proposal_id, ordinal),
+  UNIQUE (proposal_id, milestone_id),
+  FOREIGN KEY (proposal_id, project_id, proposal_revision)
+    REFERENCES delivery_plan_proposals(id, project_id, revision),
+  CHECK ((proposal_key IS NULL) = (identity_key NOT LIKE 'proposal:%'))
+);
+
+CREATE TABLE delivery_plan_proposal_tasks (
+  proposal_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  proposal_revision INTEGER NOT NULL CHECK (proposal_revision > 0),
+  ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+  identity_key TEXT NOT NULL CHECK (length(identity_key) > 0),
+  proposal_key TEXT CHECK (proposal_key IS NULL OR length(proposal_key) > 0),
+  task_id TEXT NOT NULL CHECK (length(task_id) > 0),
+  milestone_identity_key TEXT CHECK (
+    milestone_identity_key IS NULL OR length(milestone_identity_key) > 0
+  ),
+  member_json TEXT NOT NULL CHECK (json_valid(member_json)),
+  PRIMARY KEY (proposal_id, identity_key),
+  UNIQUE (proposal_id, ordinal),
+  UNIQUE (proposal_id, task_id),
+  FOREIGN KEY (proposal_id, project_id, proposal_revision)
+    REFERENCES delivery_plan_proposals(id, project_id, revision),
+  FOREIGN KEY (proposal_id, milestone_identity_key)
+    REFERENCES delivery_plan_proposal_milestones(proposal_id, identity_key),
+  CHECK ((proposal_key IS NULL) = (identity_key NOT LIKE 'proposal:%'))
+);
+
+CREATE TABLE delivery_plan_proposal_dependencies (
+  proposal_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  proposal_revision INTEGER NOT NULL CHECK (proposal_revision > 0),
+  ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+  identity_key TEXT NOT NULL CHECK (length(identity_key) > 0),
+  proposal_key TEXT CHECK (proposal_key IS NULL OR length(proposal_key) > 0),
+  dependency_id TEXT NOT NULL CHECK (length(dependency_id) > 0),
+  prerequisite_task_identity_key TEXT CHECK (
+    prerequisite_task_identity_key IS NULL OR length(prerequisite_task_identity_key) > 0
+  ),
+  dependent_task_identity_key TEXT CHECK (
+    dependent_task_identity_key IS NULL OR length(dependent_task_identity_key) > 0
+  ),
+  member_json TEXT NOT NULL CHECK (json_valid(member_json)),
+  PRIMARY KEY (proposal_id, identity_key),
+  UNIQUE (proposal_id, ordinal),
+  UNIQUE (proposal_id, dependency_id),
+  FOREIGN KEY (proposal_id, project_id, proposal_revision)
+    REFERENCES delivery_plan_proposals(id, project_id, revision),
+  FOREIGN KEY (proposal_id, prerequisite_task_identity_key)
+    REFERENCES delivery_plan_proposal_tasks(proposal_id, identity_key),
+  FOREIGN KEY (proposal_id, dependent_task_identity_key)
+    REFERENCES delivery_plan_proposal_tasks(proposal_id, identity_key),
+  CHECK (
+    prerequisite_task_identity_key IS NULL
+    OR prerequisite_task_identity_key <> dependent_task_identity_key
+  ),
+  CHECK ((proposal_key IS NULL) = (identity_key NOT LIKE 'proposal:%'))
+);
+
+CREATE TABLE delivery_plan_proposal_traces (
+  proposal_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  proposal_revision INTEGER NOT NULL CHECK (proposal_revision > 0),
+  ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+  kind TEXT NOT NULL CHECK (kind IN ('milestone_covers', 'task_satisfies')),
+  milestone_identity_key TEXT,
+  task_identity_key TEXT,
+  record_id TEXT NOT NULL,
+  record_revision INTEGER NOT NULL CHECK (record_revision > 0),
+  trace_json TEXT NOT NULL CHECK (json_valid(trace_json)),
+  PRIMARY KEY (proposal_id, ordinal),
+  FOREIGN KEY (proposal_id, project_id, proposal_revision)
+    REFERENCES delivery_plan_proposals(id, project_id, revision),
+  FOREIGN KEY (proposal_id, milestone_identity_key)
+    REFERENCES delivery_plan_proposal_milestones(proposal_id, identity_key),
+  FOREIGN KEY (proposal_id, task_identity_key)
+    REFERENCES delivery_plan_proposal_tasks(proposal_id, identity_key),
+  FOREIGN KEY (record_id, record_revision, project_id)
+    REFERENCES ledger_record_revisions(record_id, revision, project_id),
+  CHECK (
+    (kind = 'milestone_covers' AND milestone_identity_key IS NOT NULL
+      AND task_identity_key IS NULL)
+    OR (kind = 'task_satisfies' AND task_identity_key IS NOT NULL
+      AND milestone_identity_key IS NULL)
+  )
 );
 
 CREATE TABLE delivery_plans (

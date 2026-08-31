@@ -12,6 +12,7 @@ import {
   type V2Database,
 } from './database.js';
 import { migrateV2Database } from './migrate.js';
+import { PlanningRepository } from '../planning/planning-repository.js';
 import { V2CommandRepository } from '../storage/command-repository.js';
 import {
   createV2TestDatabase,
@@ -398,6 +399,10 @@ describe('V2 database identity and migration', () => {
         'delivery_plan_proposal_milestone_reservations',
         'delivery_plan_proposal_task_reservations',
         'delivery_plan_proposal_dependency_reservations',
+        'delivery_plan_proposal_milestones',
+        'delivery_plan_proposal_tasks',
+        'delivery_plan_proposal_dependencies',
+        'delivery_plan_proposal_traces',
         'delivery_plans',
         'delivery_plan_revisions',
         'milestones',
@@ -701,6 +706,13 @@ describe('V2 database identity and migration', () => {
     const executionId = randomUUID();
     const diagnosticId = randomUUID();
     const cycleId = randomUUID();
+    const humanTurnId = randomUUID();
+    const pmTurnId = randomUUID();
+    const proposalId = randomUUID();
+    const recordId = randomUUID();
+    const intentId = randomUUID();
+    const ledgerId = randomUUID();
+    const runtimeEventId = randomUUID();
     const at = '2026-08-29T01:02:03.004Z';
     const resultJson = '{ "ok": false, "evidence": [3, 2, 1] }';
     const domainPayload = '{ "ordered": ["b", "a"], "space": true }';
@@ -738,17 +750,26 @@ describe('V2 database identity and migration', () => {
     database
       .prepare(
         `INSERT INTO planning_cycles VALUES (
-          ?, ?, 'execution_active', 3, ?, 1, NULL, NULL, 2, ?, ?, ?, NULL
+          ?, ?, 'approved', 3, ?, 1, NULL, NULL, 1, NULL, ?, ?, ?
         )`,
       )
-      .run(cycleId, projectId, profileId, executionId, at, at);
-    database
-      .prepare(
-        `INSERT INTO command_results VALUES (
-          'm2-command', 'planning_cycle.submit_turn', ?, ?, ?
-        )`,
-      )
-      .run('c'.repeat(64), resultJson, at);
+      .run(cycleId, projectId, profileId, at, at, at);
+    for (const [index, commandType] of [
+      'planning_cycle.submit_turn',
+      'planning_proposal.approve',
+      'planning_proposal.reject',
+      'planning_cycle.abandon',
+    ].entries()) {
+      database
+        .prepare(`INSERT INTO command_results VALUES (?, ?, ?, ?, ?)`)
+        .run(
+          `m2-command-${index}`,
+          commandType,
+          String(index + 3).repeat(64),
+          resultJson,
+          at,
+        );
+    }
     database
       .prepare(`INSERT INTO event_streams VALUES (?, 'domain', 11)`)
       .run(projectId);
@@ -772,13 +793,148 @@ describe('V2 database identity and migration', () => {
         )`,
       )
       .run(
-        randomUUID(),
+        runtimeEventId,
         projectId,
         executionId,
         diagnosticId,
         at,
         runtimePayload,
       );
+    const intentContent = {
+      goal: 'Ship Todo.',
+      targetUsers: ['Operators'],
+      desiredCapabilities: ['Manage tasks'],
+      constraints: [],
+      nonGoals: [],
+      successConditions: ['Tasks persist'],
+      rationale: 'Requested.',
+      provenance: [
+        {
+          kind: 'conversation_turn',
+          turnId: humanTurnId,
+          rationale: 'Request.',
+        },
+      ],
+    };
+    const proposedRecord = {
+      operation: 'create',
+      key: 'requirement',
+      recordId,
+      content: {
+        type: 'requirement',
+        kind: 'functional',
+        status: 'proposed',
+        priority: 'must',
+        statement: 'Tasks persist.',
+        rationale: 'Core.',
+      },
+      provenance: [
+        {
+          kind: 'conversation_turn',
+          turnId: humanTurnId,
+          rationale: 'Request.',
+        },
+      ],
+    };
+    database
+      .prepare(
+        `INSERT INTO planning_turns VALUES (?, ?, ?, 1, 'human', ?, 'execution_bound', ?, ?)`,
+      )
+      .run(humanTurnId, projectId, cycleId, 'Plan Todo.', executionId, at);
+    database
+      .prepare(
+        `INSERT INTO planning_turns VALUES (?, ?, ?, 2, 'pm', ?, NULL, ?, ?)`,
+      )
+      .run(pmTurnId, projectId, cycleId, 'Approved intent.', executionId, at);
+    database
+      .prepare(
+        `INSERT INTO planning_proposals VALUES (
+          ?, ?, ?, 1, 'approved', NULL, NULL, ?, ?, ?, '[]', ?, ?, ?, NULL, ?, ?
+        )`,
+      )
+      .run(
+        proposalId,
+        projectId,
+        cycleId,
+        'Todo intent',
+        JSON.stringify(intentContent),
+        JSON.stringify([proposedRecord]),
+        JSON.stringify({
+          intentChanges: [
+            'goal',
+            'targetUsers',
+            'desiredCapabilities',
+            'successConditions',
+            'rationale',
+            'provenance',
+          ],
+          recordChanges: { create: 1, revise: 0, reuse: 0 },
+          relationshipChanges: { added: [], removed: [] },
+        }),
+        pmTurnId,
+        executionId,
+        at,
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO planning_proposal_records VALUES (?, 'requirement', ?)`,
+      )
+      .run(proposalId, recordId);
+    database
+      .prepare(
+        `INSERT INTO pm_output_receipts VALUES (?, ?, ?, ?, ?, ?, 'accepted', NULL, ?)`,
+      )
+      .run(
+        executionId,
+        projectId,
+        cycleId,
+        humanTurnId,
+        runtimeEventId,
+        'e'.repeat(64),
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO project_intent_revisions VALUES (?, ?, 1, ?, ?, 'human', ?)`,
+      )
+      .run(
+        intentId,
+        projectId,
+        JSON.stringify({ ...intentContent, provenance: undefined }),
+        proposalId,
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO project_intent_provenance VALUES (?, 1, ?, ?, 1, 'Request.')`,
+      )
+      .run(intentId, projectId, humanTurnId);
+    database
+      .prepare(`INSERT INTO ledger_records VALUES (?, ?, 'requirement', ?, ?)`)
+      .run(recordId, projectId, proposalId, at);
+    database
+      .prepare(
+        `INSERT INTO ledger_record_revisions VALUES (?, ?, 1, ?, ?, 'human', ?)`,
+      )
+      .run(
+        recordId,
+        projectId,
+        JSON.stringify({ ...proposedRecord.content, status: 'approved' }),
+        proposalId,
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO ledger_record_revision_provenance VALUES (?, 1, ?, ?, 1, 'Request.')`,
+      )
+      .run(recordId, projectId, humanTurnId);
+    database
+      .prepare(`INSERT INTO ledger_revisions VALUES (?, ?, 1, ?, 'human', ?)`)
+      .run(ledgerId, projectId, proposalId, at);
+    database
+      .prepare(`INSERT INTO ledger_revision_members VALUES (?, 1, ?, ?, 1, 1)`)
+      .run(ledgerId, projectId, recordId);
 
     const preservedTables = [
       'command_results',
@@ -787,6 +943,18 @@ describe('V2 database identity and migration', () => {
       'raw_diagnostics',
       'runtime_events',
       'worker_executions',
+      'planning_cycles',
+      'planning_turns',
+      'planning_proposals',
+      'planning_proposal_records',
+      'pm_output_receipts',
+      'project_intent_revisions',
+      'project_intent_provenance',
+      'ledger_records',
+      'ledger_record_revisions',
+      'ledger_record_revision_provenance',
+      'ledger_revisions',
+      'ledger_revision_members',
     ] as const;
     const snapshot = () =>
       Object.fromEntries(
@@ -839,6 +1007,17 @@ describe('V2 database identity and migration', () => {
     }
     expect(reopened.pragma('quick_check')).toEqual([{ quick_check: 'ok' }]);
     expect(reopened.pragma('foreign_key_check')).toEqual([]);
+    expect(
+      new PlanningRepository(reopened).planningSnapshot(projectId),
+    ).toMatchObject({
+      intentLedger: {
+        projectIntent: { id: intentId, revision: 1 },
+        ledger: { id: ledgerId, revision: 1 },
+        records: [{ recordId, revision: 1 }],
+      },
+      deliveryPlan: null,
+      board: { emptyReason: 'planning_required' },
+    });
   });
 
   it('rolls back the command-result rebuild when migration 3 fails', () => {

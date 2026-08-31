@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { inImmediateTransaction, openV2Database } from '../db/database.js';
 import { createV2TestDatabase } from '../test/create-v2-test-database.js';
+import { canonicalJson } from '../storage/canonical-json.js';
 import { PlanningRepository } from './planning-repository.js';
 
 const fixtures: ReturnType<typeof createV2TestDatabase>[] = [];
@@ -335,6 +336,33 @@ describe('PlanningRepository', () => {
     });
     expect(repository.approvedDeliveryPlan(fixture.project.id)).toBeUndefined();
 
+    expect(
+      fixture.database
+        .prepare(
+          `SELECT proposal_key, milestone_id
+           FROM delivery_plan_proposal_milestones WHERE proposal_id = ?`,
+        )
+        .all(proposal.id),
+    ).toEqual([{ proposal_key: 'milestone', milestone_id: milestoneId }]);
+    expect(
+      fixture.database
+        .prepare(
+          `SELECT kind FROM delivery_plan_proposal_traces
+           WHERE proposal_id = ? ORDER BY ordinal`,
+        )
+        .all(proposal.id),
+    ).toEqual([{ kind: 'milestone_covers' }, { kind: 'task_satisfies' }]);
+
+    fixture.database
+      .prepare(
+        `UPDATE delivery_plan_proposal_tasks SET member_json = '{}'
+         WHERE proposal_id = ? AND proposal_key = 'task'`,
+      )
+      .run(proposal.id);
+    expect(() => repository.deliveryPlanProposal(proposal.id)).toThrow(
+      /corrupt/i,
+    );
+
     fixture.database
       .prepare(
         `UPDATE delivery_plan_proposals
@@ -470,6 +498,19 @@ describe('PlanningRepository', () => {
           expectedDeliveryPlanRevision: 1,
           taskId,
           expectedContractRevision: 1,
+          expectedCurrentRevision: 2,
+          lifecycle: 'completed',
+          createdAt: at,
+        }),
+      ),
+    ).toThrow(/unchanged/i);
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        repository.appendTaskLifecycleRevisionInTransaction({
+          projectId: fixture.project.id,
+          expectedDeliveryPlanRevision: 1,
+          taskId,
+          expectedContractRevision: 1,
           expectedCurrentRevision: 1,
           lifecycle: 'completed',
           createdAt: at,
@@ -486,6 +527,72 @@ describe('PlanningRepository', () => {
       deliveryPlan: plan,
       board: { totalTaskCount: 1, cards: [{ taskCurrentRevision: 2 }] },
     });
+    reopened
+      .prepare(
+        `UPDATE task_revisions SET lifecycle = 'pending'
+         WHERE task_id = ? AND revision = 2`,
+      )
+      .run(taskId);
+    expect(() => reopenedRepository.currentTaskRevisions(plan)).toThrow(
+      /corrupt/i,
+    );
+    reopened
+      .prepare(
+        `UPDATE task_revisions SET lifecycle = 'completed'
+         WHERE task_id = ? AND revision = 2`,
+      )
+      .run(taskId);
+    reopened
+      .prepare(
+        `UPDATE board_filters SET updated_at = '2026-08-30T00:00:00.000Z'
+         WHERE project_id = ?`,
+      )
+      .run(fixture.project.id);
+    expect(() => reopenedRepository.boardFilter(fixture.project.id)).toThrow(
+      /corrupt/i,
+    );
+    reopened
+      .prepare(`UPDATE board_filters SET updated_at = ? WHERE project_id = ?`)
+      .run(at, fixture.project.id);
+    const retiredPlan = {
+      ...plan,
+      milestones: [{ ...plan.milestones[0], lifecycle: 'retired' as const }],
+      taskContracts: [
+        { ...plan.taskContracts[0], lifecycle: 'retired' as const },
+      ],
+    };
+    reopened
+      .prepare(
+        `UPDATE delivery_plan_revisions SET plan_json = ? WHERE project_id = ?`,
+      )
+      .run(canonicalJson(retiredPlan), fixture.project.id);
+    reopened
+      .prepare(
+        `UPDATE milestone_revisions SET lifecycle = 'retired',
+           revision_json = json_set(revision_json, '$.lifecycle', 'retired')
+         WHERE milestone_id = ? AND revision = 1`,
+      )
+      .run(milestoneId);
+    reopened
+      .prepare(
+        `UPDATE task_revisions SET lifecycle = 'retired',
+           revision_json = json_set(revision_json, '$.lifecycle', 'retired')
+         WHERE task_id = ? AND revision = 1`,
+      )
+      .run(taskId);
+    expect(() =>
+      inImmediateTransaction(reopened, () =>
+        reopenedRepository.appendTaskLifecycleRevisionInTransaction({
+          projectId: fixture.project.id,
+          expectedDeliveryPlanRevision: 1,
+          taskId,
+          expectedContractRevision: 1,
+          expectedCurrentRevision: 2,
+          lifecycle: 'pending',
+          createdAt: at,
+        }),
+      ),
+    ).toThrow(/retired/i);
     reopened
       .prepare(
         `UPDATE milestone_revisions
@@ -613,6 +720,43 @@ describe('PlanningRepository', () => {
         .prepare('SELECT * FROM delivery_plan_proposal_decisions')
         .all(),
     ).toEqual([]);
+  });
+
+  it('authenticates current cycle bases and contiguous plan proposal revisions', () => {
+    const { fixture, repository } = setup();
+    const { approved, proposal } = deliveryProposal(fixture, repository);
+    const stale: PlanningCycle = {
+      ...cycle(fixture),
+      lifecycle: 'abandoned',
+      endedAt: at,
+    };
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        repository.insertCycleInTransaction(stale),
+      ),
+    ).toThrow(/base/i);
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        repository.insertDeliveryPlanProposalInTransaction({
+          ...proposal,
+          id: randomUUID(),
+          revision: 3,
+          base: {
+            ...proposal.base,
+            projectIntentId: approved.projectIntent.id,
+          },
+        }),
+      ),
+    ).toThrow(/revision/i);
+  });
+
+  it('owns one coherent transaction for planning snapshots', () => {
+    const { fixture, repository } = setup();
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        repository.planningSnapshot(fixture.project.id),
+      ),
+    ).toThrow(/already active/i);
   });
 
   it('persists immutable cycles and ordered turns across reopen', () => {

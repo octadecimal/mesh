@@ -16,6 +16,24 @@ export type BoardProjectionInput = Readonly<{
   deliveryPlan: ApprovedDeliveryPlan | null;
   currentTaskRevisions: readonly TaskRevision[];
   filter: BoardFilter | null;
+  historicalMilestones?: readonly Readonly<{
+    milestoneId: string;
+    milestoneRevision: number;
+    title: string;
+    lifecycle: 'active' | 'retired';
+  }>[];
+  historicalRequirements?: readonly Readonly<{
+    recordId: string;
+    recordRevision: number;
+    statement: string;
+    requirementKind:
+      | 'functional'
+      | 'quality'
+      | 'ux'
+      | 'safety'
+      | 'operational'
+      | 'constraint';
+  }>[];
 }>;
 
 const unicodeCompare = (left: string, right: string) => {
@@ -72,7 +90,12 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
     deliveryPlan,
     currentTaskRevisions,
     filter,
+    historicalMilestones = [],
+    historicalRequirements = [],
   } = input;
+  if (historicalMilestones.length > 20 || historicalRequirements.length > 300) {
+    throw new Error('Historical Board metadata exceeds filter bounds');
+  }
   if (deliveryPlan === null) {
     if (currentTaskRevisions.length !== 0 || filter !== null) {
       throw new Error(
@@ -327,15 +350,22 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
     })),
     ...filter.milestoneIds
       .filter((id) => !milestones.has(id))
-      .map((id) => ({
-        value: id,
-        label: id,
-        selected: true,
-        matchingTaskCount: 0,
-        milestoneRevision: 1,
-        lifecycle: 'retired' as const,
-        historical: true,
-      })),
+      .map((id) => {
+        const historical = historicalMilestones.find(
+          ({ milestoneId }) => milestoneId === id,
+        );
+        if (!historical)
+          throw new Error('Historical milestone metadata is missing');
+        return {
+          value: historical.milestoneId,
+          label: historical.title,
+          selected: true,
+          matchingTaskCount: 0,
+          milestoneRevision: historical.milestoneRevision,
+          lifecycle: historical.lifecycle,
+          historical: true,
+        };
+      }),
   ].sort((left, right) => unicodeCompare(left.value, right.value));
   const enumOptions = <T extends string>(
     values: readonly T[],
@@ -375,21 +405,29 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
       const currentRequirement =
         currentRequirementIds.has(value) &&
         record?.content.type === 'requirement';
+      const historical = historicalRequirements.find(
+        ({ recordId }) => recordId === value,
+      );
+      if (!currentRequirement && !historical)
+        throw new Error('Historical requirement metadata is missing');
       return {
         value,
         label:
-          record?.content.type === 'requirement'
+          currentRequirement && record?.content.type === 'requirement'
             ? record.content.statement
-            : value,
+            : historical!.statement,
         selected: filter.requirementRecordIds.includes(value),
         matchingTaskCount: currentRequirement
           ? countWith('requirementRecordIds', value, cardRequirements)
           : 0,
-        recordRevision: record?.revision ?? 1,
+        recordRevision:
+          currentRequirement && record
+            ? record.revision
+            : historical!.recordRevision,
         requirementKind:
-          record?.content.type === 'requirement'
+          currentRequirement && record?.content.type === 'requirement'
             ? record.content.kind
-            : ('functional' as const),
+            : historical!.requirementKind,
         historical: !currentRequirement,
       };
     });

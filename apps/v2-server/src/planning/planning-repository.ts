@@ -13,6 +13,7 @@ import {
   ledgerRecordRevisionSchema,
   ledgerRelationshipSchema,
   ledgerRevisionSchema,
+  milestoneRevisionSchema,
   planningCycleSchema,
   planningCyclePurposeStateSchema,
   planningCycleViewSchema,
@@ -39,7 +40,7 @@ import {
   type TaskRevision,
 } from '@mesh/v2-contracts';
 
-import type { V2Database } from '../db/database.js';
+import { inImmediateTransaction, type V2Database } from '../db/database.js';
 import { canonicalJson } from '../storage/canonical-json.js';
 import { projectBoard } from './planning-board.js';
 
@@ -138,6 +139,7 @@ type ProvenanceRow = {
 
 type CyclePurposeRow = {
   planning_cycle_id: string;
+  project_id: string;
   purpose: PlanningCyclePurposeState['purpose'];
   base_delivery_plan_id: string | null;
   base_delivery_plan_revision: number | null;
@@ -183,8 +185,22 @@ type DeliveryPlanRow = {
   approved_by: 'human';
   approved_at: string;
 };
-type BoardFilterRow = { filter_json: string };
-type TaskRevisionRow = { revision_json: string };
+type BoardFilterRow = {
+  project_id: string;
+  revision: number;
+  filter_json: string;
+  updated_at: string;
+};
+type TaskRevisionRow = {
+  task_id: string;
+  project_id: string;
+  revision: number;
+  contract_revision: number;
+  revision_kind: TaskRevision['revisionKind'];
+  lifecycle: TaskRevision['lifecycle'];
+  milestone_id: string;
+  revision_json: string;
+};
 
 export type PmOutputReceipt = Readonly<{
   executionId: string;
@@ -355,19 +371,22 @@ export class PlanningRepository {
   cyclePurpose(id: string): PlanningCyclePurposeState | undefined {
     const row = this.database
       .prepare(
-        `SELECT planning_cycle_id, purpose, base_delivery_plan_id,
+        `SELECT planning_cycle_id, project_id, purpose, base_delivery_plan_id,
           base_delivery_plan_revision
          FROM planning_cycle_purposes WHERE planning_cycle_id = ?`,
       )
       .get(id) as CyclePurposeRow | undefined;
-    return row
-      ? planningCyclePurposeStateSchema.parse({
-          planningCycleId: row.planning_cycle_id,
-          purpose: row.purpose,
-          baseDeliveryPlanId: row.base_delivery_plan_id,
-          baseDeliveryPlanRevision: row.base_delivery_plan_revision,
-        })
-      : undefined;
+    if (!row) return undefined;
+    const cycle = this.cycle(id);
+    if (!cycle || cycle.projectId !== row.project_id) {
+      throw new Error('Stored planning cycle purpose is corrupt');
+    }
+    return planningCyclePurposeStateSchema.parse({
+      planningCycleId: row.planning_cycle_id,
+      purpose: row.purpose,
+      baseDeliveryPlanId: row.base_delivery_plan_id,
+      baseDeliveryPlanRevision: row.base_delivery_plan_revision,
+    });
   }
 
   cycleView(id: string): PlanningCycleView | undefined {
@@ -417,6 +436,14 @@ export class PlanningRepository {
   }
 
   planningSnapshot(projectId: string): PlanningBoardSnapshot {
+    return inImmediateTransaction(this.database, () =>
+      this.planningSnapshotInTransaction(projectId),
+    );
+  }
+
+  private planningSnapshotInTransaction(
+    projectId: string,
+  ): PlanningBoardSnapshot {
     const rows = this.database
       .prepare(
         `SELECT * FROM planning_cycles
@@ -438,6 +465,82 @@ export class PlanningRepository {
     const intentLedger = this.approvedIntentLedger(projectId) ?? null;
     const deliveryPlan = this.approvedDeliveryPlan(projectId) ?? null;
     const filter = this.boardFilter(projectId) ?? null;
+    const historicalMilestones = filter
+      ? filter.milestoneIds.flatMap((milestoneId) => {
+          if (deliveryPlan?.milestones.some(({ id }) => id === milestoneId))
+            return [];
+          const row = this.database
+            .prepare(
+              `SELECT revision_json FROM milestone_revisions
+               WHERE project_id = ? AND milestone_id = ?
+               ORDER BY revision DESC LIMIT 1`,
+            )
+            .get(projectId, milestoneId) as
+            | { revision_json: string }
+            | undefined;
+          if (!row) throw new Error('Historical milestone metadata is missing');
+          const milestone = milestoneRevisionSchema.parse(
+            JSON.parse(row.revision_json),
+          );
+          return [
+            {
+              milestoneId: milestone.id,
+              milestoneRevision: milestone.revision,
+              title: milestone.title,
+              lifecycle: milestone.lifecycle,
+            },
+          ];
+        })
+      : [];
+    const historicalRequirements = filter
+      ? filter.requirementRecordIds.flatMap((recordId) => {
+          if (
+            deliveryPlan?.traces.some(
+              (trace) =>
+                trace.kind === 'task_satisfies' &&
+                trace.requirement.recordId === recordId,
+            )
+          )
+            return [];
+          const currentRecord = intentLedger?.records.find(
+            (record) => record.recordId === recordId,
+          );
+          if (currentRecord?.content.type === 'requirement') {
+            return [
+              {
+                recordId,
+                recordRevision: currentRecord.revision,
+                statement: currentRecord.content.statement,
+                requirementKind: currentRecord.content.kind,
+              },
+            ];
+          }
+          const row = this.database
+            .prepare(
+              `SELECT revision, content_json FROM ledger_record_revisions
+               WHERE project_id = ? AND record_id = ?
+               ORDER BY revision DESC LIMIT 1`,
+            )
+            .get(projectId, recordId) as
+            | { revision: number; content_json: string }
+            | undefined;
+          if (!row)
+            throw new Error('Historical requirement metadata is missing');
+          const content = ledgerRecordContentSchema.parse(
+            JSON.parse(row.content_json),
+          );
+          if (content.type !== 'requirement')
+            throw new Error('Historical requirement metadata is corrupt');
+          return [
+            {
+              recordId,
+              recordRevision: row.revision,
+              statement: content.statement,
+              requirementKind: content.kind,
+            },
+          ];
+        })
+      : [];
     return {
       planningCycles: rows.map((row) => this.requireCycleView(row.id)),
       planningHistoryTruncated: total > rows.length,
@@ -450,6 +553,8 @@ export class PlanningRepository {
         currentTaskRevisions:
           deliveryPlan === null ? [] : this.currentTaskRevisions(deliveryPlan),
         filter,
+        historicalMilestones,
+        historicalRequirements,
       }),
     };
   }
@@ -489,6 +594,35 @@ export class PlanningRepository {
   ): PlanningCycle {
     this.assertTransaction();
     const cycle = planningCycleSchema.parse(input);
+    const purpose = planningCyclePurposeStateSchema.parse(
+      purposeInput ?? {
+        planningCycleId: cycle.id,
+        purpose: 'intent',
+        baseDeliveryPlanId: null,
+        baseDeliveryPlanRevision: null,
+      },
+    );
+    if (purpose.planningCycleId !== cycle.id) {
+      throw new Error('Planning cycle purpose does not match its cycle');
+    }
+    const currentIntent = this.approvedIntentLedger(cycle.projectId);
+    if (
+      (currentIntent?.projectIntent.revision ?? null) !==
+        cycle.baseProjectIntentRevision ||
+      (currentIntent?.ledger.revision ?? null) !== cycle.baseLedgerRevision
+    ) {
+      throw new Error('Planning cycle base is not current');
+    }
+    if (purpose.purpose === 'delivery_plan') {
+      const currentPlan = this.approvedDeliveryPlan(cycle.projectId);
+      if (
+        (currentPlan?.plan.id ?? null) !== purpose.baseDeliveryPlanId ||
+        (currentPlan?.plan.revision ?? null) !==
+          purpose.baseDeliveryPlanRevision
+      ) {
+        throw new Error('Planning cycle delivery plan base is not current');
+      }
+    }
     this.database
       .prepare(
         `INSERT INTO planning_cycles (
@@ -504,17 +638,6 @@ export class PlanningRepository {
         )`,
       )
       .run(cycle);
-    const purpose = planningCyclePurposeStateSchema.parse(
-      purposeInput ?? {
-        planningCycleId: cycle.id,
-        purpose: 'intent',
-        baseDeliveryPlanId: null,
-        baseDeliveryPlanRevision: null,
-      },
-    );
-    if (purpose.planningCycleId !== cycle.id) {
-      throw new Error('Planning cycle purpose does not match its cycle');
-    }
     const purposeChanged = this.database
       .prepare(
         `UPDATE planning_cycle_purposes SET
@@ -999,6 +1122,34 @@ export class PlanningRepository {
         'Delivery plan proposal base does not match its cycle',
       );
     }
+    const currentIntent = this.approvedIntentLedger(proposal.projectId);
+    const currentPlan = this.approvedDeliveryPlan(proposal.projectId);
+    if (
+      !currentIntent ||
+      currentIntent.projectIntent.id !== proposal.base.projectIntentId ||
+      currentIntent.projectIntent.revision !==
+        proposal.base.projectIntentRevision ||
+      currentIntent.ledger.id !== proposal.base.ledgerId ||
+      currentIntent.ledger.revision !== proposal.base.ledgerRevision ||
+      (currentPlan?.plan.id ?? null) !== proposal.base.deliveryPlan.id ||
+      (currentPlan?.plan.revision ?? null) !==
+        proposal.base.deliveryPlan.revision
+    ) {
+      throw new PlanningProposalInvalidError(
+        'Delivery plan proposal base is not current',
+      );
+    }
+    const latest = this.database
+      .prepare(
+        `SELECT MAX(revision) AS revision FROM delivery_plan_proposals
+         WHERE planning_cycle_id = ?`,
+      )
+      .get(proposal.planningCycleId) as { revision: number | null };
+    if (proposal.revision !== (latest.revision ?? 0) + 1) {
+      throw new PlanningProposalInvalidError(
+        'Delivery plan proposal revision is not contiguous',
+      );
+    }
     this.database
       .prepare(
         `INSERT INTO delivery_plan_proposals (
@@ -1051,6 +1202,152 @@ export class PlanningRepository {
       'dependency_id',
       proposal.reservations.dependencies,
     );
+    const reservationMap = (values: readonly { key: string; id: string }[]) =>
+      new Map(values.map(({ key, id }) => [key, id]));
+    const milestoneReservations = reservationMap(
+      proposal.reservations.milestones,
+    );
+    const taskReservations = reservationMap(proposal.reservations.tasks);
+    const dependencyReservations = reservationMap(
+      proposal.reservations.dependencies,
+    );
+    const identity = (member: {
+      operation: string;
+      key?: string;
+      milestoneId?: string;
+      taskId?: string;
+      dependencyId?: string;
+    }) =>
+      member.operation === 'create'
+        ? `proposal:${member.key}`
+        : `canonical:${member.milestoneId ?? member.taskId ?? member.dependencyId}`;
+    const refIdentity = (ref: {
+      kind: string;
+      key?: string;
+      milestoneId?: string;
+      taskId?: string;
+    }) =>
+      ref.kind === 'proposal'
+        ? `proposal:${ref.key}`
+        : `canonical:${ref.milestoneId ?? ref.taskId}`;
+    const memberInsert = (table: string, columns: string) =>
+      this.database.prepare(
+        `INSERT INTO ${table} (
+          proposal_id, project_id, proposal_revision, ordinal, ${columns}, member_json
+        ) VALUES (?, ?, ?, ?, ${columns
+          .split(',')
+          .map(() => '?')
+          .join(', ')}, ?)`,
+      );
+    const milestoneInsert = memberInsert(
+      'delivery_plan_proposal_milestones',
+      'identity_key, proposal_key, milestone_id',
+    );
+    proposal.proposedPlan.milestones.forEach((member, index) => {
+      const key = member.operation === 'create' ? member.key : null;
+      const id =
+        member.operation === 'create'
+          ? milestoneReservations.get(member.key)
+          : member.milestoneId;
+      if (!id)
+        throw new PlanningProposalInvalidError(
+          'Milestone reservation is missing',
+        );
+      milestoneInsert.run(
+        proposal.id,
+        proposal.projectId,
+        proposal.revision,
+        index + 1,
+        identity(member),
+        key,
+        id,
+        canonicalJson(member),
+      );
+    });
+    const taskInsert = memberInsert(
+      'delivery_plan_proposal_tasks',
+      'identity_key, proposal_key, task_id, milestone_identity_key',
+    );
+    proposal.proposedPlan.tasks.forEach((member, index) => {
+      const key = member.operation === 'create' ? member.key : null;
+      const id =
+        member.operation === 'create'
+          ? taskReservations.get(member.key)
+          : member.taskId;
+      const milestoneRef =
+        member.operation === 'reuse'
+          ? null
+          : refIdentity(member.content.milestone);
+      if (!id)
+        throw new PlanningProposalInvalidError('Task reservation is missing');
+      taskInsert.run(
+        proposal.id,
+        proposal.projectId,
+        proposal.revision,
+        index + 1,
+        identity(member),
+        key,
+        id,
+        milestoneRef,
+        canonicalJson(member),
+      );
+    });
+    const dependencyInsert = memberInsert(
+      'delivery_plan_proposal_dependencies',
+      'identity_key, proposal_key, dependency_id, prerequisite_task_identity_key, dependent_task_identity_key',
+    );
+    proposal.proposedPlan.dependencies.forEach((member, index) => {
+      const key = member.operation === 'create' ? member.key : null;
+      const id =
+        member.operation === 'create'
+          ? dependencyReservations.get(member.key)
+          : member.dependencyId;
+      if (!id)
+        throw new PlanningProposalInvalidError(
+          'Dependency reservation is missing',
+        );
+      const prerequisite =
+        member.operation === 'create' ? refIdentity(member.prerequisite) : null;
+      const dependent =
+        member.operation === 'create' ? refIdentity(member.dependent) : null;
+      dependencyInsert.run(
+        proposal.id,
+        proposal.projectId,
+        proposal.revision,
+        index + 1,
+        identity(member),
+        key,
+        id,
+        prerequisite,
+        dependent,
+        canonicalJson(member),
+      );
+    });
+    const traceInsert = this.database.prepare(
+      `INSERT INTO delivery_plan_proposal_traces (
+        proposal_id, project_id, proposal_revision, ordinal, kind,
+        milestone_identity_key, task_identity_key,
+        record_id, record_revision, trace_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    proposal.proposedPlan.traces.forEach((trace, index) => {
+      const subject =
+        trace.kind === 'milestone_covers'
+          ? refIdentity(trace.milestone)
+          : refIdentity(trace.task);
+      traceInsert.run(
+        proposal.id,
+        proposal.projectId,
+        proposal.revision,
+        index + 1,
+        trace.kind,
+        trace.kind === 'milestone_covers' ? subject : null,
+        trace.kind === 'task_satisfies' ? subject : null,
+        trace.requirement.recordId,
+        trace.requirement.recordRevision,
+        canonicalJson(trace),
+      );
+    });
     return proposal;
   }
 
@@ -1082,6 +1379,51 @@ export class PlanningRepository {
     ) {
       throw new Error('Stored delivery plan proposal is corrupt');
     }
+    const normalized = (table: string, jsonColumn: string) =>
+      this.database
+        .prepare(
+          `SELECT project_id, proposal_revision, ordinal, ${jsonColumn} AS value
+           FROM ${table} WHERE proposal_id = ? ORDER BY ordinal`,
+        )
+        .all(id) as {
+        project_id: string;
+        proposal_revision: number;
+        ordinal: number;
+        value: string;
+      }[];
+    const assertNormalized = (
+      rows: ReturnType<typeof normalized>,
+      expected: readonly unknown[],
+    ) => {
+      if (
+        rows.length !== expected.length ||
+        rows.some(
+          (member, index) =>
+            member.project_id !== stored.projectId ||
+            member.proposal_revision !== stored.revision ||
+            member.ordinal !== index + 1 ||
+            member.value !== canonicalJson(expected[index]),
+        )
+      ) {
+        throw new Error('Stored delivery plan proposal members are corrupt');
+      }
+    };
+    assertNormalized(
+      normalized('delivery_plan_proposal_milestones', 'member_json'),
+      stored.proposedPlan.milestones,
+    );
+    assertNormalized(
+      normalized('delivery_plan_proposal_tasks', 'member_json'),
+      stored.proposedPlan.tasks,
+    );
+    assertNormalized(
+      normalized('delivery_plan_proposal_dependencies', 'member_json'),
+      stored.proposedPlan.dependencies,
+    );
+    assertNormalized(
+      normalized('delivery_plan_proposal_traces', 'trace_json'),
+      stored.proposedPlan.traces,
+    );
     const decision = this.database
       .prepare(
         'SELECT * FROM delivery_plan_proposal_decisions WHERE proposal_id = ?',
@@ -1632,11 +1974,19 @@ export class PlanningRepository {
 
   boardFilter(projectId: string): BoardFilter | undefined {
     const row = this.database
-      .prepare('SELECT filter_json FROM board_filters WHERE project_id = ?')
+      .prepare('SELECT * FROM board_filters WHERE project_id = ?')
       .get(projectId) as BoardFilterRow | undefined;
-    return row
-      ? boardFilterSchema.parse(JSON.parse(row.filter_json))
-      : undefined;
+    if (!row) return undefined;
+    const filter = boardFilterSchema.parse(JSON.parse(row.filter_json));
+    if (
+      row.filter_json !== canonicalJson(filter) ||
+      row.project_id !== filter.projectId ||
+      row.revision !== filter.revision ||
+      row.updated_at !== filter.updatedAt
+    ) {
+      throw new Error('Stored Board filter is corrupt');
+    }
+    return filter;
   }
 
   replaceBoardFilterInTransaction(
@@ -1728,6 +2078,14 @@ export class PlanningRepository {
     if (!current || current.revision !== input.expectedCurrentRevision) {
       throw new Error('Task lifecycle revision conflict');
     }
+    if (anchor.lifecycle === 'retired') {
+      throw new Error(
+        'Retired task contract cannot receive lifecycle revisions',
+      );
+    }
+    if (current.lifecycle === input.lifecycle) {
+      throw new Error('Task lifecycle transition is unchanged');
+    }
     const next = taskRevisionSchema.parse({
       ...current,
       revision: current.revision + 1,
@@ -1742,11 +2100,31 @@ export class PlanningRepository {
 
   currentTaskRevisions(plan: ApprovedDeliveryPlan): readonly TaskRevision[] {
     return plan.taskContracts.map((anchor) => {
-      const revision = this.currentTaskRevision(anchor.id, anchor.revision);
-      if (!revision) {
+      const rows = this.database
+        .prepare(
+          `SELECT * FROM task_revisions
+           WHERE task_id = ? AND contract_revision = ?
+           ORDER BY revision`,
+        )
+        .all(anchor.id, anchor.revision) as TaskRevisionRow[];
+      const revisions = rows.map((row) => this.parseTaskRevisionRow(row));
+      if (
+        revisions.length === 0 ||
+        revisions[0].revision !== anchor.revision ||
+        revisions[0].revisionKind !== 'plan_contract' ||
+        revisions.some(
+          (revision, index) =>
+            revision.contractRevision !== anchor.revision ||
+            revision.revision !== anchor.revision + index ||
+            (index > 0 &&
+              (revision.revisionKind !== 'operational_lifecycle' ||
+                revision.source.kind !== 'lifecycle' ||
+                revision.source.priorRevision !== revision.revision - 1)),
+        )
+      ) {
         throw new Error('Current task revision selection is incomplete');
       }
-      return revision;
+      return revisions.at(-1)!;
     });
   }
 
@@ -1756,14 +2134,29 @@ export class PlanningRepository {
   ): TaskRevision | undefined {
     const row = this.database
       .prepare(
-        `SELECT revision_json FROM task_revisions
+        `SELECT * FROM task_revisions
          WHERE task_id = ? AND contract_revision = ?
          ORDER BY revision DESC LIMIT 1`,
       )
       .get(taskId, contractRevision) as TaskRevisionRow | undefined;
-    return row
-      ? taskRevisionSchema.parse(JSON.parse(row.revision_json))
-      : undefined;
+    return row ? this.parseTaskRevisionRow(row) : undefined;
+  }
+
+  private parseTaskRevisionRow(row: TaskRevisionRow): TaskRevision {
+    const revision = taskRevisionSchema.parse(JSON.parse(row.revision_json));
+    if (
+      row.revision_json !== canonicalJson(revision) ||
+      row.task_id !== revision.id ||
+      row.project_id !== revision.projectId ||
+      row.revision !== revision.revision ||
+      row.contract_revision !== revision.contractRevision ||
+      row.revision_kind !== revision.revisionKind ||
+      row.lifecycle !== revision.lifecycle ||
+      row.milestone_id !== revision.milestoneId
+    ) {
+      throw new Error('Stored task revision is corrupt');
+    }
+    return revision;
   }
 
   private insertTaskRevision(revisionInput: TaskRevision): void {

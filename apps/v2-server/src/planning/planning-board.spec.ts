@@ -415,6 +415,15 @@ describe('projectBoard', () => {
       deliveryPlan,
       currentTaskRevisions: [firstContract, secondContract],
       filter: selected,
+      historicalMilestones: [],
+      historicalRequirements: [
+        {
+          recordId: '00000000-0000-4000-8000-00000000000c',
+          recordRevision: 7,
+          statement: 'Retired requirement',
+          requirementKind: 'operational',
+        },
+      ],
     });
     expect(board.emptyReason).toBe('filter_empty');
     expect(
@@ -431,6 +440,15 @@ describe('projectBoard', () => {
         ({ value }) => value === '00000000-0000-4000-8000-00000000000c',
       ),
     ).toMatchObject({ selected: true, historical: true, matchingTaskCount: 0 });
+    expect(
+      board.facets.requirements.find(
+        ({ value }) => value === '00000000-0000-4000-8000-00000000000c',
+      ),
+    ).toMatchObject({
+      label: 'Retired requirement',
+      recordRevision: 7,
+      requirementKind: 'operational',
+    });
     expect(
       board.facets.milestones.find(({ value }) => value === milestoneOne)
         ?.matchingTaskCount,
@@ -459,10 +477,21 @@ describe('projectBoard', () => {
       },
       currentTaskRevisions: [firstContract],
       filter: { ...filter, revision: 2, milestoneIds: [milestoneTwo] },
+      historicalMilestones: [
+        {
+          milestoneId: milestoneTwo,
+          milestoneRevision: 4,
+          title: 'Historical Board',
+          lifecycle: 'retired',
+        },
+      ],
+      historicalRequirements: [],
     });
     expect(
       replanned.facets.milestones.find(({ value }) => value === milestoneTwo),
     ).toMatchObject({
+      label: 'Historical Board',
+      milestoneRevision: 4,
       selected: true,
       historical: true,
       matchingTaskCount: 0,

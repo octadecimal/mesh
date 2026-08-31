@@ -22,7 +22,6 @@ const runProductionV2Build = () => {
     'build',
     'v2-server',
     '--configuration=production',
-    '--skipTypeCheck=true',
     '--skip-nx-cache',
     `--outputPath=${relative(workspaceRoot, builtRoot).replace(/\\/g, '/')}`,
   ];
