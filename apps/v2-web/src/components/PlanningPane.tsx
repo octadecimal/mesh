@@ -10,7 +10,6 @@ import type {
   LedgerRecordContent,
   PlanningCycleView,
   PlanningProposal,
-  ProposedTaskRef,
   ProposedLedgerEndpoint,
   RejectPlanProposalCommand,
   SubmitPlanTurnCommand,
@@ -598,10 +597,6 @@ function proposalMemberName(
   return 'milestoneId' in member ? member.milestoneId : member.taskId;
 }
 
-function proposalRefName(ref: ProposedTaskRef) {
-  return ref.kind === 'proposal' ? ref.key : ref.taskId;
-}
-
 function DeliveryProposalCard({
   proposal,
   proposals,
@@ -613,10 +608,15 @@ function DeliveryProposalCard({
   deliveryPlan: ApprovedDeliveryPlan | null;
   headingRef?: (node: HTMLHeadingElement | null) => void;
 }) {
+  const baseDeliveryPlan =
+    proposal.base.deliveryPlan.id === deliveryPlan?.plan.id &&
+    proposal.base.deliveryPlan.revision === deliveryPlan.plan.revision
+      ? deliveryPlan
+      : null;
   const milestones = proposal.proposedPlan.milestones.map((member) => {
     const approved =
       member.operation === 'reuse'
-        ? deliveryPlan?.milestones.find(
+        ? baseDeliveryPlan?.milestones.find(
             ({ id, revision }) =>
               id === member.milestoneId && revision === member.expectedRevision,
           )
@@ -634,7 +634,7 @@ function DeliveryProposalCard({
   const tasks = proposal.proposedPlan.tasks.map((member) => {
     const approved =
       member.operation === 'reuse'
-        ? deliveryPlan?.taskContracts.find(
+        ? baseDeliveryPlan?.taskContracts.find(
             ({ id, contractRevision }) =>
               id === member.taskId &&
               contractRevision === member.expectedContractRevision,
@@ -682,11 +682,13 @@ function DeliveryProposalCard({
       </h3>
       <p>{proposal.proposedPlan.summary}</p>
       <p>
-        Intent revision {proposal.base.projectIntentRevision} · requirement
-        ledger revision {proposal.base.ledgerRevision} · delivery plan{' '}
-        {proposal.base.deliveryPlan.revision === null
+        Intent {proposal.base.projectIntentId} · revision{' '}
+        {proposal.base.projectIntentRevision} · requirement ledger{' '}
+        {proposal.base.ledgerId} · revision {proposal.base.ledgerRevision} ·
+        delivery plan{' '}
+        {proposal.base.deliveryPlan.id === null
           ? 'not yet approved'
-          : `revision ${proposal.base.deliveryPlan.revision}`}
+          : `${proposal.base.deliveryPlan.id} · revision ${proposal.base.deliveryPlan.revision}`}
       </p>
       <section
         aria-label={`Milestones in proposal revision ${proposal.revision}`}
@@ -770,19 +772,45 @@ function DeliveryProposalCard({
           <p>No dependencies.</p>
         ) : (
           <ul>
-            {proposal.proposedPlan.dependencies.map((dependency) => (
-              <li
-                key={
-                  dependency.operation === 'create'
-                    ? dependency.key
-                    : dependency.dependencyId
-                }
-              >
-                {dependency.operation === 'create'
-                  ? `${dependency.key}: ${proposalRefName(dependency.prerequisite)} before ${proposalRefName(dependency.dependent)}`
-                  : `${humanize(dependency.operation)} ${dependency.dependencyId} · expected revision ${dependency.expectedRevision}${dependency.operation === 'revise' ? ` · ${dependency.lifecycle}` : ''}`}
-              </li>
-            ))}
+            {proposal.proposedPlan.dependencies.map((dependency) => {
+              const taskName = (taskId: string) =>
+                baseDeliveryPlan?.taskContracts.find(({ id }) => id === taskId)
+                  ?.title ?? taskId;
+              const refName = (
+                ref:
+                  | { kind: 'proposal'; key: string }
+                  | { kind: 'canonical'; taskId: string },
+              ) => {
+                if (ref.kind === 'canonical')
+                  return `${taskName(ref.taskId)} (${ref.taskId})`;
+                const task = tasks.find(({ identity }) => identity === ref.key);
+                return `${task?.title ?? ref.key} (${ref.key})`;
+              };
+              const approvedDependency =
+                dependency.operation === 'create'
+                  ? undefined
+                  : baseDeliveryPlan?.dependencies.find(
+                      ({ id, revision }) =>
+                        id === dependency.dependencyId &&
+                        revision === dependency.expectedRevision,
+                    );
+              const endpoints = approvedDependency
+                ? `${taskName(approvedDependency.prerequisiteTaskId)} (${approvedDependency.prerequisiteTaskId}) → ${taskName(approvedDependency.dependentTaskId)} (${approvedDependency.dependentTaskId})`
+                : undefined;
+              return (
+                <li
+                  key={
+                    dependency.operation === 'create'
+                      ? dependency.key
+                      : dependency.dependencyId
+                  }
+                >
+                  {dependency.operation === 'create'
+                    ? `${dependency.key}: ${refName(dependency.prerequisite)} → ${refName(dependency.dependent)}`
+                    : `${humanize(dependency.operation)} ${dependency.dependencyId} · expected revision ${dependency.expectedRevision}${dependency.operation === 'revise' ? ` · ${dependency.lifecycle}` : ''}${endpoints ? ` · ${endpoints}` : ' · approved dependency revision unavailable'}`}
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -894,6 +922,8 @@ export function DeliveryPlanningPane({
     cycle?.deliveryPlanProposals.find(
       ({ revision }) => revision === selectedProposalRevision,
     ) ?? proposal;
+  const selectedIsLatest =
+    selectedProposal !== undefined && selectedProposal.id === proposal?.id;
   const connected = connection.status === 'ready';
   const selectedProfile = profiles.find(
     ({ profileId: id }) => id === profileId,
@@ -922,6 +952,8 @@ export function DeliveryPlanningPane({
       lifecycle === 'awaiting_human' ||
       retryable ||
       (awaitingApproval && requestingRevision));
+  const canSendMessage =
+    canContinue || (startOpen && continuingCycle === undefined);
   const nonterminal =
     lifecycle !== undefined &&
     !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
@@ -939,7 +971,15 @@ export function DeliveryPlanningPane({
   }, [profileId, profiles]);
   useEffect(() => {
     setSelectedProposalRevision(proposal?.revision ?? 0);
+    setRequestingRevision(false);
+    setRejecting(false);
+    setFeedback('');
   }, [cycle?.cycle.id, proposal?.id, proposal?.revision]);
+  useEffect(() => {
+    if (!cycle?.cycle.id) return;
+    setStartOpen(false);
+    setDraft('');
+  }, [cycle?.cycle.id]);
 
   function openStart() {
     const replacing = deliveryPlan !== null;
@@ -956,6 +996,7 @@ export function DeliveryPlanningPane({
     const message = draft.trim();
     if (!message || commandDisabled) return;
     if (continuingCycle) {
+      if (!canContinue) return;
       onSubmit({
         type: 'planning_cycle.submit_plan_turn',
         projectId,
@@ -985,7 +1026,7 @@ export function DeliveryPlanningPane({
   }
 
   function approveProposal() {
-    if (!cycle || !proposal) return;
+    if (!cycle || !proposal || !selectedIsLatest) return;
     onApprove({
       type: 'plan_proposal.approve',
       projectId,
@@ -1002,7 +1043,15 @@ export function DeliveryPlanningPane({
   }
 
   function rejectProposal() {
-    if (!cycle || !proposal || !feedback.trim()) return;
+    const normalizedFeedback = feedback.trim();
+    if (
+      !cycle ||
+      !proposal ||
+      !selectedIsLatest ||
+      normalizedFeedback.length < 1 ||
+      normalizedFeedback.length > 4096
+    )
+      return;
     onReject({
       type: 'plan_proposal.reject',
       projectId,
@@ -1010,7 +1059,7 @@ export function DeliveryPlanningPane({
       expectedCycleRevision: cycle.cycle.revision,
       proposalId: proposal.id,
       expectedProposalRevision: proposal.revision,
-      feedback: feedback.trim(),
+      feedback: normalizedFeedback,
     });
   }
 
@@ -1134,9 +1183,12 @@ export function DeliveryPlanningPane({
           <select
             id="delivery-proposal-revision"
             value={selectedProposal?.revision}
-            onChange={(event) =>
-              setSelectedProposalRevision(Number(event.target.value))
-            }
+            onChange={(event) => {
+              setSelectedProposalRevision(Number(event.target.value));
+              setRequestingRevision(false);
+              setRejecting(false);
+              setFeedback('');
+            }}
           >
             {cycle.deliveryPlanProposals.map((candidate) => (
               <option key={candidate.id} value={candidate.revision}>
@@ -1160,8 +1212,20 @@ export function DeliveryPlanningPane({
           ) : null}
         </section>
       ) : null}
-      {awaitingApproval && proposal ? (
-        <div className="planning-board-actions">
+      {awaitingApproval && proposal && !selectedIsLatest ? (
+        <p role="status">
+          Viewing historical proposal revision {selectedProposal?.revision}.
+          Select proposal revision {proposal.revision} to make a decision.
+        </p>
+      ) : null}
+      {awaitingApproval && proposal && selectedIsLatest ? (
+        <section
+          className="planning-board-actions"
+          aria-label={`Decision controls for proposal revision ${proposal.revision}`}
+        >
+          <p role="status">
+            Decision controls apply to proposal revision {proposal.revision}.
+          </p>
           <button
             type="button"
             disabled={commandDisabled}
@@ -1186,28 +1250,33 @@ export function DeliveryPlanningPane({
           >
             Reject proposal
           </button>
-        </div>
+        </section>
       ) : null}
-      {awaitingApproval && proposal && rejecting ? (
+      {awaitingApproval && proposal && selectedIsLatest && rejecting ? (
         <section aria-label="Reject plan proposal">
           <label htmlFor="plan-rejection-feedback">Rejection feedback</label>
           <textarea
             id="plan-rejection-feedback"
             ref={rejectionRef}
             value={feedback}
+            maxLength={4096}
             disabled={commandDisabled}
             onChange={(event) => setFeedback(event.target.value)}
           />
           <button
             type="button"
-            disabled={commandDisabled || !feedback.trim()}
+            disabled={
+              commandDisabled ||
+              feedback.trim().length < 1 ||
+              feedback.trim().length > 4096
+            }
             onClick={rejectProposal}
           >
             Confirm rejection
           </button>
         </section>
       ) : null}
-      {startOpen || canContinue ? (
+      {canSendMessage ? (
         <form aria-label="Send a message to project manager" onSubmit={submit}>
           {!continuingCycle ? (
             <fieldset disabled={commandDisabled}>

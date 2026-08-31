@@ -2,10 +2,10 @@ import { render, screen, within } from '@testing-library/react';
 import { fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  approvedDeliveryPlanSchema,
   approvedIntentLedgerSchema,
+  deliveryPlanPlanningCycleViewSchema,
   planningCycleViewSchema,
-  type ApprovedDeliveryPlan,
-  type DeliveryPlanPlanningCycleView,
   type PlanningCycleView,
   type PlanningProposal,
   workerProfileSummarySchema,
@@ -1063,7 +1063,7 @@ describe('PlanningPane', () => {
   });
 });
 
-const deliveryCycle = {
+const deliveryCycle = deliveryPlanPlanningCycleViewSchema.parse({
   cycle: {
     ...baseCycle.cycle,
     lifecycle: 'awaiting_approval',
@@ -1174,6 +1174,44 @@ const deliveryCycle = {
             task: { kind: 'proposal', key: 'persist-todo' },
             requirement: { recordId: reuseRecordId, recordRevision: 3 },
           },
+          {
+            kind: 'milestone_covers',
+            milestone: { kind: 'proposal', key: 'experience' },
+            requirement: { recordId: reuseRecordId, recordRevision: 3 },
+          },
+          {
+            kind: 'task_satisfies',
+            task: { kind: 'proposal', key: 'show-todo' },
+            requirement: { recordId: reuseRecordId, recordRevision: 3 },
+          },
+        ],
+      },
+      reservations: {
+        milestones: [
+          {
+            key: 'foundation',
+            id: '20202020-2020-4020-8020-202020202020',
+          },
+          {
+            key: 'experience',
+            id: '21212121-2121-4121-8121-212121212121',
+          },
+        ],
+        tasks: [
+          {
+            key: 'persist-todo',
+            id: '22222222-2222-4222-8222-222222222223',
+          },
+          {
+            key: 'show-todo',
+            id: '23232323-2323-4323-8323-232323232323',
+          },
+        ],
+        dependencies: [
+          {
+            key: 'foundation-before-experience',
+            id: '24242424-2424-4424-8424-242424242424',
+          },
         ],
       },
       diff: {
@@ -1192,13 +1230,16 @@ const deliveryCycle = {
           retire: 0,
           reactivate: 0,
         },
-        traceCreateCount: 2,
+        traceCreateCount: 4,
         traceRemoveCount: 0,
       },
+      createdByTurnId: '77777777-7777-4777-8777-777777777777',
+      createdByExecutionId: executionId,
+      createdAt: '2026-08-30T00:00:02.000Z',
       decision: { kind: 'pending' },
     },
   ],
-} as unknown as DeliveryPlanPlanningCycleView;
+});
 
 const approvedPlanId = 'abababab-abab-4bab-8bab-abababababab';
 const approvedMilestoneIds = [
@@ -1209,33 +1250,61 @@ const approvedTaskIds = [
   '14141414-1414-4414-8414-141414141414',
   '15151515-1515-4515-8515-151515151515',
 ] as const;
-const approvedDeliveryPlan = {
-  plan: { id: approvedPlanId, revision: 2 },
+const approvedDependencyId = '25252525-2525-4525-8525-252525252525';
+const approvedPlanProposalId = '26262626-2626-4626-8626-262626262626';
+const approvedDeliveryPlan = approvedDeliveryPlanSchema.parse({
+  plan: {
+    id: approvedPlanId,
+    projectId,
+    revision: 2,
+    projectIntentId: approvedIntentLedger.projectIntent.id,
+    projectIntentRevision: 1,
+    ledgerId: approvedIntentLedger.ledger.id,
+    ledgerRevision: 1,
+    baseDeliveryPlanRevision: 1,
+    proposalId: approvedPlanProposalId,
+    summary: 'Existing Todo delivery plan.',
+    approvedBy: 'human',
+    approvedAt: '2026-08-29T23:00:00.000Z',
+  },
   milestones: [
     {
       id: approvedMilestoneIds[0],
+      projectId,
       revision: 3,
+      lifecycle: 'active',
       title: 'Existing Foundation',
       outcome: 'Existing data remains durable.',
       stopCondition: 'Existing persistence checks pass.',
       exclusions: ['Execution automation'],
       ordinal: 1,
+      proposalId: approvedPlanProposalId,
+      deliveryPlanRevision: 2,
+      approvedAt: '2026-08-29T23:00:00.000Z',
     },
     {
       id: approvedMilestoneIds[1],
+      projectId,
       revision: 4,
+      lifecycle: 'active',
       title: 'Existing Experience',
       outcome: 'Existing Todo work remains usable.',
       stopCondition: 'Existing interaction checks pass.',
       exclusions: ['Collaboration'],
       ordinal: 2,
+      proposalId: approvedPlanProposalId,
+      deliveryPlanRevision: 2,
+      approvedAt: '2026-08-29T23:00:00.000Z',
     },
   ],
   taskContracts: [
     {
       id: approvedTaskIds[0],
+      projectId,
       revision: 5,
       contractRevision: 5,
+      revisionKind: 'plan_contract',
+      lifecycle: 'pending',
       milestoneId: approvedMilestoneIds[0],
       title: 'Existing Persistence',
       outcome: 'Existing Todo state survives refresh.',
@@ -1247,11 +1316,20 @@ const approvedDeliveryPlan = {
       prohibitedSurfaces: ['Execution runtime'],
       expectedArtifacts: ['Persistence tests'],
       ordinal: 1,
+      source: {
+        kind: 'plan',
+        proposalId: approvedPlanProposalId,
+        deliveryPlanRevision: 2,
+      },
+      createdAt: '2026-08-29T23:00:00.000Z',
     },
     {
       id: approvedTaskIds[1],
+      projectId,
       revision: 6,
       contractRevision: 6,
+      revisionKind: 'plan_contract',
+      lifecycle: 'pending',
       milestoneId: approvedMilestoneIds[1],
       title: 'Existing Interface',
       outcome: 'Existing Todo items remain visible.',
@@ -1263,18 +1341,55 @@ const approvedDeliveryPlan = {
       prohibitedSurfaces: ['Execution runtime'],
       expectedArtifacts: ['View tests'],
       ordinal: 1,
+      source: {
+        kind: 'plan',
+        proposalId: approvedPlanProposalId,
+        deliveryPlanRevision: 2,
+      },
+      createdAt: '2026-08-29T23:00:00.000Z',
     },
   ],
-  dependencies: [],
-  traces: [],
-  milestoneDependencies: [],
-} as unknown as ApprovedDeliveryPlan;
+  dependencies: [
+    {
+      id: approvedDependencyId,
+      projectId,
+      revision: 7,
+      prerequisiteTaskId: approvedTaskIds[0],
+      dependentTaskId: approvedTaskIds[1],
+      lifecycle: 'active',
+      proposalId: approvedPlanProposalId,
+      deliveryPlanRevision: 2,
+      approvedAt: '2026-08-29T23:00:00.000Z',
+    },
+  ],
+  traces: [
+    ...approvedMilestoneIds.map((milestoneId, index) => ({
+      kind: 'milestone_covers' as const,
+      milestoneId,
+      milestoneRevision: index === 0 ? 3 : 4,
+      requirement: { recordId: reuseRecordId, recordRevision: 3 },
+    })),
+    ...approvedTaskIds.map((taskId, index) => ({
+      kind: 'task_satisfies' as const,
+      taskId,
+      taskContractRevision: index === 0 ? 5 : 6,
+      requirement: { recordId: reuseRecordId, recordRevision: 3 },
+    })),
+  ],
+  milestoneDependencies: [
+    {
+      prerequisiteMilestoneId: approvedMilestoneIds[0],
+      dependentMilestoneId: approvedMilestoneIds[1],
+      throughTaskDependencyIds: [approvedDependencyId],
+    },
+  ],
+});
 
 describe('DeliveryPlanningPane', () => {
   it('keeps terminal history inspectable while starting an exact current-base replan', async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
-    const terminalCycle = {
+    const terminalCycle = deliveryPlanPlanningCycleViewSchema.parse({
       ...deliveryCycle,
       cycle: {
         ...deliveryCycle.cycle,
@@ -1292,7 +1407,7 @@ describe('DeliveryPlanningPane', () => {
           },
         },
       ],
-    } as DeliveryPlanPlanningCycleView;
+    });
 
     render(
       <DeliveryPlanningPane
@@ -1332,8 +1447,9 @@ describe('DeliveryPlanningPane', () => {
 
   it('explains proposal replacement and cycle-abandonment supersession', async () => {
     const user = userEvent.setup();
+    const onApprove = vi.fn();
     const successorId = '16161616-1616-4616-8616-161616161616';
-    const replacementHistory = {
+    const replacementHistory = deliveryPlanPlanningCycleViewSchema.parse({
       ...deliveryCycle,
       cycle: { ...deliveryCycle.cycle, latestProposalRevision: 2 },
       deliveryPlanProposals: [
@@ -1351,9 +1467,10 @@ describe('DeliveryPlanningPane', () => {
           ...deliveryCycle.deliveryPlanProposals[0],
           id: successorId,
           revision: 2,
+          createdAt: '2026-08-30T00:00:03.000Z',
         },
       ],
-    } as DeliveryPlanPlanningCycleView;
+    });
     const props = {
       projectId,
       approvedIntentLedger,
@@ -1363,7 +1480,7 @@ describe('DeliveryPlanningPane', () => {
       profiles: [profile],
       submitting: false,
       onSubmit: vi.fn(),
-      onApprove: vi.fn(),
+      onApprove,
       onReject: vi.fn(),
       onAbandon: vi.fn(),
     };
@@ -1375,8 +1492,28 @@ describe('DeliveryPlanningPane', () => {
     expect(
       screen.getByText('Superseded by proposal revision 2.'),
     ).toBeVisible();
+    expect(
+      screen.getByText(
+        'Viewing historical proposal revision 1. Select proposal revision 2 to make a decision.',
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'Approve full plan' }),
+    ).not.toBeInTheDocument();
 
-    const abandonedHistory = {
+    await user.selectOptions(screen.getByLabelText('Proposal revision'), '2');
+    expect(
+      screen.getByText('Decision controls apply to proposal revision 2.'),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Approve full plan' }));
+    expect(onApprove).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proposalId: successorId,
+        expectedProposalRevision: 2,
+      }),
+    );
+
+    const abandonedHistory = deliveryPlanPlanningCycleViewSchema.parse({
       ...deliveryCycle,
       cycle: {
         ...deliveryCycle.cycle,
@@ -1395,7 +1532,7 @@ describe('DeliveryPlanningPane', () => {
           },
         },
       ],
-    } as DeliveryPlanPlanningCycleView;
+    });
     rerender(<DeliveryPlanningPane {...props} cycle={abandonedHistory} />);
     expect(
       screen.getByText('Superseded because this planning cycle was abandoned.'),
@@ -1403,7 +1540,7 @@ describe('DeliveryPlanningPane', () => {
   });
 
   it('resolves reused approved members and groups complete tasks under milestones in proposal order', () => {
-    const reuseCycle = {
+    const reuseCycle = deliveryPlanPlanningCycleViewSchema.parse({
       ...deliveryCycle,
       purpose: {
         kind: 'delivery_plan',
@@ -1445,12 +1582,63 @@ describe('DeliveryPlanningPane', () => {
                 expectedCurrentRevision: 6,
               },
             ],
+            dependencies: [
+              {
+                operation: 'reuse',
+                dependencyId: approvedDependencyId,
+                expectedRevision: 7,
+              },
+            ],
+            traces: [
+              ...approvedMilestoneIds.map((milestoneId) => ({
+                kind: 'milestone_covers' as const,
+                milestone: { kind: 'canonical' as const, milestoneId },
+                requirement: {
+                  recordId: reuseRecordId,
+                  recordRevision: 3,
+                },
+              })),
+              ...approvedTaskIds.map((taskId) => ({
+                kind: 'task_satisfies' as const,
+                task: { kind: 'canonical' as const, taskId },
+                requirement: {
+                  recordId: reuseRecordId,
+                  recordRevision: 3,
+                },
+              })),
+            ],
+          },
+          reservations: { milestones: [], tasks: [], dependencies: [] },
+          diff: {
+            milestones: {
+              create: 0,
+              reuse: 2,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            tasks: {
+              create: 0,
+              reuse: 2,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            dependencies: {
+              create: 0,
+              reuse: 1,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            traceCreateCount: 0,
+            traceRemoveCount: 0,
           },
         },
       ],
-    } as DeliveryPlanPlanningCycleView;
+    });
 
-    render(
+    const { rerender } = render(
       <DeliveryPlanningPane
         projectId={projectId}
         cycle={reuseCycle}
@@ -1490,6 +1678,67 @@ describe('DeliveryPlanningPane', () => {
     ).toBeVisible();
     expect(
       within(milestones[1]).getByText('Existing Persistence'),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        `Reuse ${approvedDependencyId} · expected revision 7 · Existing Persistence (${approvedTaskIds[0]}) → Existing Interface (${approvedTaskIds[1]})`,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        `Intent ${approvedIntentLedger.projectIntent.id} · revision 1 · requirement ledger ${approvedIntentLedger.ledger.id} · revision 1 · delivery plan ${approvedPlanId} · revision 2`,
+      ),
+    ).toBeVisible();
+
+    const reviseCycle = deliveryPlanPlanningCycleViewSchema.parse({
+      ...reuseCycle,
+      deliveryPlanProposals: [
+        {
+          ...reuseCycle.deliveryPlanProposals[0],
+          proposedPlan: {
+            ...reuseCycle.deliveryPlanProposals[0].proposedPlan,
+            dependencies: [
+              {
+                operation: 'revise',
+                dependencyId: approvedDependencyId,
+                expectedRevision: 7,
+                lifecycle: 'active',
+              },
+            ],
+          },
+          diff: {
+            ...reuseCycle.deliveryPlanProposals[0].diff,
+            dependencies: {
+              create: 0,
+              reuse: 0,
+              revise: 1,
+              retire: 0,
+              reactivate: 0,
+            },
+          },
+        },
+      ],
+    });
+    rerender(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        cycle={reviseCycle}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={approvedDeliveryPlan}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText(
+        `Revise ${approvedDependencyId} · expected revision 7 · active · Existing Persistence (${approvedTaskIds[0]}) → Existing Interface (${approvedTaskIds[1]})`,
+      ),
     ).toBeVisible();
   });
 
@@ -1570,6 +1819,80 @@ describe('DeliveryPlanningPane', () => {
       message:
         'Propose a delivery plan for the approved intent and requirement ledger.',
     });
+  });
+
+  it('closes a pending cycle form and gates messages while PM execution starts', async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const props = {
+      projectId,
+      approvedIntentLedger,
+      deliveryPlan: null,
+      planStale: false,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmit,
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const { rerender } = render(<DeliveryPlanningPane {...props} />);
+
+    await user.click(screen.getByRole('button', { name: 'Plan delivery' }));
+    expect(screen.getByLabelText('Message to project manager')).toBeVisible();
+
+    const launchPending = deliveryPlanPlanningCycleViewSchema.parse({
+      ...deliveryCycle,
+      cycle: {
+        ...deliveryCycle.cycle,
+        lifecycle: 'launch_pending',
+        latestProposalRevision: 0,
+      },
+      turns: [
+        {
+          id: turnId,
+          projectId,
+          planningCycleId: cycleId,
+          ordinal: 1,
+          actor: 'human',
+          message: 'Propose the delivery plan.',
+          launchState: 'launch_pending',
+          executionId: null,
+          createdAt: '2026-08-30T00:00:01.000Z',
+        },
+      ],
+      deliveryPlanProposals: [],
+    });
+    rerender(<DeliveryPlanningPane {...props} cycle={launchPending} />);
+    expect(
+      screen.queryByLabelText('Message to project manager'),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <DeliveryPlanningPane
+        {...props}
+        cycle={deliveryPlanPlanningCycleViewSchema.parse({
+          ...launchPending,
+          cycle: {
+            ...launchPending.cycle,
+            lifecycle: 'execution_active',
+            activeExecutionId: executionId,
+          },
+          turns: [
+            {
+              ...launchPending.turns[0],
+              launchState: 'execution_bound',
+              executionId,
+            },
+          ],
+        })}
+      />,
+    );
+    expect(
+      screen.queryByLabelText('Message to project manager'),
+    ).not.toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('explains requirements and profile gates', () => {
@@ -1668,8 +1991,17 @@ describe('DeliveryPlanningPane', () => {
     expect(screen.getByLabelText('Proposal revision')).toHaveValue('1');
     expect(screen.getByText('Foundation')).toBeVisible();
     expect(screen.getByText('Persist Todo')).toBeVisible();
-    expect(screen.getByText(/foundation-before-experience/)).toBeVisible();
-    expect(screen.getAllByText(new RegExp(reuseRecordId))).toHaveLength(2);
+    expect(
+      screen.getByText(
+        `Intent ${approvedIntentLedger.projectIntent.id} · revision 1 · requirement ledger ${approvedIntentLedger.ledger.id} · revision 1 · delivery plan not yet approved`,
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        'foundation-before-experience: Persist Todo (persist-todo) → Show Todo (show-todo)',
+      ),
+    ).toBeVisible();
+    expect(screen.getAllByText(new RegExp(reuseRecordId))).toHaveLength(4);
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Approve full plan' }));
@@ -1704,6 +2036,18 @@ describe('DeliveryPlanningPane', () => {
     });
 
     await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
+    expect(screen.getByLabelText('Rejection feedback')).toHaveAttribute(
+      'maxLength',
+      '4096',
+    );
+    fireEvent.change(screen.getByLabelText('Rejection feedback'), {
+      target: { value: 'x'.repeat(4097) },
+    });
+    expect(
+      screen.getByRole('button', { name: 'Confirm rejection' }),
+    ).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm rejection' }));
+    expect(onReject).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText('Rejection feedback'), {
       target: { value: 'Split the second milestone.' },
     });
