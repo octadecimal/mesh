@@ -16,24 +16,6 @@ export type BoardProjectionInput = Readonly<{
   deliveryPlan: ApprovedDeliveryPlan | null;
   currentTaskRevisions: readonly TaskRevision[];
   filter: BoardFilter | null;
-  historicalMilestones?: readonly Readonly<{
-    milestoneId: string;
-    milestoneRevision: number;
-    title: string;
-    lifecycle: 'active' | 'retired';
-  }>[];
-  historicalRequirements?: readonly Readonly<{
-    recordId: string;
-    recordRevision: number;
-    statement: string;
-    requirementKind:
-      | 'functional'
-      | 'quality'
-      | 'ux'
-      | 'safety'
-      | 'operational'
-      | 'constraint';
-  }>[];
 }>;
 
 const unicodeCompare = (left: string, right: string) => {
@@ -83,19 +65,14 @@ type FacetName =
   | 'labels'
   | 'requirementRecordIds';
 
-export const projectBoard = (input: BoardProjectionInput): BoardView => {
+export function projectBoard(input: BoardProjectionInput): BoardView {
   const {
     projectId,
     intentLedger,
     deliveryPlan,
     currentTaskRevisions,
     filter,
-    historicalMilestones = [],
-    historicalRequirements = [],
   } = input;
-  if (historicalMilestones.length > 20 || historicalRequirements.length > 300) {
-    throw new Error('Historical Board metadata exceeds filter bounds');
-  }
   if (deliveryPlan === null) {
     if (currentTaskRevisions.length !== 0 || filter !== null) {
       throw new Error(
@@ -162,9 +139,21 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
       (milestone) => [milestone.id, milestone] as const,
     ),
   );
-  const records = new Map(
-    intentLedger.records.map((record) => [record.recordId, record] as const),
-  );
+  const records = new Map<string, (typeof intentLedger.records)[number]>();
+  const recordsById = new Map<
+    string,
+    (typeof intentLedger.records)[number][]
+  >();
+  for (const record of intentLedger.records) {
+    const key = `${record.recordId}:${record.revision}`;
+    if (records.has(key))
+      throw new Error('Intent ledger contains a duplicate record revision');
+    records.set(key, record);
+    recordsById.set(record.recordId, [
+      ...(recordsById.get(record.recordId) ?? []),
+      record,
+    ]);
+  }
   const stale =
     deliveryPlan.plan.projectIntentId !== intentLedger.projectIntent.id ||
     deliveryPlan.plan.projectIntentRevision !==
@@ -178,12 +167,6 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
   const readinessFor = (task: TaskRevision): TaskReadiness => {
     const milestone = milestones.get(task.milestoneId);
     if (!milestone) throw new Error('Task milestone is absent from the plan');
-    if (milestone.lifecycle === 'retired') {
-      return {
-        state: 'inactive',
-        blockers: [{ kind: 'milestone_retired', milestoneId: milestone.id }],
-      };
-    }
     if (task.lifecycle === 'completed') {
       return { state: 'inactive', blockers: [{ kind: 'task_completed' }] };
     }
@@ -200,6 +183,12 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
             actualLedgerRevision: intentLedger.ledger.revision,
           },
         ],
+      };
+    }
+    if (milestone.lifecycle === 'retired') {
+      return {
+        state: 'inactive',
+        blockers: [{ kind: 'milestone_retired', milestoneId: milestone.id }],
       };
     }
     const blockers = activeDependencies
@@ -257,12 +246,10 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
       .flatMap((trace) => {
         if (trace.kind !== 'task_satisfies' || trace.taskId !== task.id)
           return [];
-        const record = records.get(trace.requirement.recordId);
-        if (
-          !record ||
-          record.revision !== trace.requirement.recordRevision ||
-          record.content.type !== 'requirement'
-        ) {
+        const record = records.get(
+          `${trace.requirement.recordId}:${trace.requirement.recordRevision}`,
+        );
+        if (!record || record.content.type !== 'requirement') {
           throw new Error('Task requirement trace is invalid');
         }
         return [
@@ -350,21 +337,8 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
     })),
     ...filter.milestoneIds
       .filter((id) => !milestones.has(id))
-      .map((id) => {
-        const historical = historicalMilestones.find(
-          ({ milestoneId }) => milestoneId === id,
-        );
-        if (!historical)
-          throw new Error('Historical milestone metadata is missing');
-        return {
-          value: historical.milestoneId,
-          label: historical.title,
-          selected: true,
-          matchingTaskCount: 0,
-          milestoneRevision: historical.milestoneRevision,
-          lifecycle: historical.lifecycle,
-          historical: true,
-        };
+      .map(() => {
+        throw new Error('Historical milestone metadata is missing');
       }),
   ].sort((left, right) => unicodeCompare(left.value, right.value));
   const enumOptions = <T extends string>(
@@ -391,43 +365,43 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
         : 0,
       historical: !currentLabels.has(value),
     }));
-  const currentRequirementIds = new Set(
-    deliveryPlan.traces.flatMap((trace) =>
-      trace.kind === 'task_satisfies' ? [trace.requirement.recordId] : [],
-    ),
-  );
+  const currentRequirements = new Map<string, number>();
+  for (const trace of deliveryPlan.traces) {
+    if (trace.kind !== 'task_satisfies') continue;
+    const prior = currentRequirements.get(trace.requirement.recordId);
+    if (prior !== undefined && prior !== trace.requirement.recordRevision) {
+      throw new Error('Plan traces disagree on a requirement revision');
+    }
+    currentRequirements.set(
+      trace.requirement.recordId,
+      trace.requirement.recordRevision,
+    );
+  }
   const requirementOptions = [
-    ...new Set([...currentRequirementIds, ...filter.requirementRecordIds]),
+    ...new Set([...currentRequirements.keys(), ...filter.requirementRecordIds]),
   ]
     .sort(unicodeCompare)
     .map((value) => {
-      const record = records.get(value);
-      const currentRequirement =
-        currentRequirementIds.has(value) &&
-        record?.content.type === 'requirement';
-      const historical = historicalRequirements.find(
-        ({ recordId }) => recordId === value,
-      );
-      if (!currentRequirement && !historical)
+      const tracedRevision = currentRequirements.get(value);
+      const candidates = recordsById.get(value) ?? [];
+      const record =
+        tracedRevision === undefined
+          ? candidates.length === 1
+            ? candidates[0]
+            : undefined
+          : records.get(`${value}:${tracedRevision}`);
+      const currentRequirement = tracedRevision !== undefined;
+      if (!record || record.content.type !== 'requirement')
         throw new Error('Historical requirement metadata is missing');
       return {
         value,
-        label:
-          currentRequirement && record?.content.type === 'requirement'
-            ? record.content.statement
-            : historical!.statement,
-        selected: filter.requirementRecordIds.includes(value),
+        label: record.content.statement,
+        selected: filter.requirementRecordIds.some((id) => id === value),
         matchingTaskCount: currentRequirement
           ? countWith('requirementRecordIds', value, cardRequirements)
           : 0,
-        recordRevision:
-          currentRequirement && record
-            ? record.revision
-            : historical!.recordRevision,
-        requirementKind:
-          currentRequirement && record?.content.type === 'requirement'
-            ? record.content.kind
-            : historical!.requirementKind,
+        recordRevision: record.revision,
+        requirementKind: record.content.kind,
         historical: !currentRequirement,
       };
     });
@@ -470,4 +444,4 @@ export const projectBoard = (input: BoardProjectionInput): BoardView => {
     },
     cards: matched,
   });
-};
+}

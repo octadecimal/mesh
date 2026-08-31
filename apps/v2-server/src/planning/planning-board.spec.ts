@@ -380,6 +380,47 @@ describe('projectBoard', () => {
       ),
     ).toBe(true);
 
+    const retiredMilestone = {
+      ...deliveryPlan,
+      milestones: deliveryPlan.milestones.map((milestone) => ({
+        ...milestone,
+        lifecycle: 'retired' as const,
+      })),
+    };
+    expect(
+      projectBoard({
+        projectId,
+        intentLedger: staleLedger,
+        deliveryPlan: retiredMilestone,
+        currentTaskRevisions: [firstContract, secondContract],
+        filter,
+      }).cards.every(
+        ({ readiness }) => readiness.blockers[0]?.kind === 'plan_stale',
+      ),
+    ).toBe(true);
+
+    expect(() =>
+      projectBoard({
+        projectId,
+        intentLedger: {
+          ...staleLedger,
+          records: [
+            {
+              ...intentLedger.records[0],
+              revision: 2,
+              content: {
+                ...intentLedger.records[0].content,
+                statement: 'Users manage revised Todo tasks.',
+              },
+            },
+          ],
+        },
+        deliveryPlan,
+        currentTaskRevisions: [firstContract, secondContract],
+        filter,
+      }),
+    ).toThrow(/requirement trace/i);
+
     for (const revisions of [
       [firstContract],
       [
@@ -401,13 +442,13 @@ describe('projectBoard', () => {
     }
   });
 
-  it('uses self-excluding facet counts and retains selected historical options', () => {
+  it('uses self-excluding facet counts and fails closed on unauthenticated historical options', () => {
     const selected: BoardFilter = {
       ...filter,
       revision: 2,
       milestoneIds: [milestoneOne],
       labels: ['core', 'removed'],
-      requirementRecordIds: ['00000000-0000-4000-8000-00000000000c'],
+      requirementRecordIds: [requirementId],
     };
     const board = projectBoard({
       projectId,
@@ -415,17 +456,8 @@ describe('projectBoard', () => {
       deliveryPlan,
       currentTaskRevisions: [firstContract, secondContract],
       filter: selected,
-      historicalMilestones: [],
-      historicalRequirements: [
-        {
-          recordId: '00000000-0000-4000-8000-00000000000c',
-          recordRevision: 7,
-          statement: 'Retired requirement',
-          requirementKind: 'operational',
-        },
-      ],
     });
-    expect(board.emptyReason).toBe('filter_empty');
+    expect(board.emptyReason).toBe(null);
     expect(
       board.facets.labels.find(({ value }) => value === 'removed'),
     ).toEqual({
@@ -436,65 +468,57 @@ describe('projectBoard', () => {
       matchingTaskCount: 0,
     });
     expect(
-      board.facets.requirements.find(
-        ({ value }) => value === '00000000-0000-4000-8000-00000000000c',
-      ),
-    ).toMatchObject({ selected: true, historical: true, matchingTaskCount: 0 });
-    expect(
-      board.facets.requirements.find(
-        ({ value }) => value === '00000000-0000-4000-8000-00000000000c',
-      ),
+      board.facets.requirements.find(({ value }) => value === requirementId),
     ).toMatchObject({
-      label: 'Retired requirement',
-      recordRevision: 7,
-      requirementKind: 'operational',
+      label: 'Users manage Todo tasks.',
+      recordRevision: 1,
+      requirementKind: 'functional',
+      selected: true,
+      historical: false,
     });
     expect(
       board.facets.milestones.find(({ value }) => value === milestoneOne)
         ?.matchingTaskCount,
-    ).toBe(0);
+    ).toBe(1);
 
-    const replanned = projectBoard({
-      projectId,
-      intentLedger,
-      deliveryPlan: {
-        ...deliveryPlan,
-        plan: {
-          ...deliveryPlan.plan,
-          revision: 2,
-          baseDeliveryPlanRevision: 1,
+    expect(() =>
+      projectBoard({
+        projectId,
+        intentLedger,
+        deliveryPlan: {
+          ...deliveryPlan,
+          plan: {
+            ...deliveryPlan.plan,
+            revision: 2,
+            baseDeliveryPlanRevision: 1,
+          },
+          milestones: [deliveryPlan.milestones[0]],
+          taskContracts: [firstContract],
+          dependencies: [],
+          traces: deliveryPlan.traces.filter(
+            (trace) =>
+              (trace.kind === 'milestone_covers' &&
+                trace.milestoneId === milestoneOne) ||
+              (trace.kind === 'task_satisfies' && trace.taskId === taskOne),
+          ),
+          milestoneDependencies: [],
         },
-        milestones: [deliveryPlan.milestones[0]],
-        taskContracts: [firstContract],
-        dependencies: [],
-        traces: deliveryPlan.traces.filter(
-          (trace) =>
-            (trace.kind === 'milestone_covers' &&
-              trace.milestoneId === milestoneOne) ||
-            (trace.kind === 'task_satisfies' && trace.taskId === taskOne),
-        ),
-        milestoneDependencies: [],
-      },
-      currentTaskRevisions: [firstContract],
-      filter: { ...filter, revision: 2, milestoneIds: [milestoneTwo] },
-      historicalMilestones: [
-        {
-          milestoneId: milestoneTwo,
-          milestoneRevision: 4,
-          title: 'Historical Board',
-          lifecycle: 'retired',
+        currentTaskRevisions: [firstContract],
+        filter: { ...filter, revision: 2, milestoneIds: [milestoneTwo] },
+      }),
+    ).toThrow(/historical milestone/i);
+
+    expect(() =>
+      projectBoard({
+        projectId,
+        intentLedger,
+        deliveryPlan,
+        currentTaskRevisions: [firstContract, secondContract],
+        filter: {
+          ...filter,
+          requirementRecordIds: ['00000000-0000-4000-8000-00000000000c'],
         },
-      ],
-      historicalRequirements: [],
-    });
-    expect(
-      replanned.facets.milestones.find(({ value }) => value === milestoneTwo),
-    ).toMatchObject({
-      label: 'Historical Board',
-      milestoneRevision: 4,
-      selected: true,
-      historical: true,
-      matchingTaskCount: 0,
-    });
+      }),
+    ).toThrow(/historical requirement/i);
   });
 });

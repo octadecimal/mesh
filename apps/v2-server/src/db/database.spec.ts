@@ -14,6 +14,7 @@ import {
 import { migrateV2Database } from './migrate.js';
 import { PlanningRepository } from '../planning/planning-repository.js';
 import { V2CommandRepository } from '../storage/command-repository.js';
+import { V2EventStore } from '../storage/event-store.js';
 import {
   createV2TestDatabase,
   insertV2TestProject,
@@ -714,8 +715,6 @@ describe('V2 database identity and migration', () => {
     const ledgerId = randomUUID();
     const runtimeEventId = randomUUID();
     const at = '2026-08-29T01:02:03.004Z';
-    const resultJson = '{ "ok": false, "evidence": [3, 2, 1] }';
-    const domainPayload = '{ "ordered": ["b", "a"], "space": true }';
     const diagnosticPayload = '{ "raw": "keep  two  spaces", "cursor": 17 }';
     const runtimePayload = '{ "delta": "first\\nsecond", "final": false }';
 
@@ -754,17 +753,52 @@ describe('V2 database identity and migration', () => {
         )`,
       )
       .run(cycleId, projectId, profileId, at, at, at);
-    for (const [index, commandType] of [
-      'planning_cycle.submit_turn',
-      'planning_proposal.approve',
-      'planning_proposal.reject',
-      'planning_cycle.abandon',
-    ].entries()) {
+    const legacyCommandResults = [
+      {
+        commandType: 'planning_cycle.submit_turn' as const,
+        code: 'planning_cycle_revision_conflict' as const,
+        message: 'legacy submit conflict',
+      },
+      {
+        commandType: 'planning_proposal.approve' as const,
+        code: 'planning_canonical_base_conflict' as const,
+        message: 'legacy approval conflict',
+      },
+      {
+        commandType: 'planning_proposal.reject' as const,
+        code: 'planning_proposal_not_found' as const,
+        message: 'legacy rejection missing',
+      },
+      {
+        commandType: 'planning_cycle.abandon' as const,
+        code: 'planning_cycle_not_found' as const,
+        message: 'legacy abandonment missing',
+      },
+    ];
+    for (const [index, result] of legacyCommandResults.entries()) {
+      const commandResult = {
+        ok: false,
+        commandType: result.commandType,
+        error: { code: result.code, message: result.message },
+      };
+      const resultJson = JSON.stringify(commandResult);
+      expect(resultJson).not.toBe(
+        index === 0
+          ? '{}'
+          : JSON.stringify({
+              ok: false,
+              commandType: legacyCommandResults[0].commandType,
+              error: {
+                code: legacyCommandResults[0].code,
+                message: legacyCommandResults[0].message,
+              },
+            }),
+      );
       database
         .prepare(`INSERT INTO command_results VALUES (?, ?, ?, ?, ?)`)
         .run(
           `m2-command-${index}`,
-          commandType,
+          result.commandType,
           String(index + 3).repeat(64),
           resultJson,
           at,
@@ -776,13 +810,6 @@ describe('V2 database identity and migration', () => {
     database
       .prepare(`INSERT INTO event_streams VALUES (?, 'runtime', 23)`)
       .run(projectId);
-    database
-      .prepare(
-        `INSERT INTO domain_events VALUES (
-          ?, ?, 11, ?, 'planning_cycle.updated', ?
-        )`,
-      )
-      .run(randomUUID(), projectId, at, domainPayload);
     database
       .prepare(`INSERT INTO raw_diagnostics VALUES (?, ?, ?, 'fake', 17, ?, ?)`)
       .run(diagnosticId, projectId, executionId, at, diagnosticPayload);
@@ -936,6 +963,142 @@ describe('V2 database identity and migration', () => {
       .prepare(`INSERT INTO ledger_revision_members VALUES (?, 1, ?, ?, 1, 1)`)
       .run(ledgerId, projectId, recordId);
 
+    const legacyCycle = {
+      cycle: {
+        id: cycleId,
+        projectId,
+        lifecycle: 'approved' as const,
+        revision: 3,
+        profileId,
+        profileRevision: 1,
+        baseProjectIntentRevision: null,
+        baseLedgerRevision: null,
+        latestProposalRevision: 1,
+        activeExecutionId: null,
+        createdAt: at,
+        updatedAt: at,
+        endedAt: at,
+      },
+      turns: [
+        {
+          id: humanTurnId,
+          projectId,
+          planningCycleId: cycleId,
+          ordinal: 1,
+          actor: 'human' as const,
+          message: 'Plan Todo.',
+          launchState: 'execution_bound' as const,
+          executionId,
+          createdAt: at,
+        },
+        {
+          id: pmTurnId,
+          projectId,
+          planningCycleId: cycleId,
+          ordinal: 2,
+          actor: 'pm' as const,
+          message: 'Approved intent.',
+          launchState: null,
+          executionId,
+          createdAt: at,
+        },
+      ],
+      questions: [],
+      proposals: [
+        {
+          id: proposalId,
+          projectId,
+          planningCycleId: cycleId,
+          revision: 1,
+          lifecycle: 'approved' as const,
+          baseProjectIntentRevision: null,
+          baseLedgerRevision: null,
+          summary: 'Todo intent',
+          projectIntent: intentContent,
+          records: [proposedRecord],
+          relationships: [],
+          diff: {
+            intentChanges: [
+              'goal',
+              'targetUsers',
+              'desiredCapabilities',
+              'successConditions',
+              'rationale',
+              'provenance',
+            ],
+            recordChanges: { create: 1, revise: 0, reuse: 0 },
+            relationshipChanges: { added: [], removed: [] },
+          },
+          createdByTurnId: pmTurnId,
+          createdByExecutionId: executionId,
+          rejectionFeedback: null,
+          createdAt: at,
+          decidedAt: at,
+        },
+      ],
+    };
+    const legacyIntentLedger = {
+      projectIntent: {
+        id: intentId,
+        projectId,
+        revision: 1,
+        content: intentContent,
+        proposalId,
+        approvedBy: 'human' as const,
+        approvedAt: at,
+      },
+      ledger: {
+        id: ledgerId,
+        projectId,
+        revision: 1,
+        proposalId,
+        approvedBy: 'human' as const,
+        approvedAt: at,
+      },
+      records: [
+        {
+          recordId,
+          projectId,
+          revision: 1,
+          content: { ...proposedRecord.content, status: 'approved' as const },
+          provenance: proposedRecord.provenance,
+          proposalId,
+          approvedBy: 'human' as const,
+          approvedAt: at,
+        },
+      ],
+      relationships: [],
+    };
+    const legacyDomainEvents = [
+      {
+        id: randomUUID(),
+        sequence: 10,
+        type: 'planning_cycle.changed',
+        payload: { planningCycle: legacyCycle },
+      },
+      {
+        id: randomUUID(),
+        sequence: 11,
+        type: 'intent_ledger.approved',
+        payload: {
+          planningCycle: legacyCycle,
+          intentLedger: legacyIntentLedger,
+        },
+      },
+    ];
+    for (const event of legacyDomainEvents) {
+      database
+        .prepare(`INSERT INTO domain_events VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(
+          event.id,
+          projectId,
+          event.sequence,
+          at,
+          event.type,
+          JSON.stringify(event.payload),
+        );
+    }
+
     const preservedTables = [
       'command_results',
       'event_streams',
@@ -1007,6 +1170,34 @@ describe('V2 database identity and migration', () => {
     }
     expect(reopened.pragma('quick_check')).toEqual([{ quick_check: 'ok' }]);
     expect(reopened.pragma('foreign_key_check')).toEqual([]);
+    const reopenedCommands = new V2CommandRepository(reopened);
+    for (const [index, result] of legacyCommandResults.entries()) {
+      expect(reopenedCommands.find(`m2-command-${index}`)).toMatchObject({
+        commandType: result.commandType,
+        requestHash: String(index + 3).repeat(64),
+        result: {
+          ok: false,
+          commandType: result.commandType,
+          error: { code: result.code, message: result.message },
+        },
+      });
+    }
+    const replay = new V2EventStore(reopened).domainAfter(projectId, 0);
+    expect(replay).toMatchObject({
+      lowWater: 10,
+      highWater: 11,
+      events: [
+        { sequence: 10, type: 'planning_cycle.changed' },
+        { sequence: 11, type: 'intent_ledger.approved' },
+      ],
+    });
+    expect(replay.events.map(({ payload }) => payload)).toEqual(
+      legacyDomainEvents.map(({ payload }) => payload),
+    );
+    expect(new V2EventStore(reopened).cursors(projectId)).toEqual({
+      domain: 11,
+      runtime: 23,
+    });
     expect(
       new PlanningRepository(reopened).planningSnapshot(projectId),
     ).toMatchObject({

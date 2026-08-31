@@ -1,8 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, globSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  globSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { delimiter, join, relative, resolve } from 'node:path';
 
 import { afterAll, beforeAll, expect, it } from 'vitest';
 
@@ -71,9 +77,18 @@ const runProductionV2Build = () => {
         'Corepack could not locate pnpm and npm_execpath is unavailable',
       );
     }
+    const pnpmShim = join(temporaryRoot, 'pnpm.cmd');
+    writeFileSync(
+      pnpmShim,
+      `@echo off\r\n"${process.execPath}" "${npmExecPath}" %*\r\n`,
+    );
     execFileSync(process.execPath, [npmExecPath, ...pnpmArgs], {
       ...options,
-      env: { ...options.env, npm_execpath: npmExecPath },
+      env: {
+        ...options.env,
+        PATH: `${temporaryRoot}${delimiter}${options.env.PATH ?? ''}`,
+        npm_execpath: npmExecPath,
+      },
     });
   }
 };
