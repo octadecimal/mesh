@@ -117,6 +117,19 @@ Development-wave labels below are coordination metadata, never M5 product behavi
 
 No task begins until its exact prerequisite integration SHA has an accepted `INTEGRATION REVIEW HANDOFF`. Parallel tasks in one wave use the same exact base. Before each integration, compare `git diff --name-only <task-base>..<accepted-task-tip>` with ownership below. Any conflict among same-wave tasks proves an ownership violation; do not resolve it mechanically. Any cross-package contract change after W0 pauses every consumer and requires a plan-level decision.
 
+Before applying a wave, the coordinator names one absolute campaign evidence
+directory in the ledger and assigns it to that integrator. Resolve and compare
+the path case-insensitively on Windows against every entry from `git worktree
+list --porcelain`, every registered Git common directory, and every protected,
+operator-owned, or ambiguous path. The directory must be neither inside nor an
+ancestor of any of them; it must be a newly created campaign-specific child of
+the system temp directory, not a repository child. Record its owner and
+`preserve_through_final_review` disposition before use. Every diff/equivalence
+artifact below lives only there, is named by wave/task/source ordinal, remains
+untracked, and is never added to a commit, deleted, or cleaned during the
+campaign. A validation or ownership ambiguity blocks integration before any
+Git mutation.
+
 An accepted task is its complete, linear, additive lineage from the exact task
 base through the accepted tip, not only the tip commit. For every task, the
 integrator must:
@@ -128,40 +141,52 @@ integrator must:
    <task-base>..<accepted-tip>` yields the complete ordered source sequence;
 2. record the source cumulative binary diff SHA-256, its `git patch-id
    --stable`, and exact `git diff --name-status` output before applying
-   anything. Generate the canonical bytes with `git diff --binary --full-index
-   --no-ext-diff --output=<campaign-owned-source.patch>
-   <task-base>..<accepted-tip>`, hash that exact named file with PowerShell
-   `Get-FileHash -Algorithm SHA256`, and pipe the same base..tip `git diff`
-   output to `git patch-id --stable`;
-3. use `git merge --ff-only <accepted-tip>` only when the current integration
-   head equals the task base. This imports the whole lineage unchanged, so each
-   source commit maps to itself and its existing tree;
-4. otherwise apply **every** source commit, oldest first, with one
-   `git cherry-pick --no-edit <source-commit>` per commit. After each pick,
-   record the source commit and resulting integration commit/tree. Cherry-
-   picking only the accepted tip is prohibited because it would omit the
-   worker commit beneath additive rework;
+   anything. Generate canonical bytes in the validated evidence directory with
+   `git diff --binary --full-index --no-ext-diff
+   --output=<source-cumulative.patch> <task-base>..<accepted-tip>`, hash that
+   exact file with PowerShell `Get-FileHash -Algorithm SHA256`, and pipe the
+   same base..tip `git diff` output to `git patch-id --stable`;
+3. process **every** source commit oldest first. Its source parent must equal
+   the task base for ordinal 1 and the preceding source commit thereafter.
+   Before applying it, use the same canonical diff flags, SHA-256 method, and
+   stable-patch command from step 2 to write the source-parent..source binary
+   diff, stable patch ID, exact name-status/touched paths, and postimage blob
+   identity for every task-owned touched path to ordinal-specific evidence
+   artifacts. A deletion or rename source records an explicit absent
+   tombstone; every other postimage records `git rev-parse <source>:<path>`;
+4. capture the exact integration-before commit/tree, then use `git merge
+   --ff-only <source-commit>` only when integration-before equals that source
+   parent; otherwise use exactly one `git cherry-pick --no-edit
+   <source-commit>`. Cherry-picking only the accepted tip is prohibited. After
+   that single application, and **before continuing to another source commit**,
+   write the integration-before..after binary diff, stable patch ID, exact
+   name-status/touched paths, and resulting postimage blob identities to the
+   matching ordinal artifacts. Require source versus integrated equality for
+   SHA-256, stable patch ID, name-status, touched paths, and every task-owned
+   postimage blob/tombstone. Record the resulting integration commit/tree; any
+   mismatch blocks immediately;
 5. stop on any conflict or unexpected active Git operation without editing the
    conflict, aborting the operation, or cleaning the worktree. Preserve it for
    the recurring coordinator barrier; a same-wave conflict invalidates the
    shared ownership invariant;
 6. generate the integration before..after diff with the identical flags into a
-   separately named campaign-owned patch file, then compare the two SHA-256
-   values and stable patch IDs. Require exact `git diff --name-status`
-   path/status equivalence and byte-equivalent task-owned blobs. For a fast-
-   forward, also require the source and integration commit/tree to be
-   identical; and
+   separately named cumulative file in the evidence directory, then retain the
+   existing cumulative comparison: equal SHA-256 values and stable patch IDs,
+   exact `git diff --name-status` path/status equivalence, and byte-equivalent
+   task-owned blobs. For a fully fast-forwarded lineage, also require every
+   source and integration commit/tree mapping to be identical; and
 7. record the exact source-tip verification evidence and rerun the task's
    focused green gate on the cumulative integration head. If this plan
    explicitly defers that gate, record `deferred`, its exact reason, owner, and
    discharge wave rather than inventing a pass.
 
-After the last task, the integrator records the wave base/head/tree, the ordered
-source-to-integration commit/tree map, final `git diff --name-status`, exact
-union of task-owned paths, cumulative diff SHA-256/stable patch evidence, and
-the wave gate results. There may be no integration-only content. A patch,
-name-status, path, blob, ordering, or tree mismatch is manual drift and blocks
-the wave.
+After the last task, the integrator records the wave base/head/tree, every
+per-commit evidence artifact and verdict, the ordered source-to-integration
+commit/tree map, final `git diff --name-status`, exact union of task-owned
+paths, cumulative diff SHA-256/stable patch evidence, and the wave gate results.
+There may be no integration-only content. A per-commit or cumulative patch,
+name-status, path, blob, ordering, artifact-ownership, or tree mismatch is
+manual drift and blocks the wave.
 
 ## Recurring Coordinator State Barrier
 
@@ -191,8 +216,12 @@ The read-only inspection records:
   not traversed beyond the Git metadata needed to classify them; never inspect
   `C:\code\bloom`;
 - only temp directories, databases, logs, and process artifacts already named
-  in the campaign ledger, with exact path, owner, expected lifecycle, existence,
-  and cleanup disposition. Do not discover or delete by pattern; and
+  in the campaign ledger, with `fixture | integration_evidence` classification,
+  exact path, owner, expected lifecycle, existence, manifest/digest state, and
+  disposition. Validated external `integration_evidence` directories and their
+  named artifacts are expected campaign state, not dirty, unowned, or ambiguous
+  state; preserve them through final review. Do not discover or delete by
+  pattern; and
 - every campaign-named PID/listener and every listener on a campaign-assigned
   port, with address, port, PID, executable, redacted command line, expected
   owner/task, and `owned | unowned | ambiguous` verdict. Read no process
@@ -216,7 +245,7 @@ Campaign refs:
 Relevant worktrees:
 - <path, ref, head/tree, owner, dirty state, protected state, active Git operation or none>
 Named temp artifacts:
-- <name, exact path, owner, expected lifecycle, observed state, disposition>
+- <name, fixture | integration_evidence, exact path, owner, validation, expected lifecycle, observed manifest/digests, disposition>
 Listeners:
 - <address/port, PID, executable, redacted command line, expected owner, verdict>
 Ambiguous state:
@@ -234,6 +263,10 @@ missing or rewritten; the shared integration head/tree was unexpectedly
 rewritten; the shared integration worktree is dirty or mid-operation; accepted
 lineage/patch/path equivalence fails; task ownership overlaps; or a prohibited
 shared surface was changed. Never repair ambiguous state inside the barrier.
+The presence of a ledger-matching, externally validated integration-evidence
+directory with `preserve_through_final_review` disposition never causes a hold
+or hard stop. A path, owner, or digest mismatch invalidates the shared
+lineage-evidence invariant and returns `hard_stop` without cleanup.
 For this frozen-base campaign, this refines the runbook's generic base-drift
 pause rule: later remote movement is observed drift, while missing or rewritten
 frozen local authority is invalidation. Neither case authorizes a silent fetch,
@@ -336,6 +369,7 @@ Integration: <integrator/session ID>
 Status: ready_for_review | blocked
 Wave base: <full integration-base SHA and tree>
 Pre-integration coordinator barrier: <record ID and continue status>
+Evidence directory: <ledger artifact ID, absolute canonical path, integrator owner, outside-worktree/Git/protected validation, preserve_through_final_review>
 Deterministic task order:
 - <ordinal, task ID>
 Task lineage applications:
@@ -348,6 +382,20 @@ Task lineage applications:
   Integration before: <full SHA and tree>
   Resulting commit map:
   - <source commit/tree -> resulting integration commit/tree>
+  Per-commit applications:
+  - Ordinal: <1-based source ordinal>
+    Source parent: <full SHA and tree; task base or prior source>
+    Source commit: <full SHA and tree>
+    Source diff artifact: <ledger-relative file, SHA-256, stable patch ID>
+    Source name-status/touched paths: <exact output and owned-path verdict>
+    Source postimage blobs: <path -> blob SHA, absent tombstone for deletion/rename source>
+    Integration before: <full SHA and tree>
+    Application: ff-only | cherry-pick --no-edit
+    Integration after: <full SHA and tree>
+    Integrated diff artifact: <ledger-relative file, SHA-256, stable patch ID>
+    Integrated name-status/touched paths: <exact output and owned-path verdict>
+    Integrated postimage blobs: <path -> blob SHA, absent tombstone for deletion/rename source>
+    Per-commit equivalence: <SHA-256, patch ID, name-status, paths, and blobs all equal | exact mismatch>
   Integration after: <full SHA and tree>
   Stable patch equivalence: <source and integrated stable patch IDs; equal | mismatch>
   Cumulative diff equivalence: <source and integrated binary-diff SHA-256; equal | mismatch>
@@ -375,7 +423,7 @@ Next dependency-ready tasks:
 - <exact task IDs or none>
 ```
 
-A fresh read-only integration reviewer who is neither a wave worker nor integrator verifies the exact head and returns the same evidence fields under `INTEGRATION REVIEW HANDOFF`, plus `Reviewer`, `Status: accepted | rework_required | blocked`, and file/line findings. The reviewer independently reconstructs every `task-base..accepted-tip` source sequence, proves each complete source lineage was imported in declared order, and repeats the cumulative patch/name-status/path/blob checks. On rework, route task-owned defects to the original worker as additive commits, restart wave integration from the frozen wave base, integrate every newly accepted complete lineage in declared order, rerun the entire wave gate on the new head, and use another fresh reviewer. Reusing or manually editing the rejected integration worktree is forbidden.
+A fresh read-only integration reviewer who is neither a wave worker nor integrator verifies the exact head and returns the same evidence fields under `INTEGRATION REVIEW HANDOFF`, plus `Reviewer`, `Status: accepted | rework_required | blocked`, and file/line findings. The reviewer independently reconstructs every `task-base..accepted-tip` source sequence and, for every source ordinal, recomputes source-parent..source and integration-before..after SHA-256, stable patch ID, name-status/touched-path, and postimage blob/tombstone evidence before accepting the mapping. It then repeats the cumulative checks, proves each complete source lineage was imported in declared order, validates the evidence directory against the current registered/protected paths and ledger, and leaves all artifacts preserved. On rework, route task-owned defects to the original worker as additive commits, restart wave integration from the frozen wave base, integrate every newly accepted complete lineage in declared order, rerun the entire wave gate on the new head, and use another fresh reviewer. Reusing or manually editing the rejected integration worktree is forbidden.
 
 The coordinator runs and records the recurring barrier immediately after every
 task/rework review and integration/review handoff. The pre-integration barrier
@@ -467,6 +515,7 @@ coordinator's later observation.
 - `apps/v2-server/src/db/migrations/003_planning_board.sql` (new)
 - `apps/v2-server/src/db/migrate.ts`
 - `apps/v2-server/src/db/database.spec.ts`
+- `apps/v2-server/src/db/database.production.spec.ts`
 - `apps/v2-server/src/test/create-v2-test-database.ts`
 - `apps/v2-server/src/planning/planning-repository.ts`
 - `apps/v2-server/src/planning/planning-repository.spec.ts`
@@ -481,6 +530,7 @@ coordinator's later observation.
 **Produces:** `PlanningBoardSnapshot`, `BoardProjectionInput`, `projectBoard`, and the transaction/read method set on `PlanningRepository` described under Frozen Interfaces.
 
 - [ ] Seed an exact nonempty migration-2 database with M1/M2 commands, all four M2 planning result forms, intent cycles/proposals/receipts, approved ledger, strict legacy domain/runtime events, checksums, and cursors. Add failing upgrade/rollback assertions for sidecar backfill, raw byte preservation, command-table rebuild rollback, and restart reads.
+- [ ] Extend `database.production.spec.ts` with failing packaged-build assertions for `builtRoot/db/migrations/003_planning_board.sql` and `builtRoot/migrations/003_planning_board.sql`, plus the exact ordered three-row ledger `001_foundation`, `002_intent_ledger`, `003_planning_board` after opening a fresh database through emitted JavaScript. Do not edit `project.json`; its existing `**/*.sql` asset globs are the authority.
 - [ ] Add failing repository tests for immutable proposal revisions and decisions, ID reservations without canonical materialization, `cycle_abandoned` null successor, canonical plan/milestone/task/dependency revisions and memberships, exact traces, saved filters, historical selections, and task contract/lifecycle guards.
 - [ ] Add failing pure-domain tests for proposal preview, current/stale plan, retired milestone/task, completed task, zero/one/multiple prerequisites, completion/reopen, dependency retirement/reactivation, replan reuse/revise anchor behavior, obsolete-anchor conflict, derived cross-milestone dependencies, card/detail ordering, all empty reasons, self-excluding facet counts, and selected disappeared milestone/requirement/label options with exact bounds/order.
 - [ ] Run the red gate:
@@ -488,7 +538,7 @@ coordinator's later observation.
   ```powershell
   $env:NX_DAEMON='false'; $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
-  corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-board.spec.ts apps/v2-server/src/storage/event-store.spec.ts --config apps/v2-server/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/db/database.production.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-board.spec.ts apps/v2-server/src/storage/event-store.spec.ts --config apps/v2-server/vitest.config.ts
   ```
 
   Expected failure: migration 3/repository/projector behavior is absent.
@@ -501,13 +551,15 @@ coordinator's later observation.
   ```powershell
   $env:NX_DAEMON='false'; $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
-  corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-board.spec.ts apps/v2-server/src/storage/event-store.spec.ts --config apps/v2-server/vitest.config.ts
+  corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/db/database.production.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-board.spec.ts apps/v2-server/src/storage/event-store.spec.ts --config apps/v2-server/vitest.config.ts
+  corepack pnpm nx build v2-server --configuration=production
+  corepack pnpm nx test v2-server
   git diff --check
   ```
 
 - [ ] Record the exact new/extended public `PlanningRepository` signatures in the handoff, commit only owned files with `feat(v2-server): persist planning board state`, and return `TASK HANDOFF`.
 
-**Acceptance:** fresh and exact-M2 upgrade/restart pass; rollback restores exact migration-2 schema/data/indexes/ledger; raw legacy bytes/checksums/replay remain stable; immutable history and guards reject corruption/stale writes; Board/readiness/filter/detail output is deterministic and bounded; no server transport/runtime behavior is added. Full server typecheck is deferred to M3-T05 after exhaustive consumers update.
+**Acceptance:** fresh and exact-M2 upgrade/restart pass; rollback restores exact migration-2 schema/data/indexes/ledger; raw legacy bytes/checksums/replay remain stable; the production bundle contains `003_planning_board.sql` in both established asset destinations and opens with the exact ordered three-row migration ledger; the production build and full `v2-server` test target are green; immutable history and guards reject corruption/stale writes; Board/readiness/filter/detail output is deterministic and bounded; no server transport/runtime behavior is added. Full server typecheck is deferred to M3-T05 after exhaustive consumers update.
 
 ## Task M3-T03: Finite Plan Runtime and Todo Fake Reports
 
@@ -560,6 +612,8 @@ coordinator's later observation.
 - `apps/v2-web/src/components/PlanningPane.spec.tsx`
 - `apps/v2-web/src/components/BoardPane.tsx` (new)
 - `apps/v2-web/src/components/BoardPane.spec.tsx` (new)
+- `apps/v2-web/src/components/ExecutionActivity.tsx`
+- `apps/v2-web/src/components/ExecutionActivity.spec.tsx`
 - `apps/v2-web/src/components/planning-board.css` (new)
 
 **Prohibited:** `App*`, `FocusedProjectShell*`, API/state/resync/store, server/contracts/E2E/docs, readiness/filter calculation, and one-pane-per-task behavior.
@@ -569,6 +623,7 @@ coordinator's later observation.
 **Produces:** presentational callbacks for exact start/continue/approve/revision/reject/abandon/filter payload inputs, plus accessible Board/filter/task-detail rendering.
 
 - [ ] Add failing component tests for compatible `pm_plan` profile selection, disabled no-profile and empty-requirement states, exact initial/replan/stale/continue message forms, proposal revision history and abandonment text, required rejection feedback, and control availability for every lifecycle including attention retry and terminal replacement path.
+- [ ] Add the focused `ExecutionActivity` type/rendering regression using a `pmPlanExecution: WorkerExecution` fixture without a cast and a schema-valid structured `RuntimeEvent`: the article and activity-region accessible name is exactly “Project manager delivery planning,” and structured output shows `mesh.dev/pm-plan-report/v1`. Keep the existing `pm_discovery` case exactly “Project manager discovery” with `mesh.dev/pm-discovery-report/v1`, and keep the foundation title path unchanged. Implement only an exhaustive assignment-kind label switch; do not move the component or add planning state to it. Record the full web typecheck as the existing M3-T06/W2 deferment, where this typed fixture must compile green.
 - [ ] Add failing Board tests for loading, intent required, planning required, stale, plan empty, filter empty, disconnected/stale/submitting, command failure, normal cards, milestone-spanning filters, self-excluding counts, selected historical labels with “historical, 0 tasks,” named dependency blockers, trace/detail/stop-condition context, and no Start control.
 - [ ] Add keyboard/accessibility tests for `fieldset`/`legend`, labels, live errors/result counts, non-color status, focus return after errors, task-detail open/close focus, and retained shell tab semantics at the component boundary.
 - [ ] Run red:
@@ -576,15 +631,17 @@ coordinator's later observation.
   ```powershell
   $env:NX_DAEMON='false'; $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
-  corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/BoardPane.spec.tsx --config apps/v2-web/vite.config.ts
+  corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/BoardPane.spec.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx --config apps/v2-web/vite.config.ts
   ```
 
-  Expected failure: delivery-plan proposal/Board views are absent.
+  Expected failure: delivery-plan proposal/Board views and the exhaustive
+  `pm_plan` activity label are absent; existing discovery/foundation assertions
+  remain green.
 - [ ] Implement controlled presentational components only. Keep unsent messages, filter draft, rejection text, and selected task detail local; emit complete guarded commands through callbacks and await returned server projections. Do not duplicate readiness, facet counts, historical-option recovery, or filter matching.
 - [ ] Run the same command green and `git diff --check`. Record full web typecheck/build as deferred to M3-T06 because existing state/shell consumers update there.
 - [ ] Commit only owned paths with `feat(v2-web): add planning board views` and return `TASK HANDOFF`.
 
-**Acceptance:** every designed UI state/control/accessibility rule has a focused test; exact payload inputs are exposed; cards/details/filters are server-owned; no transport/state composition or execution UI appears.
+**Acceptance:** every designed UI state/control/accessibility rule has a focused test; `ExecutionActivity` exhaustively renders `pm_plan` without regressing `pm_discovery` or foundation assignments; exact payload inputs are exposed; cards/details/filters are server-owned; no transport/state composition or new execution control appears.
 
 ## Wave W1 Integration Gate
 
@@ -595,8 +652,10 @@ $env:NX_DAEMON='false'
 $env:NX_SKIP_NX_CACHE='true'
 git rev-parse HEAD
 corepack pnpm nx test v2-contracts
-corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-board.spec.ts apps/v2-server/src/storage/event-store.spec.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts --config apps/v2-server/vitest.config.ts
-corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/BoardPane.spec.tsx --config apps/v2-web/vite.config.ts
+corepack pnpm exec vitest run apps/v2-server/src/db/database.spec.ts apps/v2-server/src/db/database.production.spec.ts apps/v2-server/src/planning/planning-repository.spec.ts apps/v2-server/src/planning/planning-board.spec.ts apps/v2-server/src/storage/event-store.spec.ts apps/v2-server/src/config.spec.ts apps/v2-server/src/executions/fake-harness.spec.ts apps/v2-server/src/executions/execution-runtime.spec.ts --config apps/v2-server/vitest.config.ts
+corepack pnpm nx build v2-server --configuration=production
+corepack pnpm nx test v2-server
+corepack pnpm exec vitest run apps/v2-web/src/components/PlanningPane.spec.tsx apps/v2-web/src/components/BoardPane.spec.tsx apps/v2-web/src/components/ExecutionActivity.spec.tsx --config apps/v2-web/vite.config.ts
 git diff --check
 ```
 
@@ -670,6 +729,7 @@ Record server/web full typecheck/build as exact W2 deferments, not passes. Obtai
 
 - `apps/v2-web/src/api/client.ts`
 - `apps/v2-web/src/api/client.spec.ts`
+- `apps/v2-web/src/api/socket.spec.ts`
 - `apps/v2-web/src/state/reducer.ts`
 - `apps/v2-web/src/state/reducer.spec.ts`
 - `apps/v2-web/src/state/resync.ts`
@@ -691,6 +751,17 @@ Record server/web full typecheck/build as exact W2 deferments, not passes. Obtai
 **Produces:** exact API calls, complete projection replacement, ordered event handling, legacy command-result disposition, resync, mutation availability, and accessible Board tab composition.
 
 - [ ] Add failing reducer/API tests for versioned complete cycle/intent/plan/Board replacement; duplicate no-op; gap/stale/project mismatch/invalid pair resync; mixed legacy/new ordered replay; lifecycle/replan order; retained-gap snapshot replacement; and local unsent-form preservation only.
+- [ ] In `socket.spec.ts`, add the named regression `preserves required delivery plan and Board snapshot fields`. Its `V2ProjectSnapshot` literal must explicitly include `deliveryPlan: null` and the exact `planning_required` Board (`projectId`, null plan revision/filter, `stale: false`, zero totals, six empty facet arrays, and empty cards). After duplicate runtime completion messages, assert both fields remain byte-equal to the snapshot alongside the existing planning-cycle/intent assertions; do not use a cast or make either field optional.
+- [ ] Run that focused regression red:
+
+  ```powershell
+  $env:NX_DAEMON='false'; $env:NX_SKIP_NX_CACHE='true'
+  git rev-parse HEAD
+  corepack pnpm exec vitest run apps/v2-web/src/api/socket.spec.ts --config apps/v2-web/vite.config.ts -t "preserves required delivery plan and Board snapshot fields"
+  ```
+
+  Expected failure: the web projection does not yet retain the required
+  `deliveryPlan`/`board` pair through the socket-driven runtime update.
 - [ ] Add the required regression: begin with seeded M2 approval result/event, install a healthy current M3 snapshot containing an approved plan and nondefault filter, replay the exact old idempotency result, and assert `acknowledge_legacy` clears only local submitting state while cycles, intent, plan, Board, filter revision/selections, both cursors, and truncation state remain byte-identical. Against absent/mismatched/stale/gapped freshness, assert `resync_required`, zero synthetic field application, single-flight snapshot fetch, and exact convergence after reconnect/restart-shaped snapshot input.
 - [ ] Add app/shell tests for exact initial/replan/continue/approve/revision/reject/abandon/filter payloads and guards; typed failures/conflicts; empty approved-requirement disabled and raced-error reload behavior; every cycle lifecycle control transition; Board tab/empty/stale/detail/filter states; focus/live-region behavior; and mutation disabling while stale/disconnected/submitting.
 - [ ] Run red:
@@ -698,7 +769,7 @@ Record server/web full typecheck/build as exact W2 deferments, not passes. Obtai
   ```powershell
   $env:NX_DAEMON='false'; $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
-  corepack pnpm exec vitest run apps/v2-web/src/api/client.spec.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/app/use-project-connection.spec.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx --config apps/v2-web/vite.config.ts
+  corepack pnpm exec vitest run apps/v2-web/src/api/client.spec.ts apps/v2-web/src/api/socket.spec.ts apps/v2-web/src/state/reducer.spec.ts apps/v2-web/src/state/resync.spec.ts apps/v2-web/src/app/use-project-connection.spec.tsx apps/v2-web/src/app/App.spec.tsx apps/v2-web/src/components/FocusedProjectShell.spec.tsx --config apps/v2-web/vite.config.ts
   ```
 
   Expected failure: M3 projection/disposition/shell composition is absent.
@@ -709,6 +780,7 @@ Record server/web full typecheck/build as exact W2 deferments, not passes. Obtai
   ```powershell
   $env:NX_DAEMON='false'; $env:NX_SKIP_NX_CACHE='true'
   git rev-parse HEAD
+  corepack pnpm exec vitest run apps/v2-web/src/api/socket.spec.ts --config apps/v2-web/vite.config.ts -t "preserves required delivery plan and Board snapshot fields"
   corepack pnpm nx test v2-web
   corepack pnpm nx typecheck v2-web
   corepack pnpm nx build v2-web
@@ -717,7 +789,7 @@ Record server/web full typecheck/build as exact W2 deferments, not passes. Obtai
 
 - [ ] Commit only owned paths with `feat(v2-web): compose planning board state` and return `TASK HANDOFF`.
 
-**Acceptance:** no legacy replay can regress newer plan/filter state; unknown freshness resyncs; ordered events/snapshot converge; exact guarded commands drive accessible views; no client-owned domain logic or Start/execution UI.
+**Acceptance:** no legacy replay can regress newer plan/filter state; unknown freshness resyncs; every web snapshot literal and socket-driven projection carries the required `deliveryPlan`/`board` pair; ordered events/snapshot converge; exact guarded commands drive accessible views; no client-owned domain logic or Start/execution UI.
 
 ## Wave W2 Integration Gate
 
@@ -815,7 +887,7 @@ The integrator records exact V1/V2 E2E totals emitted by `verify`, fixture clean
 
 **Prerequisite:** exact accepted W3 integration SHA and complete campaign ledger/handoffs.
 
-- [ ] A fresh reviewer who was not a worker, task reviewer, reworker, or wave integrator independently checks base-to-head lineage, every complete ordered `task-base..accepted-tip` lineage and source-to-integration commit/tree map, every changed path, accepted planning import, recurring barrier receipts, ownership/prohibitions, design coverage, frozen interface consistency, migration/raw-history safety, atomicity/audit ordering, Board determinism, web monotonicity, fake fixture ownership, and M4/M5/V1 exclusions.
+- [ ] A fresh reviewer who was not a worker, task reviewer, reworker, or wave integrator independently checks base-to-head lineage, every complete ordered `task-base..accepted-tip` lineage, every per-source-commit diff/patch/path/blob artifact and source-to-integration commit/tree map, the validated external evidence-directory receipts and preservation state, every changed path, accepted planning import, recurring barrier receipts, ownership/prohibitions, design coverage, frozen interface consistency, migration/raw-history safety, atomicity/audit ordering, Board determinism, web monotonicity, fake fixture ownership, and M4/M5/V1 exclusions.
 - [ ] Re-run the full final verification gate daemon-disabled and uncached on the exact reviewed HEAD; do not reuse W3 output.
 - [ ] Inspect the built Todo evidence for proposal revision, atomic multi-milestone approval, dependency/trace readiness, filters/details, refresh/replay/retained-gap/restart, empty requirements, abandonment, historical label, and seeded-M2 receipt-only replay after current plan/filter state.
 - [ ] Return:
@@ -830,6 +902,7 @@ The integrator records exact V1/V2 E2E totals emitted by `verify`, fixture clean
   Reviewed commit: <full exact integration SHA>
   Reviewed tree: <full tree SHA>
   Lineage and changed paths: <commands/results and exact list>
+  Integration evidence: <validated external directory receipts, every per-commit/cumulative artifact digest and reconstruction verdict, preservation state>
   Design/stop-condition coverage:
   - <each outcome: satisfied | unsatisfied | unverified, with evidence>
   Safety and exclusions: <satisfied | unsatisfied | unverified, with evidence>
@@ -848,13 +921,13 @@ The integrator records exact V1/V2 E2E totals emitted by `verify`, fixture clean
 The coordinator may close M3 only when the exact final reviewed head proves:
 
 - T01: every strict contract/version/legacy alternative and prohibited field;
-- T02: migration-3 fresh/upgrade/rollback, immutable revisions, task anchors, dependency history, traces, filters, deterministic Board and restart reads;
+- T02: migration-3 fresh/upgrade/rollback, packaged `003_planning_board.sql`, exact three-row production ledger, green production build/full server test, immutable revisions, task anchors, dependency history, traces, filters, deterministic Board and restart reads;
 - T03: finite fake `pm_plan` execution and all failure/attention inputs without provider reuse;
-- T04: complete accessible leaf planning/Board states without client domain logic;
+- T04: complete accessible leaf planning/Board states plus `pm_plan` activity rendering without `pm_discovery` regression or client domain logic;
 - T05: full lifecycle, report receipt, atomic approval/filter/abandon, audit-before-publish, snapshot/replay/recovery, and raw idempotency preservation;
-- T06: exact commands, complete replacements, monotonic receipt-only legacy handling, gap resync, and accessible shell composition;
+- T06: exact commands, required `deliveryPlan`/`board` snapshot fields through the socket seam, complete replacements, monotonic receipt-only legacy handling, gap resync, and accessible shell composition;
 - T07: both normal/restart and mismatch children receive fixture-owned `MESH_V2_DATA_DIR`, plus built fake Todo revision/approval/multi-milestone/dependency/trace/filter/detail/refresh/replay/resync/restart and edge-branch proofs plus current docs;
-- every task/rework/wave/final tip has fresh exact-commit review and uncached daemon-disabled evidence, every wave proves complete-lineage patch/path/order equivalence, and every required recurring coordinator barrier has a campaign-ledger receipt; and
+- every task/rework/wave/final tip has fresh exact-commit review and uncached daemon-disabled evidence, every source commit and wave proves patch/path/blob/order equivalence from preserved externally validated campaign evidence, and every required recurring coordinator barrier has a campaign-ledger receipt; and
 - there is no M4 workspace/DeveloperAttempt/execution loop, no M5 `ExecutionRun` scheduler/concurrency/product wave, no paid traffic, no live operator state, and no access to `C:\code\bloom`.
 
 Stop after that proof. Do not add convenience execution, drag-and-drop Board state, generic orchestration, speculative APIs, or Milestone 4+ scaffolding.
