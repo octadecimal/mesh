@@ -1621,6 +1621,91 @@ describe('V2 intent ledger contracts', () => {
     prompt: 'Which storage should the Todo app use?',
     rationale: 'Storage determines restart behavior.',
   };
+  const emptyBoardWithPlan = (stale: boolean) => ({
+    projectId,
+    deliveryPlanRevision: 1,
+    stale,
+    emptyReason: 'plan_empty' as const,
+    filter: {
+      projectId,
+      revision: 1,
+      milestoneIds: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirementRecordIds: [],
+      updatedAt: now,
+    },
+    totalTaskCount: 0,
+    matchedTaskCount: 0,
+    facets: {
+      milestones: [],
+      taskLifecycles: [
+        {
+          value: 'pending' as const,
+          label: 'Pending',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+        {
+          value: 'completed' as const,
+          label: 'Completed',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+        {
+          value: 'retired' as const,
+          label: 'Retired',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+      ],
+      readiness: [
+        {
+          value: 'actionable' as const,
+          label: 'Actionable',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+        {
+          value: 'blocked' as const,
+          label: 'Blocked',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+        {
+          value: 'inactive' as const,
+          label: 'Inactive',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+      ],
+      priorities: [
+        {
+          value: 'must' as const,
+          label: 'Must',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+        {
+          value: 'should' as const,
+          label: 'Should',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+        {
+          value: 'could' as const,
+          label: 'Could',
+          selected: false,
+          matchingTaskCount: 0,
+        },
+      ],
+      labels: [],
+      requirements: [],
+    },
+    cards: [],
+  });
 
   it('requires coherent approved terminal outcomes in events and command results', () => {
     const approvedEvent = {
@@ -1774,6 +1859,69 @@ describe('V2 intent ledger contracts', () => {
       );
       expect(eventIssues, label).toMatch(expected);
       expect(resultIssues, label).toMatch(expected);
+    }
+  });
+
+  it('requires the exact Board transition on versioned intent approval', () => {
+    const planningCycle = asIntentCycleView(approvedCycleView);
+    const event = {
+      projectId,
+      occurredAt: now,
+      type: 'intent_ledger.approved' as const,
+      payload: {
+        schemaVersion: 2 as const,
+        planningCycle,
+        intentLedger: approvedIntentLedger,
+        board: boardWithoutPlan('planning_required'),
+      },
+    };
+    const result = {
+      ok: true as const,
+      schemaVersion: 2 as const,
+      commandType: 'planning_proposal.approve' as const,
+      planningCycle,
+      intentLedger: approvedIntentLedger,
+      board: boardWithoutPlan('planning_required'),
+    };
+    expect(domainEventDraftSchema.parse(event)).toEqual(event);
+    expect(v2CommandResultSchema.parse(result)).toEqual(result);
+
+    for (const schemaResult of [
+      domainEventDraftSchema.safeParse({
+        ...event,
+        payload: {
+          ...event.payload,
+          board: boardWithoutPlan('intent_required'),
+        },
+      }),
+      v2CommandResultSchema.safeParse({
+        ...result,
+        board: boardWithoutPlan('intent_required'),
+      }),
+    ]) {
+      expect(schemaResult.success).toBe(false);
+    }
+
+    const stalePlanBoard = emptyBoardWithPlan(true);
+    expect(
+      domainEventDraftSchema.parse({
+        ...event,
+        payload: { ...event.payload, board: stalePlanBoard },
+      }).payload.board,
+    ).toEqual(stalePlanBoard);
+    expect(
+      v2CommandResultSchema.parse({ ...result, board: stalePlanBoard }).board,
+    ).toEqual(stalePlanBoard);
+
+    const freshPlanBoard = emptyBoardWithPlan(false);
+    for (const schemaResult of [
+      domainEventDraftSchema.safeParse({
+        ...event,
+        payload: { ...event.payload, board: freshPlanBoard },
+      }),
+      v2CommandResultSchema.safeParse({ ...result, board: freshPlanBoard }),
+    ]) {
+      expect(schemaResult.success).toBe(false);
     }
   });
 
@@ -2085,91 +2233,7 @@ describe('V2 intent ledger contracts', () => {
       traces: [],
       milestoneDependencies: [],
     };
-    const emptyApprovedBoard = {
-      projectId,
-      deliveryPlanRevision: 1,
-      stale: false,
-      emptyReason: 'plan_empty' as const,
-      filter: {
-        projectId,
-        revision: 1,
-        milestoneIds: [],
-        taskLifecycles: [],
-        readiness: [],
-        priorities: [],
-        labels: [],
-        requirementRecordIds: [],
-        updatedAt: now,
-      },
-      totalTaskCount: 0,
-      matchedTaskCount: 0,
-      facets: {
-        milestones: [],
-        taskLifecycles: [
-          {
-            value: 'pending' as const,
-            label: 'Pending',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-          {
-            value: 'completed' as const,
-            label: 'Completed',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-          {
-            value: 'retired' as const,
-            label: 'Retired',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-        ],
-        readiness: [
-          {
-            value: 'actionable' as const,
-            label: 'Actionable',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-          {
-            value: 'blocked' as const,
-            label: 'Blocked',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-          {
-            value: 'inactive' as const,
-            label: 'Inactive',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-        ],
-        priorities: [
-          {
-            value: 'must' as const,
-            label: 'Must',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-          {
-            value: 'should' as const,
-            label: 'Should',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-          {
-            value: 'could' as const,
-            label: 'Could',
-            selected: false,
-            matchingTaskCount: 0,
-          },
-        ],
-        labels: [],
-        requirements: [],
-      },
-      cards: [],
-    };
+    const emptyApprovedBoard = emptyBoardWithPlan(false);
     const approvedPlanHistory = {
       ...approvedHistory,
       planningCycles: [...approvedHistory.planningCycles, approvedPlanCycle],

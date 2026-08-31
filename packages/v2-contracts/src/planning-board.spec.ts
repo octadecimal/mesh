@@ -831,6 +831,142 @@ describe('planning and Board contracts', () => {
     ).toBe(true);
   });
 
+  it.each([
+    [
+      'milestones',
+      { ...activeBoard.facets.milestones[0], matchingTaskCount: 0 },
+    ],
+    [
+      'taskLifecycles',
+      {
+        value: 'pending',
+        label: 'Pending',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+    ],
+    [
+      'readiness',
+      {
+        value: 'actionable',
+        label: 'Actionable',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+    ],
+    [
+      'priorities',
+      {
+        value: 'must',
+        label: 'Must',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+    ],
+    ['labels', { ...activeBoard.facets.labels[0], matchingTaskCount: 0 }],
+    [
+      'requirements',
+      { ...activeBoard.facets.requirements[0], matchingTaskCount: 0 },
+    ],
+  ] as const)(
+    'requires an empty %s facet before plan approval',
+    (facet, option) => {
+      expect(
+        boardViewSchema.safeParse({
+          ...emptyBoard,
+          facets: { ...emptyBoard.facets, [facet]: [option] },
+        }).success,
+      ).toBe(false);
+    },
+  );
+
+  it('binds Board staleness to deterministic pending readiness', () => {
+    const card = activeBoard.cards[0];
+    const planStaleReadiness = {
+      state: 'blocked',
+      blockers: [
+        {
+          kind: 'plan_stale',
+          expectedLedgerRevision: 1,
+          actualLedgerRevision: 2,
+        },
+      ],
+    };
+    const staleBoard = {
+      ...activeBoard,
+      stale: true,
+      cards: [{ ...card, readiness: planStaleReadiness }],
+    };
+    expect(boardViewSchema.parse(staleBoard)).toEqual(staleBoard);
+    for (const readiness of [
+      card.readiness,
+      {
+        state: 'blocked',
+        blockers: [
+          {
+            kind: 'dependency_incomplete',
+            dependencyId: id('48'),
+            prerequisiteTaskId: id('49'),
+          },
+        ],
+      },
+      { state: 'blocked', blockers: [{ kind: 'plan_not_approved' }] },
+    ]) {
+      expect(
+        boardViewSchema.safeParse({
+          ...activeBoard,
+          stale: true,
+          cards: [{ ...card, readiness }],
+        }).success,
+      ).toBe(false);
+    }
+    expect(
+      boardViewSchema.safeParse({
+        ...activeBoard,
+        cards: [{ ...card, readiness: planStaleReadiness }],
+      }).success,
+    ).toBe(false);
+    expect(
+      boardViewSchema.safeParse({
+        ...activeBoard,
+        cards: [
+          {
+            ...card,
+            readiness: {
+              state: 'blocked',
+              blockers: [{ kind: 'plan_not_approved' }],
+            },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    for (const [lifecycle, blocker] of [
+      ['completed', { kind: 'task_completed' }],
+      ['retired', { kind: 'task_retired' }],
+      [
+        'completed',
+        { kind: 'milestone_retired', milestoneId: card.milestoneId },
+      ],
+    ] as const) {
+      expect(
+        boardViewSchema.safeParse({
+          ...activeBoard,
+          stale: true,
+          cards: [
+            {
+              ...card,
+              lifecycle,
+              readiness: { state: 'inactive', blockers: [blocker] },
+            },
+          ],
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      boardViewSchema.safeParse({ ...emptyBoard, stale: true }).success,
+    ).toBe(false);
+  });
+
   it('parses strict plan commands with exact new-cycle bases', () => {
     const envelope = {
       idempotencyKey: 'plan-1',

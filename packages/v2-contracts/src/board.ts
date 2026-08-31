@@ -417,6 +417,17 @@ export const boardViewSchema = z
           'Pre-plan Board requires an intent-required or planning-required reason',
       });
     }
+    if (beforePlan) {
+      for (const [name, options] of Object.entries(value.facets)) {
+        if (options.length !== 0) {
+          context.addIssue({
+            code: 'custom',
+            path: ['facets', name],
+            message: 'Every pre-plan Board facet must be empty',
+          });
+        }
+      }
+    }
     const fixedFacetValues = {
       taskLifecycles: ['pending', 'completed', 'retired'],
       readiness: ['actionable', 'blocked', 'inactive'],
@@ -427,10 +438,9 @@ export const boardViewSchema = z
         ({ value: option }) => option,
       );
       if (
-        beforePlan
-          ? actual.length !== 0
-          : actual.length !== expected.length ||
-            actual.some((option, index) => option !== expected[index])
+        !beforePlan &&
+        (actual.length !== expected.length ||
+          actual.some((option, index) => option !== expected[index]))
       ) {
         context.addIssue({
           code: 'custom',
@@ -586,6 +596,25 @@ export const boardViewSchema = z
         code: 'custom',
         path: ['cards'],
         message: 'Board cards must use unique task identities',
+      });
+    }
+    if (!beforePlan) {
+      value.cards.forEach((card, index) => {
+        if (card.lifecycle !== 'pending') return;
+        const blocker = card.readiness.blockers[0];
+        if (
+          (value.stale && blocker?.kind !== 'plan_stale') ||
+          (!value.stale &&
+            (blocker?.kind === 'plan_stale' ||
+              blocker?.kind === 'plan_not_approved'))
+        ) {
+          context.addIssue({
+            code: 'custom',
+            path: ['cards', index, 'readiness'],
+            message:
+              'Pending task readiness must match approved-plan staleness',
+          });
+        }
       });
     }
   });

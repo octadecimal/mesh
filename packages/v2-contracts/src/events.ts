@@ -104,6 +104,18 @@ export const m3IntentLedgerApprovedPayloadSchema = z
         message: 'Intent approval Board must match the cycle project',
       });
     }
+    if (
+      value.board.deliveryPlanRevision === null
+        ? value.board.emptyReason !== 'planning_required'
+        : !value.board.stale
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['board'],
+        message:
+          'Intent approval must require planning or preserve a stale approved plan',
+      });
+    }
   });
 export const persistedIntentLedgerApprovedPayloadSchema = z.union([
   legacyM2IntentLedgerApprovedPayloadSchema,
