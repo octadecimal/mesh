@@ -49,7 +49,13 @@ the following on one integrated commit:
 7. refresh, ordered replay, a forced retained-gap resync, and server restart
    reconstruct byte-equivalent planning history, canonical plan, saved filter,
    traceability, and readiness;
-8. no test starts a workspace, `DeveloperAttempt`, worker execution loop, or
+8. a ledger with no approved current requirement cannot start delivery
+   planning and leaves only its required idempotent failure audit;
+9. abandoning an awaiting proposal atomically records why it was superseded
+   without inventing a successor, and replay/restart preserve that view;
+10. a selected label removed by a replacement plan survives as a bounded,
+    zero-count historical Board option and remains clearable;
+11. no test starts a workspace, `DeveloperAttempt`, worker execution loop, or
    `ExecutionRun`, and no real harness, credential, operator database, or
    subscription capacity is used.
 
@@ -183,6 +189,23 @@ the consequential questions and the conservative choices used here.
 16. **Does task detail need a new query?** No. At the M3 maximum of 100 tasks,
     each matched server card can carry its bounded detail. This keeps one
     coherent Board read and avoids an endpoint/cache before it is needed.
+17. **Should M3 migrate old command-result JSON or version new successes?** It
+    keeps the four exact unversioned M2 alternatives and writes strict version
+    2 alternatives after migration. One pure normalizer is cheaper and safer
+    than rewriting audited idempotency results; the cost is an explicit raw/
+    normalized boundary.
+18. **Does abandonment require a new proposal lifecycle?** No. It preserves
+    M2's `superseded` lifecycle and adds a strict reason/successor union. This
+    costs one decision discriminator but avoids both a synthetic successor and
+    a fifth lifecycle with identical terminal behavior.
+19. **May delivery planning start from an approved ledger with no approved
+    requirement?** No. The server returns one typed audited failure before
+    creating planning state. This rejects an otherwise schema-valid M2 ledger,
+    but it is the smallest way to preserve M3's mandatory traceability.
+20. **Should replan silently discard a selected label that disappears?** No.
+    The server returns it as a bounded zero-count historical option, just like
+    saved milestone/requirement identities. This adds at most 100 options and
+    makes the saved filter explainable and clearable.
 
 ## Approaches Considered
 
@@ -314,7 +337,11 @@ pretending the two proposal types have the same effects.
 ### Frozen requirement input
 
 A delivery-plan cycle may be created only when the project has an approved
-`ProjectIntentRevision` and `LedgerRevision`. It freezes:
+`ProjectIntentRevision` and `LedgerRevision` **and** that ledger's current
+`records` array contains at least one record whose content is an `approved`
+`requirement`. The service computes this nonempty set from the exact current
+ledger before creating the cycle; a decision, assumption, question, risk, or
+rejected/retired requirement does not satisfy the gate. It then freezes:
 
 - exact project-intent ID and revision;
 - exact ledger ID and revision;
@@ -339,6 +366,12 @@ A requirement trace always names `(recordId, recordRevision)` from the frozen
 ledger. Only records whose type is `requirement` and whose exact revision status
 is `approved` are valid targets. Decisions, assumptions, questions, risks, and
 superseded/rejected/retired requirements cannot be coverage targets.
+
+The nonempty-requirement gate applies only when starting a delivery-plan cycle.
+Later turns use the already-frozen nonempty ledger. If intent approval changes
+the current ledger while a cycle is open, the existing base guard makes plan
+approval stale; a replacement cycle must pass the gate again. This preserves
+mandatory traceability rather than allowing an untraceable empty-input plan.
 
 ## Plan Proposal and Approval
 
@@ -391,7 +424,7 @@ The proposal wire contract is concrete rather than an implementation prompt:
 ```ts
 type ProposalKey = string; // ^[a-z][a-z0-9-]{0,63}$
 type PlanText = string; // trimmed, 1..4,096 characters
-type PlanLabel = string; // trimmed, 1..64 characters
+type PlanLabel = string; // trimmed exact/case-sensitive form, 1..64 characters
 
 type ProposedMilestoneRef =
   | { kind: 'canonical'; milestoneId: MilestoneId }
@@ -540,7 +573,7 @@ decision/supersession row:
 ```text
 awaiting_approval -> approved
 awaiting_approval -> rejected
-awaiting_approval -> superseded   (only when a later revision is accepted)
+awaiting_approval -> superseded   (later revision accepted or cycle abandoned)
 ```
 
 Its exact durable projection is:
@@ -589,7 +622,14 @@ type DeliveryPlanProposal = {
     | { kind: 'pending' }
     | {
         kind: 'superseded';
+        reason: 'replacement_accepted';
         supersededByProposalId: DeliveryPlanProposalId;
+        decidedAt: IsoTimestamp;
+      }
+    | {
+        kind: 'superseded';
+        reason: 'cycle_abandoned';
+        supersededByProposalId: null;
         decidedAt: IsoTimestamp;
       }
     | { kind: 'approved'; decidedBy: 'human'; decidedAt: IsoTimestamp }
@@ -609,8 +649,29 @@ server-computed nonnegative integer. The PM supplies only
 reservations, diff, provenance, lifecycle, and timestamps. A revision request
 is an ordinary `planning_cycle.submit_plan_turn` carrying human feedback. It
 does not mutate
-the reviewed proposal. The old proposal becomes `superseded` only when the new
-complete proposal and its reservations commit.
+the reviewed proposal. The old proposal becomes `superseded` with reason
+`replacement_accepted` only when the new complete proposal and its reservations
+commit; that decision requires the exact nonnull successor proposal ID.
+
+M2 abandonment already terminalizes an awaiting intent proposal as
+`superseded`. M3 preserves that lifecycle for a delivery-plan proposal and
+distinguishes why: after M2 cleanup has contained any reservation/execution,
+`planning_cycle.abandon` re-reads the expected nonterminal cycle in one
+immediate transaction. If its latest delivery proposal is still
+`awaiting_approval`, the transaction appends its sole terminal decision with
+reason `cycle_abandoned`, null successor, and the same timestamp used to mark
+the cycle `abandoned`; it then appends the versioned
+`planning_cycle.changed` event and stores the command result before commit and
+publication. A cycle abandoned before any proposal exists only terminalizes the
+cycle. A proposal already terminal is never rewritten.
+
+Thus abandonment needs no invented successor proposal. The abandoned view may
+have no proposal or one latest `superseded/cycle_abandoned` proposal; all
+earlier proposals remain `superseded/replacement_accepted`. Failure before the
+terminal transaction leaves both cycle and proposal nonterminal under the full
+M2 retry/attention rules. Transaction rollback leaves no partial decision,
+cycle, event, or command-result write. Replay, a fresh snapshot, and restart
+select the same append-only decision and reconstruct the same terminal view.
 
 Rejection records required human feedback, terminalizes the proposal and cycle,
 and changes no canonical plan. Approval is all-or-nothing. Partial milestone,
@@ -637,8 +698,8 @@ revision operation, so no approval-time merge with an older proposal exists.
 
 The server reserves stable UUIDs for every `create` key when it accepts the
 proposal. Those reservation rows are durable proposal state, not canonical plan
-state. Superseded, rejected, or abandoned proposal IDs never become canonical
-and are never reused.
+state. Superseded proposals (including cycle-abandoned ones) and rejected
+proposal IDs never become canonical and are never reused.
 
 ### Human-only atomic approval
 
@@ -972,7 +1033,7 @@ type BoardFilter = {
   taskLifecycles: readonly ('pending' | 'completed' | 'retired')[]; // unique, 0..3
   readiness: readonly ('actionable' | 'blocked' | 'inactive')[]; // unique, 0..3
   priorities: readonly ('must' | 'should' | 'could')[]; // unique, 0..3
-  labels: readonly string[]; // unique canonical labels, 0..100
+  labels: readonly PlanLabel[]; // unique canonical labels, 0..100
   requirementRecordIds: readonly LedgerRecordId[]; // unique, 0..300
   updatedAt: IsoTimestamp;
 };
@@ -986,15 +1047,20 @@ all milestones while retired history remains opt-in.
 
 `board_filter.set` carries the complete filter and expected filter revision.
 The server validates milestone and requirement identities belong to this
-project, canonicalizes order and duplicate values, stores the next revision,
-derives the Board, appends `board.filter_changed`, stores the command result,
-commits, and publishes. Same-key replay returns the same Board. A stale distinct
-command returns `board_filter_revision_conflict` with no filter/event change.
+project, and accepts each label only when it is present in the current plan or
+already selected by the current saved filter. This lets a complete replacement
+retain or remove a disappeared selection without letting a client introduce an
+arbitrary absent label. The server canonicalizes order and duplicate values,
+stores the next revision, derives the Board, appends `board.filter_changed`,
+stores the command result, commits, and publishes. Same-key replay returns the
+same Board. A stale distinct command returns
+`board_filter_revision_conflict` with no filter/event change.
 
 Plan changes do not silently clear saved selections. A selected retired
-milestone or requirement remains a valid project identity and may yield zero
-cards until the operator changes the filter. Filter options include selected
-historical identities with a zero count so the UI can explain and clear them.
+milestone or requirement, or a selected label no longer used by any current
+task, remains valid and may yield zero cards until the operator changes the
+filter. Filter options include those selected historical identities/labels
+with a zero count so the UI can explain and clear them.
 
 ### Board view
 
@@ -1017,6 +1083,10 @@ type BoardMilestoneOption = BoardFacetOption<MilestoneId> & {
 type BoardRequirementOption = BoardFacetOption<LedgerRecordId> & {
   recordRevision: number;
   requirementKind: RequirementKind;
+  historical: boolean;
+};
+
+type BoardLabelOption = BoardFacetOption<PlanLabel> & {
   historical: boolean;
 };
 
@@ -1083,7 +1153,7 @@ type BoardView = {
       'actionable' | 'blocked' | 'inactive'
     >[];
     priorities: readonly BoardFacetOption<'must' | 'should' | 'could'>[];
-    labels: readonly BoardFacetOption<string>[];
+    labels: readonly BoardLabelOption[];
     requirements: readonly BoardRequirementOption[];
   };
   cards: readonly BoardTaskCard[];
@@ -1102,8 +1172,14 @@ match all other filter fields plus that option; the option's own field is
 temporarily omitted for counting. This count domain is server-owned,
 nonnegative, and includes retired task identities when the candidate lifecycle
 permits them. Current-plan options plus selected historical milestone/
-requirement identities are returned; a selected historical option may have
-count zero. `totalTaskCount` is before filters and `matchedTaskCount` is after
+requirement identities and selected historical labels are returned. Every
+label used by a current plan task has `historical: false`, even when the other
+filters make its count zero. A selected label absent from every current task is
+returned with `selected: true`, `historical: true`, and
+`matchingTaskCount: 0`; if a later plan uses it again, the same option becomes
+nonhistorical and receives its ordinary self-excluding count. For every
+`BoardLabelOption`, display `label` equals canonical `value`; there is no second
+label alias. `totalTaskCount` is before filters and `matchedTaskCount` is after
 all filters.
 
 Strict output bounds follow the input maxima: at most 100 cards, 40 milestone
@@ -1111,7 +1187,12 @@ options (20 current plus 20 selected historical), 600 requirement options (300
 current plus 300 selected historical), 2,100 label options, the fixed enum
 option counts above, and 200 dependency summaries per card. Counts are
 nonnegative integers no greater than `totalTaskCount`; IDs/options are unique
-and canonically ordered.
+and canonically ordered. The label bound is exactly 2,000 unique labels from at
+most 100 tasks times 20 labels plus at most 100 selected historical labels.
+Labels use their trimmed exact/case-sensitive `PlanLabel` value and sort by
+ascending Unicode code point with current and historical options interleaved;
+milestone and requirement ordering remains the canonical identity ordering
+defined above. This order and bound are stable across refresh and restart.
 
 Cards sort by milestone ordinal, task ordinal, then task ID. `detail` is the
 complete server-owned task-detail projection, so opening and closing task detail
@@ -1211,18 +1292,83 @@ type SetBoardFilterCommand = {
   filter: BoardFilterSelection;
 };
 
-type M3CommandSuccess =
+type LegacyM2PlanningCycleView = {
+  cycle: PlanningCycle;
+  turns: readonly PlanningTurn[];
+  questions: readonly PlanningQuestion[];
+  proposals: readonly PlanningProposal[];
+};
+
+type IntentPlanningCycleView = Extract<
+  PlanningCycleView,
+  { purpose: { kind: 'intent' } }
+>;
+type DeliveryPlanPlanningCycleView = Extract<
+  PlanningCycleView,
+  { purpose: { kind: 'delivery_plan' } }
+>;
+
+type LegacyM2PlanningCommandSuccess =
+  | {
+      ok: true;
+      commandType: 'planning_cycle.submit_turn';
+      planningCycle: LegacyM2PlanningCycleView;
+    }
+  | {
+      ok: true;
+      commandType: 'planning_proposal.approve';
+      planningCycle: LegacyM2PlanningCycleView;
+      intentLedger: ApprovedIntentLedger;
+    }
+  | {
+      ok: true;
+      commandType: 'planning_proposal.reject';
+      planningCycle: LegacyM2PlanningCycleView;
+    }
+  | {
+      ok: true;
+      commandType: 'planning_cycle.abandon';
+      planningCycle: LegacyM2PlanningCycleView;
+    };
+
+type VersionedPlanningCommandSuccess =
   | {
       ok: true;
       schemaVersion: 2;
-      commandType: 'planning_cycle.submit_plan_turn';
+      commandType: 'planning_cycle.submit_turn';
+      planningCycle: IntentPlanningCycleView;
+    }
+  | {
+      ok: true;
+      schemaVersion: 2;
+      commandType: 'planning_proposal.approve';
+      planningCycle: IntentPlanningCycleView;
+      intentLedger: ApprovedIntentLedger;
+      board: BoardView;
+    }
+  | {
+      ok: true;
+      schemaVersion: 2;
+      commandType: 'planning_proposal.reject';
+      planningCycle: IntentPlanningCycleView;
+    }
+  | {
+      ok: true;
+      schemaVersion: 2;
+      commandType: 'planning_cycle.abandon';
       planningCycle: PlanningCycleView;
     }
   | {
       ok: true;
       schemaVersion: 2;
+      commandType: 'planning_cycle.submit_plan_turn';
+      planningCycle: DeliveryPlanPlanningCycleView;
+    }
+  | {
+      ok: true;
+      schemaVersion: 2;
       commandType: 'plan_proposal.approve';
-      planningCycle: PlanningCycleView;
+      planningCycle: DeliveryPlanPlanningCycleView;
       deliveryPlan: ApprovedDeliveryPlan;
       board: BoardView;
     }
@@ -1230,7 +1376,7 @@ type M3CommandSuccess =
       ok: true;
       schemaVersion: 2;
       commandType: 'plan_proposal.reject';
-      planningCycle: PlanningCycleView;
+      planningCycle: DeliveryPlanPlanningCycleView;
     }
   | {
       ok: true;
@@ -1238,21 +1384,62 @@ type M3CommandSuccess =
       commandType: 'board_filter.set';
       board: BoardView;
     };
+
+type PersistedPlanningCommandSuccess =
+  | LegacyM2PlanningCommandSuccess
+  | VersionedPlanningCommandSuccess;
+
+declare function normalizePlanningCommandSuccess(
+  raw: PersistedPlanningCommandSuccess,
+): VersionedPlanningCommandSuccess;
 ```
 
 The start variant freezes and guards all three canonical bases. The continue
 variant reuses the immutable assignment/profile/base on its exact cycle and
 therefore forbids profile and base fields. Approve rechecks both its explicit
 bases and every member guard stored in the proposal. Reject requires feedback;
-no empty-reason rejection exists. Successes above join the existing strict M2
-success and failure union, and command-result persistence uses these exact
-shapes. The frozen raw decoder also retains every exact unversioned M2 success
-shape that embeds `LegacyM2PlanningCycleView`. New successes for existing M2
-planning commands, including purpose-aware `planning_cycle.abandon`, use
-`schemaVersion: 2` and the new `PlanningCycleView`; unversioned output is legacy
-only. Replaying a seeded M2 idempotency key returns its byte-identical raw stored
-result, while projection consumers normalize its cycle as `intent`. Migration 3
-therefore copies command results without making their strict parser invalid.
+no empty-reason rejection exists. Every object above is strict. The four legacy
+alternatives have exactly the fields shown and forbid `schemaVersion`,
+`purpose`, `deliveryPlanProposals`, and `board`. Their existing refinements also
+remain exact: submit requires a `launch_pending` cycle; approve must satisfy the
+M2 approved-planning-outcome refinement; reject requires
+`proposal_rejected`; abandon requires `abandoned`.
+
+The versioned refinements are equally explicit. Intent submit requires purpose
+`intent` and `launch_pending`; intent approve requires purpose `intent`, an
+approved terminal cycle/latest intent proposal, the exact M2
+approved-planning-outcome coherence between cycle and ledger, and a Board for
+the same project; intent reject requires purpose `intent`,
+`proposal_rejected`, and a rejected latest intent proposal. Purpose-aware
+abandon accepts either purpose but requires an `abandoned` cycle and the
+proposal coherence defined above, including
+`superseded/cycle_abandoned` for a latest awaiting delivery proposal. Plan
+submit requires purpose `delivery_plan` and `launch_pending`; plan approve
+requires purpose `delivery_plan`, an approved terminal cycle/latest plan
+proposal, exact proposal/plan/project/revision agreement, and a coherent Board
+for that plan revision; plan reject requires purpose `delivery_plan`,
+`proposal_rejected`, and a rejected latest plan proposal. Filter success's
+Board must match the command project and committed next filter revision.
+
+These alternatives join the existing unrelated successes and one strict
+failure alternative in the exhaustive `V2CommandResult` union. The raw decoder
+first branches on `schemaVersion`: exact value `2` must parse one versioned
+success, absence may parse only an exact legacy/unrelated M2 success, and every
+other value fails. Command-result storage preserves the raw alternative. The
+normalizer adds intent purpose/null plan bases/empty delivery proposals to a
+legacy cycle and adds `schemaVersion: 2`; for legacy intent approval only, it
+also constructs the deterministic `planning_required` Board defined in the
+event section. Versioned input passes through unchanged. No normalizer reads
+current database state.
+
+New intent approval returns `board` and the command-response reducer replaces
+the complete cycle, intent ledger, and Board. If no approved plan exists that
+Board is `planning_required`; if a plan exists it preserves that plan/filter,
+sets `stale: true`, and exposes `plan_stale` blockers. Other reused-command
+successes do not carry or replace Board. Replaying a seeded M2 idempotency key
+still returns its byte-identical raw stored result; only the consumer's internal
+projection uses the normalized form. Migration 3 therefore copies command
+results without making their strict parser invalid.
 
 `planning_cycle.abandon` already applies to either purpose. Revision requests
 use `planning_cycle.submit_plan_turn`, not a fifth command. Every envelope is
@@ -1265,6 +1452,7 @@ stored:
 | Code | Meaning |
 | --- | --- |
 | `planning_intent_required` | No approved intent/ledger exists for delivery planning |
+| `planning_requirements_required` | Approved current ledger contains no approved requirement |
 | `planning_cycle_active_conflict` | Another nonterminal intent or plan cycle owns the project |
 | `planning_cycle_revision_conflict` | Expected cycle revision/lifecycle is stale |
 | `planning_cycle_history_limit` | Existing bounded cycle history is exhausted |
@@ -1287,6 +1475,22 @@ bound PM output stores its rejected receipt and cycle attention transaction but
 no proposal. Rejection and abandonment preserve history but create no canonical
 plan. Audit persistence failure stops further unsafe mutation and publishes
 nothing.
+
+For a new `planning_cycle.submit_plan_turn`, the service performs the approved-
+requirement gate after loading the exact guarded ledger and before inserting a
+cycle, turn, assignment, reservation, output receipt, or domain event. An empty
+set returns `ok: false`, command type `planning_cycle.submit_plan_turn`, code
+`planning_requirements_required`, and the stable message “At least one approved
+current requirement is required for delivery planning.” The only durable write
+is the idempotent command failure receipt, committed before the HTTP 200
+response; replay returns it exactly. If that audit write fails, the existing
+barrier returns 503 and publishes nothing. Thus “no write” means no canonical,
+planning, runtime, or event write—not suppression of the required command
+audit.
+
+Failure precedence remains unambiguous: an absent approved intent/ledger returns
+`planning_intent_required`; `planning_requirements_required` is considered only
+after that exact approved ledger exists and its current records parse.
 
 ## Events, Snapshots, Replay, and Resync
 
@@ -1326,12 +1530,6 @@ type TaskLifecycleChangedPayload = {
   board: BoardView;
 };
 
-type LegacyM2PlanningCycleView = {
-  cycle: PlanningCycle;
-  turns: readonly PlanningTurn[];
-  questions: readonly PlanningQuestion[];
-  proposals: readonly PlanningProposal[];
-};
 type LegacyM2PlanningCycleChangedPayload = {
   planningCycle: LegacyM2PlanningCycleView;
 };
@@ -1445,6 +1643,13 @@ edge per plan revision, one trace per subject/requirement/revision tuple, and on
 Board filter per project. JSON is canonicalized and parsed through shared
 contracts on read.
 
+The proposal-decision table constrains supersession reason and successor
+together: `replacement_accepted` requires one nonnull same-cycle proposal with
+the next revision, while `cycle_abandoned` requires a null successor and an
+abandoned parent cycle in the enclosing transaction. Approval/rejection rows
+carry no supersession reason. Startup integrity applies these same refinements,
+so restart cannot reinterpret an orphaned successor or abandonment decision.
+
 Each task revision's `(task_id, contract_revision)` references a same-task
 revision. Repository validation requires that target to be `plan_contract`,
 requires plan memberships/traces to target it, and requires every
@@ -1521,6 +1726,14 @@ profile ID/revision; later turns display and reuse that frozen selection and the
 wire schema rejects replacement profile fields. With no compatible profile,
 the start control is disabled with a text explanation.
 
+The start control is also disabled when the current approved ledger has zero
+approved current requirements, with the visible explanation “Approve at least
+one current requirement before planning delivery.” This is a convenience over
+the authoritative server gate. If intent/ledger state races after rendering,
+the typed `planning_requirements_required` response leaves the form open,
+announces the same explanation in the error region, focuses the message field,
+and reloads current project truth; it never silently retries.
+
 With no approved plan, the action is “Plan delivery” and opens an editable
 message prefilled with “Propose a delivery plan for the approved intent and
 requirement ledger.” With an approved current plan it is “Replace plan” and
@@ -1548,7 +1761,10 @@ question cards, but its proposal card renders:
 No per-item checkbox or partial approval control exists. Request revision uses
 the ordinary labeled human message. Reject opens a required 1..4,096 character
 feedback field and sends the exact cycle/proposal revision guards. Old revisions
-remain inspectable and are clearly marked superseded.
+remain inspectable and are clearly marked “superseded by proposal revision N.”
+When abandonment settles the latest proposal without a successor, its card
+instead says “superseded because this planning cycle was abandoned”; it remains
+inspectable and never links to a nonexistent replacement.
 
 Control availability is deterministic:
 
@@ -1564,7 +1780,9 @@ Control availability is deterministic:
 - `approved`, `proposal_rejected`, and `abandoned` expose no cycle action. The
   ordinary start form returns as “Replace plan” or “Replan current requirements”
   when an approved plan exists, otherwise “Plan delivery.” Rejection and
-  abandonment never remove the still-current approved plan;
+  abandonment never remove the still-current approved plan. The start action
+  remains disabled if the current ledger has no approved requirement, even
+  after rejection or abandonment;
 - disconnected, stale-projection, and submitting states disable every mutation.
 
 Approval replaces the plan/Board and leaves the terminal proposal reviewable.
@@ -1581,6 +1799,9 @@ matched/total count, and cards across the selected milestones. Filter groups use
 requirements are multi-select controls with visible counts. Applying a filter
 sends the complete expected-revision command. The draft is local until submit;
 the applied chips, options, counts, and cards come back from the server.
+Selected historical labels remain in the label control and applied chips with
+visible “historical, 0 tasks” text and a clear action; the client neither drops
+nor fabricates them.
 
 Cards show task outcome, milestone, lifecycle, priority, labels, actionable/
 blocked/inactive text, named dependency blockers, and requirement coverage.
@@ -1654,6 +1875,22 @@ owned server spawn and restart.
     Assert proposal history, plan revision, stable IDs/revisions, dependency
     history, traces, filter, readiness, and Board are byte-equivalent.
 
+The built fake suite adds three isolated Todo branches rather than complicating
+that approval path. First, a valid M2 conversation approves an intent/ledger
+containing a decision but zero approved current requirements. Assert Plan
+delivery is disabled; a direct exact start command returns the persisted
+`planning_requirements_required` failure; and there is no cycle, turn,
+assignment, reservation, output receipt, domain event, or plan row. Approve one
+requirement through an M2 revision, then assert the same form enables and a new
+idempotency key can start planning. Second, a fake plan cycle reaches an
+awaiting proposal and is abandoned without requesting a successor. Assert the
+proposal is `superseded/cycle_abandoned` with null successor in the same commit
+as the abandoned cycle, versioned result, and changed event; the terminal card,
+ordered replay, and restart agree. Third, select a Todo label, approve a
+replacement plan that removes it from every current task, and assert the saved
+selection and one zero-count historical label option survive refresh, replay,
+and restart, sort in canonical label order, and can be cleared.
+
 Focused domain tests separately approve a second plan revision that retires and
 then another that reactivates one dependency. They prove the dependent Board
 card changes blocked -> actionable -> blocked while every dependency revision
@@ -1697,7 +1934,8 @@ uses operator runtime paths, binds V1 ports, or kills an unowned process.
 - **Reverse states: yes.** Proposal supersede/reject/abandon, dependency
   active/retired/reactivated, task/milestone retirement/reactivation, guarded
   task completion/reopen projection, plan stale after intent change, filter
-  replacement, and restart/replay recovery are explicit and tested.
+  replacement including disappearing selected labels, and restart/replay
+  recovery are explicit and tested.
 - **Documentation: yes after implementation.** Current architecture and V2
   operating guidance must state that M3 owns plan/readiness/Board and M4/M5 own
   workspace execution and scheduling. This design is the only documentation
@@ -1754,25 +1992,32 @@ snapshot fields. Green tests prove strict parsing, limits, unknown-field
 rejection, ID/project/revision coherence, human-only authority, complete
 proposal keys/refs, exact lifecycle enums, task contract/current-revision
 guards, complete Board facets/details/empty reasons, frozen strict M2 event
-alternatives, version-required new events, and no workspace/run/attempt field.
+alternatives, all four exact unversioned/versioned reused-command result pairs,
+normalization, version-required new events, historical-label bounds/order, and
+no workspace/run/attempt field. Negative fixtures prove unknown versions,
+purpose/result mismatches, missing approval Board, extra legacy fields, and
+non-null abandonment successor under `cycle_abandoned` fail strictly.
 
 ### Migration and persistence
 
 Fresh and exact-M2 upgrade tests prove migration 3, sidecar backfill, immutable
 revisions, proposal reservations without premature canonical rows, complete
 memberships/traces, dependency history, saved filters, all command-result
-types, task contract/lifecycle anchor selection, and exact M1/M2 replay
-preservation. Seeded legacy event JSON/checksums remain unchanged and normalize
+types, proposal supersession reasons/null-successor constraints, task contract/
+lifecycle anchor selection, and exact M1/M2 replay preservation. Seeded legacy
+event JSON/checksums and command-result JSON remain unchanged and normalize
 identically before/after restart. Forced migration failure after the command
 table rebuild restores exact M2 state.
 
 ### Domain and approval
 
 Focused tests cover questions, proposals, revision/supersession, rejection,
-abandonment, duplicate/malformed reports, exact base and member conflicts,
+abandonment with and without a pending proposal, empty approved-requirement
+gating, duplicate/malformed reports, exact base and member conflicts,
 atomic approval, injected failure at every write boundary, project-wide DAG
 validation, trace completeness, retirement/reactivation, plan staleness,
-filter idempotency, and Board derivation. Readiness cases cover proposal versus
+filter idempotency, disappearing selected labels, and Board derivation.
+Readiness cases cover proposal versus
 approval, current versus stale ledger, pending/completed/retired tasks, retired
 milestones, zero/one/multiple prerequisites, completed prerequisites, edge
 retirement/reactivation, and prerequisite reopen. A focused immutable sequence
@@ -1796,10 +2041,13 @@ well as `pm_discovery`, while foundation/intent fake behavior remains unchanged.
 Route tests cover every command and exact status mapping. Event/repository/
 reducer tests prove complete projection, duplicates, gaps, invalid payloads,
 legacy/new mixed ordered replay, retained-gap resync, lifecycle/replan ordering,
+raw idempotency-result preservation, normalized legacy intent approval, new
+intent-approval Board replacement, abandonment transaction/restart coherence,
 and fresh-snapshot equivalence. Component tests cover compatible profile
 selection, exact initial/replan/continue payloads, required rejection feedback,
 every lifecycle control transition, proposal revisions, complete approval
-authority, server-owned filters/facet counts, cards/blockers/traces, task detail
+authority, the empty-requirement disabled/race states, server-owned filters/
+facet counts including historical labels, cards/blockers/traces, task detail
 focus, tabs, labels, live errors, and every empty/loading/stale state.
 
 ### Built-process acceptance
@@ -1842,10 +2090,15 @@ dependency.
 - Existing `PlanningCycle` is reused with an explicit `intent | delivery_plan`
   purpose; intent and plan proposal artifacts remain separate, and the full M2
   attention/failure/retry transition model applies to both.
+- Delivery planning cannot start without at least one approved current
+  requirement. The typed audited failure creates no planning/runtime/event
+  state, and every approved plan remains completely traceable.
 - Plan PM output schema is exactly `mesh.dev/pm-plan-report/v1`; every human
   turn owns one finite execution.
 - Plan proposal revisions are immutable complete snapshots. Revision feedback
-  creates a new proposal; approval is human-only and all-or-nothing.
+  creates a new proposal; approval is human-only and all-or-nothing. Abandonment
+  settles an awaiting proposal as superseded for `cycle_abandoned` without
+  inventing a successor.
 - Canonical plans, milestones, tasks, and dependencies use stable identities
   and immutable revisions. Plan revisions name exact members and traces.
 - Plan membership/traces anchor an exact task contract; readiness selects the
@@ -1865,7 +2118,9 @@ dependency.
   active prerequisites. It says nothing about workspaces, runs, workers, or
   capacity.
 - One durable project Board filter is server-owned. Empty selections mean all;
-  AND applies across filter fields and OR within a field.
+  AND applies across filter fields and OR within a field. Selected milestone,
+  requirement, and label values remain bounded zero-count historical options
+  when they disappear from the current plan.
 - Board cards are derived from canonical plan, readiness, traces, and saved
   filter. Facet counts and complete task detail are server projections, never a
   second mutable source of truth.
@@ -1875,6 +2130,10 @@ dependency.
   replay, retained-gap resync, audit barrier, and V2 datastore identity remain.
 - Strict M2 persisted event payloads remain accepted and byte-immutable; all M3
   writes use explicit payload versions and normalize before projection.
+- Strict unversioned M2 planning successes remain accepted and byte-immutable;
+  every newly stored post-migration planning success is version 2, intent
+  approval replaces Board, and legacy normalization never consults mutable
+  state.
 - Migration 3 is forward-only; migrations 1 and 2 are immutable.
 - Default verification is fake-only and temporary. No V1 state, real harness,
   credential, operator worktree, or subscription quota is touched.
