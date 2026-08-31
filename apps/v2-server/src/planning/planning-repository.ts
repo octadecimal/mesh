@@ -375,6 +375,46 @@ export class PlanningRepository {
     return row ? toCycle(row) : undefined;
   }
 
+  private authenticateDeliveryPlanBase(
+    projectId: string,
+    deliveryPlanId: string,
+    revision: number,
+  ): void {
+    const row = this.database
+      .prepare(
+        `SELECT r.*, p.project_id AS identity_project_id
+         FROM delivery_plan_revisions r
+         JOIN delivery_plans p ON p.id = r.delivery_plan_id
+         WHERE r.delivery_plan_id = ? AND r.revision = ? AND r.project_id = ?`,
+      )
+      .get(deliveryPlanId, revision, projectId) as
+      | (DeliveryPlanRow & { identity_project_id: string })
+      | undefined;
+    if (!row) throw new Error('Stored delivery plan base is corrupt');
+    const stored = approvedDeliveryPlanSchema.parse(JSON.parse(row.plan_json));
+    if (
+      canonicalJson(stored) !== row.plan_json ||
+      row.delivery_plan_id !== deliveryPlanId ||
+      row.project_id !== projectId ||
+      row.identity_project_id !== projectId ||
+      row.revision !== revision ||
+      stored.plan.id !== deliveryPlanId ||
+      stored.plan.projectId !== projectId ||
+      stored.plan.revision !== revision ||
+      row.project_intent_id !== stored.plan.projectIntentId ||
+      row.project_intent_revision !== stored.plan.projectIntentRevision ||
+      row.ledger_id !== stored.plan.ledgerId ||
+      row.ledger_revision !== stored.plan.ledgerRevision ||
+      row.base_delivery_plan_revision !==
+        stored.plan.baseDeliveryPlanRevision ||
+      row.proposal_id !== stored.plan.proposalId ||
+      row.approved_by !== stored.plan.approvedBy ||
+      row.approved_at !== stored.plan.approvedAt
+    ) {
+      throw new Error('Stored delivery plan base is corrupt');
+    }
+  }
+
   cyclePurpose(id: string): PlanningCyclePurposeState | undefined {
     const row = this.database
       .prepare(
@@ -388,12 +428,23 @@ export class PlanningRepository {
     if (!cycle || cycle.projectId !== row.project_id) {
       throw new Error('Stored planning cycle purpose is corrupt');
     }
-    return planningCyclePurposeStateSchema.parse({
+    const purpose = planningCyclePurposeStateSchema.parse({
       planningCycleId: row.planning_cycle_id,
       purpose: row.purpose,
       baseDeliveryPlanId: row.base_delivery_plan_id,
       baseDeliveryPlanRevision: row.base_delivery_plan_revision,
     });
+    if (
+      purpose.baseDeliveryPlanId !== null &&
+      purpose.baseDeliveryPlanRevision !== null
+    ) {
+      this.authenticateDeliveryPlanBase(
+        row.project_id,
+        purpose.baseDeliveryPlanId,
+        purpose.baseDeliveryPlanRevision,
+      );
+    }
+    return purpose;
   }
 
   cycleView(id: string): PlanningCycleView | undefined {
@@ -1435,6 +1486,16 @@ export class PlanningRepository {
     ) {
       throw new Error('Stored delivery plan proposal is corrupt');
     }
+    if (
+      stored.base.deliveryPlan.id !== null &&
+      stored.base.deliveryPlan.revision !== null
+    ) {
+      this.authenticateDeliveryPlanBase(
+        stored.projectId,
+        stored.base.deliveryPlan.id,
+        stored.base.deliveryPlan.revision,
+      );
+    }
     const assertNormalized = (
       table: string,
       jsonColumn: 'member_json' | 'trace_json',
@@ -2111,49 +2172,79 @@ export class PlanningRepository {
     }
     const milestoneRows = this.database
       .prepare(
-        `SELECT m.delivery_plan_id, m.delivery_plan_revision,
-           m.project_id AS member_project_id, m.milestone_id AS member_id,
-           m.milestone_revision AS member_revision, m.ordinal,
-           r.*, i.project_id AS identity_project_id,
-           i.created_proposal_id, i.created_at
-         FROM delivery_plan_revision_milestones m
-         JOIN milestone_revisions r
-           ON r.milestone_id = m.milestone_id
-          AND r.revision = m.milestone_revision
-         JOIN milestones i ON i.id = m.milestone_id
+        `SELECT m.delivery_plan_id,
+            m.delivery_plan_revision AS member_delivery_plan_revision,
+            m.project_id AS member_project_id, m.milestone_id AS member_id,
+            m.milestone_revision AS member_revision, m.ordinal,
+            r.*, i.project_id AS identity_project_id,
+            i.created_proposal_id, i.created_at,
+            initial.project_id AS initial_project_id,
+            initial.revision AS initial_revision,
+            initial.lifecycle AS initial_lifecycle,
+            initial.proposal_id AS initial_proposal_id,
+            initial.delivery_plan_revision AS initial_delivery_plan_revision,
+            initial.approved_at AS initial_approved_at,
+            initial.revision_json AS initial_revision_json
+          FROM delivery_plan_revision_milestones m
+          JOIN milestone_revisions r
+            ON r.milestone_id = m.milestone_id
+           AND r.revision = m.milestone_revision
+          JOIN milestones i ON i.id = m.milestone_id
+          JOIN milestone_revisions initial
+            ON initial.milestone_id = i.id AND initial.revision = 1
          WHERE m.delivery_plan_id = ? AND m.delivery_plan_revision = ?
          ORDER BY m.ordinal`,
       )
       .all(plan.plan.id, plan.plan.revision) as Record<string, unknown>[];
     const taskRows = this.database
       .prepare(
-        `SELECT m.delivery_plan_id, m.delivery_plan_revision,
-           m.project_id AS member_project_id, m.task_id AS member_id,
-           m.task_contract_revision AS member_revision, m.ordinal,
-           r.*, i.project_id AS identity_project_id,
-           i.created_proposal_id, i.created_at
+        `SELECT m.delivery_plan_id,
+            m.delivery_plan_revision AS member_delivery_plan_revision,
+            m.project_id AS member_project_id, m.task_id AS member_id,
+            m.task_contract_revision AS member_revision, m.ordinal,
+            r.*, i.project_id AS identity_project_id,
+            i.created_proposal_id, i.created_at,
+            initial.project_id AS initial_project_id,
+            initial.revision AS initial_revision,
+            initial.contract_revision AS initial_contract_revision,
+            initial.revision_kind AS initial_revision_kind,
+            initial.lifecycle AS initial_lifecycle,
+            initial.milestone_id AS initial_milestone_id,
+            initial.revision_json AS initial_revision_json
          FROM delivery_plan_revision_tasks m
          JOIN task_revisions r
            ON r.task_id = m.task_id
           AND r.revision = m.task_contract_revision
-         JOIN tasks i ON i.id = m.task_id
+          JOIN tasks i ON i.id = m.task_id
+          JOIN task_revisions initial
+            ON initial.task_id = i.id AND initial.revision = 1
          WHERE m.delivery_plan_id = ? AND m.delivery_plan_revision = ?
          ORDER BY m.ordinal`,
       )
       .all(plan.plan.id, plan.plan.revision) as Record<string, unknown>[];
     const dependencyRows = this.database
       .prepare(
-        `SELECT m.delivery_plan_id, m.delivery_plan_revision,
+        `SELECT m.delivery_plan_id,
+            m.delivery_plan_revision AS member_delivery_plan_revision,
            m.project_id AS member_project_id, m.dependency_id AS member_id,
            m.dependency_revision AS member_revision,
-           r.*, i.project_id AS identity_project_id,
-           i.prerequisite_task_id, i.dependent_task_id,
-           i.created_proposal_id, i.created_at
+            r.*, i.project_id AS identity_project_id,
+            i.prerequisite_task_id, i.dependent_task_id,
+            i.created_proposal_id, i.created_at,
+            initial.project_id AS initial_project_id,
+            initial.revision AS initial_revision,
+            initial.lifecycle AS initial_lifecycle,
+            initial.proposal_id AS initial_proposal_id,
+            initial.delivery_plan_revision AS initial_delivery_plan_revision,
+            initial.approved_at AS initial_approved_at,
+            initial.revision_json AS initial_revision_json
          FROM delivery_plan_revision_dependencies m
          JOIN task_dependency_revisions r
            ON r.dependency_id = m.dependency_id
           AND r.revision = m.dependency_revision
-         JOIN task_dependencies i ON i.id = m.dependency_id
+          JOIN task_dependencies i ON i.id = m.dependency_id
+          JOIN task_dependency_revisions initial
+            ON initial.dependency_id = i.id AND initial.revision = 1
          WHERE m.delivery_plan_id = ? AND m.delivery_plan_revision = ?
          ORDER BY m.dependency_id`,
       )
@@ -2162,11 +2253,14 @@ export class PlanningRepository {
       const revision = milestoneRevisionSchema.parse(
         JSON.parse(String(record.revision_json)),
       );
+      const initialRevision = milestoneRevisionSchema.parse(
+        JSON.parse(String(record.initial_revision_json)),
+      );
       const expected = plan.milestones[index];
       if (
         !expected ||
         record.delivery_plan_id !== plan.plan.id ||
-        record.delivery_plan_revision !== plan.plan.revision ||
+        record.member_delivery_plan_revision !== plan.plan.revision ||
         record.member_project_id !== plan.plan.projectId ||
         record.member_id !== expected.id ||
         record.member_revision !== expected.revision ||
@@ -2179,9 +2273,20 @@ export class PlanningRepository {
         record.delivery_plan_revision !== expected.deliveryPlanRevision ||
         record.approved_at !== expected.approvedAt ||
         record.identity_project_id !== expected.projectId ||
-        record.created_proposal_id !== expected.proposalId ||
-        record.created_at !== expected.approvedAt ||
-        record.revision_json !== canonicalJson(revision)
+        initialRevision.id !== expected.id ||
+        initialRevision.projectId !== expected.projectId ||
+        initialRevision.revision !== 1 ||
+        record.initial_project_id !== initialRevision.projectId ||
+        record.initial_revision !== initialRevision.revision ||
+        record.initial_lifecycle !== initialRevision.lifecycle ||
+        record.initial_proposal_id !== initialRevision.proposalId ||
+        record.initial_delivery_plan_revision !==
+          initialRevision.deliveryPlanRevision ||
+        record.initial_approved_at !== initialRevision.approvedAt ||
+        record.created_proposal_id !== initialRevision.proposalId ||
+        record.created_at !== initialRevision.approvedAt ||
+        record.revision_json !== canonicalJson(revision) ||
+        record.initial_revision_json !== canonicalJson(initialRevision)
       ) {
         throw new Error('Stored delivery plan members are corrupt');
       }
@@ -2191,11 +2296,14 @@ export class PlanningRepository {
       const revision = taskRevisionSchema.parse(
         JSON.parse(String(record.revision_json)),
       );
+      const initialRevision = taskRevisionSchema.parse(
+        JSON.parse(String(record.initial_revision_json)),
+      );
       const expected = plan.taskContracts[index];
       if (
         !expected ||
         record.delivery_plan_id !== plan.plan.id ||
-        record.delivery_plan_revision !== plan.plan.revision ||
+        record.member_delivery_plan_revision !== plan.plan.revision ||
         record.member_project_id !== plan.plan.projectId ||
         record.member_id !== expected.id ||
         record.member_revision !== expected.contractRevision ||
@@ -2208,12 +2316,21 @@ export class PlanningRepository {
         record.lifecycle !== expected.lifecycle ||
         record.milestone_id !== expected.milestoneId ||
         record.identity_project_id !== expected.projectId ||
-        record.created_proposal_id !==
-          (expected.source.kind === 'plan'
-            ? expected.source.proposalId
-            : null) ||
-        record.created_at !== expected.createdAt ||
-        record.revision_json !== canonicalJson(revision)
+        initialRevision.id !== expected.id ||
+        initialRevision.projectId !== expected.projectId ||
+        initialRevision.revision !== 1 ||
+        initialRevision.revisionKind !== 'plan_contract' ||
+        initialRevision.source.kind !== 'plan' ||
+        record.initial_project_id !== initialRevision.projectId ||
+        record.initial_revision !== initialRevision.revision ||
+        record.initial_contract_revision !== initialRevision.contractRevision ||
+        record.initial_revision_kind !== initialRevision.revisionKind ||
+        record.initial_lifecycle !== initialRevision.lifecycle ||
+        record.initial_milestone_id !== initialRevision.milestoneId ||
+        record.created_proposal_id !== initialRevision.source.proposalId ||
+        record.created_at !== initialRevision.createdAt ||
+        record.revision_json !== canonicalJson(revision) ||
+        record.initial_revision_json !== canonicalJson(initialRevision)
       ) {
         throw new Error('Stored delivery plan members are corrupt');
       }
@@ -2226,11 +2343,14 @@ export class PlanningRepository {
       const revision = taskDependencyRevisionSchema.parse(
         JSON.parse(String(record.revision_json)),
       );
+      const initialRevision = taskDependencyRevisionSchema.parse(
+        JSON.parse(String(record.initial_revision_json)),
+      );
       const expected = expectedDependencies[index];
       if (
         !expected ||
         record.delivery_plan_id !== plan.plan.id ||
-        record.delivery_plan_revision !== plan.plan.revision ||
+        record.member_delivery_plan_revision !== plan.plan.revision ||
         record.member_project_id !== plan.plan.projectId ||
         record.member_id !== expected.id ||
         record.member_revision !== expected.revision ||
@@ -2244,9 +2364,20 @@ export class PlanningRepository {
         record.identity_project_id !== expected.projectId ||
         record.prerequisite_task_id !== expected.prerequisiteTaskId ||
         record.dependent_task_id !== expected.dependentTaskId ||
-        record.created_proposal_id !== expected.proposalId ||
-        record.created_at !== expected.approvedAt ||
-        record.revision_json !== canonicalJson(revision)
+        initialRevision.id !== expected.id ||
+        initialRevision.projectId !== expected.projectId ||
+        initialRevision.revision !== 1 ||
+        record.initial_project_id !== initialRevision.projectId ||
+        record.initial_revision !== initialRevision.revision ||
+        record.initial_lifecycle !== initialRevision.lifecycle ||
+        record.initial_proposal_id !== initialRevision.proposalId ||
+        record.initial_delivery_plan_revision !==
+          initialRevision.deliveryPlanRevision ||
+        record.initial_approved_at !== initialRevision.approvedAt ||
+        record.created_proposal_id !== initialRevision.proposalId ||
+        record.created_at !== initialRevision.approvedAt ||
+        record.revision_json !== canonicalJson(revision) ||
+        record.initial_revision_json !== canonicalJson(initialRevision)
       ) {
         throw new Error('Stored delivery plan members are corrupt');
       }

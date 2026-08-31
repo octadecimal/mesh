@@ -33,6 +33,11 @@ CREATE TABLE planning_cycle_purposes (
   UNIQUE (planning_cycle_id, project_id),
   FOREIGN KEY (planning_cycle_id, project_id)
     REFERENCES planning_cycles(id, project_id),
+  FOREIGN KEY (
+    base_delivery_plan_id, base_delivery_plan_revision, project_id
+  ) REFERENCES delivery_plan_revisions(
+    delivery_plan_id, revision, project_id
+  ),
   CHECK (
     (base_delivery_plan_id IS NULL) = (base_delivery_plan_revision IS NULL)
   ),
@@ -41,12 +46,6 @@ CREATE TABLE planning_cycle_purposes (
     OR (base_delivery_plan_id IS NULL AND base_delivery_plan_revision IS NULL)
   )
 );
-
-INSERT INTO planning_cycle_purposes (
-  planning_cycle_id, project_id, purpose,
-  base_delivery_plan_id, base_delivery_plan_revision
-)
-SELECT id, project_id, 'intent', NULL, NULL FROM planning_cycles;
 
 CREATE TRIGGER planning_cycles_default_purpose
 AFTER INSERT ON planning_cycles
@@ -86,6 +85,11 @@ CREATE TABLE delivery_plan_proposals (
     REFERENCES project_intent_revisions(id, revision, project_id),
   FOREIGN KEY (ledger_id, ledger_revision, project_id)
     REFERENCES ledger_revisions(id, revision, project_id),
+  FOREIGN KEY (
+    base_delivery_plan_id, base_delivery_plan_revision, project_id
+  ) REFERENCES delivery_plan_revisions(
+    delivery_plan_id, revision, project_id
+  ),
   CHECK (
     (base_delivery_plan_id IS NULL) = (base_delivery_plan_revision IS NULL)
   )
@@ -288,6 +292,12 @@ CREATE TABLE delivery_plan_revisions (
   )
 );
 
+INSERT INTO planning_cycle_purposes (
+  planning_cycle_id, project_id, purpose,
+  base_delivery_plan_id, base_delivery_plan_revision
+)
+SELECT id, project_id, 'intent', NULL, NULL FROM planning_cycles;
+
 CREATE TABLE milestones (
   id TEXT PRIMARY KEY CHECK (length(id) > 0),
   project_id TEXT NOT NULL REFERENCES projects(id),
@@ -448,6 +458,10 @@ CREATE TABLE delivery_plan_revision_traces (
     REFERENCES delivery_plan_revisions(delivery_plan_id, revision, project_id),
   FOREIGN KEY (record_id, record_revision, project_id)
     REFERENCES ledger_record_revisions(record_id, revision, project_id),
+  FOREIGN KEY (milestone_id, milestone_revision, project_id)
+    REFERENCES milestone_revisions(milestone_id, revision, project_id),
+  FOREIGN KEY (task_id, task_contract_revision, project_id)
+    REFERENCES task_revisions(task_id, revision, project_id),
   CHECK (
     (kind = 'milestone_covers' AND milestone_id IS NOT NULL
       AND milestone_revision IS NOT NULL AND task_id IS NULL
@@ -457,6 +471,20 @@ CREATE TABLE delivery_plan_revision_traces (
       AND milestone_revision IS NULL)
   )
 );
+
+CREATE UNIQUE INDEX delivery_plan_revision_milestone_trace_unique
+ON delivery_plan_revision_traces (
+  delivery_plan_id, delivery_plan_revision,
+  milestone_id, milestone_revision, record_id, record_revision
+)
+WHERE kind = 'milestone_covers';
+
+CREATE UNIQUE INDEX delivery_plan_revision_task_trace_unique
+ON delivery_plan_revision_traces (
+  delivery_plan_id, delivery_plan_revision,
+  task_id, task_contract_revision, record_id, record_revision
+)
+WHERE kind = 'task_satisfies';
 
 CREATE TABLE board_filters (
   project_id TEXT PRIMARY KEY REFERENCES projects(id),

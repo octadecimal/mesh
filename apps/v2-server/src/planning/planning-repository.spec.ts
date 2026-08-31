@@ -185,6 +185,7 @@ const seedApprovedRequirement = (
 const deliveryProposal = (
   fixture: ReturnType<typeof createV2TestDatabase>,
   repository: PlanningRepository,
+  withDependency = false,
 ) => {
   const { approved, recordId } = seedApprovedRequirement(fixture, repository);
   const value: PlanningCycle = {
@@ -217,6 +218,8 @@ const deliveryProposal = (
   };
   const milestoneId = randomUUID();
   const taskId = randomUUID();
+  const secondTaskId = randomUUID();
+  const dependencyId = randomUUID();
   const proposal = deliveryPlanProposalSchema.parse({
     id: randomUUID(),
     projectId: fixture.project.id,
@@ -263,8 +266,38 @@ const deliveryProposal = (
             ordinal: 1,
           },
         },
+        ...(withDependency
+          ? [
+              {
+                operation: 'create' as const,
+                key: 'second-task',
+                content: {
+                  milestone: { kind: 'proposal' as const, key: 'milestone' },
+                  title: 'Render task',
+                  outcome: 'Task is visible.',
+                  acceptanceCriteria: ['Task is rendered.'],
+                  verificationCriteria: ['Rendering test passes.'],
+                  priority: 'should' as const,
+                  labels: ['ui'],
+                  ownedSurfaces: ['web'],
+                  prohibitedSurfaces: [],
+                  expectedArtifacts: ['web.spec.ts'],
+                  ordinal: 2,
+                },
+              },
+            ]
+          : []),
       ],
-      dependencies: [],
+      dependencies: withDependency
+        ? [
+            {
+              operation: 'create' as const,
+              key: 'dependency',
+              prerequisite: { kind: 'proposal' as const, key: 'task' },
+              dependent: { kind: 'proposal' as const, key: 'second-task' },
+            },
+          ]
+        : [],
       traces: [
         {
           kind: 'milestone_covers',
@@ -276,24 +309,46 @@ const deliveryProposal = (
           task: { kind: 'proposal', key: 'task' },
           requirement: { recordId, recordRevision: 1 },
         },
+        ...(withDependency
+          ? [
+              {
+                kind: 'task_satisfies' as const,
+                task: { kind: 'proposal' as const, key: 'second-task' },
+                requirement: { recordId, recordRevision: 1 },
+              },
+            ]
+          : []),
       ],
     },
     reservations: {
       milestones: [{ key: 'milestone', id: milestoneId }],
-      tasks: [{ key: 'task', id: taskId }],
-      dependencies: [],
+      tasks: withDependency
+        ? [
+            { key: 'second-task', id: secondTaskId },
+            { key: 'task', id: taskId },
+          ]
+        : [{ key: 'task', id: taskId }],
+      dependencies: withDependency
+        ? [{ key: 'dependency', id: dependencyId }]
+        : [],
     },
     diff: {
       milestones: { create: 1, reuse: 0, revise: 0, retire: 0, reactivate: 0 },
-      tasks: { create: 1, reuse: 0, revise: 0, retire: 0, reactivate: 0 },
-      dependencies: {
-        create: 0,
+      tasks: {
+        create: withDependency ? 2 : 1,
         reuse: 0,
         revise: 0,
         retire: 0,
         reactivate: 0,
       },
-      traceCreateCount: 2,
+      dependencies: {
+        create: withDependency ? 1 : 0,
+        reuse: 0,
+        revise: 0,
+        retire: 0,
+        reactivate: 0,
+      },
+      traceCreateCount: withDependency ? 3 : 2,
       traceRemoveCount: 0,
     },
     createdByTurnId: pm.id,
@@ -312,15 +367,33 @@ const deliveryProposal = (
     repository.insertTurnInTransaction(pm);
     repository.insertDeliveryPlanProposalInTransaction(proposal);
   });
-  return { approved, proposal, value, milestoneId, taskId, recordId };
+  return {
+    approved,
+    proposal,
+    value,
+    milestoneId,
+    taskId,
+    secondTaskId,
+    dependencyId,
+    recordId,
+  };
 };
 
 const approveDeliveryProposal = (
   fixture: ReturnType<typeof createV2TestDatabase>,
   repository: PlanningRepository,
+  withDependency = false,
 ) => {
-  const seeded = deliveryProposal(fixture, repository);
-  const { approved, proposal, value, milestoneId, taskId } = seeded;
+  const seeded = deliveryProposal(fixture, repository, withDependency);
+  const {
+    approved,
+    proposal,
+    value,
+    milestoneId,
+    taskId,
+    secondTaskId,
+    dependencyId,
+  } = seeded;
   const plan = approvedDeliveryPlanSchema.parse({
     plan: {
       id: randomUUID(),
@@ -378,8 +451,51 @@ const approveDeliveryProposal = (
         },
         createdAt: at,
       },
+      ...(withDependency
+        ? [
+            {
+              id: secondTaskId,
+              projectId: fixture.project.id,
+              revision: 1,
+              contractRevision: 1,
+              revisionKind: 'plan_contract' as const,
+              lifecycle: 'pending' as const,
+              milestoneId,
+              title: 'Render task',
+              outcome: 'Task is visible.',
+              acceptanceCriteria: ['Task is rendered.'],
+              verificationCriteria: ['Rendering test passes.'],
+              priority: 'should' as const,
+              labels: ['ui'],
+              ownedSurfaces: ['web'],
+              prohibitedSurfaces: [],
+              expectedArtifacts: ['web.spec.ts'],
+              ordinal: 2,
+              source: {
+                kind: 'plan' as const,
+                proposalId: proposal.id,
+                deliveryPlanRevision: 1,
+              },
+              createdAt: at,
+            },
+          ]
+        : []),
     ],
-    dependencies: [],
+    dependencies: withDependency
+      ? [
+          {
+            id: dependencyId,
+            projectId: fixture.project.id,
+            revision: 1,
+            prerequisiteTaskId: taskId,
+            dependentTaskId: secondTaskId,
+            lifecycle: 'active' as const,
+            proposalId: proposal.id,
+            deliveryPlanRevision: 1,
+            approvedAt: at,
+          },
+        ]
+      : [],
     traces: [
       {
         kind: 'milestone_covers',
@@ -399,6 +515,19 @@ const approveDeliveryProposal = (
           recordRevision: 1,
         },
       },
+      ...(withDependency
+        ? [
+            {
+              kind: 'task_satisfies' as const,
+              taskId: secondTaskId,
+              taskContractRevision: 1,
+              requirement: {
+                recordId: approved.records[0].recordId,
+                recordRevision: 1,
+              },
+            },
+          ]
+        : []),
     ],
     milestoneDependencies: [],
   });
@@ -410,6 +539,450 @@ const approveDeliveryProposal = (
     );
   });
   return { ...seeded, plan };
+};
+
+const applySecondDeliveryPlanRevision = (
+  fixture: ReturnType<typeof createV2TestDatabase>,
+  repository: PlanningRepository,
+  seeded: ReturnType<typeof approveDeliveryProposal>,
+) => {
+  const { approved, plan, milestoneId, taskId, secondTaskId, dependencyId } =
+    seeded;
+  const value: PlanningCycle = {
+    ...cycle(fixture),
+    id: randomUUID(),
+    profileId: fixture.pmProfileRevision.profileId,
+    profileRevision: fixture.pmProfileRevision.revision,
+    baseProjectIntentRevision: approved.projectIntent.revision,
+    baseLedgerRevision: approved.ledger.revision,
+    lifecycle: 'awaiting_approval',
+    revision: 2,
+    latestProposalRevision: 1,
+  };
+  const human = humanTurn(value);
+  const pm: PlanningTurn = {
+    id: randomUUID(),
+    projectId: value.projectId,
+    planningCycleId: value.id,
+    ordinal: 2,
+    actor: 'pm',
+    message: 'Revise the approved delivery plan.',
+    launchState: null,
+    executionId: fixture.execution.id,
+    createdAt: at,
+  };
+  const proposal = deliveryPlanProposalSchema.parse({
+    id: randomUUID(),
+    projectId: fixture.project.id,
+    planningCycleId: value.id,
+    revision: 1,
+    lifecycle: 'awaiting_approval',
+    base: {
+      projectIntentId: approved.projectIntent.id,
+      projectIntentRevision: approved.projectIntent.revision,
+      ledgerId: approved.ledger.id,
+      ledgerRevision: approved.ledger.revision,
+      deliveryPlan: { id: plan.plan.id, revision: 1 },
+    },
+    proposedPlan: {
+      summary: 'Revise persistence and retire its edge.',
+      milestones: [
+        {
+          operation: 'revise',
+          milestoneId,
+          expectedRevision: 1,
+          lifecycle: 'active',
+          content: {
+            title: 'Todo persistence',
+            outcome: 'Todo remains durable.',
+            stopCondition: 'Both tasks persist.',
+            exclusions: [],
+            ordinal: 1,
+          },
+        },
+      ],
+      tasks: [
+        {
+          operation: 'revise',
+          taskId,
+          expectedContractRevision: 1,
+          expectedCurrentRevision: 1,
+          lifecycle: 'pending',
+          content: {
+            milestone: { kind: 'canonical', milestoneId },
+            title: 'Persist revised task',
+            outcome: 'Revised task survives restart.',
+            acceptanceCriteria: ['Revised task is restored.'],
+            verificationCriteria: ['Revised restart test passes.'],
+            priority: 'must',
+            labels: ['core'],
+            ownedSurfaces: ['storage'],
+            prohibitedSurfaces: [],
+            expectedArtifacts: ['storage.spec.ts'],
+            ordinal: 1,
+          },
+        },
+        {
+          operation: 'reuse',
+          taskId: secondTaskId,
+          expectedContractRevision: 1,
+          expectedCurrentRevision: 1,
+        },
+      ],
+      dependencies: [
+        {
+          operation: 'revise',
+          dependencyId,
+          expectedRevision: 1,
+          lifecycle: 'retired',
+        },
+      ],
+      traces: [
+        {
+          kind: 'milestone_covers',
+          milestone: { kind: 'canonical', milestoneId },
+          requirement: { recordId: seeded.recordId, recordRevision: 1 },
+        },
+        {
+          kind: 'task_satisfies',
+          task: { kind: 'canonical', taskId },
+          requirement: { recordId: seeded.recordId, recordRevision: 1 },
+        },
+        {
+          kind: 'task_satisfies',
+          task: { kind: 'canonical', taskId: secondTaskId },
+          requirement: { recordId: seeded.recordId, recordRevision: 1 },
+        },
+      ],
+    },
+    reservations: { milestones: [], tasks: [], dependencies: [] },
+    diff: {
+      milestones: { create: 0, reuse: 0, revise: 1, retire: 0, reactivate: 0 },
+      tasks: { create: 0, reuse: 1, revise: 1, retire: 0, reactivate: 0 },
+      dependencies: {
+        create: 0,
+        reuse: 0,
+        revise: 0,
+        retire: 1,
+        reactivate: 0,
+      },
+      traceCreateCount: 2,
+      traceRemoveCount: 2,
+    },
+    createdByTurnId: pm.id,
+    createdByExecutionId: fixture.execution.id,
+    createdAt: at,
+    decision: { kind: 'pending' },
+  });
+  const revised = approvedDeliveryPlanSchema.parse({
+    plan: {
+      ...plan.plan,
+      revision: 2,
+      baseDeliveryPlanRevision: 1,
+      proposalId: proposal.id,
+      summary: proposal.proposedPlan.summary,
+    },
+    milestones: [
+      {
+        ...plan.milestones[0],
+        revision: 2,
+        title: 'Todo persistence',
+        outcome: 'Todo remains durable.',
+        stopCondition: 'Both tasks persist.',
+        proposalId: proposal.id,
+        deliveryPlanRevision: 2,
+      },
+    ],
+    taskContracts: [
+      {
+        ...plan.taskContracts[0],
+        revision: 2,
+        contractRevision: 2,
+        title: 'Persist revised task',
+        outcome: 'Revised task survives restart.',
+        acceptanceCriteria: ['Revised task is restored.'],
+        verificationCriteria: ['Revised restart test passes.'],
+        source: {
+          kind: 'plan',
+          proposalId: proposal.id,
+          deliveryPlanRevision: 2,
+        },
+      },
+      plan.taskContracts[1],
+    ],
+    dependencies: [
+      {
+        ...plan.dependencies[0],
+        revision: 2,
+        lifecycle: 'retired',
+        proposalId: proposal.id,
+        deliveryPlanRevision: 2,
+      },
+    ],
+    traces: [
+      {
+        kind: 'milestone_covers',
+        milestoneId,
+        milestoneRevision: 2,
+        requirement: { recordId: seeded.recordId, recordRevision: 1 },
+      },
+      {
+        kind: 'task_satisfies',
+        taskId,
+        taskContractRevision: 2,
+        requirement: { recordId: seeded.recordId, recordRevision: 1 },
+      },
+      {
+        kind: 'task_satisfies',
+        taskId: secondTaskId,
+        taskContractRevision: 1,
+        requirement: { recordId: seeded.recordId, recordRevision: 1 },
+      },
+    ],
+    milestoneDependencies: [],
+  });
+  inImmediateTransaction(fixture.database, () => {
+    repository.insertCycleInTransaction(value, {
+      planningCycleId: value.id,
+      purpose: 'delivery_plan',
+      baseDeliveryPlanId: plan.plan.id,
+      baseDeliveryPlanRevision: 1,
+    });
+    repository.insertTurnInTransaction({
+      ...human,
+      launchState: 'execution_bound',
+      executionId: fixture.execution.id,
+    });
+    repository.insertTurnInTransaction(pm);
+    repository.insertDeliveryPlanProposalInTransaction(proposal);
+    repository.applyApprovedDeliveryPlanInTransaction(proposal, revised);
+    repository.updateCycleInTransaction(
+      { ...value, lifecycle: 'approved', revision: 3, endedAt: at },
+      2,
+    );
+  });
+  return { revised, cycle: value, proposal };
+};
+
+const applyLifecycleDeliveryPlanRevision = (
+  fixture: ReturnType<typeof createV2TestDatabase>,
+  repository: PlanningRepository,
+  approved: ReturnType<typeof seedApprovedRequirement>['approved'],
+  previous: ApprovedDeliveryPlan,
+  lifecycle: 'retired' | 'active',
+) => {
+  const revision = previous.plan.revision + 1;
+  const value: PlanningCycle = {
+    ...cycle(fixture),
+    id: randomUUID(),
+    profileId: fixture.pmProfileRevision.profileId,
+    profileRevision: fixture.pmProfileRevision.revision,
+    baseProjectIntentRevision: approved.projectIntent.revision,
+    baseLedgerRevision: approved.ledger.revision,
+    lifecycle: 'awaiting_approval',
+    revision: 2,
+    latestProposalRevision: 1,
+  };
+  const human = humanTurn(value);
+  const pm: PlanningTurn = {
+    id: randomUUID(),
+    projectId: value.projectId,
+    planningCycleId: value.id,
+    ordinal: 2,
+    actor: 'pm',
+    message: `${lifecycle === 'retired' ? 'Retire' : 'Reactivate'} the plan.`,
+    launchState: null,
+    executionId: fixture.execution.id,
+    createdAt: at,
+  };
+  const milestone = previous.milestones[0];
+  const taskMembers = previous.taskContracts.map((task) => ({
+    operation: 'revise' as const,
+    taskId: task.id,
+    expectedContractRevision: task.contractRevision,
+    expectedCurrentRevision: task.revision,
+    lifecycle:
+      lifecycle === 'retired' ? ('retired' as const) : ('pending' as const),
+    content: {
+      milestone: { kind: 'canonical' as const, milestoneId: milestone.id },
+      title: task.title,
+      outcome: task.outcome,
+      acceptanceCriteria: task.acceptanceCriteria,
+      verificationCriteria: task.verificationCriteria,
+      priority: task.priority,
+      labels: task.labels,
+      ownedSurfaces: task.ownedSurfaces,
+      prohibitedSurfaces: task.prohibitedSurfaces,
+      expectedArtifacts: task.expectedArtifacts,
+      ordinal: task.ordinal,
+    },
+  }));
+  const proposal = deliveryPlanProposalSchema.parse({
+    id: randomUUID(),
+    projectId: fixture.project.id,
+    planningCycleId: value.id,
+    revision: 1,
+    lifecycle: 'awaiting_approval',
+    base: {
+      projectIntentId: approved.projectIntent.id,
+      projectIntentRevision: approved.projectIntent.revision,
+      ledgerId: approved.ledger.id,
+      ledgerRevision: approved.ledger.revision,
+      deliveryPlan: { id: previous.plan.id, revision: previous.plan.revision },
+    },
+    proposedPlan: {
+      summary: `${lifecycle === 'retired' ? 'Retire' : 'Reactivate'} Todo plan.`,
+      milestones: [
+        {
+          operation: 'revise',
+          milestoneId: milestone.id,
+          expectedRevision: milestone.revision,
+          lifecycle,
+          content: {
+            title: milestone.title,
+            outcome: milestone.outcome,
+            stopCondition: milestone.stopCondition,
+            exclusions: milestone.exclusions,
+            ordinal: milestone.ordinal,
+          },
+        },
+      ],
+      tasks: taskMembers,
+      dependencies: [
+        lifecycle === 'retired'
+          ? {
+              operation: 'reuse' as const,
+              dependencyId: previous.dependencies[0].id,
+              expectedRevision: previous.dependencies[0].revision,
+            }
+          : {
+              operation: 'revise' as const,
+              dependencyId: previous.dependencies[0].id,
+              expectedRevision: previous.dependencies[0].revision,
+              lifecycle: 'active' as const,
+            },
+      ],
+      traces: previous.traces.map((trace) =>
+        trace.kind === 'milestone_covers'
+          ? {
+              kind: trace.kind,
+              milestone: {
+                kind: 'canonical' as const,
+                milestoneId: trace.milestoneId,
+              },
+              requirement: trace.requirement,
+            }
+          : {
+              kind: trace.kind,
+              task: { kind: 'canonical' as const, taskId: trace.taskId },
+              requirement: trace.requirement,
+            },
+      ),
+    },
+    reservations: { milestones: [], tasks: [], dependencies: [] },
+    diff: {
+      milestones: {
+        create: 0,
+        reuse: 0,
+        revise: 0,
+        retire: lifecycle === 'retired' ? 1 : 0,
+        reactivate: lifecycle === 'active' ? 1 : 0,
+      },
+      tasks: {
+        create: 0,
+        reuse: 0,
+        revise: 0,
+        retire: lifecycle === 'retired' ? taskMembers.length : 0,
+        reactivate: lifecycle === 'active' ? taskMembers.length : 0,
+      },
+      dependencies: {
+        create: 0,
+        reuse: lifecycle === 'retired' ? 1 : 0,
+        revise: 0,
+        retire: 0,
+        reactivate: lifecycle === 'active' ? 1 : 0,
+      },
+      traceCreateCount: previous.traces.length,
+      traceRemoveCount: previous.traces.length,
+    },
+    createdByTurnId: pm.id,
+    createdByExecutionId: fixture.execution.id,
+    createdAt: at,
+    decision: { kind: 'pending' },
+  });
+  const next = approvedDeliveryPlanSchema.parse({
+    plan: {
+      ...previous.plan,
+      revision,
+      baseDeliveryPlanRevision: previous.plan.revision,
+      proposalId: proposal.id,
+      summary: proposal.proposedPlan.summary,
+    },
+    milestones: [
+      {
+        ...milestone,
+        revision: milestone.revision + 1,
+        lifecycle,
+        proposalId: proposal.id,
+        deliveryPlanRevision: revision,
+      },
+    ],
+    taskContracts: previous.taskContracts.map((task) => ({
+      ...task,
+      revision: task.revision + 1,
+      contractRevision: task.revision + 1,
+      lifecycle:
+        lifecycle === 'retired' ? ('retired' as const) : ('pending' as const),
+      source: {
+        kind: 'plan' as const,
+        proposalId: proposal.id,
+        deliveryPlanRevision: revision,
+      },
+    })),
+    dependencies: [
+      lifecycle === 'retired'
+        ? previous.dependencies[0]
+        : {
+            ...previous.dependencies[0],
+            revision: previous.dependencies[0].revision + 1,
+            lifecycle: 'active' as const,
+            proposalId: proposal.id,
+            deliveryPlanRevision: revision,
+          },
+    ],
+    traces: previous.traces.map((trace) =>
+      trace.kind === 'milestone_covers'
+        ? { ...trace, milestoneRevision: milestone.revision + 1 }
+        : {
+            ...trace,
+            taskContractRevision:
+              previous.taskContracts.find(({ id }) => id === trace.taskId)!
+                .revision + 1,
+          },
+    ),
+    milestoneDependencies: [],
+  });
+  inImmediateTransaction(fixture.database, () => {
+    repository.insertCycleInTransaction(value, {
+      planningCycleId: value.id,
+      purpose: 'delivery_plan',
+      baseDeliveryPlanId: previous.plan.id,
+      baseDeliveryPlanRevision: previous.plan.revision,
+    });
+    repository.insertTurnInTransaction({
+      ...human,
+      launchState: 'execution_bound',
+      executionId: fixture.execution.id,
+    });
+    repository.insertTurnInTransaction(pm);
+    repository.insertDeliveryPlanProposalInTransaction(proposal);
+    repository.applyApprovedDeliveryPlanInTransaction(proposal, next);
+    repository.updateCycleInTransaction(
+      { ...value, lifecycle: 'approved', revision: 3, endedAt: at },
+      2,
+    );
+  });
+  return next;
 };
 
 const replaceCurrentIntent = (
@@ -1089,6 +1662,190 @@ describe('PlanningRepository', () => {
         /corrupt/i,
       );
     }
+  });
+
+  it('authenticates first-creation and selected-revision provenance independently', () => {
+    const { fixture, repository } = setup();
+    const seeded = approveDeliveryProposal(fixture, repository, true);
+    const { revised } = applySecondDeliveryPlanRevision(
+      fixture,
+      repository,
+      seeded,
+    );
+    const retired = applyLifecycleDeliveryPlanRevision(
+      fixture,
+      repository,
+      seeded.approved,
+      revised,
+      'retired',
+    );
+    const reactivated = applyLifecycleDeliveryPlanRevision(
+      fixture,
+      repository,
+      seeded.approved,
+      retired,
+      'active',
+    );
+
+    expect(repository.approvedDeliveryPlan(fixture.project.id)).toEqual(
+      reactivated,
+    );
+    for (const table of ['milestones', 'tasks', 'task_dependencies']) {
+      expect(
+        fixture.database
+          .prepare(`SELECT created_proposal_id FROM ${table} ORDER BY id`)
+          .all(),
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ created_proposal_id: seeded.proposal.id }),
+        ]),
+      );
+    }
+
+    fixture.database.close();
+    const reopened = openV2Database(fixture.path);
+    expect(
+      new PlanningRepository(reopened).approvedDeliveryPlan(fixture.project.id),
+    ).toEqual(reactivated);
+    reopened.close();
+  });
+
+  it('rejects duplicate and foreign exact-revision requirement trace subjects', () => {
+    const { fixture, repository } = setup();
+    const { plan, recordId } = approveDeliveryProposal(fixture, repository);
+    const insert = fixture.database.prepare(
+      `INSERT INTO delivery_plan_revision_traces (
+        delivery_plan_id, delivery_plan_revision, project_id, ordinal, kind,
+        milestone_id, milestone_revision, task_id, task_contract_revision,
+        record_id, record_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const milestone = plan.milestones[0];
+    expect(() =>
+      insert.run(
+        plan.plan.id,
+        1,
+        fixture.project.id,
+        99,
+        'milestone_covers',
+        milestone.id,
+        milestone.revision,
+        null,
+        null,
+        recordId,
+        1,
+      ),
+    ).toThrow(/unique/i);
+    expect(() =>
+      insert.run(
+        plan.plan.id,
+        1,
+        fixture.project.id,
+        99,
+        'milestone_covers',
+        randomUUID(),
+        1,
+        null,
+        null,
+        recordId,
+        1,
+      ),
+    ).toThrow(/foreign key/i);
+    const task = plan.taskContracts[0];
+    expect(() =>
+      insert.run(
+        plan.plan.id,
+        1,
+        fixture.project.id,
+        99,
+        'task_satisfies',
+        null,
+        null,
+        task.id,
+        task.contractRevision,
+        recordId,
+        1,
+      ),
+    ).toThrow(/unique/i);
+    expect(() =>
+      insert.run(
+        plan.plan.id,
+        1,
+        fixture.project.id,
+        99,
+        'task_satisfies',
+        null,
+        null,
+        randomUUID(),
+        1,
+        recordId,
+        1,
+      ),
+    ).toThrow(/foreign key/i);
+  });
+
+  it.each([
+    {
+      label: 'cycle wrong revision',
+      table: 'planning_cycle_purposes',
+      column: 'base_delivery_plan_revision',
+      value: 99,
+      key: 'planning_cycle_id',
+      select: 'cycle' as const,
+    },
+    {
+      label: 'cycle missing plan',
+      table: 'planning_cycle_purposes',
+      column: 'base_delivery_plan_id',
+      value: randomUUID(),
+      key: 'planning_cycle_id',
+      select: 'cycle' as const,
+    },
+    {
+      label: 'proposal wrong revision',
+      table: 'delivery_plan_proposals',
+      column: 'base_delivery_plan_revision',
+      value: 99,
+      key: 'id',
+      select: 'proposal' as const,
+    },
+    {
+      label: 'proposal cross-project identity',
+      table: 'delivery_plan_proposals',
+      column: 'project_id',
+      value: randomUUID(),
+      key: 'id',
+      select: 'proposal' as const,
+    },
+  ])('fails closed across reopen on $label base corruption', (corruption) => {
+    const { fixture, repository } = setup();
+    const seeded = approveDeliveryProposal(fixture, repository, true);
+    const revision = applySecondDeliveryPlanRevision(
+      fixture,
+      repository,
+      seeded,
+    );
+    fixture.database.pragma('foreign_keys = OFF');
+    fixture.database
+      .prepare(
+        `UPDATE ${corruption.table} SET ${corruption.column} = ? WHERE ${corruption.key} = ?`,
+      )
+      .run(
+        corruption.value,
+        corruption.select === 'cycle'
+          ? revision.cycle.id
+          : revision.proposal.id,
+      );
+    fixture.database.close();
+
+    const reopened = openV2Database(fixture.path);
+    const reopenedRepository = new PlanningRepository(reopened);
+    expect(() =>
+      corruption.select === 'cycle'
+        ? reopenedRepository.cyclePurpose(revision.cycle.id)
+        : reopenedRepository.deliveryPlanProposal(revision.proposal.id),
+    ).toThrow(/corrupt/i);
+    reopened.close();
   });
 
   it('persists immutable cycles and ordered turns across reopen', () => {

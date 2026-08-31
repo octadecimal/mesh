@@ -3,6 +3,10 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import BetterSqlite3 from 'better-sqlite3';
+import {
+  legacyM2PlanningCommandSuccessSchema,
+  normalizePlanningCommandSuccess,
+} from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -753,57 +757,6 @@ describe('V2 database identity and migration', () => {
         )`,
       )
       .run(cycleId, projectId, profileId, at, at, at);
-    const legacyCommandResults = [
-      {
-        commandType: 'planning_cycle.submit_turn' as const,
-        code: 'planning_cycle_revision_conflict' as const,
-        message: 'legacy submit conflict',
-      },
-      {
-        commandType: 'planning_proposal.approve' as const,
-        code: 'planning_canonical_base_conflict' as const,
-        message: 'legacy approval conflict',
-      },
-      {
-        commandType: 'planning_proposal.reject' as const,
-        code: 'planning_proposal_not_found' as const,
-        message: 'legacy rejection missing',
-      },
-      {
-        commandType: 'planning_cycle.abandon' as const,
-        code: 'planning_cycle_not_found' as const,
-        message: 'legacy abandonment missing',
-      },
-    ];
-    for (const [index, result] of legacyCommandResults.entries()) {
-      const commandResult = {
-        ok: false,
-        commandType: result.commandType,
-        error: { code: result.code, message: result.message },
-      };
-      const resultJson = JSON.stringify(commandResult);
-      expect(resultJson).not.toBe(
-        index === 0
-          ? '{}'
-          : JSON.stringify({
-              ok: false,
-              commandType: legacyCommandResults[0].commandType,
-              error: {
-                code: legacyCommandResults[0].code,
-                message: legacyCommandResults[0].message,
-              },
-            }),
-      );
-      database
-        .prepare(`INSERT INTO command_results VALUES (?, ?, ?, ?, ?)`)
-        .run(
-          `m2-command-${index}`,
-          result.commandType,
-          String(index + 3).repeat(64),
-          resultJson,
-          at,
-        );
-    }
     database
       .prepare(`INSERT INTO event_streams VALUES (?, 'domain', 11)`)
       .run(projectId);
@@ -1069,6 +1022,79 @@ describe('V2 database identity and migration', () => {
       ],
       relationships: [],
     };
+    const legacyCommandResults = [
+      {
+        ok: true as const,
+        commandType: 'planning_cycle.submit_turn' as const,
+        planningCycle: {
+          ...legacyCycle,
+          cycle: {
+            ...legacyCycle.cycle,
+            lifecycle: 'launch_pending' as const,
+            revision: 1,
+            latestProposalRevision: 0,
+            endedAt: null,
+          },
+          turns: [
+            {
+              ...legacyCycle.turns[0],
+              launchState: 'launch_pending' as const,
+              executionId: null,
+            },
+          ],
+          proposals: [],
+        },
+      },
+      {
+        ok: true as const,
+        commandType: 'planning_proposal.approve' as const,
+        planningCycle: legacyCycle,
+        intentLedger: legacyIntentLedger,
+      },
+      {
+        ok: true as const,
+        commandType: 'planning_proposal.reject' as const,
+        planningCycle: {
+          ...legacyCycle,
+          cycle: {
+            ...legacyCycle.cycle,
+            lifecycle: 'proposal_rejected' as const,
+          },
+          proposals: legacyCycle.proposals.map((proposal) => ({
+            ...proposal,
+            lifecycle: 'rejected' as const,
+            rejectionFeedback: 'Revise the scope.',
+          })),
+        },
+      },
+      {
+        ok: true as const,
+        commandType: 'planning_cycle.abandon' as const,
+        planningCycle: {
+          ...legacyCycle,
+          cycle: {
+            ...legacyCycle.cycle,
+            lifecycle: 'abandoned' as const,
+            latestProposalRevision: 0,
+          },
+          proposals: [],
+        },
+      },
+    ].map((result) => legacyM2PlanningCommandSuccessSchema.parse(result));
+    const legacyCommandBytes = legacyCommandResults.map((result) =>
+      JSON.stringify(result),
+    );
+    for (const [index, result] of legacyCommandResults.entries()) {
+      database
+        .prepare(`INSERT INTO command_results VALUES (?, ?, ?, ?, ?)`)
+        .run(
+          `m2-command-${index}`,
+          result.commandType,
+          String(index + 3).repeat(64),
+          legacyCommandBytes[index],
+          at,
+        );
+    }
     const legacyDomainEvents = [
       {
         id: randomUUID(),
@@ -1172,14 +1198,26 @@ describe('V2 database identity and migration', () => {
     expect(reopened.pragma('foreign_key_check')).toEqual([]);
     const reopenedCommands = new V2CommandRepository(reopened);
     for (const [index, result] of legacyCommandResults.entries()) {
-      expect(reopenedCommands.find(`m2-command-${index}`)).toMatchObject({
+      const replayed = reopenedCommands.find(`m2-command-${index}`);
+      expect(replayed).toMatchObject({
         commandType: result.commandType,
         requestHash: String(index + 3).repeat(64),
-        result: {
-          ok: false,
-          commandType: result.commandType,
-          error: { code: result.code, message: result.message },
-        },
+        result,
+      });
+      expect(
+        reopened
+          .prepare(
+            'SELECT result_json FROM command_results WHERE idempotency_key = ?',
+          )
+          .get(`m2-command-${index}`),
+      ).toEqual({ result_json: legacyCommandBytes[index] });
+      expect(
+        legacyM2PlanningCommandSuccessSchema.parse(replayed?.result),
+      ).toEqual(result);
+      expect(normalizePlanningCommandSuccess(result)).toMatchObject({
+        source: 'legacy_m2',
+        projectionAuthority: 'receipt_only',
+        result: { commandType: result.commandType, schemaVersion: 2 },
       });
     }
     const replay = new V2EventStore(reopened).domainAfter(projectId, 0);
@@ -1209,6 +1247,49 @@ describe('V2 database identity and migration', () => {
       deliveryPlan: null,
       board: { emptyReason: 'planning_required' },
     });
+  });
+
+  it('binds planning bases and requirement trace subjects to exact same-project revisions', () => {
+    const fixture = createV2TestDatabase();
+    testDatabases.push(fixture);
+    const schema = (name: string) =>
+      (
+        fixture.database
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+          )
+          .get(name) as { sql: string }
+      ).sql.replace(/\s+/g, ' ');
+
+    for (const table of [
+      'planning_cycle_purposes',
+      'delivery_plan_proposals',
+    ]) {
+      expect(schema(table)).toMatch(
+        /FOREIGN KEY \(\s*base_delivery_plan_id, base_delivery_plan_revision, project_id\s*\) REFERENCES delivery_plan_revisions\(\s*delivery_plan_id, revision, project_id\s*\)/,
+      );
+    }
+    const traceSchema = schema('delivery_plan_revision_traces');
+    expect(traceSchema).toMatch(
+      /FOREIGN KEY \(milestone_id, milestone_revision, project_id\) REFERENCES milestone_revisions\(milestone_id, revision, project_id\)/,
+    );
+    expect(traceSchema).toMatch(
+      /FOREIGN KEY \(task_id, task_contract_revision, project_id\) REFERENCES task_revisions\(task_id, revision, project_id\)/,
+    );
+    expect(
+      (
+        fixture.database
+          .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'delivery_plan_revision_traces' ORDER BY name",
+          )
+          .all() as { name: string }[]
+      ).map(({ name }) => name),
+    ).toEqual(
+      expect.arrayContaining([
+        'delivery_plan_revision_milestone_trace_unique',
+        'delivery_plan_revision_task_trace_unique',
+      ]),
+    );
   });
 
   it('rolls back the command-result rebuild when migration 3 fails', () => {
