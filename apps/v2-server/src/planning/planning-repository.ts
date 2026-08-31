@@ -1470,9 +1470,11 @@ export class PlanningRepository {
       [...values].sort((left, right) =>
         left.key < right.key ? -1 : left.key > right.key ? 1 : 0,
       );
-    const sortedReservations = (
-      reservations: DeliveryPlanProposal['reservations'],
-    ) => ({
+    const sortedReservations = (reservations: {
+      milestones: readonly { key: string; id: string }[];
+      tasks: readonly { key: string; id: string }[];
+      dependencies: readonly { key: string; id: string }[];
+    }) => ({
       milestones: byKey(reservations.milestones),
       tasks: byKey(reservations.tasks),
       dependencies: byKey(reservations.dependencies),
