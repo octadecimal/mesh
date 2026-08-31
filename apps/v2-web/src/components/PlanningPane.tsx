@@ -627,20 +627,18 @@ function DeliveryProposalCard({
     };
   });
   const tasks = proposal.proposedPlan.tasks.map((member) => {
-    const current =
-      member.operation === 'reuse'
-        ? deliveryPlan?.taskContracts.find(({ id }) => id === member.taskId)
-        : undefined;
     const approved =
       member.operation === 'reuse'
-        ? current?.contractRevision === member.expectedContractRevision
-          ? current
-          : undefined
+        ? deliveryPlan?.taskContracts.find(
+            ({ id, contractRevision }) =>
+              id === member.taskId &&
+              contractRevision === member.expectedContractRevision,
+          )
         : undefined;
     const content = member.operation === 'reuse' ? approved : member.content;
     const milestoneIdentity =
       member.operation === 'reuse'
-        ? current?.milestoneId
+        ? approved?.milestoneId
         : member.content.milestone.kind === 'proposal'
           ? member.content.milestone.key
           : member.content.milestone.milestoneId;
@@ -654,6 +652,39 @@ function DeliveryProposalCard({
       content,
     };
   });
+  const unplacedTasks = tasks.filter(
+    ({ milestoneIdentity }) => milestoneIdentity === undefined,
+  );
+  const renderTask = ({
+    member: task,
+    identity: taskIdentity,
+    title,
+    content,
+  }: (typeof tasks)[number]) => (
+    <li key={taskIdentity}>
+      <strong>{title}</strong> · {humanize(task.operation)}
+      {task.operation === 'reuse'
+        ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision}`
+        : task.operation === 'revise'
+          ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision} · ${task.lifecycle}`
+          : null}
+      {content ? (
+        <>
+          <p>{content.outcome}</p>
+          <p>Acceptance: {list(content.acceptanceCriteria)}</p>
+          <p>Verification: {list(content.verificationCriteria)}</p>
+          <p>
+            Priority {content.priority} · labels {list(content.labels)}
+          </p>
+          <p>Owned surfaces: {list(content.ownedSurfaces)}</p>
+          <p>Prohibited surfaces: {list(content.prohibitedSurfaces)}</p>
+          <p>Expected artifacts: {list(content.expectedArtifacts)}</p>
+        </>
+      ) : (
+        <p>Approved task revision unavailable.</p>
+      )}
+    </li>
+  );
   let superseded: string | undefined;
   if (proposal.decision.kind === 'superseded') {
     if (proposal.decision.reason === 'replacement_accepted') {
@@ -713,54 +744,24 @@ function DeliveryProposalCard({
               <ol>
                 {tasks
                   .filter((task) => task.milestoneIdentity === identity)
-                  .map(
-                    ({
-                      member: task,
-                      identity: taskIdentity,
-                      title,
-                      content,
-                    }) => (
-                      <li key={taskIdentity}>
-                        <strong>{title}</strong> · {humanize(task.operation)}
-                        {task.operation === 'reuse'
-                          ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision}`
-                          : task.operation === 'revise'
-                            ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision} · ${task.lifecycle}`
-                            : null}
-                        {content ? (
-                          <>
-                            <p>{content.outcome}</p>
-                            <p>
-                              Acceptance: {list(content.acceptanceCriteria)}
-                            </p>
-                            <p>
-                              Verification: {list(content.verificationCriteria)}
-                            </p>
-                            <p>
-                              Priority {content.priority} · labels{' '}
-                              {list(content.labels)}
-                            </p>
-                            <p>Owned surfaces: {list(content.ownedSurfaces)}</p>
-                            <p>
-                              Prohibited surfaces:{' '}
-                              {list(content.prohibitedSurfaces)}
-                            </p>
-                            <p>
-                              Expected artifacts:{' '}
-                              {list(content.expectedArtifacts)}
-                            </p>
-                          </>
-                        ) : (
-                          <p>Approved task revision unavailable.</p>
-                        )}
-                      </li>
-                    ),
-                  )}
+                  .map(renderTask)}
               </ol>
             </li>
           ))}
         </ol>
       </section>
+      {unplacedTasks.length > 0 ? (
+        <section
+          aria-label={`Tasks with unavailable milestone placement in proposal revision ${proposal.revision}`}
+        >
+          <h4>Tasks with unavailable milestone placement</h4>
+          <p>
+            Exact approved task revisions are unavailable, so their milestone
+            placement cannot be shown.
+          </p>
+          <ol>{unplacedTasks.map(renderTask)}</ol>
+        </section>
+      ) : null}
       <section
         aria-label={`Dependencies in proposal revision ${proposal.revision}`}
       >

@@ -1724,10 +1724,10 @@ describe('DeliveryPlanningPane', () => {
         onAbandon={vi.fn()}
       />,
     );
-    const fallbackMilestone = screen.getByRole('listitem', {
-      name: /Existing Foundation/,
+    const unavailablePlacement = screen.getByRole('region', {
+      name: 'Tasks with unavailable milestone placement in proposal revision 1',
     });
-    const unavailableTask = within(fallbackMilestone).getByText(
+    const unavailableTask = within(unavailablePlacement).getByText(
       approvedTaskIds[0],
     );
     expect(unavailableTask).toBeVisible();
@@ -1735,7 +1735,7 @@ describe('DeliveryPlanningPane', () => {
       'contract revision 5 · current revision 5',
     );
     expect(
-      within(fallbackMilestone).getByText(
+      within(unavailablePlacement).getByText(
         'Approved task revision unavailable.',
       ),
     ).toBeVisible();
@@ -1847,6 +1847,153 @@ describe('DeliveryPlanningPane', () => {
         `Reuse ${approvedDependencyId} · expected revision 7 · Existing Persistence (${approvedTaskIds[0]}) → Existing Interface (${approvedTaskIds[1]})`,
       ),
     ).toBeVisible();
+  });
+
+  it('does not place a historical task from a newer contract revision', () => {
+    const proposal = deliveryCycle.deliveryPlanProposals[0];
+    const historicalCycle = deliveryPlanPlanningCycleViewSchema.parse({
+      ...deliveryCycle,
+      purpose: {
+        kind: 'delivery_plan',
+        baseDeliveryPlanId: approvedPlanId,
+        baseDeliveryPlanRevision: 2,
+      },
+      deliveryPlanProposals: [
+        {
+          ...proposal,
+          base: {
+            ...proposal.base,
+            deliveryPlan: { id: approvedPlanId, revision: 2 },
+          },
+          proposedPlan: {
+            ...proposal.proposedPlan,
+            milestones: [
+              {
+                operation: 'reuse',
+                milestoneId: approvedMilestoneIds[0],
+                expectedRevision: 3,
+              },
+              {
+                operation: 'reuse',
+                milestoneId: approvedMilestoneIds[1],
+                expectedRevision: 4,
+              },
+            ],
+            tasks: [
+              {
+                operation: 'reuse',
+                taskId: approvedTaskIds[0],
+                expectedContractRevision: 5,
+                expectedCurrentRevision: 5,
+              },
+            ],
+            dependencies: [],
+            traces: [
+              {
+                kind: 'task_satisfies',
+                task: { kind: 'canonical', taskId: approvedTaskIds[0] },
+                requirement: {
+                  recordId: reuseRecordId,
+                  recordRevision: 3,
+                },
+              },
+            ],
+          },
+          reservations: { milestones: [], tasks: [], dependencies: [] },
+          diff: {
+            milestones: {
+              create: 0,
+              reuse: 2,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            tasks: {
+              create: 0,
+              reuse: 1,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            dependencies: {
+              create: 0,
+              reuse: 0,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            traceCreateCount: 0,
+            traceRemoveCount: 0,
+          },
+        },
+      ],
+    });
+    const movedTaskPlan = approvedDeliveryPlanSchema.parse({
+      ...approvedDeliveryPlan,
+      taskContracts: approvedDeliveryPlan.taskContracts.map((task) =>
+        task.id === approvedTaskIds[0]
+          ? {
+              ...task,
+              revision: 8,
+              contractRevision: 8,
+              milestoneId: approvedMilestoneIds[1],
+              title: 'Moved Newer Persistence Contract',
+            }
+          : task.id === approvedTaskIds[1]
+            ? { ...task, milestoneId: approvedMilestoneIds[0] }
+            : task,
+      ),
+      traces: approvedDeliveryPlan.traces.map((trace) =>
+        trace.kind === 'task_satisfies' && trace.taskId === approvedTaskIds[0]
+          ? { ...trace, taskContractRevision: 8 }
+          : trace,
+      ),
+      milestoneDependencies: [
+        {
+          prerequisiteMilestoneId: approvedMilestoneIds[1],
+          dependentMilestoneId: approvedMilestoneIds[0],
+          throughTaskDependencyIds: [approvedDependencyId],
+        },
+      ],
+    });
+
+    render(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        cycle={historicalCycle}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={movedTaskPlan}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+
+    const unavailable = screen.getByRole('region', {
+      name: 'Tasks with unavailable milestone placement in proposal revision 1',
+    });
+    const taskId = within(unavailable).getByText(approvedTaskIds[0]);
+    expect(taskId.closest('li')).toHaveTextContent(
+      'contract revision 5 · current revision 5',
+    );
+    expect(
+      within(unavailable).getByText('Approved task revision unavailable.'),
+    ).toBeVisible();
+    expect(
+      within(
+        screen.getByRole('listitem', {
+          name: 'Existing Experience milestone',
+        }),
+      ).queryByText(approvedTaskIds[0]),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Moved Newer Persistence Contract'),
+    ).not.toBeInTheDocument();
   });
 
   it('leaves abandon as the sole action when cycle history is exhausted', async () => {
