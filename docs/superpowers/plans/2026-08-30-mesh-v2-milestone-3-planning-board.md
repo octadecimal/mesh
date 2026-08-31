@@ -28,6 +28,12 @@
 - Apply Ponytail/YAGNI: extend the current V2 modules and create only the two cohesive plan/Board contract modules and one pure Board projector named below. A V1 helper may move only if it is provider-neutral, already has two real consumers, and does not import V1 types; otherwise write the small V2-local function.
 - Use strict TDD for every non-trivial behavior: add the named failing assertion, run the focused red command and record the expected behavioral failure, implement the minimum, then rerun the same command green. A compile error caused solely by a deliberately not-yet-integrated frozen consumer is a recorded deferment, not the red proof.
 - Before every worker, reviewer, rework, integration, or final command that invokes Nx or `pnpm verify`, set `$env:NX_DAEMON='false'` and `$env:NX_SKIP_NX_CACHE='true'` in that PowerShell process and record both values, `git rev-parse HEAD`, command, exit code, and concise result. Cached or daemon-backed output is not acceptance evidence.
+- The coordinator runs the recurring state barrier defined below after every
+  asynchronous probe, resume, interruption, review, rework, and integration
+  result and before it authorizes another mutation or dispatch. The barrier is
+  observational: it never fetches, rebases, merges, resets, cleans, removes a
+  worktree, aborts an active Git operation, deletes a temp artifact, or kills a
+  listener.
 - No worker edits the accepted design, this plan, another worker handoff, campaign scratch state, or a different task's files. No worker delegates top-level ownership.
 
 ## Exact Outcome and Stop Condition
@@ -110,6 +116,128 @@ Development-wave labels below are coordination metadata, never M5 product behavi
 | Final | M3-FINAL only | accepted W3 integration head | no product commit unless reviewed rework requires one | independent milestone review |
 
 No task begins until its exact prerequisite integration SHA has an accepted `INTEGRATION REVIEW HANDOFF`. Parallel tasks in one wave use the same exact base. Before each integration, compare `git diff --name-only <task-base>..<accepted-task-tip>` with ownership below. Any conflict among same-wave tasks proves an ownership violation; do not resolve it mechanically. Any cross-package contract change after W0 pauses every consumer and requires a plan-level decision.
+
+An accepted task is its complete, linear, additive lineage from the exact task
+base through the accepted tip, not only the tip commit. For every task, the
+integrator must:
+
+1. prove the recorded task base is an ancestor of the accepted tip, the tip
+   commit/tree match the accepted review, no merge commit occurs in
+   `task-base..accepted-tip`, and
+   `git rev-list --reverse --topo-order --ancestry-path
+   <task-base>..<accepted-tip>` yields the complete ordered source sequence;
+2. record the source cumulative binary diff SHA-256, its `git patch-id
+   --stable`, and exact `git diff --name-status` output before applying
+   anything. Generate the canonical bytes with `git diff --binary --full-index
+   --no-ext-diff --output=<campaign-owned-source.patch>
+   <task-base>..<accepted-tip>`, hash that exact named file with PowerShell
+   `Get-FileHash -Algorithm SHA256`, and pipe the same base..tip `git diff`
+   output to `git patch-id --stable`;
+3. use `git merge --ff-only <accepted-tip>` only when the current integration
+   head equals the task base. This imports the whole lineage unchanged, so each
+   source commit maps to itself and its existing tree;
+4. otherwise apply **every** source commit, oldest first, with one
+   `git cherry-pick --no-edit <source-commit>` per commit. After each pick,
+   record the source commit and resulting integration commit/tree. Cherry-
+   picking only the accepted tip is prohibited because it would omit the
+   worker commit beneath additive rework;
+5. stop on any conflict or unexpected active Git operation without editing the
+   conflict, aborting the operation, or cleaning the worktree. Preserve it for
+   the recurring coordinator barrier; a same-wave conflict invalidates the
+   shared ownership invariant;
+6. generate the integration before..after diff with the identical flags into a
+   separately named campaign-owned patch file, then compare the two SHA-256
+   values and stable patch IDs. Require exact `git diff --name-status`
+   path/status equivalence and byte-equivalent task-owned blobs. For a fast-
+   forward, also require the source and integration commit/tree to be
+   identical; and
+7. record the exact source-tip verification evidence and rerun the task's
+   focused green gate on the cumulative integration head. If this plan
+   explicitly defers that gate, record `deferred`, its exact reason, owner, and
+   discharge wave rather than inventing a pass.
+
+After the last task, the integrator records the wave base/head/tree, the ordered
+source-to-integration commit/tree map, final `git diff --name-status`, exact
+union of task-owned paths, cumulative diff SHA-256/stable patch evidence, and
+the wave gate results. There may be no integration-only content. A patch,
+name-status, path, blob, ordering, or tree mismatch is manual drift and blocks
+the wave.
+
+## Recurring Coordinator State Barrier
+
+The coordinator records this barrier after every returned asynchronous probe,
+resumed execution, interruption, task/integration/final review, additive
+rework, and integration handoff. It runs before the result is acted on or
+another task is dispatched. Repeated results each receive a new record; a prior
+record is never reused.
+
+The read-only inspection records:
+
+- the frozen base, accepted design, accepted plan, current integration ref/head/
+  tree, and every active campaign task/review/rework head/tree;
+- the campaign-start `origin/master`, current local remote-tracking
+  `origin/master`, and live remote master SHA from read-only `git ls-remote`
+  when reachable, with their relation to the frozen base and prior barrier. A
+  changed remote SHA is recorded as drift. If its object already exists
+  locally, record the exact name-status diff; otherwise record
+  `changed_uninspected`. Do not fetch, rebase, or merge it silently;
+- all local `campaign/*` refs, local `refs/remotes/origin/campaign/*` refs, and
+  live remote `campaign/*` refs from read-only `git ls-remote` when reachable;
+- every worktree named in the campaign ledger or attached to a campaign ref,
+  including path, ref/detached state, head/tree, ownership classification,
+  porcelain-v2 dirty state, protected state, and active `MERGE_HEAD`,
+  `CHERRY_PICK_HEAD`, `REBASE_HEAD`, rebase directory, sequencer, or bisect
+  state. Operator-owned and ambiguous worktrees are protected and recorded but
+  not traversed beyond the Git metadata needed to classify them; never inspect
+  `C:\code\bloom`;
+- only temp directories, databases, logs, and process artifacts already named
+  in the campaign ledger, with exact path, owner, expected lifecycle, existence,
+  and cleanup disposition. Do not discover or delete by pattern; and
+- every campaign-named PID/listener and every listener on a campaign-assigned
+  port, with address, port, PID, executable, redacted command line, expected
+  owner/task, and `owned | unowned | ambiguous` verdict. Read no process
+  environment and never kill by name, path, or port.
+
+Every barrier returns exactly:
+
+```text
+COORDINATOR BARRIER RECORD
+Barrier: <M3-Bnnn>
+Trigger: asynchronous_probe | resume | interruption | task_review | integration_review | final_review | rework | integration
+Observed at: <ISO timestamp>
+Status: continue | task_hold | hard_stop
+Frozen authority: <base, design, plan full SHAs and trees>
+Origin/master drift: <campaign-start, local tracking, live remote SHAs; relation/diff or unavailable>
+Integration authority: <ref, expected prior head/tree, observed head/tree>
+Campaign heads:
+- <task/review/rework/integration ID, ref, full head/tree, expected relation>
+Campaign refs:
+- <local, remote-tracking, and live-remote ref tables or explicit unavailable>
+Relevant worktrees:
+- <path, ref, head/tree, owner, dirty state, protected state, active Git operation or none>
+Named temp artifacts:
+- <name, exact path, owner, expected lifecycle, observed state, disposition>
+Listeners:
+- <address/port, PID, executable, redacted command line, expected owner, verdict>
+Ambiguous state:
+- <preserved item and affected task; or none>
+Shared invariant decision: <valid, or exact invalidated invariant and evidence>
+Permitted next action: <exact dispatch/integration/review, task-local hold, or none>
+```
+
+`origin/master` movement, a remote-probe outage, protected operator state, an
+unrelated listener, or one task-local dirty/active worktree is not by itself a
+campaign hard stop. Record drift, preserve ambiguity, and use `task_hold` for
+only the affected task while independent work remains safe. Use `hard_stop`
+only when evidence invalidates a shared invariant: frozen planning authority is
+missing or rewritten; the shared integration head/tree was unexpectedly
+rewritten; the shared integration worktree is dirty or mid-operation; accepted
+lineage/patch/path equivalence fails; task ownership overlaps; or a prohibited
+shared surface was changed. Never repair ambiguous state inside the barrier.
+For this frozen-base campaign, this refines the runbook's generic base-drift
+pause rule: later remote movement is observed drift, while missing or rewritten
+frozen local authority is invalidation. Neither case authorizes a silent fetch,
+rebase, or merge.
 
 ## Required Handoff and Review Protocol
 
@@ -206,14 +334,34 @@ INTEGRATION HANDOFF
 Wave: <P | W0 | W1 | W2 | W3>
 Integration: <integrator/session ID>
 Status: ready_for_review | blocked
-Base: <full integration-base SHA>
-Accepted commits in order:
-- <task ID: full accepted SHA>
+Wave base: <full integration-base SHA and tree>
+Pre-integration coordinator barrier: <record ID and continue status>
+Deterministic task order:
+- <ordinal, task ID>
+Task lineage applications:
+- Task: <exact task ID>
+  Source task base: <full SHA and tree>
+  Accepted tip: <full SHA and tree>
+  Ordered source commits:
+  - <ordinal, full source commit SHA and tree>
+  Mechanism: ff-only | complete-lineage cherry-pick
+  Integration before: <full SHA and tree>
+  Resulting commit map:
+  - <source commit/tree -> resulting integration commit/tree>
+  Integration after: <full SHA and tree>
+  Stable patch equivalence: <source and integrated stable patch IDs; equal | mismatch>
+  Cumulative diff equivalence: <source and integrated binary-diff SHA-256; equal | mismatch>
+  Name-status/path/blob equivalence: <exact commands/results>
+  Source verification: <source tip, NX env, commands/results>
+  Integrated verification disposition: rerun | deferred
+  Integrated verification: <integration head, NX env, commands/results, or reason/owner/discharge wave>
 Result commit: <full integration SHA>
 Tree: <full tree SHA>
 Changed paths:
 - <exact combined paths>
-Conflict and ownership audit: <commands/results; no unexpected paths>
+Final cumulative proof:
+- <wave base..head ordered task/commit map, binary-diff SHA-256/stable patch evidence, name-status, expected/actual path union, blob/tree and ordering result>
+Conflict and ownership audit: <commands/results; no unexpected paths or active operation>
 Frozen-interface audit: <satisfied | blocked, with evidence>
 Verification:
 - <NX env values, tested HEAD, exact commands, exit codes, concise results>
@@ -227,7 +375,13 @@ Next dependency-ready tasks:
 - <exact task IDs or none>
 ```
 
-A fresh read-only integration reviewer who is neither a wave worker nor integrator verifies the exact head and returns the same evidence fields under `INTEGRATION REVIEW HANDOFF`, plus `Reviewer`, `Status: accepted | rework_required | blocked`, and file/line findings. On rework, route task-owned defects to the original worker as additive commits, reintegrate in declared order, rerun the entire wave gate on the new head, and use another fresh reviewer.
+A fresh read-only integration reviewer who is neither a wave worker nor integrator verifies the exact head and returns the same evidence fields under `INTEGRATION REVIEW HANDOFF`, plus `Reviewer`, `Status: accepted | rework_required | blocked`, and file/line findings. The reviewer independently reconstructs every `task-base..accepted-tip` source sequence, proves each complete source lineage was imported in declared order, and repeats the cumulative patch/name-status/path/blob checks. On rework, route task-owned defects to the original worker as additive commits, restart wave integration from the frozen wave base, integrate every newly accepted complete lineage in declared order, rerun the entire wave gate on the new head, and use another fresh reviewer. Reusing or manually editing the rejected integration worktree is forbidden.
+
+The coordinator runs and records the recurring barrier immediately after every
+task/rework review and integration/review handoff. The pre-integration barrier
+record is an input to `INTEGRATION HANDOFF`; the post-result record remains a
+separate campaign-ledger receipt so the reporting agent cannot assert the
+coordinator's later observation.
 
 ## Task M3-P00: Import Accepted Planning Lineage
 
@@ -595,17 +749,18 @@ This discharges W0/W1 server/web compatibility deferments. Obtain an accepted fr
 
 **Owned files:**
 
+- `e2e-v2/src/fixtures/v2-process.ts`
 - `e2e-v2/src/v2-foundation.spec.ts`
 - `docs/development/architecture.md`
 - `docs/development/v2-foundation.md`
 
-**Prohibited:** all product/contracts/config/project files, design/plan/runbook, V1/E2E-V1 paths, historical artifacts, M4/M5 implementation, and `C:\code\bloom`.
+**Prohibited:** all product/contracts/config/project files; every E2E path except `e2e-v2/src/fixtures/v2-process.ts` and `e2e-v2/src/v2-foundation.spec.ts`; design/plan/runbook; V1/E2E-V1 paths; historical artifacts; M4/M5 implementation; and `C:\code\bloom`. No other task owns `e2e-v2/src/fixtures/v2-process.ts`.
 
-**Consumes:** the built V2 server/web, explicit Todo fake, current E2E process/temp-repository helpers, and accepted design scenario.
+**Consumes:** the built V2 server/web, explicit Todo fake, current E2E process/temp-repository helpers, and accepted design scenario. It extends the existing fixture directly; no new fixture/config layer is allowed.
 
 **Produces:** fake-only built acceptance and current durable M3 operating/architecture guidance.
 
-- [ ] Extend the built-process fixture so every spawn/restart sets `NODE_ENV=test`, `MESH_V2_TEST_FAKE_PM_SCENARIO=todo`, `MESH_V2_PORT=0`, and absolute fixture-owned `MESH_V2_WORKSPACE_ROOT`, `MESH_V2_DATA_DIR`, `MESH_V2_DATABASE_PATH`, and `MESH_V2_WEB_ROOT`. The fixture creates its temporary repository/database under its own temp directory, records exact child PIDs and loopback origin, closes only those children/listeners, and proves cleanup. It must reject any path resolving to operator state or `C:\code\bloom`.
+- [ ] Extend only `V2ProcessFixture.spawnServer` and `V2ProcessFixture.runMismatchProbe` in `e2e-v2/src/fixtures/v2-process.ts` so both child environment objects pass absolute fixture-owned `MESH_V2_DATA_DIR` (the fixture root). Preserve their existing `NODE_ENV=test`, `MESH_V2_PORT=0`, `MESH_V2_WORKSPACE_ROOT`, `MESH_V2_DATABASE_PATH`, `MESH_V2_WEB_ROOT`, `HOME`, and `USERPROFILE`; preserve `spawnServer`'s explicit Todo fake selection. This covers normal start/restart and the database-mismatch child instead of relying on inherited operator environment. The fixture creates its temporary repository/database under its own temp directory, records exact child PIDs and loopback origin, closes only those children/listeners, and proves cleanup. It must reject any path resolving to operator state or `C:\code\bloom`.
 - [ ] Add the named built test `approved delivery plan becomes a deterministic Board`. Drive M2 Todo intent/ledger approval, approve a project `pm_plan` profile, submit the editable initial message with exact null/current bases, inspect proposal revision 1, request the keyboard/persistence revision, inspect immutable proposal revision 2, and prove no canonical Board cards before approval.
 - [ ] Approve proposal 2 and assert one atomic commit yields plan revision 1, two milestones, three pending tasks, two dependencies, complete exact traces, terminal proposal/cycle, default saved filter, versioned event/result, and Board. UI/persistence tasks are actionable; integrated Todo is blocked by both exact prerequisites; no workspace/attempt/run/worker assignment exists.
 - [ ] Exercise all-milestone, each-milestone, actionable, blocked, requirement, priority, and label filters; verify self-excluding counts and persistence after refresh. Open detail and verify dependency direction, exact requirement revision, acceptance/verification criteria, surfaces/artifacts, milestone outcome/stop condition/exclusions, and focus behavior.
@@ -624,7 +779,7 @@ This discharges W0/W1 server/web compatibility deferments. Obtain an accepted fr
 - [ ] Update current docs only. State that M3 owns canonical delivery planning, deterministic readiness, and Board projection; M4 owns workspace/DeveloperAttempt execution; M5 owns `ExecutionRun` scheduling/concurrency/waves. Document fake-only controls, temp ownership, restart/replay/resync behavior, and the absence of real-agent acceptance.
 - [ ] Run focused green plus the final gate below. Commit only owned paths with `test(v2): prove planning board journey` and return `TASK HANDOFF`.
 
-**Acceptance:** the complete design Todo scenario, revision path, atomic approval, filters, traceability, readiness, refresh, replay, resync, restart, empty-ledger, proposal-abandonment, historical-label, and stale-safe legacy replay proofs run against built output with owned fake-only fixtures; current docs state the correct milestone boundary; no product fix is hidden in E2E/docs. Any discovered product defect returns to its owning task as additive reviewed rework.
+**Acceptance:** the complete design Todo scenario, revision path, atomic approval, filters, traceability, readiness, refresh, replay, resync, restart, empty-ledger, proposal-abandonment, historical-label, and stale-safe legacy replay proofs run against built output with owned fake-only fixtures; both normal/restart and mismatch spawns pass the same absolute fixture-owned `MESH_V2_DATA_DIR`; `corepack pnpm nx typecheck v2-e2e`, the focused named journey, and the unfiltered V2 E2E run inside `corepack pnpm verify` cover the fixture change; current docs state the correct milestone boundary; no product fix is hidden in E2E/docs. Any discovered product defect returns to its owning task as additive reviewed rework.
 
 ## Wave W3 and Final Verification Gate
 
@@ -660,7 +815,7 @@ The integrator records exact V1/V2 E2E totals emitted by `verify`, fixture clean
 
 **Prerequisite:** exact accepted W3 integration SHA and complete campaign ledger/handoffs.
 
-- [ ] A fresh reviewer who was not a worker, task reviewer, reworker, or wave integrator independently checks base-to-head lineage, every changed path, accepted planning import, ordered commits, ownership/prohibitions, design coverage, frozen interface consistency, migration/raw-history safety, atomicity/audit ordering, Board determinism, web monotonicity, fake fixture ownership, and M4/M5/V1 exclusions.
+- [ ] A fresh reviewer who was not a worker, task reviewer, reworker, or wave integrator independently checks base-to-head lineage, every complete ordered `task-base..accepted-tip` lineage and source-to-integration commit/tree map, every changed path, accepted planning import, recurring barrier receipts, ownership/prohibitions, design coverage, frozen interface consistency, migration/raw-history safety, atomicity/audit ordering, Board determinism, web monotonicity, fake fixture ownership, and M4/M5/V1 exclusions.
 - [ ] Re-run the full final verification gate daemon-disabled and uncached on the exact reviewed HEAD; do not reuse W3 output.
 - [ ] Inspect the built Todo evidence for proposal revision, atomic multi-milestone approval, dependency/trace readiness, filters/details, refresh/replay/retained-gap/restart, empty requirements, abandonment, historical label, and seeded-M2 receipt-only replay after current plan/filter state.
 - [ ] Return:
@@ -698,8 +853,8 @@ The coordinator may close M3 only when the exact final reviewed head proves:
 - T04: complete accessible leaf planning/Board states without client domain logic;
 - T05: full lifecycle, report receipt, atomic approval/filter/abandon, audit-before-publish, snapshot/replay/recovery, and raw idempotency preservation;
 - T06: exact commands, complete replacements, monotonic receipt-only legacy handling, gap resync, and accessible shell composition;
-- T07: built fake Todo revision/approval/multi-milestone/dependency/trace/filter/detail/refresh/replay/resync/restart and edge-branch proofs plus current docs;
-- every task/rework/wave/final tip has fresh exact-commit review and uncached daemon-disabled evidence; and
+- T07: both normal/restart and mismatch children receive fixture-owned `MESH_V2_DATA_DIR`, plus built fake Todo revision/approval/multi-milestone/dependency/trace/filter/detail/refresh/replay/resync/restart and edge-branch proofs plus current docs;
+- every task/rework/wave/final tip has fresh exact-commit review and uncached daemon-disabled evidence, every wave proves complete-lineage patch/path/order equivalence, and every required recurring coordinator barrier has a campaign-ledger receipt; and
 - there is no M4 workspace/DeveloperAttempt/execution loop, no M5 `ExecutionRun` scheduler/concurrency/product wave, no paid traffic, no live operator state, and no access to `C:\code\bloom`.
 
 Stop after that proof. Do not add convenience execution, drag-and-drop Board state, generic orchestration, speculative APIs, or Milestone 4+ scaffolding.
