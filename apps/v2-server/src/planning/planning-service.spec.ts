@@ -1119,6 +1119,26 @@ describe('PlanningService', () => {
     const revisionOne = structuredClone(
       context.repository.approvedDeliveryPlan(context.fixture.project.id)!,
     );
+    const persistedRevisionOne = context.fixture.database
+      .prepare(
+        `SELECT plan_json FROM delivery_plan_revisions
+         WHERE delivery_plan_id = ? AND project_id = ? AND revision = 1`,
+      )
+      .get(revisionOne.plan.id, context.fixture.project.id) as {
+      plan_json: string;
+    };
+    const persistedTaskRevisionOne = context.fixture.database
+      .prepare(
+        `SELECT revision_json FROM task_revisions
+         WHERE task_id = ? AND project_id = ? AND revision = 1`,
+      )
+      .get(initial.taskId, context.fixture.project.id) as {
+      revision_json: string;
+    };
+    expect(persistedRevisionOne).toEqual({ plan_json: expect.any(String) });
+    expect(persistedTaskRevisionOne).toEqual({
+      revision_json: expect.any(String),
+    });
     inImmediateTransaction(context.fixture.database, () => {
       context.repository.appendTaskLifecycleRevisionInTransaction({
         projectId: context.fixture.project.id,
@@ -1183,6 +1203,22 @@ describe('PlanningService', () => {
         }),
       ]),
     );
+    expect(
+      context.fixture.database
+        .prepare(
+          `SELECT plan_json FROM delivery_plan_revisions
+           WHERE delivery_plan_id = ? AND project_id = ? AND revision = 1`,
+        )
+        .get(revisionOne.plan.id, context.fixture.project.id),
+    ).toEqual(persistedRevisionOne);
+    expect(
+      context.fixture.database
+        .prepare(
+          `SELECT revision_json FROM task_revisions
+           WHERE task_id = ? AND project_id = ? AND revision = 1`,
+        )
+        .get(initial.taskId, context.fixture.project.id),
+    ).toEqual(persistedTaskRevisionOne);
   });
 
   it('rolls back every approval write seam and trips the audit barrier', () => {
