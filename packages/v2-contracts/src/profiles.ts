@@ -8,6 +8,7 @@ import {
   workerProfileIdSchema,
 } from './ids';
 import { PM_DISCOVERY_REPORT_SCHEMA } from './intent';
+import { PM_PLAN_REPORT_SCHEMA } from './delivery-plan';
 
 export const WORKER_PROFILE_API_VERSION = 'mesh.dev/v1alpha1' as const;
 
@@ -54,6 +55,7 @@ const workerProfileSpecShape = {
   assignmentKinds: z.union([
     z.tuple([z.literal('foundation-check')]).readonly(),
     z.tuple([z.literal('pm_discovery')]).readonly(),
+    z.tuple([z.literal('pm_plan')]).readonly(),
   ]),
   preferredRuntime: runtimePreferenceSchema,
   alternatives: z.array(runtimePreferenceSchema).max(16).readonly(),
@@ -75,7 +77,10 @@ const workerProfileSpecShape = {
 
 const requirePmOutputSchema = (
   value: {
-    assignmentKinds?: readonly ['foundation-check'] | readonly ['pm_discovery'];
+    assignmentKinds?:
+      | readonly ['foundation-check']
+      | readonly ['pm_discovery']
+      | readonly ['pm_plan'];
     outputSchema?: string;
   },
   context: z.RefinementCtx,
@@ -88,6 +93,16 @@ const requirePmOutputSchema = (
       code: 'custom',
       path: ['outputSchema'],
       message: `PM discovery profiles require ${PM_DISCOVERY_REPORT_SCHEMA}`,
+    });
+  }
+  if (
+    value.assignmentKinds?.[0] === 'pm_plan' &&
+    value.outputSchema !== PM_PLAN_REPORT_SCHEMA
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['outputSchema'],
+      message: `PM plan profiles require ${PM_PLAN_REPORT_SCHEMA}`,
     });
   }
 };

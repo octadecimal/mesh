@@ -25,9 +25,11 @@ import {
   ledgerRecordContentSchema,
   ledgerRelationshipSchema,
   logicalSkillRequestSchema,
+  normalizeIntentLedgerApprovedPayload,
+  normalizePlanningCommandSuccess,
   parseWorkerProfileYaml,
   planningCycleLifecycleSchema,
-  planningCycleViewSchema,
+  legacyM2PlanningCycleViewSchema as planningCycleViewSchema,
   planningProposalDiffSchema,
   planningProposalSchema,
   planningTurnSchema,
@@ -86,6 +88,37 @@ const project = {
   createdAt: now,
   updatedAt: now,
 };
+
+const boardWithoutPlan = (
+  emptyReason: 'intent_required' | 'planning_required',
+) => ({
+  projectId,
+  deliveryPlanRevision: null,
+  stale: false,
+  emptyReason,
+  filter: null,
+  totalTaskCount: 0,
+  matchedTaskCount: 0,
+  facets: {
+    milestones: [],
+    taskLifecycles: [],
+    readiness: [],
+    priorities: [],
+    labels: [],
+    requirements: [],
+  },
+  cards: [],
+});
+
+const asIntentCycleView = <T extends object>(view: T) => ({
+  ...view,
+  purpose: {
+    kind: 'intent' as const,
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+  },
+  deliveryPlanProposals: [] as const,
+});
 
 const profileDocument = {
   apiVersion: WORKER_PROFILE_API_VERSION,
@@ -417,6 +450,8 @@ describe('V2 foundation contracts', () => {
       planningCycles: [],
       planningHistoryTruncated: false,
       intentLedger: null,
+      deliveryPlan: null,
+      board: boardWithoutPlan('intent_required'),
       cursors: { domain: 0, runtime: 0 },
     };
 
@@ -1120,6 +1155,8 @@ describe('V2 foundation contracts', () => {
       planningCycles: [],
       planningHistoryTruncated: false,
       intentLedger: null,
+      deliveryPlan: null,
+      board: boardWithoutPlan('intent_required'),
       cursors: { domain: 0, runtime: 0 },
     };
     expect(v2ProjectSnapshotSchema.parse(snapshot)).toEqual(snapshot);
@@ -1786,9 +1823,11 @@ describe('V2 intent ledger contracts', () => {
       profiles: [],
       executions: [],
       attentionItems: [],
-      planningCycles: [laterApprovedCycleView],
+      planningCycles: [asIntentCycleView(laterApprovedCycleView)],
       planningHistoryTruncated: false,
       intentLedger: laterApprovedIntentLedger,
+      deliveryPlan: null,
+      board: boardWithoutPlan('planning_required'),
       cursors: { domain: 2, runtime: 2 },
     };
 
@@ -1808,9 +1847,14 @@ describe('V2 intent ledger contracts', () => {
       profiles: [],
       executions: [],
       attentionItems: [],
-      planningCycles: [approvedCycleView, laterApprovedCycleView],
+      planningCycles: [
+        asIntentCycleView(approvedCycleView),
+        asIntentCycleView(laterApprovedCycleView),
+      ],
       planningHistoryTruncated: false,
       intentLedger: laterApprovedIntentLedger,
+      deliveryPlan: null,
+      board: boardWithoutPlan('planning_required'),
       cursors: { domain: 2, runtime: 2 },
     };
     expect(v2ProjectSnapshotSchema.parse(approvedHistory)).toEqual(
@@ -1836,7 +1880,7 @@ describe('V2 intent ledger contracts', () => {
     const abandonedHistory = {
       ...approvedHistory,
       planningCycles: [
-        {
+        asIntentCycleView({
           ...cycleView,
           cycle: {
             ...cycleView.cycle,
@@ -1850,9 +1894,10 @@ describe('V2 intent ledger contracts', () => {
               decidedAt: now,
             },
           ],
-        },
+        }),
       ],
       intentLedger: null,
+      board: boardWithoutPlan('intent_required'),
     };
     expect(v2ProjectSnapshotSchema.parse(abandonedHistory)).toEqual(
       abandonedHistory,
@@ -1872,6 +1917,7 @@ describe('V2 intent ledger contracts', () => {
         ...abandonedHistory,
         planningHistoryTruncated: true,
         intentLedger: approvedIntentLedger,
+        board: boardWithoutPlan('planning_required'),
       }).success,
     ).toBe(true);
   });
@@ -2548,16 +2594,18 @@ describe('V2 intent ledger contracts', () => {
       executions: [],
       attentionItems: [],
       planningCycles: [
-        cycleView,
-        {
+        asIntentCycleView(cycleView),
+        asIntentCycleView({
           ...cycleView,
           cycle: { ...cycleView.cycle, id: randomUUID() },
           turns: [],
           proposals: [],
-        },
+        }),
       ],
       planningHistoryTruncated: false,
       intentLedger: null,
+      deliveryPlan: null,
+      board: boardWithoutPlan('intent_required'),
       cursors: { domain: 0, runtime: 0 },
     };
     expect(issueText(v2ProjectSnapshotSchema.safeParse(twoOpenCycles))).toMatch(
@@ -3055,9 +3103,14 @@ describe('V2 intent ledger contracts', () => {
       profiles: [],
       executions: [],
       attentionItems: [],
-      planningCycles: [historicalCycle, distinctCycle],
+      planningCycles: [
+        asIntentCycleView(historicalCycle),
+        asIntentCycleView(distinctCycle),
+      ],
       planningHistoryTruncated: false,
       intentLedger: null,
+      deliveryPlan: null,
+      board: boardWithoutPlan('intent_required'),
       cursors: { domain: 0, runtime: 0 },
     };
 
@@ -3067,14 +3120,14 @@ describe('V2 intent ledger contracts', () => {
         v2ProjectSnapshotSchema.safeParse({
           ...snapshot,
           planningCycles: [
-            historicalCycle,
-            {
+            asIntentCycleView(historicalCycle),
+            asIntentCycleView({
               ...distinctCycle,
               turns: distinctCycle.turns.map((turn, index) => ({
                 ...turn,
                 id: index === 0 ? historicalHumanTurnId : historicalPmTurnId,
               })),
-            },
+            }),
           ],
         }),
       ),
@@ -3092,7 +3145,10 @@ describe('V2 intent ledger contracts', () => {
       issueText(
         v2ProjectSnapshotSchema.safeParse({
           ...snapshot,
-          planningCycles: [historicalCycle, duplicateCycleId],
+          planningCycles: [
+            asIntentCycleView(historicalCycle),
+            asIntentCycleView(duplicateCycleId),
+          ],
         }),
       ),
     ).toMatch(/planning cycle ids must be unique/i);
@@ -3118,6 +3174,32 @@ describe('V2 intent ledger contracts', () => {
         commandType,
       ).toMatch(expected);
     }
+  });
+
+  it('separates ordered legacy event fallback from receipt-only command normalization', () => {
+    const legacyApproval = {
+      planningCycle: approvedCycleView,
+      intentLedger: approvedIntentLedger,
+    };
+    const ordered = normalizeIntentLedgerApprovedPayload(legacyApproval);
+    expect(ordered).toMatchObject({
+      schemaVersion: 2,
+      deliveryPlan: null,
+      board: {
+        projectId,
+        deliveryPlanRevision: null,
+        emptyReason: 'planning_required',
+      },
+    });
+    const receipt = normalizePlanningCommandSuccess({
+      ok: true,
+      commandType: 'planning_proposal.approve',
+      ...legacyApproval,
+    });
+    expect(receipt).toMatchObject({
+      source: 'legacy_m2',
+      projectionAuthority: 'receipt_only',
+    });
   });
 
   it('requires assignment base and next-proposal revision coherence', () => {
@@ -3845,9 +3927,13 @@ describe('V2 intent ledger contracts', () => {
             profiles: [],
             executions: [],
             attentionItems: [],
-            planningCycles: terminalCycles.slice(0, count),
+            planningCycles: terminalCycles
+              .slice(0, count)
+              .map(asIntentCycleView),
             planningHistoryTruncated: false,
             intentLedger: null,
+            deliveryPlan: null,
+            board: boardWithoutPlan('intent_required'),
             cursors: { domain: 0, runtime: 0 },
           }).success,
       },
@@ -4418,6 +4504,17 @@ describe('V2 intent ledger contracts', () => {
       expect(v2CommandResultSchema.parse(result).commandType).toBe(
         result.commandType,
       );
+      const versioned = {
+        ...result,
+        schemaVersion: 2,
+        planningCycle: asIntentCycleView(result.planningCycle),
+        ...(result.commandType === 'planning_proposal.approve'
+          ? { board: boardWithoutPlan('planning_required') }
+          : {}),
+      };
+      expect(v2CommandResultSchema.parse(versioned).commandType).toBe(
+        result.commandType,
+      );
     }
     for (const code of [
       'planning_cycle_not_found',
@@ -4429,6 +4526,15 @@ describe('V2 intent ledger contracts', () => {
       'planning_canonical_base_conflict',
       'planning_profile_incompatible',
       'planning_proposal_invalid',
+      'planning_intent_required',
+      'planning_requirements_required',
+      'plan_proposal_not_found',
+      'plan_proposal_revision_conflict',
+      'plan_canonical_base_conflict',
+      'plan_proposal_invalid',
+      'board_filter_not_found',
+      'board_filter_revision_conflict',
+      'board_filter_invalid',
     ]) {
       expect(v2ErrorCodeSchema.parse(code)).toBe(code);
       expect(
@@ -4516,9 +4622,11 @@ describe('V2 intent ledger contracts', () => {
       profiles: [resolvedProfile, pmProfile],
       executions: [execution],
       attentionItems: [],
-      planningCycles: [approvedCycleView],
+      planningCycles: [asIntentCycleView(approvedCycleView)],
       planningHistoryTruncated: false,
       intentLedger: approvedIntentLedger,
+      deliveryPlan: null,
+      board: boardWithoutPlan('planning_required'),
       cursors: { domain: 1, runtime: 1 },
     };
     expect(v2ProjectSnapshotSchema.parse(snapshot)).toEqual(snapshot);
@@ -4526,10 +4634,10 @@ describe('V2 intent ledger contracts', () => {
       v2ProjectSnapshotSchema.parse({
         ...snapshot,
         planningCycles: [
-          {
+          asIntentCycleView({
             ...approvedCycleView,
             cycle: { ...approvedCycleView.cycle, projectId: otherProjectId },
-          },
+          }),
         ],
       }),
     ).toThrow(/project/i);

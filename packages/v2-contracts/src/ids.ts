@@ -42,6 +42,24 @@ export type LedgerId = z.infer<typeof ledgerIdSchema>;
 export const ledgerRecordIdSchema = brandedUuid<'LedgerRecordId'>();
 export type LedgerRecordId = z.infer<typeof ledgerRecordIdSchema>;
 
+export const deliveryPlanIdSchema = brandedUuid<'DeliveryPlanId'>();
+export type DeliveryPlanId = z.infer<typeof deliveryPlanIdSchema>;
+
+export const deliveryPlanProposalIdSchema =
+  brandedUuid<'DeliveryPlanProposalId'>();
+export type DeliveryPlanProposalId = z.infer<
+  typeof deliveryPlanProposalIdSchema
+>;
+
+export const milestoneIdSchema = brandedUuid<'MilestoneId'>();
+export type MilestoneId = z.infer<typeof milestoneIdSchema>;
+
+export const taskIdSchema = brandedUuid<'TaskId'>();
+export type TaskId = z.infer<typeof taskIdSchema>;
+
+export const taskDependencyIdSchema = brandedUuid<'TaskDependencyId'>();
+export type TaskDependencyId = z.infer<typeof taskDependencyIdSchema>;
+
 export const isoTimestampSchema = z.string().datetime({ offset: true });
 export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;
 

@@ -1,15 +1,21 @@
 import { z } from 'zod';
 
 import {
+  deliveryPlanIdSchema,
+  deliveryPlanProposalIdSchema,
+  ledgerIdSchema,
   nonNegativeIntegerSchema,
   planningCycleIdSchema,
   planningProposalIdSchema,
   positiveIntegerSchema,
   projectIdSchema,
+  projectIntentIdSchema,
   workerExecutionIdSchema,
   workerProfileIdSchema,
 } from './ids';
 import { workerAssignmentSchema } from './executions';
+import { boardFilterSelectionSchema } from './board';
+import { planTextSchema } from './delivery-plan';
 
 export const v2CommandTypeSchema = z.enum([
   'project.register',
@@ -20,6 +26,10 @@ export const v2CommandTypeSchema = z.enum([
   'planning_proposal.approve',
   'planning_proposal.reject',
   'planning_cycle.abandon',
+  'planning_cycle.submit_plan_turn',
+  'plan_proposal.approve',
+  'plan_proposal.reject',
+  'board_filter.set',
 ]);
 export type V2CommandType = z.infer<typeof v2CommandTypeSchema>;
 
@@ -181,7 +191,78 @@ export type AbandonPlanningCycleCommand = z.infer<
   typeof abandonPlanningCycleCommandSchema
 >;
 
-export const v2CommandSchema = z.discriminatedUnion('type', [
+const expectedDeliveryPlanSchema = z.union([
+  z.strictObject({ id: deliveryPlanIdSchema, revision: positiveIntegerSchema }),
+  z.strictObject({ id: z.null(), revision: z.null() }),
+]);
+
+const startPlanCycleCommandSchema = z.strictObject({
+  type: z.literal('planning_cycle.submit_plan_turn'),
+  projectId: projectIdSchema,
+  expectedCycleRevision: z.null(),
+  profileId: workerProfileIdSchema,
+  profileRevision: positiveIntegerSchema,
+  expectedProjectIntentId: projectIntentIdSchema,
+  expectedProjectIntentRevision: positiveIntegerSchema,
+  expectedLedgerId: ledgerIdSchema,
+  expectedLedgerRevision: positiveIntegerSchema,
+  expectedDeliveryPlan: expectedDeliveryPlanSchema,
+  message: z.string().trim().min(1).max(16_384),
+});
+
+const continuePlanCycleCommandSchema = z.strictObject({
+  type: z.literal('planning_cycle.submit_plan_turn'),
+  projectId: projectIdSchema,
+  planningCycleId: planningCycleIdSchema,
+  expectedCycleRevision: nonNegativeIntegerSchema,
+  message: z.string().trim().min(1).max(16_384),
+});
+
+export const submitPlanTurnCommandSchema = z.union([
+  startPlanCycleCommandSchema,
+  continuePlanCycleCommandSchema,
+]);
+export type SubmitPlanTurnCommand = z.infer<typeof submitPlanTurnCommandSchema>;
+
+export const approvePlanProposalCommandSchema = z.strictObject({
+  type: z.literal('plan_proposal.approve'),
+  projectId: projectIdSchema,
+  planningCycleId: planningCycleIdSchema,
+  expectedCycleRevision: nonNegativeIntegerSchema,
+  proposalId: deliveryPlanProposalIdSchema,
+  expectedProposalRevision: positiveIntegerSchema,
+  expectedProjectIntentId: projectIntentIdSchema,
+  expectedProjectIntentRevision: positiveIntegerSchema,
+  expectedLedgerId: ledgerIdSchema,
+  expectedLedgerRevision: positiveIntegerSchema,
+  expectedDeliveryPlan: expectedDeliveryPlanSchema,
+});
+export type ApprovePlanProposalCommand = z.infer<
+  typeof approvePlanProposalCommandSchema
+>;
+
+export const rejectPlanProposalCommandSchema = z.strictObject({
+  type: z.literal('plan_proposal.reject'),
+  projectId: projectIdSchema,
+  planningCycleId: planningCycleIdSchema,
+  expectedCycleRevision: nonNegativeIntegerSchema,
+  proposalId: deliveryPlanProposalIdSchema,
+  expectedProposalRevision: positiveIntegerSchema,
+  feedback: planTextSchema,
+});
+export type RejectPlanProposalCommand = z.infer<
+  typeof rejectPlanProposalCommandSchema
+>;
+
+export const setBoardFilterCommandSchema = z.strictObject({
+  type: z.literal('board_filter.set'),
+  projectId: projectIdSchema,
+  expectedFilterRevision: positiveIntegerSchema,
+  filter: boardFilterSelectionSchema,
+});
+export type SetBoardFilterCommand = z.infer<typeof setBoardFilterCommandSchema>;
+
+export const v2CommandSchema = z.union([
   projectRegisterCommandSchema,
   profileApprovalCommandSchema,
   startExecutionCommandSchema,
@@ -190,6 +271,10 @@ export const v2CommandSchema = z.discriminatedUnion('type', [
   approvePlanningProposalCommandSchema,
   rejectPlanningProposalCommandSchema,
   abandonPlanningCycleCommandSchema,
+  submitPlanTurnCommandSchema,
+  approvePlanProposalCommandSchema,
+  rejectPlanProposalCommandSchema,
+  setBoardFilterCommandSchema,
 ]);
 export type V2Command = z.infer<typeof v2CommandSchema>;
 
@@ -230,6 +315,22 @@ export const abandonPlanningCycleEnvelopeSchema = z.strictObject({
   ...v2CommandEnvelopeBase,
   command: abandonPlanningCycleCommandSchema,
 });
+export const submitPlanTurnEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: submitPlanTurnCommandSchema,
+});
+export const approvePlanProposalEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: approvePlanProposalCommandSchema,
+});
+export const rejectPlanProposalEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: rejectPlanProposalCommandSchema,
+});
+export const setBoardFilterEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: setBoardFilterCommandSchema,
+});
 
 export const v2CommandEnvelopeSchema = z.union([
   projectRegisterEnvelopeSchema,
@@ -240,6 +341,10 @@ export const v2CommandEnvelopeSchema = z.union([
   approvePlanningProposalEnvelopeSchema,
   rejectPlanningProposalEnvelopeSchema,
   abandonPlanningCycleEnvelopeSchema,
+  submitPlanTurnEnvelopeSchema,
+  approvePlanProposalEnvelopeSchema,
+  rejectPlanProposalEnvelopeSchema,
+  setBoardFilterEnvelopeSchema,
 ]);
 export type V2CommandEnvelope = z.infer<typeof v2CommandEnvelopeSchema>;
 
@@ -266,4 +371,16 @@ export type RejectPlanningProposalEnvelope = V2CommandEnvelope & {
 };
 export type AbandonPlanningCycleEnvelope = V2CommandEnvelope & {
   command: Extract<V2Command, { type: 'planning_cycle.abandon' }>;
+};
+export type SubmitPlanTurnEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'planning_cycle.submit_plan_turn' }>;
+};
+export type ApprovePlanProposalEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'plan_proposal.approve' }>;
+};
+export type RejectPlanProposalEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'plan_proposal.reject' }>;
+};
+export type SetBoardFilterEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'board_filter.set' }>;
 };

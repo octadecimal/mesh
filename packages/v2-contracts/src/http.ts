@@ -11,8 +11,17 @@ import {
 import {
   approvedIntentLedgerSchema,
   approvedPlanningOutcomeSchema,
-  planningCycleViewSchema,
+  legacyM2PlanningCycleViewSchema,
 } from './intent';
+import { boardViewSchema, type BoardView } from './board';
+import {
+  approvedDeliveryPlanSchema,
+  deliveryPlanPlanningCycleViewSchema,
+  intentPlanningCycleViewSchema,
+  planningCycleViewSchema,
+  type IntentPlanningCycleView,
+  type PlanningCycleView,
+} from './delivery-plan';
 import { projectSchema } from './projects';
 import {
   profileNameSchema,
@@ -94,6 +103,8 @@ export const v2ProjectSnapshotSchema = z
     planningCycles: z.array(planningCycleViewSchema).max(20).readonly(),
     planningHistoryTruncated: z.boolean(),
     intentLedger: approvedIntentLedgerSchema.nullable(),
+    deliveryPlan: approvedDeliveryPlanSchema.nullable(),
+    board: boardViewSchema,
     cursors: projectEventCursorsSchema,
   })
   .superRefine((value, context) => {
@@ -162,7 +173,10 @@ export const v2ProjectSnapshotSchema = z
       });
     }
     const newestApprovedCycle = value.planningCycles
-      .filter(({ cycle }) => cycle.lifecycle === 'approved')
+      .filter(
+        ({ cycle, purpose }) =>
+          cycle.lifecycle === 'approved' && purpose.kind === 'intent',
+      )
       .reduce<(typeof value.planningCycles)[number] | null>(
         (newest, candidate) => {
           if (newest === null) return candidate;
@@ -233,10 +247,56 @@ export const v2ProjectSnapshotSchema = z
         message: 'Intent ledger must match the snapshot project',
       });
     }
+    if (value.deliveryPlan !== null) {
+      if (
+        value.intentLedger === null ||
+        value.deliveryPlan.plan.projectId !== value.project.id ||
+        value.board.projectId !== value.project.id ||
+        value.board.deliveryPlanRevision !== value.deliveryPlan.plan.revision
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['deliveryPlan'],
+          message:
+            'Delivery plan and Board must match the snapshot project and revision',
+        });
+      }
+      if (value.intentLedger !== null) {
+        const stale =
+          value.deliveryPlan.plan.projectIntentId !==
+            value.intentLedger.projectIntent.id ||
+          value.deliveryPlan.plan.projectIntentRevision !==
+            value.intentLedger.projectIntent.revision ||
+          value.deliveryPlan.plan.ledgerId !== value.intentLedger.ledger.id ||
+          value.deliveryPlan.plan.ledgerRevision !==
+            value.intentLedger.ledger.revision;
+        if (value.board.stale !== stale) {
+          context.addIssue({
+            code: 'custom',
+            path: ['board', 'stale'],
+            message:
+              'Board staleness must reflect the current intent and ledger base',
+          });
+        }
+      }
+    } else if (
+      value.board.projectId !== value.project.id ||
+      value.board.deliveryPlanRevision !== null ||
+      value.board.stale ||
+      value.board.emptyReason !==
+        (value.intentLedger === null ? 'intent_required' : 'planning_required')
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['board'],
+        message:
+          'Pre-plan Board must match the snapshot and have no plan revision',
+      });
+    }
   });
 export type V2ProjectSnapshot = z.infer<typeof v2ProjectSnapshotSchema>;
 
-const commandFailureSchema = z.strictObject({
+export const commandFailureSchema = z.strictObject({
   ok: z.literal(false),
   commandType: v2CommandTypeSchema,
   error: z.strictObject({
@@ -245,11 +305,11 @@ const commandFailureSchema = z.strictObject({
   }),
 });
 
-const planningProposalApproveResultSchema = z
+export const legacyM2PlanningProposalApproveResultSchema = z
   .strictObject({
     ok: z.literal(true),
     commandType: z.literal('planning_proposal.approve'),
-    planningCycle: planningCycleViewSchema,
+    planningCycle: legacyM2PlanningCycleViewSchema,
     intentLedger: approvedIntentLedgerSchema,
   })
   .superRefine((value, context) => {
@@ -264,22 +324,22 @@ const planningProposalApproveResultSchema = z
     }
   });
 
-const planningTurnSubmitResultSchema = z
+export const legacyM2PlanningTurnSubmitResultSchema = z
   .strictObject({
     ok: z.literal(true),
     commandType: z.literal('planning_cycle.submit_turn'),
-    planningCycle: planningCycleViewSchema,
+    planningCycle: legacyM2PlanningCycleViewSchema,
   })
   .refine((value) => value.planningCycle.cycle.lifecycle === 'launch_pending', {
     path: ['planningCycle', 'cycle', 'lifecycle'],
     message: 'Submit-turn success must be launch-pending',
   });
 
-const planningProposalRejectResultSchema = z
+export const legacyM2PlanningProposalRejectResultSchema = z
   .strictObject({
     ok: z.literal(true),
     commandType: z.literal('planning_proposal.reject'),
-    planningCycle: planningCycleViewSchema,
+    planningCycle: legacyM2PlanningCycleViewSchema,
   })
   .refine(
     (value) => value.planningCycle.cycle.lifecycle === 'proposal_rejected',
@@ -289,9 +349,122 @@ const planningProposalRejectResultSchema = z
     },
   );
 
-const planningCycleAbandonResultSchema = z
+export const legacyM2PlanningCycleAbandonResultSchema = z
   .strictObject({
     ok: z.literal(true),
+    commandType: z.literal('planning_cycle.abandon'),
+    planningCycle: legacyM2PlanningCycleViewSchema,
+  })
+  .refine((value) => value.planningCycle.cycle.lifecycle === 'abandoned', {
+    path: ['planningCycle', 'cycle', 'lifecycle'],
+    message: 'Abandon success must be abandoned',
+  });
+
+export const legacyM2PlanningCommandSuccessSchema = z.union([
+  legacyM2PlanningTurnSubmitResultSchema,
+  legacyM2PlanningProposalApproveResultSchema,
+  legacyM2PlanningProposalRejectResultSchema,
+  legacyM2PlanningCycleAbandonResultSchema,
+]);
+export type LegacyM2PlanningCommandSuccess = z.infer<
+  typeof legacyM2PlanningCommandSuccessSchema
+>;
+
+const requireIntentApprovalCoherence = (
+  value: {
+    planningCycle: PlanningCycleView;
+    intentLedger: z.infer<typeof approvedIntentLedgerSchema>;
+    board: BoardView;
+  },
+  context: z.RefinementCtx,
+) => {
+  if (value.planningCycle.purpose.kind !== 'intent') {
+    context.addIssue({
+      code: 'custom',
+      path: ['planningCycle', 'purpose'],
+      message: 'Intent approval requires an intent planning cycle',
+    });
+    return;
+  }
+  const parsed = approvedPlanningOutcomeSchema.safeParse({
+    planningCycle: {
+      cycle: value.planningCycle.cycle,
+      turns: value.planningCycle.turns,
+      questions: value.planningCycle.questions,
+      proposals: value.planningCycle.proposals,
+    },
+    intentLedger: value.intentLedger,
+  });
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      context.addIssue({
+        code: 'custom',
+        path: issue.path,
+        message: issue.message,
+      });
+    }
+  }
+  if (value.board.projectId !== value.planningCycle.cycle.projectId) {
+    context.addIssue({
+      code: 'custom',
+      path: ['board', 'projectId'],
+      message: 'Approval Board must match the planning project',
+    });
+  }
+};
+
+const versionedIntentSubmitResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    schemaVersion: z.literal(2),
+    commandType: z.literal('planning_cycle.submit_turn'),
+    planningCycle: intentPlanningCycleViewSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.planningCycle.cycle.lifecycle !== 'launch_pending') {
+      context.addIssue({
+        code: 'custom',
+        path: ['planningCycle'],
+        message: 'Intent submit success must be intent and launch-pending',
+      });
+    }
+  });
+
+const versionedIntentApproveResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    schemaVersion: z.literal(2),
+    commandType: z.literal('planning_proposal.approve'),
+    planningCycle: intentPlanningCycleViewSchema,
+    intentLedger: approvedIntentLedgerSchema,
+    board: boardViewSchema,
+  })
+  .superRefine(requireIntentApprovalCoherence);
+
+const versionedIntentRejectResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    schemaVersion: z.literal(2),
+    commandType: z.literal('planning_proposal.reject'),
+    planningCycle: intentPlanningCycleViewSchema,
+  })
+  .superRefine((value, context) => {
+    if (
+      value.planningCycle.cycle.lifecycle !== 'proposal_rejected' ||
+      value.planningCycle.proposals.at(-1)?.lifecycle !== 'rejected'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['planningCycle'],
+        message: 'Intent reject success requires a rejected intent proposal',
+      });
+    }
+  });
+
+const versionedPlanningAbandonResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    schemaVersion: z.literal(2),
     commandType: z.literal('planning_cycle.abandon'),
     planningCycle: planningCycleViewSchema,
   })
@@ -299,6 +472,208 @@ const planningCycleAbandonResultSchema = z
     path: ['planningCycle', 'cycle', 'lifecycle'],
     message: 'Abandon success must be abandoned',
   });
+
+const versionedPlanSubmitResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    schemaVersion: z.literal(2),
+    commandType: z.literal('planning_cycle.submit_plan_turn'),
+    planningCycle: deliveryPlanPlanningCycleViewSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.planningCycle.cycle.lifecycle !== 'launch_pending') {
+      context.addIssue({
+        code: 'custom',
+        path: ['planningCycle'],
+        message: 'Plan submit success must be delivery-plan and launch-pending',
+      });
+    }
+  });
+
+const versionedPlanApproveResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    schemaVersion: z.literal(2),
+    commandType: z.literal('plan_proposal.approve'),
+    planningCycle: deliveryPlanPlanningCycleViewSchema,
+    deliveryPlan: approvedDeliveryPlanSchema,
+    board: boardViewSchema,
+  })
+  .superRefine((value, context) => {
+    const latest = value.planningCycle.deliveryPlanProposals.at(-1);
+    const proposalBase = latest?.base;
+    if (
+      value.planningCycle.cycle.lifecycle !== 'approved' ||
+      latest?.lifecycle !== 'approved' ||
+      latest.id !== value.deliveryPlan.plan.proposalId ||
+      value.deliveryPlan.plan.projectId !==
+        value.planningCycle.cycle.projectId ||
+      value.deliveryPlan.plan.projectIntentId !==
+        proposalBase?.projectIntentId ||
+      value.deliveryPlan.plan.projectIntentRevision !==
+        proposalBase?.projectIntentRevision ||
+      value.deliveryPlan.plan.ledgerId !== proposalBase?.ledgerId ||
+      value.deliveryPlan.plan.ledgerRevision !== proposalBase?.ledgerRevision ||
+      value.deliveryPlan.plan.baseDeliveryPlanRevision !==
+        proposalBase?.deliveryPlan.revision ||
+      (proposalBase?.deliveryPlan.id !== null &&
+        value.deliveryPlan.plan.id !== proposalBase?.deliveryPlan.id) ||
+      value.deliveryPlan.plan.summary !== latest.proposedPlan.summary ||
+      value.board.projectId !== value.deliveryPlan.plan.projectId ||
+      value.board.deliveryPlanRevision !== value.deliveryPlan.plan.revision
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['deliveryPlan'],
+        message:
+          'Plan approval cycle, proposal, canonical plan, and Board must agree',
+      });
+    }
+  });
+
+const versionedPlanRejectResultSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    schemaVersion: z.literal(2),
+    commandType: z.literal('plan_proposal.reject'),
+    planningCycle: deliveryPlanPlanningCycleViewSchema,
+  })
+  .superRefine((value, context) => {
+    const latest = value.planningCycle.deliveryPlanProposals.at(-1);
+    if (
+      value.planningCycle.cycle.lifecycle !== 'proposal_rejected' ||
+      latest?.lifecycle !== 'rejected'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['planningCycle'],
+        message: 'Plan reject success requires a rejected plan proposal',
+      });
+    }
+  });
+
+const versionedBoardFilterResultSchema = z.strictObject({
+  ok: z.literal(true),
+  schemaVersion: z.literal(2),
+  commandType: z.literal('board_filter.set'),
+  board: boardViewSchema,
+});
+
+export const versionedPlanningCommandSuccessSchema = z.union([
+  versionedIntentSubmitResultSchema,
+  versionedIntentApproveResultSchema,
+  versionedIntentRejectResultSchema,
+  versionedPlanningAbandonResultSchema,
+  versionedPlanSubmitResultSchema,
+  versionedPlanApproveResultSchema,
+  versionedPlanRejectResultSchema,
+  versionedBoardFilterResultSchema,
+]);
+export type VersionedPlanningCommandSuccess = z.infer<
+  typeof versionedPlanningCommandSuccessSchema
+>;
+
+export const persistedPlanningCommandSuccessSchema = z.union([
+  legacyM2PlanningCommandSuccessSchema,
+  versionedPlanningCommandSuccessSchema,
+]);
+export type PersistedPlanningCommandSuccess = z.infer<
+  typeof persistedPlanningCommandSuccessSchema
+>;
+
+const planningRequiredBoard = (projectId: string): BoardView =>
+  boardViewSchema.parse({
+    projectId,
+    deliveryPlanRevision: null,
+    stale: false,
+    emptyReason: 'planning_required',
+    filter: null,
+    totalTaskCount: 0,
+    matchedTaskCount: 0,
+    facets: {
+      milestones: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [],
+  });
+
+const normalizeLegacyCycle = (
+  planningCycle: LegacyM2PlanningCommandSuccess['planningCycle'],
+): IntentPlanningCycleView =>
+  planningCycleViewSchema.parse({
+    ...planningCycle,
+    purpose: {
+      kind: 'intent',
+      baseDeliveryPlanId: null,
+      baseDeliveryPlanRevision: null,
+    },
+    deliveryPlanProposals: [],
+  }) as IntentPlanningCycleView;
+
+export type NormalizedPlanningCommandSuccess =
+  | Readonly<{
+      source: 'legacy_m2';
+      projectionAuthority: 'receipt_only';
+      result: VersionedPlanningCommandSuccess;
+    }>
+  | Readonly<{
+      source: 'versioned';
+      projectionAuthority: 'command_response';
+      result: VersionedPlanningCommandSuccess;
+    }>;
+
+export const normalizePlanningCommandSuccess = (
+  raw: PersistedPlanningCommandSuccess,
+): NormalizedPlanningCommandSuccess => {
+  if ('schemaVersion' in raw) {
+    return {
+      source: 'versioned',
+      projectionAuthority: 'command_response',
+      result: raw,
+    };
+  }
+  const planningCycle = normalizeLegacyCycle(raw.planningCycle);
+  const result: VersionedPlanningCommandSuccess =
+    raw.commandType === 'planning_proposal.approve'
+      ? versionedIntentApproveResultSchema.parse({
+          ...raw,
+          schemaVersion: 2,
+          planningCycle,
+          board: planningRequiredBoard(planningCycle.cycle.projectId),
+        })
+      : versionedPlanningCommandSuccessSchema.parse({
+          ...raw,
+          schemaVersion: 2,
+          planningCycle,
+        });
+  return {
+    source: 'legacy_m2',
+    projectionAuthority: 'receipt_only',
+    result,
+  };
+};
+
+export const planningCommandResponseDispositionSchema = z.union([
+  z.strictObject({
+    kind: z.literal('apply_versioned'),
+    result: versionedPlanningCommandSuccessSchema,
+  }),
+  z.strictObject({
+    kind: z.literal('acknowledge_legacy'),
+    reason: z.literal('legacy_m2_receipt'),
+  }),
+  z.strictObject({
+    kind: z.literal('resync_required'),
+    reason: z.literal('legacy_m2_freshness_unknown'),
+  }),
+]);
+export type PlanningCommandResponseDisposition = z.infer<
+  typeof planningCommandResponseDispositionSchema
+>;
 
 export const v2CommandResultSchema = z.union([
   z.strictObject({
@@ -321,10 +696,7 @@ export const v2CommandResultSchema = z.union([
     commandType: z.literal('worker_execution.interrupt'),
     execution: workerExecutionSchema,
   }),
-  planningTurnSubmitResultSchema,
-  planningProposalApproveResultSchema,
-  planningProposalRejectResultSchema,
-  planningCycleAbandonResultSchema,
+  persistedPlanningCommandSuccessSchema,
   commandFailureSchema,
 ]);
 export type V2CommandResult = z.infer<typeof v2CommandResultSchema>;
