@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import {
   PM_DISCOVERY_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
+  boardViewSchema,
   planningCycleViewSchema,
   resolvedWorkerProfileSnapshotSchema,
   runtimeEventSchema,
@@ -164,10 +165,135 @@ const projectSnapshot = v2ProjectSnapshotSchema.parse({
   planningCycles: [],
   planningHistoryTruncated: false,
   intentLedger: null,
+  deliveryPlan: null,
+  board: {
+    projectId,
+    deliveryPlanRevision: null,
+    stale: false,
+    emptyReason: 'intent_required',
+    filter: null,
+    totalTaskCount: 0,
+    matchedTaskCount: 0,
+    facets: {
+      milestones: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [],
+  },
   cursors: { domain: 3, runtime: 5 },
 });
 
+const filteredBoard = boardViewSchema.parse({
+  projectId,
+  deliveryPlanRevision: 2,
+  stale: false,
+  emptyReason: 'filter_empty',
+  filter: {
+    projectId,
+    revision: 3,
+    milestoneIds: [],
+    taskLifecycles: [],
+    readiness: [],
+    priorities: [],
+    labels: ['web'],
+    requirementRecordIds: [],
+    updatedAt: '2026-08-28T00:00:04.000Z',
+  },
+  totalTaskCount: 1,
+  matchedTaskCount: 0,
+  facets: {
+    milestones: [],
+    taskLifecycles: [
+      {
+        value: 'pending',
+        label: 'Pending',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      {
+        value: 'completed',
+        label: 'Completed',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      {
+        value: 'retired',
+        label: 'Retired',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+    ],
+    readiness: [
+      {
+        value: 'actionable',
+        label: 'Actionable',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      {
+        value: 'blocked',
+        label: 'Blocked',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      {
+        value: 'inactive',
+        label: 'Inactive',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+    ],
+    priorities: [
+      { value: 'must', label: 'Must', selected: false, matchingTaskCount: 0 },
+      {
+        value: 'should',
+        label: 'Should',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      { value: 'could', label: 'Could', selected: false, matchingTaskCount: 0 },
+    ],
+    labels: [
+      {
+        value: 'web',
+        label: 'web',
+        selected: true,
+        matchingTaskCount: 0,
+        historical: false,
+      },
+    ],
+    requirements: [],
+  },
+  cards: [],
+});
+
+const clearedFilteredBoard = boardViewSchema.parse({
+  ...filteredBoard,
+  filter: {
+    ...filteredBoard.filter!,
+    revision: 4,
+    labels: [],
+    updatedAt: '2026-08-28T00:00:05.000Z',
+  },
+  facets: {
+    ...filteredBoard.facets,
+    labels: filteredBoard.facets.labels.map((option) => ({
+      ...option,
+      selected: false,
+    })),
+  },
+});
+
 const terminalPlanningCycle = planningCycleViewSchema.parse({
+  purpose: {
+    kind: 'intent',
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+  },
   cycle: {
     id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
     projectId,
@@ -186,9 +312,11 @@ const terminalPlanningCycle = planningCycleViewSchema.parse({
   turns: [],
   questions: [],
   proposals: [],
+  deliveryPlanProposals: [],
 });
 
 const activePlanningCycle = planningCycleViewSchema.parse({
+  purpose: terminalPlanningCycle.purpose,
   cycle: {
     ...terminalPlanningCycle.cycle,
     id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
@@ -263,6 +391,7 @@ const activePlanningCycle = planningCycleViewSchema.parse({
       decidedAt: null,
     },
   ],
+  deliveryPlanProposals: [],
 });
 
 class FakeLocation extends EventTarget implements AppLocation {
@@ -480,6 +609,89 @@ describe('App', () => {
     expect(screen.getByLabelText('Message to project manager')).toHaveValue(
       'Plan a durable Todo product.',
     );
+  });
+
+  it('sends exact Board filters and installs only the versioned server projection', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => ({
+      ...projectSnapshot,
+      board: filteredBoard,
+    }));
+    api.command = vi.fn(async () => ({
+      ok: true,
+      schemaVersion: 2,
+      commandType: 'board_filter.set',
+      board: clearedFilteredBoard,
+    }));
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+
+    const label = screen.getByRole('checkbox', {
+      name: 'web · 0 tasks',
+    });
+    expect(label).toBeChecked();
+    await user.click(label);
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
+
+    await waitFor(() => expect(api.command).toHaveBeenCalledOnce());
+    expect(api.command).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actor: { kind: 'human' },
+        command: {
+          type: 'board_filter.set',
+          projectId,
+          expectedFilterRevision: 3,
+          filter: {
+            milestoneIds: [],
+            taskLifecycles: [],
+            readiness: [],
+            priorities: [],
+            labels: [],
+            requirementRecordIds: [],
+          },
+        },
+      }),
+      expect.any(AbortSignal),
+    );
+    await waitFor(() => expect(label).not.toBeChecked());
+  });
+
+  it('shows typed filter conflicts and resyncs before allowing another mutation', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => ({
+      ...projectSnapshot,
+      board: filteredBoard,
+    }));
+    api.command = vi.fn(async () => ({
+      ok: false,
+      commandType: 'board_filter.set',
+      error: {
+        code: 'board_filter_revision_conflict',
+        message: 'Board filters changed elsewhere.',
+      },
+    }));
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
+    expect(await screen.findAllByRole('alert')).not.toHaveLength(0);
+    expect(screen.getAllByRole('alert')[0]).toHaveTextContent(
+      'Board filters changed elsewhere.',
+    );
+    await waitFor(() => expect(api.projectSnapshot).toHaveBeenCalledTimes(2));
+    expect(
+      screen.getByRole('button', { name: 'Apply filters' }),
+    ).toBeDisabled();
   });
 
   it('registers a repository, navigates from the parsed success, and subscribes from snapshot cursors', async () => {
@@ -888,7 +1100,7 @@ describe('App', () => {
     );
   });
 
-  it('shows attention, activity, diagnostics, planning, and the Board placeholder', async () => {
+  it('shows attention, activity, diagnostics, planning, and the Board', async () => {
     const user = userEvent.setup();
     const app = renderApp({ pathname: `/projects/${projectId}` });
     expect(await screen.findByText('Preferred skill fallback')).toBeVisible();
@@ -896,9 +1108,8 @@ describe('App', () => {
     expect(
       screen.getByText('Required verification skill is unavailable.'),
     ).toBeVisible();
-    expect(screen.getAllByText('Available in a later milestone')).toHaveLength(
-      1,
-    );
+    expect(screen.getByRole('heading', { name: 'Board' })).toBeVisible();
+    expect(screen.getByText(/Showing 0 of 0 tasks/)).toBeVisible();
     expect(
       screen.queryByRole('button', { name: /start|approve|create/i }),
     ).not.toBeInTheDocument();

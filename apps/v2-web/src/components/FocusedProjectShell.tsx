@@ -1,6 +1,12 @@
 import { useRef, useState, type KeyboardEvent } from 'react';
 
 import type {
+  AbandonPlanningCycleCommand,
+  ApprovePlanProposalCommand,
+  RejectPlanProposalCommand,
+  SetBoardFilterCommand,
+  SubmitPlanTurnCommand,
+  DeliveryPlanPlanningCycleView,
   PlanningCycleView,
   PlanningProposal,
   RuntimeEvent,
@@ -8,7 +14,8 @@ import type {
 } from '@mesh/v2-contracts';
 
 import { ExecutionActivity, type ChildActivity } from './ExecutionActivity';
-import { PlanningPane } from './PlanningPane';
+import { BoardPane } from './BoardPane';
+import { DeliveryPlanningPane, PlanningPane } from './PlanningPane';
 import { RequirementsPane } from './RequirementsPane';
 import type { ProjectShellViewModel } from './shell-state';
 
@@ -38,6 +45,11 @@ export type PlanningCommandProjection = {
   onApprove(proposalId: PlanningProposal['id']): void;
   onReject(proposalId: PlanningProposal['id'], feedback: string): void;
   onAbandon(cycleId: PlanningCycleView['cycle']['id']): void;
+  onSubmitPlan(command: SubmitPlanTurnCommand): void;
+  onApprovePlan(command: ApprovePlanProposalCommand): void;
+  onRejectPlan(command: RejectPlanProposalCommand): void;
+  onAbandonPlan(command: AbandonPlanningCycleCommand): void;
+  onApplyFilter(command: SetBoardFilterCommand): void;
 };
 
 const inertPlanning: PlanningCommandProjection = {
@@ -47,6 +59,11 @@ const inertPlanning: PlanningCommandProjection = {
   onApprove: () => undefined,
   onReject: () => undefined,
   onAbandon: () => undefined,
+  onSubmitPlan: () => undefined,
+  onApprovePlan: () => undefined,
+  onRejectPlan: () => undefined,
+  onAbandonPlan: () => undefined,
+  onApplyFilter: () => undefined,
 };
 
 const terminalPlanningLifecycles = new Set([
@@ -127,10 +144,12 @@ export function FocusedProjectShell({
               } as const)
             : ({ status: 'loading' } as const);
   const planningProfiles = snapshot.profiles
-    .filter((profile) =>
-      profile.document.spec.assignmentKinds.some(
-        (kind) => kind === 'pm_discovery',
-      ),
+    .filter(
+      (profile) =>
+        profile.document.spec.assignmentKinds.length === 1 &&
+        profile.document.spec.assignmentKinds[0] === 'pm_discovery' &&
+        profile.document.spec.outputSchema ===
+          'mesh.dev/pm-discovery-report/v1',
     )
     .map((profile) => ({
       profileId: profile.profileId,
@@ -141,13 +160,40 @@ export function FocusedProjectShell({
       approvedRevision: profile.profileRevision,
     }));
   const activePlanningCycle = snapshot.planningCycles.find(
-    ({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle),
+    ({ cycle, purpose }) =>
+      purpose.kind === 'intent' &&
+      !terminalPlanningLifecycles.has(cycle.lifecycle),
   );
   const terminalPlanningHistory = activePlanningCycle
     ? undefined
-    : snapshot.planningCycles.find(({ cycle }) =>
-        terminalPlanningLifecycles.has(cycle.lifecycle),
+    : snapshot.planningCycles.find(
+        ({ cycle, purpose }) =>
+          purpose.kind === 'intent' &&
+          terminalPlanningLifecycles.has(cycle.lifecycle),
       );
+  const deliveryCycles = snapshot.planningCycles.filter(
+    (cycle): cycle is DeliveryPlanPlanningCycleView =>
+      cycle.purpose.kind === 'delivery_plan',
+  );
+  const deliveryCycle =
+    deliveryCycles.find(
+      ({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle),
+    ) ?? deliveryCycles[0];
+  const deliveryProfiles = snapshot.profiles
+    .filter(
+      (profile) =>
+        profile.document.spec.assignmentKinds.length === 1 &&
+        profile.document.spec.assignmentKinds[0] === 'pm_plan' &&
+        profile.document.spec.outputSchema === 'mesh.dev/pm-plan-report/v1',
+    )
+    .map((profile) => ({
+      profileId: profile.profileId,
+      projectId: profile.projectId,
+      scope: profile.document.metadata.scope,
+      name: profile.document.metadata.name,
+      displayName: profile.document.metadata.displayName,
+      approvedRevision: profile.profileRevision,
+    }));
   const latestPlanningExecutionId =
     activePlanningCycle?.turns.at(-1)?.executionId;
   const latestPlanningExecution = snapshot.executions.find(
@@ -253,6 +299,27 @@ export function FocusedProjectShell({
             onReject={planning.onReject}
             onAbandon={planning.onAbandon}
           />
+          <DeliveryPlanningPane
+            projectId={snapshot.project.id}
+            cycle={deliveryCycle}
+            approvedIntentLedger={snapshot.intentLedger}
+            deliveryPlan={snapshot.deliveryPlan}
+            planStale={snapshot.board.stale}
+            connection={planningConnection}
+            profiles={deliveryProfiles}
+            submitting={planning.submitting}
+            error={planning.error}
+            historyLimitReached={
+              deliveryCycle !== undefined &&
+              (deliveryCycle.turns.filter(({ actor }) => actor === 'human')
+                .length >= 32 ||
+                deliveryCycle.deliveryPlanProposals.length >= 16)
+            }
+            onSubmit={planning.onSubmitPlan}
+            onApprove={planning.onApprovePlan}
+            onReject={planning.onRejectPlan}
+            onAbandon={planning.onAbandonPlan}
+          />
         </aside>
         <div className="v2-project-content">
           <section aria-label="Future workflow panes">
@@ -282,8 +349,13 @@ export function FocusedProjectShell({
               aria-labelledby="project-pane-tab-board"
               hidden={activePane !== 'board'}
             >
-              <h2>Board</h2>
-              <p>Available in a later milestone</p>
+              <BoardPane
+                board={snapshot.board}
+                connection={planningConnection}
+                submitting={planning.submitting}
+                error={planning.error}
+                onApplyFilter={planning.onApplyFilter}
+              />
             </section>
             <section
               id="project-pane-panel-requirements"

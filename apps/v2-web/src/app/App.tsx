@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   V2_PROTOCOL_VERSION,
+  type AbandonPlanningCycleCommand,
+  type ApprovePlanProposalCommand,
   type PlanningCycleView,
+  type RejectPlanProposalCommand,
+  type SetBoardFilterCommand,
+  type SubmitPlanTurnCommand,
   type V2CommandEnvelope,
   type V2ProjectSnapshot,
   type V2SystemSnapshot,
@@ -60,7 +65,29 @@ const terminalPlanningLifecycles = new Set([
 ]);
 
 const activePlanningCycle = (cycles?: readonly PlanningCycleView[]) =>
-  cycles?.find(({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle));
+  cycles?.find(
+    ({ cycle, purpose }) =>
+      purpose.kind === 'intent' &&
+      !terminalPlanningLifecycles.has(cycle.lifecycle),
+  );
+
+const freshnessConflictCodes = new Set([
+  'planning_canonical_base_conflict',
+  'planning_intent_required',
+  'planning_requirements_required',
+  'planning_cycle_active_conflict',
+  'planning_cycle_history_limit',
+  'planning_cycle_not_found',
+  'planning_cycle_revision_conflict',
+  'planning_profile_incompatible',
+  'planning_proposal_not_found',
+  'planning_proposal_revision_conflict',
+  'plan_proposal_not_found',
+  'plan_proposal_revision_conflict',
+  'plan_canonical_base_conflict',
+  'board_filter_not_found',
+  'board_filter_revision_conflict',
+]);
 
 const routeProjectId = (pathname: string) => {
   const match = /^\/projects\/([^/]+)$/.exec(pathname);
@@ -137,7 +164,7 @@ function ProjectConnection({
   onAuditBarrier: (message: string) => void;
   onDeselect: () => void;
 }) {
-  const { projection, error, resyncing } = useProjectConnection({
+  const { projection, error, resyncing, dispatch } = useProjectConnection({
     api,
     projectId,
     socketFactory,
@@ -149,7 +176,7 @@ function ProjectConnection({
   const [commandError, setCommandError] = useState<string>();
   const snapshot = useMemo<V2ProjectSnapshot | undefined>(
     () =>
-      projection.project
+      projection.project && projection.board
         ? {
             protocolVersion: V2_PROTOCOL_VERSION,
             project: projection.project,
@@ -159,6 +186,8 @@ function ProjectConnection({
             planningCycles: projection.planningCycles,
             planningHistoryTruncated: projection.planningHistoryTruncated,
             intentLedger: projection.intentLedger,
+            deliveryPlan: projection.deliveryPlan,
+            board: projection.board,
             cursors: {
               domain: projection.domainCursor,
               runtime: projection.runtimeCursor,
@@ -235,6 +264,14 @@ function ProjectConnection({
           setCommandError(
             result.ok ? 'Unexpected command result.' : result.error.message,
           );
+          if (!result.ok && freshnessConflictCodes.has(result.error.code)) {
+            dispatch({
+              type: 'resync.required',
+              reason: result.error.code,
+            });
+          }
+        } else {
+          dispatch({ type: 'planning.command_result', result });
         }
       } catch (cause) {
         if (activeCommand.current?.token !== token) return;
@@ -252,7 +289,7 @@ function ProjectConnection({
         }
       }
     },
-    [api, onAuditBarrier],
+    [api, dispatch, onAuditBarrier],
   );
 
   const interruptExecution = useCallback(
@@ -391,6 +428,26 @@ function ProjectConnection({
     [projectId, runCommand, snapshot],
   );
 
+  const runPlanningCommand = useCallback(
+    (
+      command:
+        | SubmitPlanTurnCommand
+        | ApprovePlanProposalCommand
+        | RejectPlanProposalCommand
+        | AbandonPlanningCycleCommand
+        | SetBoardFilterCommand,
+    ) => {
+      if (command.projectId !== projectId) return;
+      const envelope = {
+        idempotencyKey: crypto.randomUUID(),
+        actor: { kind: 'human' as const },
+        command,
+      } as V2CommandEnvelope;
+      void runCommand(JSON.stringify(command), envelope, command.type);
+    },
+    [projectId, runCommand],
+  );
+
   return (
     <>
       {error || commandError ? (
@@ -410,6 +467,11 @@ function ProjectConnection({
           onApprove: approvePlanningProposal,
           onReject: rejectPlanningProposal,
           onAbandon: abandonPlanningCycle,
+          onSubmitPlan: runPlanningCommand,
+          onApprovePlan: runPlanningCommand,
+          onRejectPlan: runPlanningCommand,
+          onAbandonPlan: runPlanningCommand,
+          onApplyFilter: runPlanningCommand,
         }}
       />
     </>

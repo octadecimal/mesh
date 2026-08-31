@@ -13,7 +13,11 @@ import { FocusedProjectShell } from './FocusedProjectShell';
 const executionFixture = {
   id: '22222222-2222-4222-8222-222222222222',
   assignment: {
+    kind: 'foundation-check',
+    projectId: '11111111-1111-4111-8111-111111111111',
     title: 'Todo foundation worker',
+    instructions: 'Verify the Todo foundation.',
+    fakeScenario: 'todo-foundation-v1',
   },
   lifecycle: 'running',
   resolvedSkills: [],
@@ -49,6 +53,25 @@ const snapshot: V2ProjectSnapshot = {
   planningCycles: [],
   planningHistoryTruncated: false,
   intentLedger: null,
+  deliveryPlan: null,
+  board: {
+    projectId: '11111111-1111-4111-8111-111111111111',
+    deliveryPlanRevision: null,
+    stale: false,
+    emptyReason: 'intent_required',
+    filter: null,
+    totalTaskCount: 0,
+    matchedTaskCount: 0,
+    facets: {
+      milestones: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [],
+  },
   cursors: { domain: 4, runtime: 12 },
 };
 
@@ -73,13 +96,18 @@ const pmProfile = {
       requiredCapabilities: [],
       skills: { preferred: [], required: [] },
       instructions: 'Discover intent.',
-      outputSchema: 'mesh.pm-discovery-report/v1',
+      outputSchema: 'mesh.dev/pm-discovery-report/v1',
     },
   },
   digest: 'a'.repeat(64),
 } as V2ProjectSnapshot['profiles'][number];
 
 const planningCycle = {
+  purpose: {
+    kind: 'intent',
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+  },
   cycle: {
     id: '44444444-4444-4444-8444-444444444444',
     projectId: snapshot.project.id,
@@ -98,6 +126,7 @@ const planningCycle = {
   turns: [],
   questions: [],
   proposals: [],
+  deliveryPlanProposals: [],
 } as PlanningCycleView;
 
 const terminalPlanningCycle = (
@@ -445,9 +474,14 @@ describe('FocusedProjectShell', () => {
       />,
     );
 
-    expect(screen.getAllByText('Available in a later milestone')).toHaveLength(
-      1,
-    );
+    expect(
+      screen.queryByText('Available in a later milestone'),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Approve project intent and requirements to plan delivery.',
+      ),
+    ).toBeVisible();
     expect(
       screen.getByRole('complementary', { name: 'PM Chat' }),
     ).toHaveTextContent('Project manager');
@@ -522,7 +556,11 @@ describe('FocusedProjectShell', () => {
           onInterrupt={vi.fn()}
         />,
       );
-      expect(screen.getByRole('status')).toHaveTextContent(lifecycle);
+      expect(
+        within(
+          screen.getByRole('article', { name: 'Todo foundation worker' }),
+        ).getByRole('status'),
+      ).toHaveTextContent(lifecycle);
     },
   );
 
@@ -595,7 +633,13 @@ describe('FocusedProjectShell', () => {
     const completedExecution = {
       ...executionFixture,
       id: '44444444-4444-4444-8444-444444444444',
-      assignment: { title: 'Completed Todo worker' },
+      assignment: {
+        kind: 'foundation-check',
+        projectId: snapshot.project.id,
+        title: 'Completed Todo worker',
+        instructions: 'Verify the completed Todo foundation.',
+        fakeScenario: 'todo-foundation-v1',
+      },
       lifecycle: 'completed',
       revision: 5,
     } as WorkerExecution;

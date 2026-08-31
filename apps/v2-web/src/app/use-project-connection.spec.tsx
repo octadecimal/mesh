@@ -21,6 +21,11 @@ const diagnosticId = '44444444-4444-4444-8444-444444444444';
 const planningTruth = (projectId: string, revision: number) => ({
   planningCycles: [
     {
+      purpose: {
+        kind: 'intent' as const,
+        baseDeliveryPlanId: null,
+        baseDeliveryPlanRevision: null,
+      },
       cycle: {
         id: '66666666-6666-4666-8666-666666666666',
         projectId,
@@ -39,6 +44,7 @@ const planningTruth = (projectId: string, revision: number) => ({
       turns: [],
       questions: [],
       proposals: [],
+      deliveryPlanProposals: [],
     },
   ],
   planningHistoryTruncated: true,
@@ -78,6 +84,25 @@ const planningTruth = (projectId: string, revision: number) => ({
     records: [],
     relationships: [],
   },
+  deliveryPlan: null,
+  board: {
+    projectId,
+    deliveryPlanRevision: null,
+    stale: false,
+    emptyReason: 'planning_required' as const,
+    filter: null,
+    totalTaskCount: 0,
+    matchedTaskCount: 0,
+    facets: {
+      milestones: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [],
+  },
 });
 
 const outputEvent = (
@@ -96,6 +121,20 @@ const outputEvent = (
     type: 'worker_execution.output',
     payload: { text },
   });
+
+const legacyPlanningReceipt = (projectId: string, revision: number) => {
+  const current = planningTruth(projectId, revision).planningCycles[0]!;
+  const {
+    purpose: _purpose,
+    deliveryPlanProposals: _plans,
+    ...planningCycle
+  } = current;
+  return {
+    ok: true as const,
+    commandType: 'planning_cycle.abandon' as const,
+    planningCycle,
+  };
+};
 
 const snapshot = (
   projectId: string,
@@ -185,10 +224,75 @@ const Harness = ({
       <p data-testid="planning-revision">
         {connection.projection.intentLedger?.ledger.revision ?? 'none'}
       </p>
+      <button
+        type="button"
+        onClick={() =>
+          connection.dispatch({
+            type: 'planning.command_result',
+            result: legacyPlanningReceipt(projectId, 1),
+          })
+        }
+      >
+        Apply legacy planning receipt
+      </button>
       {connection.error ? <p role="alert">{connection.error}</p> : null}
     </>
   );
 };
+
+it('coalesces repeated command-result freshness loss into one snapshot resync', async () => {
+  const replacement = deferred<V2ProjectSnapshot>();
+  const projectSnapshot = vi
+    .fn<
+      Parameters<V2Api['projectSnapshot']>,
+      ReturnType<V2Api['projectSnapshot']>
+    >()
+    .mockResolvedValueOnce(snapshot(projectOne, 'Todo', 3, 5))
+    .mockImplementationOnce(() => replacement.promise);
+  const api: V2Api = {
+    systemSnapshot: vi.fn(),
+    projectSnapshot,
+    runtimeReplay: vi.fn(async (_, after) => ({
+      lowWater: after + 1,
+      highWater: after,
+      events: [],
+    })),
+    command: vi.fn(),
+  };
+  const sockets: FakeSocket[] = [];
+  render(
+    <Harness
+      api={api}
+      projectId={projectOne}
+      socketFactory={() => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      }}
+    />,
+  );
+
+  expect(await screen.findByTestId('project-name')).toHaveTextContent('Todo');
+  expect(sockets).toHaveLength(1);
+  act(() => {
+    screen
+      .getByRole('button', {
+        name: 'Apply legacy planning receipt',
+      })
+      .click();
+    screen
+      .getByRole('button', {
+        name: 'Apply legacy planning receipt',
+      })
+      .click();
+  });
+
+  expect(projectSnapshot).toHaveBeenCalledTimes(2);
+  expect(screen.getByTestId('resyncing')).toHaveTextContent('true');
+  act(() => replacement.resolve(snapshot(projectOne, 'Todo current', 4, 6)));
+  await waitFor(() => expect(sockets).toHaveLength(2));
+  expect(screen.getByTestId('project-name')).toHaveTextContent('Todo current');
+});
 
 it('fetches before socket creation, replaces a stale projection once, and reconnects from current cursors', async () => {
   const calls: string[] = [];

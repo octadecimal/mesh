@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 
 import type { V2Api } from '../api/client';
 import {
@@ -39,6 +46,13 @@ export function useProjectConnection({
   );
   const [error, setError] = useState<string>();
   const [resyncing, setResyncing] = useState(false);
+  const dispatchRef = useRef<(action: ProjectionAction) => void>(
+    store.dispatch,
+  );
+  const dispatch = useCallback(
+    (action: ProjectionAction) => dispatchRef.current(action),
+    [],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -76,6 +90,7 @@ export function useProjectConnection({
       if (requested || !store.getState().resyncRequested) return;
       resync();
     };
+    dispatchRef.current = dispatch;
 
     setError(undefined);
     setResyncing(false);
@@ -93,8 +108,9 @@ export function useProjectConnection({
       cancelled = true;
       coordinator.cancel();
       socket?.close();
+      dispatchRef.current = store.dispatch;
     };
   }, [api, location.host, location.protocol, projectId, socketFactory, store]);
 
-  return { projection, error, resyncing };
+  return { projection, error, resyncing, dispatch };
 }
