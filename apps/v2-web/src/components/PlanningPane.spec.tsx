@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
@@ -1200,7 +1200,338 @@ const deliveryCycle = {
   ],
 } as unknown as DeliveryPlanPlanningCycleView;
 
+const approvedPlanId = 'abababab-abab-4bab-8bab-abababababab';
+const approvedMilestoneIds = [
+  '12121212-1212-4212-8212-121212121212',
+  '13131313-1313-4313-8313-131313131313',
+] as const;
+const approvedTaskIds = [
+  '14141414-1414-4414-8414-141414141414',
+  '15151515-1515-4515-8515-151515151515',
+] as const;
+const approvedDeliveryPlan = {
+  plan: { id: approvedPlanId, revision: 2 },
+  milestones: [
+    {
+      id: approvedMilestoneIds[0],
+      revision: 3,
+      title: 'Existing Foundation',
+      outcome: 'Existing data remains durable.',
+      stopCondition: 'Existing persistence checks pass.',
+      exclusions: ['Execution automation'],
+      ordinal: 1,
+    },
+    {
+      id: approvedMilestoneIds[1],
+      revision: 4,
+      title: 'Existing Experience',
+      outcome: 'Existing Todo work remains usable.',
+      stopCondition: 'Existing interaction checks pass.',
+      exclusions: ['Collaboration'],
+      ordinal: 2,
+    },
+  ],
+  taskContracts: [
+    {
+      id: approvedTaskIds[0],
+      revision: 5,
+      contractRevision: 5,
+      milestoneId: approvedMilestoneIds[0],
+      title: 'Existing Persistence',
+      outcome: 'Existing Todo state survives refresh.',
+      acceptanceCriteria: ['Existing Todo items are durable.'],
+      verificationCriteria: ['Run existing persistence checks.'],
+      priority: 'must',
+      labels: ['backend'],
+      ownedSurfaces: ['Todo persistence'],
+      prohibitedSurfaces: ['Execution runtime'],
+      expectedArtifacts: ['Persistence tests'],
+      ordinal: 1,
+    },
+    {
+      id: approvedTaskIds[1],
+      revision: 6,
+      contractRevision: 6,
+      milestoneId: approvedMilestoneIds[1],
+      title: 'Existing Interface',
+      outcome: 'Existing Todo items remain visible.',
+      acceptanceCriteria: ['Existing Todo items appear.'],
+      verificationCriteria: ['Run existing interface checks.'],
+      priority: 'should',
+      labels: ['web'],
+      ownedSurfaces: ['Todo view'],
+      prohibitedSurfaces: ['Execution runtime'],
+      expectedArtifacts: ['View tests'],
+      ordinal: 1,
+    },
+  ],
+  dependencies: [],
+  traces: [],
+  milestoneDependencies: [],
+} as unknown as ApprovedDeliveryPlan;
+
 describe('DeliveryPlanningPane', () => {
+  it('keeps terminal history inspectable while starting an exact current-base replan', async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const terminalCycle = {
+      ...deliveryCycle,
+      cycle: {
+        ...deliveryCycle.cycle,
+        lifecycle: 'approved',
+        endedAt: '2026-08-30T00:00:04.000Z',
+      },
+      deliveryPlanProposals: [
+        {
+          ...deliveryCycle.deliveryPlanProposals[0],
+          lifecycle: 'approved',
+          decision: {
+            kind: 'approved',
+            decidedBy: 'human',
+            decidedAt: '2026-08-30T00:00:04.000Z',
+          },
+        },
+      ],
+    } as DeliveryPlanPlanningCycleView;
+
+    render(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        cycle={terminalCycle}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={approvedDeliveryPlan}
+        planStale
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={onSubmit}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Proposal revision 1 · Approved/)).toBeVisible();
+    await user.click(
+      screen.getByRole('button', { name: 'Replan current requirements' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedCycleRevision: null,
+        expectedProjectIntentId: approvedIntentLedger.projectIntent.id,
+        expectedProjectIntentRevision:
+          approvedIntentLedger.projectIntent.revision,
+        expectedLedgerId: approvedIntentLedger.ledger.id,
+        expectedLedgerRevision: approvedIntentLedger.ledger.revision,
+        expectedDeliveryPlan: { id: approvedPlanId, revision: 2 },
+      }),
+    );
+    expect(onSubmit.mock.calls[0]?.[0]).not.toHaveProperty('planningCycleId');
+  });
+
+  it('explains proposal replacement and cycle-abandonment supersession', async () => {
+    const user = userEvent.setup();
+    const successorId = '16161616-1616-4616-8616-161616161616';
+    const replacementHistory = {
+      ...deliveryCycle,
+      cycle: { ...deliveryCycle.cycle, latestProposalRevision: 2 },
+      deliveryPlanProposals: [
+        {
+          ...deliveryCycle.deliveryPlanProposals[0],
+          lifecycle: 'superseded',
+          decision: {
+            kind: 'superseded',
+            reason: 'replacement_accepted',
+            supersededByProposalId: successorId,
+            decidedAt: '2026-08-30T00:00:03.000Z',
+          },
+        },
+        {
+          ...deliveryCycle.deliveryPlanProposals[0],
+          id: successorId,
+          revision: 2,
+        },
+      ],
+    } as DeliveryPlanPlanningCycleView;
+    const props = {
+      projectId,
+      approvedIntentLedger,
+      deliveryPlan: null,
+      planStale: false,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmit: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const { rerender } = render(
+      <DeliveryPlanningPane {...props} cycle={replacementHistory} />,
+    );
+
+    await user.selectOptions(screen.getByLabelText('Proposal revision'), '1');
+    expect(
+      screen.getByText('Superseded by proposal revision 2.'),
+    ).toBeVisible();
+
+    const abandonedHistory = {
+      ...deliveryCycle,
+      cycle: {
+        ...deliveryCycle.cycle,
+        lifecycle: 'abandoned',
+        endedAt: '2026-08-30T00:00:04.000Z',
+      },
+      deliveryPlanProposals: [
+        {
+          ...deliveryCycle.deliveryPlanProposals[0],
+          lifecycle: 'superseded',
+          decision: {
+            kind: 'superseded',
+            reason: 'cycle_abandoned',
+            supersededByProposalId: null,
+            decidedAt: '2026-08-30T00:00:04.000Z',
+          },
+        },
+      ],
+    } as DeliveryPlanPlanningCycleView;
+    rerender(<DeliveryPlanningPane {...props} cycle={abandonedHistory} />);
+    expect(
+      screen.getByText('Superseded because this planning cycle was abandoned.'),
+    ).toBeVisible();
+  });
+
+  it('resolves reused approved members and groups complete tasks under milestones in proposal order', () => {
+    const reuseCycle = {
+      ...deliveryCycle,
+      purpose: {
+        kind: 'delivery_plan',
+        baseDeliveryPlanId: approvedPlanId,
+        baseDeliveryPlanRevision: 2,
+      },
+      deliveryPlanProposals: [
+        {
+          ...deliveryCycle.deliveryPlanProposals[0],
+          base: {
+            ...deliveryCycle.deliveryPlanProposals[0].base,
+            deliveryPlan: { id: approvedPlanId, revision: 2 },
+          },
+          proposedPlan: {
+            ...deliveryCycle.deliveryPlanProposals[0].proposedPlan,
+            milestones: [
+              {
+                operation: 'reuse',
+                milestoneId: approvedMilestoneIds[1],
+                expectedRevision: 4,
+              },
+              {
+                operation: 'reuse',
+                milestoneId: approvedMilestoneIds[0],
+                expectedRevision: 3,
+              },
+            ],
+            tasks: [
+              {
+                operation: 'reuse',
+                taskId: approvedTaskIds[0],
+                expectedContractRevision: 5,
+                expectedCurrentRevision: 5,
+              },
+              {
+                operation: 'reuse',
+                taskId: approvedTaskIds[1],
+                expectedContractRevision: 6,
+                expectedCurrentRevision: 6,
+              },
+            ],
+          },
+        },
+      ],
+    } as DeliveryPlanPlanningCycleView;
+
+    render(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        cycle={reuseCycle}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={approvedDeliveryPlan}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+
+    const milestones = screen.getAllByRole('listitem', {
+      name: /Existing (Experience|Foundation)/,
+    });
+    expect(milestones[0]).toHaveAccessibleName(/Existing Experience/);
+    expect(milestones[1]).toHaveAccessibleName(/Existing Foundation/);
+    expect(within(milestones[0]).getByText('Existing Interface')).toBeVisible();
+    expect(
+      within(milestones[0]).getByText(
+        'Acceptance: Existing Todo items appear.',
+      ),
+    ).toBeVisible();
+    expect(
+      within(milestones[0]).getByText(
+        'Verification: Run existing interface checks.',
+      ),
+    ).toBeVisible();
+    expect(
+      within(milestones[0]).getByText(
+        'Stop condition: Existing interaction checks pass.',
+      ),
+    ).toBeVisible();
+    expect(
+      within(milestones[1]).getByText('Existing Persistence'),
+    ).toBeVisible();
+  });
+
+  it('focuses the action-specific control when a planning command fails', async () => {
+    const user = userEvent.setup();
+    const props = {
+      projectId,
+      cycle: deliveryCycle,
+      approvedIntentLedger,
+      deliveryPlan: null,
+      planStale: false,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmit: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const { rerender, unmount } = render(<DeliveryPlanningPane {...props} />);
+    rerender(<DeliveryPlanningPane {...props} error="Approval conflict" />);
+    expect(screen.getByText('Approval conflict')).toHaveAttribute(
+      'aria-live',
+      'assertive',
+    );
+    expect(
+      screen.getByRole('heading', { name: /Proposal revision 1/ }),
+    ).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
+    rerender(<DeliveryPlanningPane {...props} error="Rejection conflict" />);
+    expect(screen.getByLabelText('Rejection feedback')).toHaveFocus();
+    unmount();
+
+    const second = render(<DeliveryPlanningPane {...props} />);
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+    second.rerender(
+      <DeliveryPlanningPane {...props} error="Revision conflict" />,
+    );
+    expect(screen.getByLabelText('Message to project manager')).toHaveFocus();
+  });
+
   it('gates and submits a new delivery planning cycle with exact frozen bases', async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
@@ -1279,7 +1610,8 @@ describe('DeliveryPlanningPane', () => {
         projectId={projectId}
         approvedIntentLedger={approvedIntentLedger}
         deliveryPlan={{
-          plan: { id: planId, revision: 2 } as ApprovedDeliveryPlan['plan'],
+          ...approvedDeliveryPlan,
+          plan: { ...approvedDeliveryPlan.plan, id: planId, revision: 2 },
         }}
         planStale={false}
         connection={{ status: 'ready' }}

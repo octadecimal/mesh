@@ -26,7 +26,8 @@
   gap: 0.5rem;
 }
 
-.planning-board-chips span {
+.planning-board-chips > span,
+.planning-board-chips > div {
   border: 1px solid currentColor;
   border-radius: 999px;
   padding: 0.125rem 0.5rem;

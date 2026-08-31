@@ -1,6 +1,6 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { boardViewSchema } from '@mesh/v2-contracts';
+import { boardViewSchema, type BoardView } from '@mesh/v2-contracts';
 import { describe, expect, it, vi } from 'vitest';
 
 import { BoardPane } from './BoardPane';
@@ -236,6 +236,11 @@ describe('BoardPane', () => {
     expect(screen.getByText('Actionable')).toBeVisible();
     expect(screen.getByText(/Blocked by Persist Todo/)).toBeVisible();
     expect(
+      screen.getAllByText(
+        'Requirements: Preserve completed tasks · revision 3',
+      ),
+    ).toHaveLength(2);
+    expect(
       screen.queryByRole('button', { name: /^Start/ }),
     ).not.toBeInTheDocument();
 
@@ -243,11 +248,64 @@ describe('BoardPane', () => {
       name: 'View Show Todo details',
     });
     await user.click(details);
+    expect(screen.getByRole('heading', { name: 'Task details' })).toHaveFocus();
     expect(screen.getByText(/Acceptance: Todo items appear\./)).toBeVisible();
     await user.click(
       screen.getByRole('button', { name: 'Close task details' }),
     );
     expect(details).toHaveFocus();
+  });
+
+  it('renders every server blocker in order with its matching task name', () => {
+    const blocked = board.cards[1];
+    const multiBlocked = {
+      ...board,
+      cards: [
+        board.cards[0],
+        {
+          ...blocked,
+          readiness: {
+            state: 'blocked',
+            blockers: [
+              ...blocked.readiness.blockers,
+              {
+                kind: 'dependency_incomplete',
+                dependencyId: '88888888-8888-4888-8888-888888888888',
+                prerequisiteTaskId: '99999999-9999-4999-8999-999999999999',
+              },
+            ],
+          },
+          dependencies: [
+            ...blocked.dependencies,
+            {
+              dependencyId: '88888888-8888-4888-8888-888888888888',
+              dependencyRevision: 1,
+              direction: 'prerequisite',
+              otherTaskId: '99999999-9999-4999-8999-999999999999',
+              otherTaskTitle: 'Validate Todo',
+              otherTaskLifecycle: 'pending',
+            },
+          ],
+        },
+      ],
+    } as BoardView;
+
+    render(
+      <BoardPane
+        board={multiBlocked}
+        connection={{ status: 'ready' }}
+        submitting={false}
+        onApplyFilter={vi.fn()}
+      />,
+    );
+
+    const reasons = within(
+      screen.getByLabelText('Readiness for Show Todo'),
+    ).getAllByRole('listitem');
+    expect(reasons.map((reason) => reason.textContent)).toEqual([
+      'Blocked by Persist Todo',
+      'Blocked by Validate Todo',
+    ]);
   });
 
   it('keeps draft filters local and submits one complete canonical selection', async () => {
@@ -262,13 +320,21 @@ describe('BoardPane', () => {
       />,
     );
 
-    expect(screen.getByText('old-label · historical, 0 tasks')).toBeVisible();
-    expect(screen.getByLabelText('Applied Board filters')).toHaveTextContent(
-      'old-label',
+    expect(screen.getAllByText('old-label · historical, 0 tasks')).toHaveLength(
+      2,
     );
+    const applied = screen.getByLabelText('Applied Board filters');
+    expect(applied).toHaveTextContent('old-label · historical, 0 tasks');
+    expect(
+      within(applied).getByRole('button', {
+        name: 'Clear old-label filter',
+      }),
+    ).toBeVisible();
     await user.click(screen.getByLabelText('Foundation · 1 task'));
     await user.click(
-      screen.getByRole('button', { name: 'Clear old-label filter' }),
+      within(applied).getByRole('button', {
+        name: 'Clear old-label filter',
+      }),
     );
     expect(screen.getByLabelText('Applied Board filters')).toHaveTextContent(
       'old-label',
@@ -287,6 +353,30 @@ describe('BoardPane', () => {
         requirementRecordIds: [],
       },
     });
+  });
+
+  it('announces result counts and errors without stealing filter focus', () => {
+    const props = {
+      board,
+      connection: { status: 'ready' } as const,
+      submitting: false,
+      onApplyFilter: vi.fn(),
+    };
+    const { rerender } = render(<BoardPane {...props} />);
+    const apply = screen.getByRole('button', { name: 'Apply filters' });
+    apply.focus();
+
+    rerender(<BoardPane {...props} error="Filter conflict" />);
+
+    expect(screen.getByText(/Showing 2 of 2 tasks/)).toHaveAttribute(
+      'aria-live',
+      'polite',
+    );
+    expect(screen.getByText('Filter conflict')).toHaveAttribute(
+      'aria-live',
+      'assertive',
+    );
+    expect(apply).toHaveFocus();
   });
 
   it('shows explicit loading, pre-plan, empty, stale, and connection states', () => {

@@ -5,6 +5,7 @@ import type {
   BoardTaskCard,
   BoardView,
   SetBoardFilterCommand,
+  TaskReadinessBlocker,
 } from '@mesh/v2-contracts';
 
 import type { PlanningConnection } from './PlanningPane';
@@ -39,9 +40,7 @@ function selectionFrom(board: BoardView | undefined): BoardFilterSelection {
   };
 }
 
-function readinessReason(card: BoardTaskCard) {
-  if (card.readiness.state === 'actionable') return 'Actionable';
-  const blocker = card.readiness.blockers[0];
+function readinessReason(card: BoardTaskCard, blocker: TaskReadinessBlocker) {
   switch (blocker.kind) {
     case 'dependency_incomplete': {
       const dependency = card.dependencies.find(
@@ -63,9 +62,13 @@ function readinessReason(card: BoardTaskCard) {
 }
 
 function TaskDetails({ card }: { card: BoardTaskCard }) {
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => headingRef.current?.focus(), []);
   return (
-    <div className="planning-board-details">
-      <h4>Task details</h4>
+    <section className="planning-board-details" aria-label="Task details">
+      <h4 ref={headingRef} tabIndex={-1}>
+        Task details
+      </h4>
       <p>Acceptance: {card.detail.acceptanceCriteria.join(' · ')}</p>
       <p>Verification: {card.detail.verificationCriteria.join(' · ')}</p>
       <p>Owned surfaces: {card.detail.ownedSurfaces.join(' · ') || 'None'}</p>
@@ -95,8 +98,17 @@ function TaskDetails({ card }: { card: BoardTaskCard }) {
           ))}
         </ul>
       )}
-    </div>
+    </section>
   );
+}
+
+function optionLabel(option: {
+  label: string;
+  matchingTaskCount: number;
+  historical?: boolean;
+}) {
+  const count = option.matchingTaskCount;
+  return `${option.label} · ${option.historical ? 'historical, ' : ''}${count} ${count === 1 ? 'task' : 'tasks'}`;
 }
 
 export function BoardPane({
@@ -192,14 +204,18 @@ export function BoardPane({
   return (
     <section className="planning-board-pane" aria-labelledby={headingId}>
       <h2 id={headingId}>Board</h2>
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? (
+        <p role="alert" aria-live="assertive">
+          {error}
+        </p>
+      ) : null}
       {connection.status === 'disconnected' || connection.status === 'stale' ? (
         <p role="status">{connection.message}</p>
       ) : null}
       {submitting ? <p role="status">Saving Board filters.</p> : null}
       {board?.stale ? <p role="status">Approved plan is stale.</p> : null}
       {board ? (
-        <p>
+        <p role="status" aria-live="polite">
           Showing {board.matchedTaskCount} of {board.totalTaskCount} tasks ·
           plan {board.deliveryPlanRevision ?? 'not approved'}
         </p>
@@ -210,11 +226,24 @@ export function BoardPane({
           className="planning-board-chips"
         >
           <h3>Applied filters</h3>
-          {facetGroups.flatMap(([, , options]) =>
+          {facetGroups.flatMap(([, key, options]) =>
             options
               .filter(({ selected }) => selected)
               .map((option) => (
-                <span key={`${option.value}`}>{option.label}</span>
+                <div key={`${option.value}`}>
+                  <span>{optionLabel(option)}</span>
+                  {'historical' in option && option.historical ? (
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      onClick={() =>
+                        toggle(key, option.value, optionOrder[key])
+                      }
+                    >
+                      Clear {option.label} filter
+                    </button>
+                  ) : null}
+                </div>
               )),
           )}
           {Object.values(selectionFrom(board)).every(
@@ -242,9 +271,7 @@ export function BoardPane({
             <fieldset key={key} disabled={disabled}>
               <legend>{legend}</legend>
               {options.map((option) => {
-                const historical = 'historical' in option && option.historical;
-                const count = option.matchingTaskCount;
-                const label = `${option.label} · ${historical ? 'historical, ' : ''}${count} ${count === 1 ? 'task' : 'tasks'}`;
+                const label = optionLabel(option);
                 return (
                   <div key={`${option.value}`}>
                     <label>
@@ -260,17 +287,6 @@ export function BoardPane({
                       />
                       {label}
                     </label>
-                    {historical && option.selected ? (
-                      <button
-                        type="button"
-                        disabled={disabled}
-                        onClick={() =>
-                          toggle(key, option.value, optionOrder[key])
-                        }
-                      >
-                        Clear {option.label} filter
-                      </button>
-                    ) : null}
                   </div>
                 );
               })}
@@ -301,7 +317,34 @@ export function BoardPane({
                   {card.lifecycle} · {card.priority} ·{' '}
                   {card.labels.join(' · ') || 'No labels'}
                 </p>
-                <p>{readinessReason(card)}</p>
+                {card.readiness.state === 'actionable' ? (
+                  <p>Actionable</p>
+                ) : (
+                  <ul aria-label={`Readiness for ${card.title}`}>
+                    {card.readiness.blockers.map((blocker) => (
+                      <li
+                        key={
+                          blocker.kind === 'dependency_incomplete'
+                            ? blocker.dependencyId
+                            : blocker.kind
+                        }
+                      >
+                        {readinessReason(card, blocker)}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <p>
+                  Requirements:{' '}
+                  {card.detail.requirementTraces.length === 0
+                    ? 'None'
+                    : card.detail.requirementTraces
+                        .map(
+                          ({ title, recordRevision }) =>
+                            `${title} · revision ${recordRevision}`,
+                        )
+                        .join(' · ')}
+                </p>
                 {card.dependencies.length ? (
                   <ul aria-label={`Dependencies for ${card.title}`}>
                     {card.dependencies.map((dependency) => (

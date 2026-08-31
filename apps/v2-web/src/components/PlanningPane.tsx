@@ -589,8 +589,6 @@ export function PlanningPane({
   );
 }
 
-type DeliveryPlanBase = Pick<ApprovedDeliveryPlan, 'plan'>;
-
 function proposalMemberName(
   member:
     | DeliveryPlanProposal['proposedPlan']['milestones'][number]
@@ -606,15 +604,80 @@ function proposalRefName(ref: ProposedTaskRef) {
 
 function DeliveryProposalCard({
   proposal,
+  proposals,
+  deliveryPlan,
+  headingRef,
 }: {
   proposal: DeliveryPlanProposal;
+  proposals: readonly DeliveryPlanProposal[];
+  deliveryPlan: ApprovedDeliveryPlan | null;
+  headingRef?: (node: HTMLHeadingElement | null) => void;
 }) {
+  const milestones = proposal.proposedPlan.milestones.map((member) => {
+    const approved =
+      member.operation === 'reuse'
+        ? deliveryPlan?.milestones.find(
+            ({ id, revision }) =>
+              id === member.milestoneId && revision === member.expectedRevision,
+          )
+        : undefined;
+    const content = member.operation === 'reuse' ? approved : member.content;
+    return {
+      member,
+      identity: proposalMemberName(member),
+      title:
+        content?.title ??
+        (member.operation === 'reuse' ? member.milestoneId : 'Milestone'),
+      content,
+    };
+  });
+  const tasks = proposal.proposedPlan.tasks.map((member) => {
+    const approved =
+      member.operation === 'reuse'
+        ? deliveryPlan?.taskContracts.find(
+            ({ id, contractRevision }) =>
+              id === member.taskId &&
+              contractRevision === member.expectedContractRevision,
+          )
+        : undefined;
+    const content = member.operation === 'reuse' ? approved : member.content;
+    const milestoneIdentity =
+      member.operation === 'reuse'
+        ? approved?.milestoneId
+        : member.content.milestone.kind === 'proposal'
+          ? member.content.milestone.key
+          : member.content.milestone.milestoneId;
+    return {
+      member,
+      identity: proposalMemberName(member),
+      milestoneIdentity,
+      title:
+        content?.title ??
+        (member.operation === 'reuse' ? member.taskId : 'Task'),
+      content,
+    };
+  });
+  let superseded: string | undefined;
+  if (proposal.decision.kind === 'superseded') {
+    if (proposal.decision.reason === 'replacement_accepted') {
+      const replacementId = proposal.decision.supersededByProposalId;
+      superseded = `Superseded by proposal revision ${
+        proposals.find(({ id }) => id === replacementId)?.revision ?? 'unknown'
+      }.`;
+    } else {
+      superseded = 'Superseded because this planning cycle was abandoned.';
+    }
+  }
   return (
     <article
       className="planning-board-card"
       aria-labelledby={`delivery-proposal-${proposal.id}`}
     >
-      <h3 id={`delivery-proposal-${proposal.id}`}>
+      <h3
+        id={`delivery-proposal-${proposal.id}`}
+        ref={headingRef}
+        tabIndex={-1}
+      >
         Proposal revision {proposal.revision} · {humanize(proposal.lifecycle)}
       </h3>
       <p>{proposal.proposedPlan.summary}</p>
@@ -630,62 +693,71 @@ function DeliveryProposalCard({
       >
         <h4>Milestones</h4>
         <ol>
-          {proposal.proposedPlan.milestones.map((milestone) => (
-            <li key={proposalMemberName(milestone)}>
-              <strong>
-                {milestone.operation === 'reuse'
-                  ? milestone.milestoneId
-                  : milestone.content.title}
-              </strong>{' '}
-              · {humanize(milestone.operation)}
-              {milestone.operation === 'reuse'
-                ? ` · expected revision ${milestone.expectedRevision}`
-                : milestone.operation === 'revise'
-                  ? ` · expected revision ${milestone.expectedRevision} · ${milestone.lifecycle}`
+          {milestones.map(({ member, identity, title, content }) => (
+            <li key={identity} aria-label={`${title} milestone`}>
+              <strong>{title}</strong> · {humanize(member.operation)}
+              {member.operation === 'reuse'
+                ? ` · expected revision ${member.expectedRevision}`
+                : member.operation === 'revise'
+                  ? ` · expected revision ${member.expectedRevision} · ${member.lifecycle}`
                   : null}
-              {milestone.operation !== 'reuse' ? (
+              {content ? (
                 <>
-                  <p>{milestone.content.outcome}</p>
-                  <p>Stop condition: {milestone.content.stopCondition}</p>
-                  <p>Exclusions: {list(milestone.content.exclusions)}</p>
+                  <p>{content.outcome}</p>
+                  <p>Stop condition: {content.stopCondition}</p>
+                  <p>Exclusions: {list(content.exclusions)}</p>
                 </>
-              ) : null}
-            </li>
-          ))}
-        </ol>
-      </section>
-      <section aria-label={`Tasks in proposal revision ${proposal.revision}`}>
-        <h4>Tasks</h4>
-        <ol>
-          {proposal.proposedPlan.tasks.map((task) => (
-            <li key={proposalMemberName(task)}>
-              <strong>
-                {task.operation === 'reuse' ? task.taskId : task.content.title}
-              </strong>{' '}
-              · {humanize(task.operation)}
-              {task.operation === 'reuse'
-                ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision}`
-                : task.operation === 'revise'
-                  ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision} · ${task.lifecycle}`
-                  : null}
-              {task.operation !== 'reuse' ? (
-                <>
-                  <p>{task.content.outcome}</p>
-                  <p>Acceptance: {list(task.content.acceptanceCriteria)}</p>
-                  <p>Verification: {list(task.content.verificationCriteria)}</p>
-                  <p>
-                    Priority {task.content.priority} · labels{' '}
-                    {list(task.content.labels)}
-                  </p>
-                  <p>Owned surfaces: {list(task.content.ownedSurfaces)}</p>
-                  <p>
-                    Prohibited surfaces: {list(task.content.prohibitedSurfaces)}
-                  </p>
-                  <p>
-                    Expected artifacts: {list(task.content.expectedArtifacts)}
-                  </p>
-                </>
-              ) : null}
+              ) : (
+                <p>Approved milestone revision unavailable.</p>
+              )}
+              <h5>Tasks</h5>
+              <ol>
+                {tasks
+                  .filter((task) => task.milestoneIdentity === identity)
+                  .map(
+                    ({
+                      member: task,
+                      identity: taskIdentity,
+                      title,
+                      content,
+                    }) => (
+                      <li key={taskIdentity}>
+                        <strong>{title}</strong> · {humanize(task.operation)}
+                        {task.operation === 'reuse'
+                          ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision}`
+                          : task.operation === 'revise'
+                            ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision} · ${task.lifecycle}`
+                            : null}
+                        {content ? (
+                          <>
+                            <p>{content.outcome}</p>
+                            <p>
+                              Acceptance: {list(content.acceptanceCriteria)}
+                            </p>
+                            <p>
+                              Verification: {list(content.verificationCriteria)}
+                            </p>
+                            <p>
+                              Priority {content.priority} · labels{' '}
+                              {list(content.labels)}
+                            </p>
+                            <p>Owned surfaces: {list(content.ownedSurfaces)}</p>
+                            <p>
+                              Prohibited surfaces:{' '}
+                              {list(content.prohibitedSurfaces)}
+                            </p>
+                            <p>
+                              Expected artifacts:{' '}
+                              {list(content.expectedArtifacts)}
+                            </p>
+                          </>
+                        ) : (
+                          <p>Approved task revision unavailable.</p>
+                        )}
+                      </li>
+                    ),
+                  )}
+              </ol>
             </li>
           ))}
         </ol>
@@ -758,6 +830,7 @@ function DeliveryProposalCard({
       {proposal.decision.kind === 'rejected' ? (
         <p>Rejection feedback: {proposal.decision.feedback}</p>
       ) : null}
+      {superseded ? <p>{superseded}</p> : null}
     </article>
   );
 }
@@ -782,7 +855,7 @@ export function DeliveryPlanningPane({
   projectId: string;
   cycle?: DeliveryPlanPlanningCycleView;
   approvedIntentLedger: ApprovedIntentLedger | null;
-  deliveryPlan: DeliveryPlanBase | null;
+  deliveryPlan: ApprovedDeliveryPlan | null;
   planStale: boolean;
   connection: PlanningConnection;
   profiles: readonly WorkerProfileSummary[];
@@ -799,6 +872,9 @@ export function DeliveryPlanningPane({
 }) {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const proposalHeadingRef = useRef<HTMLHeadingElement>(null);
+  const rejectionRef = useRef<HTMLTextAreaElement>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
   const [startOpen, setStartOpen] = useState(false);
   const [draft, setDraft] = useState('');
   const [profileId, setProfileId] = useState(profiles[0]?.profileId ?? '');
@@ -806,6 +882,10 @@ export function DeliveryPlanningPane({
   const [rejecting, setRejecting] = useState(false);
   const [feedback, setFeedback] = useState('');
   const lifecycle = cycle?.cycle.lifecycle;
+  const terminal =
+    lifecycle !== undefined &&
+    ['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
+  const continuingCycle = cycle && !terminal ? cycle : undefined;
   const proposal = cycle?.deliveryPlanProposals.at(-1);
   const [selectedProposalRevision, setSelectedProposalRevision] = useState(
     proposal?.revision ?? 0,
@@ -829,7 +909,7 @@ export function DeliveryPlanningPane({
     approvedIntentLedger !== null &&
     approvedRequirements.length > 0 &&
     selectedProfile !== undefined &&
-    !cycle;
+    !continuingCycle;
   const commandDisabled = !connected || submitting;
   const awaitingApproval =
     lifecycle === 'awaiting_approval' &&
@@ -847,8 +927,12 @@ export function DeliveryPlanningPane({
     !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
 
   useEffect(() => {
-    if (error) headingRef.current?.focus();
-  }, [error]);
+    if (!error) return;
+    if (rejecting) rejectionRef.current?.focus();
+    else if (requestingRevision || startOpen || canContinue)
+      messageRef.current?.focus();
+    else proposalHeadingRef.current?.focus();
+  }, [canContinue, error, rejecting, requestingRevision, startOpen]);
   useEffect(() => {
     if (!profiles.some(({ profileId: id }) => id === profileId))
       setProfileId(profiles[0]?.profileId ?? '');
@@ -871,12 +955,12 @@ export function DeliveryPlanningPane({
     event.preventDefault();
     const message = draft.trim();
     if (!message || commandDisabled) return;
-    if (cycle) {
+    if (continuingCycle) {
       onSubmit({
         type: 'planning_cycle.submit_plan_turn',
         projectId,
-        planningCycleId: cycle.cycle.id,
-        expectedCycleRevision: cycle.cycle.revision,
+        planningCycleId: continuingCycle.cycle.id,
+        expectedCycleRevision: continuingCycle.cycle.revision,
         message,
       });
       return;
@@ -953,7 +1037,11 @@ export function DeliveryPlanningPane({
       <h2 id={headingId} ref={headingRef} tabIndex={-1}>
         Planning
       </h2>
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? (
+        <p role="alert" aria-live="assertive">
+          {error}
+        </p>
+      ) : null}
       {connection.status === 'loading' ? (
         <p role="status">Planning is loading.</p>
       ) : null}
@@ -993,16 +1081,16 @@ export function DeliveryPlanningPane({
           )}
         </section>
       ) : null}
-      {!cycle &&
+      {!continuingCycle &&
       (!approvedIntentLedger || approvedRequirements.length === 0) ? (
         <p>
           Approve at least one current requirement before planning delivery.
         </p>
       ) : null}
-      {!cycle && profiles.length === 0 ? (
+      {!continuingCycle && profiles.length === 0 ? (
         <p>No compatible PM profiles are available.</p>
       ) : null}
-      {!cycle ? (
+      {!continuingCycle ? (
         <button type="button" disabled={!canStart} onClick={openStart}>
           {startLabel}
         </button>
@@ -1057,7 +1145,18 @@ export function DeliveryPlanningPane({
             ))}
           </select>
           {selectedProposal ? (
-            <DeliveryProposalCard proposal={selectedProposal} />
+            <DeliveryProposalCard
+              proposal={selectedProposal}
+              proposals={cycle.deliveryPlanProposals}
+              deliveryPlan={deliveryPlan}
+              headingRef={
+                selectedProposal.id === proposal?.id
+                  ? (node) => {
+                      proposalHeadingRef.current = node;
+                    }
+                  : undefined
+              }
+            />
           ) : null}
         </section>
       ) : null}
@@ -1094,6 +1193,7 @@ export function DeliveryPlanningPane({
           <label htmlFor="plan-rejection-feedback">Rejection feedback</label>
           <textarea
             id="plan-rejection-feedback"
+            ref={rejectionRef}
             value={feedback}
             disabled={commandDisabled}
             onChange={(event) => setFeedback(event.target.value)}
@@ -1109,7 +1209,7 @@ export function DeliveryPlanningPane({
       ) : null}
       {startOpen || canContinue ? (
         <form aria-label="Send a message to project manager" onSubmit={submit}>
-          {!cycle ? (
+          {!continuingCycle ? (
             <fieldset disabled={commandDisabled}>
               <legend>Project manager profile</legend>
               <select
@@ -1130,6 +1230,7 @@ export function DeliveryPlanningPane({
           </label>
           <textarea
             id="delivery-plan-message"
+            ref={messageRef}
             value={draft}
             disabled={commandDisabled}
             onChange={(event) => setDraft(event.target.value)}
