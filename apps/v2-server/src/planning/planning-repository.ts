@@ -3,33 +3,45 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import {
+  approvedDeliveryPlanMaterializationSchema,
+  approvedDeliveryPlanSchema,
   approvedIntentLedgerSchema,
+  boardFilterSchema,
+  deliveryPlanProposalSchema,
   ledgerRecordIdSchema,
   ledgerRecordContentSchema,
   ledgerRecordRevisionSchema,
   ledgerRelationshipSchema,
   ledgerRevisionSchema,
   planningCycleSchema,
+  planningCyclePurposeStateSchema,
   planningCycleViewSchema,
   planningProposalSchema,
   planningQuestionSchema,
   planningTurnSchema,
   projectIntentContentSchema,
   projectIntentRevisionSchema,
+  taskRevisionSchema,
+  type ApprovedDeliveryPlan,
   type ApprovedIntentLedger,
+  type BoardFilter,
+  type DeliveryPlanProposal,
   type LedgerRecordContent,
   type LedgerRecordRevision,
   type LedgerRelationship,
   type PlanningCycle,
+  type PlanningCyclePurposeState,
   type PlanningCycleView,
   type PlanningProposal,
   type PlanningQuestion,
   type PlanningTurn,
   type ProjectIntentRevision,
+  type TaskRevision,
 } from '@mesh/v2-contracts';
 
 import type { V2Database } from '../db/database.js';
 import { canonicalJson } from '../storage/canonical-json.js';
+import { projectBoard } from './planning-board.js';
 
 type CycleRow = {
   id: string;
@@ -123,6 +135,56 @@ type ProvenanceRow = {
   turn_id: string;
   rationale: string;
 };
+
+type CyclePurposeRow = {
+  planning_cycle_id: string;
+  purpose: PlanningCyclePurposeState['purpose'];
+  base_delivery_plan_id: string | null;
+  base_delivery_plan_revision: number | null;
+};
+
+type DeliveryPlanProposalRow = {
+  id: string;
+  project_id: string;
+  planning_cycle_id: string;
+  revision: number;
+  proposal_json: string;
+  project_intent_id: string;
+  project_intent_revision: number;
+  ledger_id: string;
+  ledger_revision: number;
+  base_delivery_plan_id: string | null;
+  base_delivery_plan_revision: number | null;
+  created_by_turn_id: string;
+  created_by_execution_id: string;
+  created_at: string;
+};
+
+type ProposalDecisionRow = {
+  kind: 'superseded' | 'approved' | 'rejected';
+  reason: 'replacement_accepted' | 'cycle_abandoned' | null;
+  successor_proposal_id: string | null;
+  decided_by: 'human' | null;
+  feedback: string | null;
+  decided_at: string;
+};
+
+type DeliveryPlanRow = {
+  delivery_plan_id: string;
+  project_id: string;
+  revision: number;
+  project_intent_id: string;
+  project_intent_revision: number;
+  ledger_id: string;
+  ledger_revision: number;
+  base_delivery_plan_revision: number | null;
+  proposal_id: string;
+  plan_json: string;
+  approved_by: 'human';
+  approved_at: string;
+};
+type BoardFilterRow = { filter_json: string };
+type TaskRevisionRow = { revision_json: string };
 
 export type PmOutputReceipt = Readonly<{
   executionId: string;
@@ -254,10 +316,12 @@ const assertUniqueProvenance = (
   }
 };
 
-export type PlanningSnapshot = Readonly<{
+export type PlanningBoardSnapshot = Readonly<{
   planningCycles: readonly PlanningCycleView[];
   planningHistoryTruncated: boolean;
   intentLedger: ApprovedIntentLedger | null;
+  deliveryPlan: ApprovedDeliveryPlan | null;
+  board: ReturnType<typeof projectBoard>;
 }>;
 
 export class PlanningRepository {
@@ -288,9 +352,29 @@ export class PlanningRepository {
     return row ? toCycle(row) : undefined;
   }
 
+  cyclePurpose(id: string): PlanningCyclePurposeState | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT planning_cycle_id, purpose, base_delivery_plan_id,
+          base_delivery_plan_revision
+         FROM planning_cycle_purposes WHERE planning_cycle_id = ?`,
+      )
+      .get(id) as CyclePurposeRow | undefined;
+    return row
+      ? planningCyclePurposeStateSchema.parse({
+          planningCycleId: row.planning_cycle_id,
+          purpose: row.purpose,
+          baseDeliveryPlanId: row.base_delivery_plan_id,
+          baseDeliveryPlanRevision: row.base_delivery_plan_revision,
+        })
+      : undefined;
+  }
+
   cycleView(id: string): PlanningCycleView | undefined {
     const cycle = this.cycle(id);
     if (!cycle) return undefined;
+    const purpose = this.cyclePurpose(id);
+    if (!purpose) throw new Error('Stored planning cycle purpose is missing');
     const turns = (
       this.database
         .prepare(
@@ -306,22 +390,33 @@ export class PlanningRepository {
         )
         .all(id) as QuestionRow[]
     ).map(toQuestion);
-    const proposals = (
-      this.database
-        .prepare(
-          'SELECT * FROM planning_proposals WHERE planning_cycle_id = ? ORDER BY revision',
-        )
-        .all(id) as ProposalRow[]
-    ).map(toProposal);
+    const proposals =
+      purpose.purpose === 'intent'
+        ? (
+            this.database
+              .prepare(
+                'SELECT * FROM planning_proposals WHERE planning_cycle_id = ? ORDER BY revision',
+              )
+              .all(id) as ProposalRow[]
+          ).map(toProposal)
+        : [];
+    const deliveryPlanProposals =
+      purpose.purpose === 'delivery_plan' ? this.deliveryPlanProposals(id) : [];
     return planningCycleViewSchema.parse({
       cycle,
+      purpose: {
+        kind: purpose.purpose,
+        baseDeliveryPlanId: purpose.baseDeliveryPlanId,
+        baseDeliveryPlanRevision: purpose.baseDeliveryPlanRevision,
+      },
       turns,
       questions,
       proposals,
+      deliveryPlanProposals,
     });
   }
 
-  planningSnapshot(projectId: string): PlanningSnapshot {
+  planningSnapshot(projectId: string): PlanningBoardSnapshot {
     const rows = this.database
       .prepare(
         `SELECT * FROM planning_cycles
@@ -340,10 +435,22 @@ export class PlanningRepository {
         )
         .get(projectId) as { count: number }
     ).count;
+    const intentLedger = this.approvedIntentLedger(projectId) ?? null;
+    const deliveryPlan = this.approvedDeliveryPlan(projectId) ?? null;
+    const filter = this.boardFilter(projectId) ?? null;
     return {
       planningCycles: rows.map((row) => this.requireCycleView(row.id)),
       planningHistoryTruncated: total > rows.length,
-      intentLedger: this.approvedIntentLedger(projectId) ?? null,
+      intentLedger,
+      deliveryPlan,
+      board: projectBoard({
+        projectId,
+        intentLedger,
+        deliveryPlan,
+        currentTaskRevisions:
+          deliveryPlan === null ? [] : this.currentTaskRevisions(deliveryPlan),
+        filter,
+      }),
     };
   }
 
@@ -376,7 +483,10 @@ export class PlanningRepository {
     ).map(toTurn);
   }
 
-  insertCycleInTransaction(input: PlanningCycle): PlanningCycle {
+  insertCycleInTransaction(
+    input: PlanningCycle,
+    purposeInput?: PlanningCyclePurposeState,
+  ): PlanningCycle {
     this.assertTransaction();
     const cycle = planningCycleSchema.parse(input);
     this.database
@@ -394,6 +504,34 @@ export class PlanningRepository {
         )`,
       )
       .run(cycle);
+    const purpose = planningCyclePurposeStateSchema.parse(
+      purposeInput ?? {
+        planningCycleId: cycle.id,
+        purpose: 'intent',
+        baseDeliveryPlanId: null,
+        baseDeliveryPlanRevision: null,
+      },
+    );
+    if (purpose.planningCycleId !== cycle.id) {
+      throw new Error('Planning cycle purpose does not match its cycle');
+    }
+    const purposeChanged = this.database
+      .prepare(
+        `UPDATE planning_cycle_purposes SET
+          purpose = ?, base_delivery_plan_id = ?,
+          base_delivery_plan_revision = ?
+         WHERE planning_cycle_id = ? AND project_id = ?`,
+      )
+      .run(
+        purpose.purpose,
+        purpose.baseDeliveryPlanId,
+        purpose.baseDeliveryPlanRevision,
+        cycle.id,
+        cycle.projectId,
+      );
+    if (purposeChanged.changes !== 1) {
+      throw new Error('Planning cycle purpose was not created');
+    }
     return cycle;
   }
 
@@ -839,6 +977,814 @@ export class PlanningRepository {
       ),
     );
     return approved;
+  }
+
+  insertDeliveryPlanProposalInTransaction(
+    input: DeliveryPlanProposal,
+  ): DeliveryPlanProposal {
+    this.assertTransaction();
+    const proposal = deliveryPlanProposalSchema.parse(input);
+    if (proposal.decision.kind !== 'pending') {
+      throw new PlanningProposalInvalidError(
+        'New delivery plan proposals must be pending',
+      );
+    }
+    const purpose = this.cyclePurpose(proposal.planningCycleId);
+    if (
+      purpose?.purpose !== 'delivery_plan' ||
+      purpose.baseDeliveryPlanId !== proposal.base.deliveryPlan.id ||
+      purpose.baseDeliveryPlanRevision !== proposal.base.deliveryPlan.revision
+    ) {
+      throw new PlanningProposalInvalidError(
+        'Delivery plan proposal base does not match its cycle',
+      );
+    }
+    this.database
+      .prepare(
+        `INSERT INTO delivery_plan_proposals (
+          id, project_id, planning_cycle_id, revision, proposal_json,
+          project_intent_id, project_intent_revision, ledger_id,
+          ledger_revision, base_delivery_plan_id, base_delivery_plan_revision,
+          created_by_turn_id, created_by_execution_id, created_at
+        ) VALUES (
+          @id, @projectId, @planningCycleId, @revision, @proposalJson,
+          @projectIntentId, @projectIntentRevision, @ledgerId,
+          @ledgerRevision, @baseDeliveryPlanId, @baseDeliveryPlanRevision,
+          @createdByTurnId, @createdByExecutionId, @createdAt
+        )`,
+      )
+      .run({
+        ...proposal,
+        proposalJson: canonicalJson(proposal),
+        projectIntentId: proposal.base.projectIntentId,
+        projectIntentRevision: proposal.base.projectIntentRevision,
+        ledgerId: proposal.base.ledgerId,
+        ledgerRevision: proposal.base.ledgerRevision,
+        baseDeliveryPlanId: proposal.base.deliveryPlan.id,
+        baseDeliveryPlanRevision: proposal.base.deliveryPlan.revision,
+      });
+    const insert = (
+      table: string,
+      idColumn: string,
+      reservations: readonly { key: string; id: string }[],
+    ) => {
+      const statement = this.database.prepare(
+        `INSERT INTO ${table} (proposal_id, proposal_key, ${idColumn})
+         VALUES (?, ?, ?)`,
+      );
+      for (const reservation of reservations) {
+        statement.run(proposal.id, reservation.key, reservation.id);
+      }
+    };
+    insert(
+      'delivery_plan_proposal_milestone_reservations',
+      'milestone_id',
+      proposal.reservations.milestones,
+    );
+    insert(
+      'delivery_plan_proposal_task_reservations',
+      'task_id',
+      proposal.reservations.tasks,
+    );
+    insert(
+      'delivery_plan_proposal_dependency_reservations',
+      'dependency_id',
+      proposal.reservations.dependencies,
+    );
+    return proposal;
+  }
+
+  deliveryPlanProposal(id: string): DeliveryPlanProposal | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM delivery_plan_proposals WHERE id = ?')
+      .get(id) as DeliveryPlanProposalRow | undefined;
+    if (!row) return undefined;
+    const stored = deliveryPlanProposalSchema.parse(
+      JSON.parse(row.proposal_json),
+    );
+    if (
+      canonicalJson(stored) !== row.proposal_json ||
+      row.id !== stored.id ||
+      row.project_id !== stored.projectId ||
+      row.planning_cycle_id !== stored.planningCycleId ||
+      row.revision !== stored.revision ||
+      row.project_intent_id !== stored.base.projectIntentId ||
+      row.project_intent_revision !== stored.base.projectIntentRevision ||
+      row.ledger_id !== stored.base.ledgerId ||
+      row.ledger_revision !== stored.base.ledgerRevision ||
+      row.base_delivery_plan_id !== stored.base.deliveryPlan.id ||
+      row.base_delivery_plan_revision !== stored.base.deliveryPlan.revision ||
+      row.created_by_turn_id !== stored.createdByTurnId ||
+      row.created_by_execution_id !== stored.createdByExecutionId ||
+      row.created_at !== stored.createdAt ||
+      canonicalJson(this.deliveryPlanProposalReservations(id)) !==
+        canonicalJson(stored.reservations)
+    ) {
+      throw new Error('Stored delivery plan proposal is corrupt');
+    }
+    const decision = this.database
+      .prepare(
+        'SELECT * FROM delivery_plan_proposal_decisions WHERE proposal_id = ?',
+      )
+      .get(id) as ProposalDecisionRow | undefined;
+    if (!decision) return stored;
+    const projectedDecision =
+      decision.kind === 'superseded'
+        ? {
+            kind: 'superseded' as const,
+            reason: decision.reason,
+            supersededByProposalId: decision.successor_proposal_id,
+            decidedAt: decision.decided_at,
+          }
+        : decision.kind === 'approved'
+          ? {
+              kind: 'approved' as const,
+              decidedBy: 'human' as const,
+              decidedAt: decision.decided_at,
+            }
+          : {
+              kind: 'rejected' as const,
+              decidedBy: 'human' as const,
+              feedback: decision.feedback,
+              decidedAt: decision.decided_at,
+            };
+    return deliveryPlanProposalSchema.parse({
+      ...stored,
+      lifecycle: decision.kind,
+      decision: projectedDecision,
+    });
+  }
+
+  deliveryPlanProposals(cycleId: string): readonly DeliveryPlanProposal[] {
+    const rows = this.database
+      .prepare(
+        `SELECT id FROM delivery_plan_proposals
+         WHERE planning_cycle_id = ? ORDER BY revision`,
+      )
+      .all(cycleId) as { id: string }[];
+    return rows.map(({ id }) => {
+      const proposal = this.deliveryPlanProposal(id);
+      if (!proposal)
+        throw new Error('Stored delivery plan proposal is missing');
+      return proposal;
+    });
+  }
+
+  deliveryPlanProposalReservations(proposalId: string) {
+    const read = (table: string, idColumn: string) =>
+      this.database
+        .prepare(
+          `SELECT proposal_key AS key, ${idColumn} AS id
+           FROM ${table} WHERE proposal_id = ? ORDER BY proposal_key`,
+        )
+        .all(proposalId) as { key: string; id: string }[];
+    return {
+      milestones: read(
+        'delivery_plan_proposal_milestone_reservations',
+        'milestone_id',
+      ),
+      tasks: read('delivery_plan_proposal_task_reservations', 'task_id'),
+      dependencies: read(
+        'delivery_plan_proposal_dependency_reservations',
+        'dependency_id',
+      ),
+    };
+  }
+
+  settleDeliveryPlanProposalInTransaction(
+    proposalId: string,
+    decision: Exclude<DeliveryPlanProposal['decision'], { kind: 'pending' }>,
+  ): DeliveryPlanProposal {
+    this.assertTransaction();
+    const proposal = this.deliveryPlanProposal(proposalId);
+    if (!proposal || proposal.decision.kind !== 'pending') {
+      throw new PlanningProposalInvalidError(
+        'Pending delivery plan proposal was not found',
+      );
+    }
+    if (
+      decision.kind === 'superseded' &&
+      decision.reason === 'replacement_accepted'
+    ) {
+      const successor = this.deliveryPlanProposal(
+        decision.supersededByProposalId,
+      );
+      if (
+        !successor ||
+        successor.planningCycleId !== proposal.planningCycleId ||
+        successor.revision !== proposal.revision + 1
+      ) {
+        throw new PlanningProposalInvalidError(
+          'Replacement proposal must be the next same-cycle revision',
+        );
+      }
+    }
+    if (
+      decision.kind === 'superseded' &&
+      decision.reason === 'cycle_abandoned'
+    ) {
+      const cycle = this.cycle(proposal.planningCycleId);
+      if (
+        cycle?.lifecycle !== 'abandoned' ||
+        cycle.endedAt !== decision.decidedAt
+      ) {
+        throw new PlanningProposalInvalidError(
+          'Cycle-abandoned decision requires the matching abandoned cycle',
+        );
+      }
+    }
+    this.database
+      .prepare(
+        `INSERT INTO delivery_plan_proposal_decisions (
+          proposal_id, planning_cycle_id, proposal_revision, project_id,
+          kind, reason, successor_proposal_id, decided_by, feedback, decided_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        proposal.id,
+        proposal.planningCycleId,
+        proposal.revision,
+        proposal.projectId,
+        decision.kind,
+        decision.kind === 'superseded' ? decision.reason : null,
+        decision.kind === 'superseded' ? decision.supersededByProposalId : null,
+        decision.kind === 'approved' || decision.kind === 'rejected'
+          ? 'human'
+          : null,
+        decision.kind === 'rejected' ? decision.feedback : null,
+        decision.decidedAt,
+      );
+    const settled = this.deliveryPlanProposal(proposalId);
+    if (!settled) throw new Error('Settled delivery plan proposal is missing');
+    return settled;
+  }
+
+  applyApprovedDeliveryPlanInTransaction(
+    proposalInput: DeliveryPlanProposal,
+    deliveryPlanInput: ApprovedDeliveryPlan,
+  ): ApprovedDeliveryPlan {
+    this.assertTransaction();
+    const proposal = this.deliveryPlanProposal(proposalInput.id);
+    if (!proposal || proposal.decision.kind !== 'pending') {
+      throw new PlanningProposalInvalidError(
+        'Pending delivery plan proposal was not found',
+      );
+    }
+    const current = this.approvedDeliveryPlan(proposal.projectId) ?? null;
+    const deliveryPlan = approvedDeliveryPlanSchema.parse(deliveryPlanInput);
+    approvedDeliveryPlanMaterializationSchema.parse({
+      proposal,
+      baseDeliveryPlan: current,
+      deliveryPlan,
+    });
+    const currentIntent = this.approvedIntentLedger(proposal.projectId);
+    if (
+      !currentIntent ||
+      currentIntent.projectIntent.id !== proposal.base.projectIntentId ||
+      currentIntent.projectIntent.revision !==
+        proposal.base.projectIntentRevision ||
+      currentIntent.ledger.id !== proposal.base.ledgerId ||
+      currentIntent.ledger.revision !== proposal.base.ledgerRevision
+    ) {
+      throw new PlanningProposalInvalidError(
+        'Delivery plan canonical base conflict',
+      );
+    }
+    const requirements = new Map(
+      currentIntent.records.flatMap((record) =>
+        record.content.type === 'requirement' &&
+        record.content.status === 'approved'
+          ? [[record.recordId, record.revision] as const]
+          : [],
+      ),
+    );
+    if (
+      deliveryPlan.traces.some(
+        (trace) =>
+          requirements.get(trace.requirement.recordId) !==
+          trace.requirement.recordRevision,
+      )
+    ) {
+      throw new PlanningProposalInvalidError(
+        'Delivery plan trace does not target the current approved ledger',
+      );
+    }
+
+    if (current === null) {
+      this.database
+        .prepare(
+          `INSERT INTO delivery_plans (
+            id, project_id, created_proposal_id, created_at
+          ) VALUES (?, ?, ?, ?)`,
+        )
+        .run(
+          deliveryPlan.plan.id,
+          deliveryPlan.plan.projectId,
+          proposal.id,
+          deliveryPlan.plan.approvedAt,
+        );
+    }
+    this.database
+      .prepare(
+        `INSERT INTO delivery_plan_revisions (
+          delivery_plan_id, project_id, revision, project_intent_id,
+          project_intent_revision, ledger_id, ledger_revision,
+          base_delivery_plan_revision, proposal_id, plan_json,
+          approved_by, approved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        deliveryPlan.plan.id,
+        deliveryPlan.plan.projectId,
+        deliveryPlan.plan.revision,
+        deliveryPlan.plan.projectIntentId,
+        deliveryPlan.plan.projectIntentRevision,
+        deliveryPlan.plan.ledgerId,
+        deliveryPlan.plan.ledgerRevision,
+        deliveryPlan.plan.baseDeliveryPlanRevision,
+        proposal.id,
+        canonicalJson(deliveryPlan),
+        deliveryPlan.plan.approvedBy,
+        deliveryPlan.plan.approvedAt,
+      );
+
+    const ensureIdentity = (
+      table: 'milestones' | 'tasks',
+      id: string,
+      projectId: string,
+      createdAt: string,
+    ) => {
+      const existing = this.database
+        .prepare(`SELECT project_id FROM ${table} WHERE id = ?`)
+        .get(id) as { project_id: string } | undefined;
+      if (existing && existing.project_id !== projectId) {
+        throw new PlanningProposalInvalidError(
+          'Canonical identity crosses projects',
+        );
+      }
+      if (!existing) {
+        this.database
+          .prepare(
+            `INSERT INTO ${table} (
+              id, project_id, created_proposal_id, created_at
+            ) VALUES (?, ?, ?, ?)`,
+          )
+          .run(id, projectId, proposal.id, createdAt);
+      }
+    };
+    const milestoneMember = this.database.prepare(
+      `INSERT INTO delivery_plan_revision_milestones (
+        delivery_plan_id, delivery_plan_revision, project_id,
+        milestone_id, milestone_revision, ordinal
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    for (const [index, milestone] of deliveryPlan.milestones.entries()) {
+      ensureIdentity(
+        'milestones',
+        milestone.id,
+        milestone.projectId,
+        milestone.approvedAt,
+      );
+      if (milestone.proposalId === proposal.id) {
+        this.database
+          .prepare(
+            `INSERT INTO milestone_revisions (
+              milestone_id, project_id, revision, lifecycle, revision_json,
+              proposal_id, delivery_plan_revision, approved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            milestone.id,
+            milestone.projectId,
+            milestone.revision,
+            milestone.lifecycle,
+            canonicalJson(milestone),
+            proposal.id,
+            milestone.deliveryPlanRevision,
+            milestone.approvedAt,
+          );
+      }
+      milestoneMember.run(
+        deliveryPlan.plan.id,
+        deliveryPlan.plan.revision,
+        deliveryPlan.plan.projectId,
+        milestone.id,
+        milestone.revision,
+        index + 1,
+      );
+    }
+    const taskMember = this.database.prepare(
+      `INSERT INTO delivery_plan_revision_tasks (
+        delivery_plan_id, delivery_plan_revision, project_id,
+        task_id, task_contract_revision, ordinal
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    for (const [index, task] of deliveryPlan.taskContracts.entries()) {
+      ensureIdentity('tasks', task.id, task.projectId, task.createdAt);
+      if (
+        task.source.kind === 'plan' &&
+        task.source.proposalId === proposal.id
+      ) {
+        this.insertTaskRevision(task);
+      }
+      taskMember.run(
+        deliveryPlan.plan.id,
+        deliveryPlan.plan.revision,
+        deliveryPlan.plan.projectId,
+        task.id,
+        task.contractRevision,
+        index + 1,
+      );
+    }
+    const dependencyMember = this.database.prepare(
+      `INSERT INTO delivery_plan_revision_dependencies (
+        delivery_plan_id, delivery_plan_revision, project_id,
+        dependency_id, dependency_revision
+      ) VALUES (?, ?, ?, ?, ?)`,
+    );
+    for (const dependency of deliveryPlan.dependencies) {
+      const existing = this.database
+        .prepare('SELECT * FROM task_dependencies WHERE id = ?')
+        .get(dependency.id) as
+        | {
+            project_id: string;
+            prerequisite_task_id: string;
+            dependent_task_id: string;
+          }
+        | undefined;
+      if (!existing) {
+        this.database
+          .prepare(
+            `INSERT INTO task_dependencies (
+              id, project_id, prerequisite_task_id, dependent_task_id,
+              created_proposal_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            dependency.id,
+            dependency.projectId,
+            dependency.prerequisiteTaskId,
+            dependency.dependentTaskId,
+            proposal.id,
+            dependency.approvedAt,
+          );
+      } else if (
+        existing.project_id !== dependency.projectId ||
+        existing.prerequisite_task_id !== dependency.prerequisiteTaskId ||
+        existing.dependent_task_id !== dependency.dependentTaskId
+      ) {
+        throw new PlanningProposalInvalidError(
+          'Dependency identity endpoints cannot change',
+        );
+      }
+      if (dependency.proposalId === proposal.id) {
+        this.database
+          .prepare(
+            `INSERT INTO task_dependency_revisions (
+              dependency_id, project_id, revision, lifecycle, revision_json,
+              proposal_id, delivery_plan_revision, approved_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            dependency.id,
+            dependency.projectId,
+            dependency.revision,
+            dependency.lifecycle,
+            canonicalJson(dependency),
+            proposal.id,
+            dependency.deliveryPlanRevision,
+            dependency.approvedAt,
+          );
+      }
+      dependencyMember.run(
+        deliveryPlan.plan.id,
+        deliveryPlan.plan.revision,
+        deliveryPlan.plan.projectId,
+        dependency.id,
+        dependency.revision,
+      );
+    }
+    const traceInsert = this.database.prepare(
+      `INSERT INTO delivery_plan_revision_traces (
+        delivery_plan_id, delivery_plan_revision, project_id, ordinal, kind,
+        milestone_id, milestone_revision, task_id, task_contract_revision,
+        record_id, record_revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    deliveryPlan.traces.forEach((trace, index) =>
+      traceInsert.run(
+        deliveryPlan.plan.id,
+        deliveryPlan.plan.revision,
+        deliveryPlan.plan.projectId,
+        index + 1,
+        trace.kind,
+        trace.kind === 'milestone_covers' ? trace.milestoneId : null,
+        trace.kind === 'milestone_covers' ? trace.milestoneRevision : null,
+        trace.kind === 'task_satisfies' ? trace.taskId : null,
+        trace.kind === 'task_satisfies' ? trace.taskContractRevision : null,
+        trace.requirement.recordId,
+        trace.requirement.recordRevision,
+      ),
+    );
+    this.settleDeliveryPlanProposalInTransaction(proposal.id, {
+      kind: 'approved',
+      decidedBy: 'human',
+      decidedAt: deliveryPlan.plan.approvedAt,
+    });
+    if (!this.boardFilter(proposal.projectId)) {
+      const defaultFilter = boardFilterSchema.parse({
+        projectId: proposal.projectId,
+        revision: 1,
+        milestoneIds: [],
+        taskLifecycles: ['pending', 'completed'],
+        readiness: [],
+        priorities: [],
+        labels: [],
+        requirementRecordIds: [],
+        updatedAt: deliveryPlan.plan.approvedAt,
+      });
+      this.database
+        .prepare(
+          `INSERT INTO board_filters (
+            project_id, revision, filter_json, updated_at
+          ) VALUES (?, ?, ?, ?)`,
+        )
+        .run(
+          defaultFilter.projectId,
+          defaultFilter.revision,
+          canonicalJson(defaultFilter),
+          defaultFilter.updatedAt,
+        );
+    }
+    return deliveryPlan;
+  }
+
+  approvedDeliveryPlan(projectId: string): ApprovedDeliveryPlan | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT * FROM delivery_plan_revisions
+         WHERE project_id = ? ORDER BY revision DESC LIMIT 1`,
+      )
+      .get(projectId) as DeliveryPlanRow | undefined;
+    if (!row) return undefined;
+    const plan = approvedDeliveryPlanSchema.parse(JSON.parse(row.plan_json));
+    if (
+      canonicalJson(plan) !== row.plan_json ||
+      row.delivery_plan_id !== plan.plan.id ||
+      row.project_id !== plan.plan.projectId ||
+      row.revision !== plan.plan.revision ||
+      row.project_intent_id !== plan.plan.projectIntentId ||
+      row.project_intent_revision !== plan.plan.projectIntentRevision ||
+      row.ledger_id !== plan.plan.ledgerId ||
+      row.ledger_revision !== plan.plan.ledgerRevision ||
+      row.base_delivery_plan_revision !== plan.plan.baseDeliveryPlanRevision ||
+      row.proposal_id !== plan.plan.proposalId ||
+      row.approved_by !== plan.plan.approvedBy ||
+      row.approved_at !== plan.plan.approvedAt
+    ) {
+      throw new Error('Stored delivery plan revision is corrupt');
+    }
+    const children = (
+      table: string,
+      memberTable: string,
+      join: string,
+      order: string,
+    ) =>
+      (
+        this.database
+          .prepare(
+            `SELECT r.revision_json FROM ${memberTable} m
+             JOIN ${table} r ON ${join}
+             WHERE m.delivery_plan_id = ? AND m.delivery_plan_revision = ?
+             ORDER BY ${order}`,
+          )
+          .all(plan.plan.id, plan.plan.revision) as { revision_json: string }[]
+      ).map(({ revision_json }) => JSON.parse(revision_json));
+    const milestones = children(
+      'milestone_revisions',
+      'delivery_plan_revision_milestones',
+      'r.milestone_id = m.milestone_id AND r.revision = m.milestone_revision',
+      'm.ordinal',
+    );
+    const tasks = children(
+      'task_revisions',
+      'delivery_plan_revision_tasks',
+      'r.task_id = m.task_id AND r.revision = m.task_contract_revision',
+      'm.ordinal',
+    );
+    const dependencies = children(
+      'task_dependency_revisions',
+      'delivery_plan_revision_dependencies',
+      'r.dependency_id = m.dependency_id AND r.revision = m.dependency_revision',
+      'm.dependency_id',
+    );
+    const expectedDependencies = [...plan.dependencies].sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+    const traceRows = this.database
+      .prepare(
+        `SELECT kind, milestone_id, milestone_revision, task_id,
+           task_contract_revision, record_id, record_revision
+         FROM delivery_plan_revision_traces
+         WHERE delivery_plan_id = ? AND delivery_plan_revision = ?
+         ORDER BY ordinal`,
+      )
+      .all(plan.plan.id, plan.plan.revision) as {
+      kind: 'milestone_covers' | 'task_satisfies';
+      milestone_id: string | null;
+      milestone_revision: number | null;
+      task_id: string | null;
+      task_contract_revision: number | null;
+      record_id: string;
+      record_revision: number;
+    }[];
+    const traces = traceRows.map((trace) =>
+      trace.kind === 'milestone_covers'
+        ? {
+            kind: trace.kind,
+            milestoneId: trace.milestone_id,
+            milestoneRevision: trace.milestone_revision,
+            requirement: {
+              recordId: trace.record_id,
+              recordRevision: trace.record_revision,
+            },
+          }
+        : {
+            kind: trace.kind,
+            taskId: trace.task_id,
+            taskContractRevision: trace.task_contract_revision,
+            requirement: {
+              recordId: trace.record_id,
+              recordRevision: trace.record_revision,
+            },
+          },
+    );
+    if (
+      canonicalJson(milestones) !== canonicalJson(plan.milestones) ||
+      canonicalJson(tasks) !== canonicalJson(plan.taskContracts) ||
+      canonicalJson(dependencies) !== canonicalJson(expectedDependencies) ||
+      canonicalJson(traces) !== canonicalJson(plan.traces)
+    ) {
+      throw new Error('Stored delivery plan members are corrupt');
+    }
+    return plan;
+  }
+
+  boardFilter(projectId: string): BoardFilter | undefined {
+    const row = this.database
+      .prepare('SELECT filter_json FROM board_filters WHERE project_id = ?')
+      .get(projectId) as BoardFilterRow | undefined;
+    return row
+      ? boardFilterSchema.parse(JSON.parse(row.filter_json))
+      : undefined;
+  }
+
+  replaceBoardFilterInTransaction(
+    input: BoardFilter,
+    expectedRevision: number,
+  ): BoardFilter {
+    this.assertTransaction();
+    const filter = boardFilterSchema.parse(input);
+    if (filter.revision !== expectedRevision + 1) {
+      throw new Error('Board filter revision conflict');
+    }
+    const current = this.boardFilter(filter.projectId);
+    if (!current || current.revision !== expectedRevision) {
+      throw new Error('Board filter revision conflict');
+    }
+    const plan = this.approvedDeliveryPlan(filter.projectId);
+    if (!plan) throw new Error('Approved delivery plan was not found');
+    const milestoneIds = new Set([
+      ...plan.milestones.map(({ id }) => id),
+      ...current.milestoneIds,
+    ]);
+    if (filter.milestoneIds.some((id) => !milestoneIds.has(id))) {
+      throw new Error('Board filter milestone is outside the current plan');
+    }
+    const ledger = this.approvedIntentLedger(filter.projectId);
+    const requirementIds = new Set([
+      ...(ledger?.records.flatMap((record) =>
+        record.content.type === 'requirement' ? [record.recordId] : [],
+      ) ?? []),
+      ...current.requirementRecordIds,
+    ]);
+    if (filter.requirementRecordIds.some((id) => !requirementIds.has(id))) {
+      throw new Error('Board filter requirement is outside the current ledger');
+    }
+    const currentLabels = new Set(
+      plan.taskContracts.flatMap(({ labels }) => labels),
+    );
+    const historicalLabels = new Set(current.labels);
+    if (
+      filter.labels.some(
+        (label) => !currentLabels.has(label) && !historicalLabels.has(label),
+      )
+    ) {
+      throw new Error(
+        'Board filter label is not current or previously selected',
+      );
+    }
+    const changed = this.database
+      .prepare(
+        `UPDATE board_filters SET revision = ?, filter_json = ?, updated_at = ?
+         WHERE project_id = ? AND revision = ?`,
+      )
+      .run(
+        filter.revision,
+        canonicalJson(filter),
+        filter.updatedAt,
+        filter.projectId,
+        expectedRevision,
+      );
+    if (changed.changes !== 1)
+      throw new Error('Board filter revision conflict');
+    return filter;
+  }
+
+  appendTaskLifecycleRevisionInTransaction(input: {
+    projectId: string;
+    expectedDeliveryPlanRevision: number;
+    taskId: string;
+    expectedContractRevision: number;
+    expectedCurrentRevision: number;
+    lifecycle: 'pending' | 'completed';
+    createdAt: string;
+  }): TaskRevision {
+    this.assertTransaction();
+    const plan = this.approvedDeliveryPlan(input.projectId);
+    const anchor = plan?.taskContracts.find(({ id }) => id === input.taskId);
+    if (
+      !plan ||
+      plan.plan.revision !== input.expectedDeliveryPlanRevision ||
+      !anchor ||
+      anchor.contractRevision !== input.expectedContractRevision
+    ) {
+      throw new Error('Task lifecycle revision conflict');
+    }
+    const current = this.currentTaskRevision(
+      input.taskId,
+      input.expectedContractRevision,
+    );
+    if (!current || current.revision !== input.expectedCurrentRevision) {
+      throw new Error('Task lifecycle revision conflict');
+    }
+    const next = taskRevisionSchema.parse({
+      ...current,
+      revision: current.revision + 1,
+      revisionKind: 'operational_lifecycle',
+      lifecycle: input.lifecycle,
+      source: { kind: 'lifecycle', priorRevision: current.revision },
+      createdAt: input.createdAt,
+    });
+    this.insertTaskRevision(next);
+    return next;
+  }
+
+  currentTaskRevisions(plan: ApprovedDeliveryPlan): readonly TaskRevision[] {
+    return plan.taskContracts.map((anchor) => {
+      const revision = this.currentTaskRevision(anchor.id, anchor.revision);
+      if (!revision) {
+        throw new Error('Current task revision selection is incomplete');
+      }
+      return revision;
+    });
+  }
+
+  private currentTaskRevision(
+    taskId: string,
+    contractRevision: number,
+  ): TaskRevision | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT revision_json FROM task_revisions
+         WHERE task_id = ? AND contract_revision = ?
+         ORDER BY revision DESC LIMIT 1`,
+      )
+      .get(taskId, contractRevision) as TaskRevisionRow | undefined;
+    return row
+      ? taskRevisionSchema.parse(JSON.parse(row.revision_json))
+      : undefined;
+  }
+
+  private insertTaskRevision(revisionInput: TaskRevision): void {
+    const revision = taskRevisionSchema.parse(revisionInput);
+    this.database
+      .prepare(
+        `INSERT INTO task_revisions (
+          task_id, project_id, revision, contract_revision, revision_kind,
+          lifecycle, milestone_id, revision_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        revision.id,
+        revision.projectId,
+        revision.revision,
+        revision.contractRevision,
+        revision.revisionKind,
+        revision.lifecycle,
+        revision.milestoneId,
+        canonicalJson(revision),
+      );
   }
 
   approvedIntentLedger(projectId: string): ApprovedIntentLedger | undefined {

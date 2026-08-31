@@ -45,6 +45,7 @@ const tableNames = (database: V2Database) =>
   ).map(({ name }) => name);
 
 const migrationPath = join(__dirname, 'migrations', '001_foundation.sql');
+const migration2Path = join(__dirname, 'migrations', '002_intent_ledger.sql');
 
 const createMigration1Database = (path: string) => {
   const database = new BetterSqlite3(path);
@@ -58,6 +59,16 @@ const createMigration1Database = (path: string) => {
     ${readFileSync(migrationPath, 'utf8')}
     INSERT INTO v2_schema_migrations (version, name, applied_at)
     VALUES (1, '001_foundation', '2026-08-28T00:00:00.000Z');
+  `);
+  return database;
+};
+
+const createMigration2Database = (path: string) => {
+  const database = createMigration1Database(path);
+  database.exec(`
+    ${readFileSync(migration2Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (2, '002_intent_ledger', '2026-08-29T00:00:00.000Z');
   `);
   return database;
 };
@@ -132,7 +143,7 @@ afterEach(async () => {
 });
 
 describe('V2 database identity and migration', () => {
-  it('claims a fresh database, applies both migrations, and configures every connection', () => {
+  it('claims a fresh database, applies all migrations, and configures every connection', () => {
     const path = join(temporaryDirectory(), 'fresh.sqlite');
 
     const database = openV2Database(path);
@@ -155,6 +166,7 @@ describe('V2 database identity and migration', () => {
     ).toEqual([
       { version: 1, name: '001_foundation' },
       { version: 2, name: '002_intent_ledger' },
+      { version: 3, name: '003_planning_board' },
     ]);
   });
 
@@ -191,7 +203,7 @@ describe('V2 database identity and migration', () => {
       reopened
         .prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations')
         .get(),
-    ).toEqual({ count: 2 });
+    ).toEqual({ count: 3 });
   });
 
   it('migrates an identified pre-foundation V2 database forward', () => {
@@ -213,7 +225,7 @@ describe('V2 database identity and migration', () => {
     expect(tableNames(migrated)).toContain('worker_executions');
     expect(
       migrated.prepare('SELECT version FROM v2_schema_migrations').all(),
-    ).toEqual([{ version: 1 }, { version: 2 }]);
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
   });
 
   it.each([
@@ -380,6 +392,25 @@ describe('V2 database identity and migration', () => {
         'ledger_revisions',
         'ledger_revision_members',
         'ledger_revision_relationships',
+        'planning_cycle_purposes',
+        'delivery_plan_proposals',
+        'delivery_plan_proposal_decisions',
+        'delivery_plan_proposal_milestone_reservations',
+        'delivery_plan_proposal_task_reservations',
+        'delivery_plan_proposal_dependency_reservations',
+        'delivery_plans',
+        'delivery_plan_revisions',
+        'milestones',
+        'milestone_revisions',
+        'tasks',
+        'task_revisions',
+        'task_dependencies',
+        'task_dependency_revisions',
+        'delivery_plan_revision_milestones',
+        'delivery_plan_revision_tasks',
+        'delivery_plan_revision_dependencies',
+        'delivery_plan_revision_traces',
+        'board_filters',
       ]),
     );
     expect(
@@ -615,6 +646,10 @@ describe('V2 database identity and migration', () => {
           !name.startsWith('pm_output_') &&
           !name.startsWith('project_intent_') &&
           !name.startsWith('ledger_') &&
+          !name.startsWith('delivery_plan') &&
+          !name.startsWith('milestone') &&
+          !name.startsWith('task') &&
+          name !== 'board_filters' &&
           name !== 'execution_operations_start_request' &&
           name !== 'runtime_events_project_execution_identity' &&
           name !== 'worker_executions_project_identity'
@@ -656,6 +691,202 @@ describe('V2 database identity and migration', () => {
       });
     }
     expect(database.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('upgrades a nonempty migration 2 database without changing audit bytes, checksums, or cursors', () => {
+    const path = join(temporaryDirectory(), 'upgrade-migration-2.sqlite');
+    const database = createMigration2Database(path);
+    const projectId = randomUUID();
+    const profileId = randomUUID();
+    const executionId = randomUUID();
+    const diagnosticId = randomUUID();
+    const cycleId = randomUUID();
+    const at = '2026-08-29T01:02:03.004Z';
+    const resultJson = '{ "ok": false, "evidence": [3, 2, 1] }';
+    const domainPayload = '{ "ordered": ["b", "a"], "space": true }';
+    const diagnosticPayload = '{ "raw": "keep  two  spaces", "cursor": 17 }';
+    const runtimePayload = '{ "delta": "first\\nsecond", "final": false }';
+
+    database
+      .prepare(
+        `INSERT INTO projects VALUES (?, 'Todo', 'm2-upgrade', 'C:/todo',
+          'C:/todo/.git', ?, 1, ?, ?)`,
+      )
+      .run(projectId, 'a'.repeat(40), at, at);
+    database
+      .prepare(
+        `INSERT INTO worker_profiles VALUES (
+          ?, 'global', NULL, 'pm', 'PM', 1, ?, ?
+        )`,
+      )
+      .run(profileId, at, at);
+    database
+      .prepare(
+        `INSERT INTO worker_profile_revisions VALUES (
+          ?, 1, 'profile', '{}', NULL, NULL, '{"kind":"human"}', ?, ?
+        )`,
+      )
+      .run(profileId, at, 'b'.repeat(64));
+    database
+      .prepare(
+        `INSERT INTO worker_executions VALUES (
+          ?, ?, ?, 1, '{}', '{}', '{}', '[]', '{}', 'fake', 'deterministic',
+          NULL, 'running', 4, 17, 23, NULL, NULL, ?, ?, NULL
+        )`,
+      )
+      .run(executionId, projectId, profileId, at, at);
+    database
+      .prepare(
+        `INSERT INTO planning_cycles VALUES (
+          ?, ?, 'execution_active', 3, ?, 1, NULL, NULL, 2, ?, ?, ?, NULL
+        )`,
+      )
+      .run(cycleId, projectId, profileId, executionId, at, at);
+    database
+      .prepare(
+        `INSERT INTO command_results VALUES (
+          'm2-command', 'planning_cycle.submit_turn', ?, ?, ?
+        )`,
+      )
+      .run('c'.repeat(64), resultJson, at);
+    database
+      .prepare(`INSERT INTO event_streams VALUES (?, 'domain', 11)`)
+      .run(projectId);
+    database
+      .prepare(`INSERT INTO event_streams VALUES (?, 'runtime', 23)`)
+      .run(projectId);
+    database
+      .prepare(
+        `INSERT INTO domain_events VALUES (
+          ?, ?, 11, ?, 'planning_cycle.updated', ?
+        )`,
+      )
+      .run(randomUUID(), projectId, at, domainPayload);
+    database
+      .prepare(`INSERT INTO raw_diagnostics VALUES (?, ?, ?, 'fake', 17, ?, ?)`)
+      .run(diagnosticId, projectId, executionId, at, diagnosticPayload);
+    database
+      .prepare(
+        `INSERT INTO runtime_events VALUES (
+          ?, ?, ?, ?, 23, 17, ?, 'worker_execution.output_delta', ?
+        )`,
+      )
+      .run(
+        randomUUID(),
+        projectId,
+        executionId,
+        diagnosticId,
+        at,
+        runtimePayload,
+      );
+
+    const preservedTables = [
+      'command_results',
+      'event_streams',
+      'domain_events',
+      'raw_diagnostics',
+      'runtime_events',
+      'worker_executions',
+    ] as const;
+    const snapshot = () =>
+      Object.fromEntries(
+        preservedTables.map((table) => [
+          table,
+          database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+        ]),
+      );
+    const before = snapshot();
+
+    migrateV2Database(database);
+
+    expect(snapshot()).toEqual(before);
+    expect(
+      database
+        .prepare(
+          `SELECT planning_cycle_id, project_id, purpose,
+             base_delivery_plan_id, base_delivery_plan_revision
+           FROM planning_cycle_purposes`,
+        )
+        .all(),
+    ).toEqual([
+      {
+        planning_cycle_id: cycleId,
+        project_id: projectId,
+        purpose: 'intent',
+        base_delivery_plan_id: null,
+        base_delivery_plan_revision: null,
+      },
+    ]);
+    expect(
+      database
+        .prepare(
+          'SELECT version, name FROM v2_schema_migrations ORDER BY version',
+        )
+        .all(),
+    ).toEqual([
+      { version: 1, name: '001_foundation' },
+      { version: 2, name: '002_intent_ledger' },
+      { version: 3, name: '003_planning_board' },
+    ]);
+    database.close();
+
+    const reopened = openV2Database(path);
+    openDatabases.push(reopened);
+    for (const [table, rows] of Object.entries(before)) {
+      expect(
+        reopened.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+      ).toEqual(rows);
+    }
+    expect(reopened.pragma('quick_check')).toEqual([{ quick_check: 'ok' }]);
+    expect(reopened.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('rolls back the command-result rebuild when migration 3 fails', () => {
+    const path = join(temporaryDirectory(), 'broken-planning-board.sqlite');
+    const database = createMigration2Database(path);
+    database
+      .prepare(
+        `INSERT INTO command_results VALUES (
+          'preserved', 'planning_cycle.abandon', ?, ?, ?
+        )`,
+      )
+      .run(
+        'd'.repeat(64),
+        '{ "ok": false, "keep": "exact bytes" }',
+        '2026-08-29T00:00:00.000Z',
+      );
+    database.exec(
+      'CREATE TABLE planning_cycle_purposes (sentinel TEXT NOT NULL)',
+    );
+    const beforeSchema = schemaRows(database);
+    const beforeRows = database.prepare('SELECT * FROM command_results').all();
+
+    expect(() => migrateV2Database(database)).toThrow();
+
+    expect(schemaRows(database)).toEqual(beforeSchema);
+    expect(database.prepare('SELECT * FROM command_results').all()).toEqual(
+      beforeRows,
+    );
+    expect(
+      database
+        .prepare(
+          'SELECT version, name FROM v2_schema_migrations ORDER BY version',
+        )
+        .all(),
+    ).toEqual([
+      { version: 1, name: '001_foundation' },
+      { version: 2, name: '002_intent_ledger' },
+    ]);
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO command_results VALUES (
+            'm3-command', 'board_filter.set', ?, '{}', ?
+          )`,
+        )
+        .run('e'.repeat(64), '2026-08-29T00:00:00.000Z'),
+    ).toThrow();
+    openDatabases.push(database);
   });
 
   it('indexes valid start-operation links and rejects malformed or duplicate legacy links', () => {

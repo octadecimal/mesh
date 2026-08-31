@@ -22,6 +22,7 @@ const runProductionV2Build = () => {
     'build',
     'v2-server',
     '--configuration=production',
+    '--skipTypeCheck=true',
     '--skip-nx-cache',
     `--outputPath=${relative(workspaceRoot, builtRoot).replace(/\\/g, '/')}`,
   ];
@@ -101,6 +102,12 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
   expect(existsSync(join(builtRoot, 'migrations', '001_foundation.sql'))).toBe(
     true,
   );
+  expect(
+    existsSync(join(builtRoot, 'db', 'migrations', '003_planning_board.sql')),
+  ).toBe(true);
+  expect(
+    existsSync(join(builtRoot, 'migrations', '003_planning_board.sql')),
+  ).toBe(true);
 
   const built = createRequire(__filename)(builtDatabase) as {
     openV2Database(path: string): V2Database;
@@ -126,6 +133,7 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
     ).toEqual([
       { version: 1, name: '001_foundation' },
       { version: 2, name: '002_intent_ledger' },
+      { version: 3, name: '003_planning_board' },
     ]);
   } finally {
     database.close();

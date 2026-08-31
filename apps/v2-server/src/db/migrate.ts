@@ -31,7 +31,20 @@ const intentLedgerMigration = {
   ),
 };
 
-const migrations = [foundationMigration, intentLedgerMigration] as const;
+const planningBoardMigration = {
+  version: 3,
+  name: '003_planning_board',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '003_planning_board.sql'),
+    'utf8',
+  ),
+};
+
+const migrations = [
+  foundationMigration,
+  intentLedgerMigration,
+  planningBoardMigration,
+] as const;
 
 type MigrationLedgerRow = { version: number; name: string };
 type StartOperationRow = { request_json: string };
