@@ -55,8 +55,10 @@ the following on one integrated commit:
    without inventing a successor, and replay/restart preserve that view;
 10. a selected label removed by a replacement plan survives as a bounded,
     zero-count historical Board option and remains clearable;
-11. no test starts a workspace, `DeveloperAttempt`, worker execution loop, or
-   `ExecutionRun`, and no real harness, credential, operator database, or
+11. replaying a seeded M2 approval result after an M3 plan/filter exists cannot
+    replace current projection state and resyncs when freshness is unknown;
+12. no test starts a workspace, `DeveloperAttempt`, worker execution loop, or
+    `ExecutionRun`, and no real harness, credential, operator database, or
    subscription capacity is used.
 
 Passing contract or repository tests alone is insufficient. The stop condition
@@ -206,6 +208,14 @@ the consequential questions and the conservative choices used here.
     The server returns it as a bounded zero-count historical option, just like
     saved milestone/requirement identities. This adds at most 100 options and
     makes the saved filter explainable and clearable.
+21. **May a normalized legacy command result replace current planning state?**
+    No. A stored M2 command result has no domain-event sequence, so its
+    synthetic Board cannot prove freshness. The decoder preserves legacy
+    provenance: a healthy snapshot/event projection treats the result only as
+    an acknowledgement, while an unhealthy or unknown projection requests the
+    existing snapshot resync without applying it. This costs one response
+    disposition branch and prevents old idempotency replay from clearing a plan
+    or saved filter.
 
 ## Approaches Considered
 
@@ -1389,9 +1399,32 @@ type PersistedPlanningCommandSuccess =
   | LegacyM2PlanningCommandSuccess
   | VersionedPlanningCommandSuccess;
 
+type NormalizedPlanningCommandSuccess =
+  | {
+      source: 'legacy_m2';
+      projectionAuthority: 'receipt_only';
+      result: VersionedPlanningCommandSuccess;
+    }
+  | {
+      source: 'versioned';
+      projectionAuthority: 'command_response';
+      result: VersionedPlanningCommandSuccess;
+    };
+
 declare function normalizePlanningCommandSuccess(
   raw: PersistedPlanningCommandSuccess,
-): VersionedPlanningCommandSuccess;
+): NormalizedPlanningCommandSuccess;
+
+type PlanningCommandResponseDisposition =
+  | {
+      kind: 'apply_versioned';
+      result: VersionedPlanningCommandSuccess;
+    }
+  | { kind: 'acknowledge_legacy'; reason: 'legacy_m2_receipt' }
+  | {
+      kind: 'resync_required';
+      reason: 'legacy_m2_freshness_unknown';
+    };
 ```
 
 The start variant freezes and guards all three canonical bases. The continue
@@ -1429,17 +1462,42 @@ other value fails. Command-result storage preserves the raw alternative. The
 normalizer adds intent purpose/null plan bases/empty delivery proposals to a
 legacy cycle and adds `schemaVersion: 2`; for legacy intent approval only, it
 also constructs the deterministic `planning_required` Board defined in the
-event section. Versioned input passes through unchanged. No normalizer reads
-current database state.
+event section. It wraps that value as `source: 'legacy_m2'` and
+`projectionAuthority: 'receipt_only'`. Versioned input is wrapped without
+changing its result fields. No normalizer reads current database state, and the
+source discriminator is never discarded before response disposition.
 
-New intent approval returns `board` and the command-response reducer replaces
-the complete cycle, intent ledger, and Board. If no approved plan exists that
-Board is `planning_required`; if a plan exists it preserves that plan/filter,
-sets `stale: true`, and exposes `plan_stale` blockers. Other reused-command
-successes do not carry or replace Board. Replaying a seeded M2 idempotency key
-still returns its byte-identical raw stored result; only the consumer's internal
-projection uses the normalized form. Migration 3 therefore copies command
-results without making their strict parser invalid.
+The command-response reducer classifies the tagged result before touching
+server-owned projection fields:
+
+1. A versioned result returns `apply_versioned`. New intent approval therefore
+   returns `board` and replaces the complete cycle, intent ledger, and Board as
+   previously specified. If no approved plan exists that Board is
+   `planning_required`; if a plan exists it preserves that plan/filter, sets
+   `stale: true`, and exposes `plan_stale` blockers. Other reused-command
+   successes do not carry or replace Board.
+2. A legacy result against a loaded, project-matching projection whose domain
+   cursor is continuous and whose stale/resync flag is clear returns
+   `acknowledge_legacy`. The reducer may clear local submitting state and report
+   command success, but it leaves planning cycles, intent ledger, delivery
+   plan, Board, saved filter, both cursors, and history-truncation state
+   byte-unchanged. This is monotonic even when the current projection contains
+   no M3 plan: the installed snapshot plus its ordered event cursor already
+   includes or postdates every unversioned M2 result.
+3. If that freshness proof is unavailable because no project snapshot is
+   installed, the project differs, the connection/projection is stale, or a
+   cursor gap/resync is pending, the reducer returns `resync_required`. It
+   applies none of the normalized cycle/ledger/Board fields, marks or retains
+   the projection stale, and invokes the existing single-flight project
+   snapshot resync. While disconnected, that resync waits for reconnect.
+
+No branch compares the synthetic Board with current plan/filter revisions or
+merges it component by component: absence of an event sequence makes such a
+comparison insufficient. Replaying a seeded M2 idempotency key still returns
+its byte-identical raw stored result and creates no repairing event. Migration
+3 still copies command results without making their strict parser invalid; the
+consumer uses the tagged normalized form only to acknowledge or resync, never
+to install legacy projection data.
 
 `planning_cycle.abandon` already applies to either purpose. Revision requests
 use `planning_cycle.submit_plan_turn`, not a fifth command. Every envelope is
@@ -1559,6 +1617,17 @@ a plan, a legacy intent-approval event deterministically normalizes with
 and empty cards. No decoder consults current database state while replaying an
 old event.
 
+That event fallback and the command-result fallback have different authority.
+A legacy `intent_ledger.approved` event carries its persisted project-domain
+sequence, so replay may install `planning_required` only at that exact ordered
+position; every later M3 plan/filter event then replaces it, and a sequence
+gap/stale cursor triggers resync instead of out-of-order application. A legacy
+approval command result has no sequence and is therefore receipt-only under the
+response rules above. Restart does not change either rule: ordered event replay
+reconstructs history, while a post-restart old-key command replay is ignored by
+a healthy snapshot projection or causes snapshot resync when freshness is
+unknown.
+
 Every event written after migration 3 uses the versioned alternative; omission
 of `schemaVersion` is accepted only by the frozen legacy shapes. Stored event
 JSON, sequence numbers, timestamps, and checksums are never rewritten. The
@@ -1600,12 +1669,14 @@ plan memberships, current lifecycle revisions, filter, and Board within one
 coherent database transaction.
 
 Reducers replace complete cycle, plan, and Board projections. They do not merge
-cards or recalculate filter membership. Duplicate sequence delivery is a no-op;
-stale sequences, gaps, project mismatch, invalid payloads, or an incomplete
-plan/Board pair mark the projection stale and request resync. Reconnect uses the
-existing domain/runtime cursors. A retained gap produces existing
-`v2.resync_required`; the browser fetches a fresh project snapshot and replaces
-server truth while preserving only its local unsent form draft.
+cards or recalculate filter membership when applying ordered events, snapshots,
+or versioned command responses. Receipt-only legacy command results are the
+explicit exception: they never replace server truth. Duplicate sequence
+delivery is a no-op; stale sequences, gaps, project mismatch, invalid payloads,
+or an incomplete plan/Board pair mark the projection stale and request resync.
+Reconnect uses the existing domain/runtime cursors. A retained gap produces
+existing `v2.resync_required`; the browser fetches a fresh project snapshot and
+replaces server truth while preserving only its local unsent form draft.
 
 Contract, repository, and reducer tests first seed byte-for-byte M2
 `planning_cycle.changed` and `intent_ledger.approved` rows, migrate without
@@ -1615,6 +1686,20 @@ tests then apply proposal revision, approval, lifecycle completion/reopen,
 replan, filter, and later intent-approval events to an earlier snapshot and
 assert byte-equivalence with a fresh final snapshot and restart. Runtime events
 remain only PM transport facts and never mutate Board state.
+
+A dedicated built-server/web monotonic-response regression uses the same
+temporary Todo repository and explicit fake mode. It starts from byte-for-byte
+seeded M2 approval event/result rows and migrates without rewriting either. It
+then approves an M3 delivery plan, commits a nondefault saved filter, and loads a
+healthy client snapshot at the resulting domain cursor. Reposting the exact M2
+approval idempotency key/request hash must return the exact unversioned stored
+bytes, append no event, decode as `legacy_m2/receipt_only`, and produce
+`acknowledge_legacy`. After local submitting state clears, the client delivery
+plan, Board, filter revision/selections, intent ledger, planning history, and
+cursors must remain byte-equivalent. The same response against a deliberately
+stale/gapped projection must produce `resync_required`, apply none of its
+synthetic fields, and converge to that same snapshot. Restart the server on the
+same database and repeat both assertions; no later repairing event is required.
 
 ## Persistence and Migration
 
@@ -1676,7 +1761,8 @@ Fresh-schema tests and exact migration-2 upgrade tests seed nonempty M1 and M2
 commands, intent cycles, proposals, receipts, approved ledgers, domain/runtime
 events, and cursors. Upgrade must preserve event bytes/checksums and produce the
 specified normalized M2 planning/ledger plus `planning_required` Board on read,
-replay, and restart.
+ordered event replay, snapshot read, and restart. That assertion does not grant
+projection authority to a sequence-less command-result replay.
 
 ## Restart Recovery and Audit Ordering
 
@@ -1921,10 +2007,14 @@ uses operator runtime paths, binds V1 ports, or kills an unowned process.
   migrations and existing event payload bytes remain immutable.
 - **Realtime: yes.** Existing project domain events, cursors, replay, socket,
   retained-gap resync, strict legacy normalization, and publication ordering
-  carry complete plan/Board projections. No new stream is added.
+  carry complete plan/Board projections. Ordered legacy events retain
+  projection authority; sequence-less legacy command receipts do not. No new
+  stream is added.
 - **Web: yes.** Planning supports the delivery-plan purpose; Board renders
   server truth and filter commands; reducer/resync replace complete
-  projections. The client owns no readiness rule.
+  projections, while the command-response reducer acknowledges or resyncs a
+  legacy receipt without applying its synthetic projection. The client owns no
+  readiness rule.
 - **Workspace safety: no new mutation surface.** M3 does not resolve, create,
   reserve, delete, or inspect task workspaces. Tests use only the existing
   temporary Todo repository identity.
@@ -2042,8 +2132,10 @@ Route tests cover every command and exact status mapping. Event/repository/
 reducer tests prove complete projection, duplicates, gaps, invalid payloads,
 legacy/new mixed ordered replay, retained-gap resync, lifecycle/replan ordering,
 raw idempotency-result preservation, normalized legacy intent approval, new
-intent-approval Board replacement, abandonment transaction/restart coherence,
-and fresh-snapshot equivalence. Component tests cover compatible profile
+intent-approval Board replacement, tagged response disposition, legacy receipt
+no-op against newer plan/filter state, unknown-freshness resync, abandonment
+transaction/restart coherence, and fresh-snapshot equivalence. Component tests
+cover compatible profile
 selection, exact initial/replan/continue payloads, required rejection feedback,
 every lifecycle control transition, proposal revisions, complete approval
 authority, the empty-requirement disabled/race states, server-owned filters/
@@ -2132,8 +2224,10 @@ dependency.
   writes use explicit payload versions and normalize before projection.
 - Strict unversioned M2 planning successes remain accepted and byte-immutable;
   every newly stored post-migration planning success is version 2, intent
-  approval replaces Board, and legacy normalization never consults mutable
-  state.
+  approval replaces Board only for the versioned response, and legacy
+  normalization never consults or replaces mutable projection state. A legacy
+  receipt is ignored by a healthy ordered projection or forces snapshot resync
+  without applying synthetic fields when freshness is unknown.
 - Migration 3 is forward-only; migrations 1 and 2 are immutable.
 - Default verification is fake-only and temporary. No V1 state, real harness,
   credential, operator worktree, or subscription quota is touched.
