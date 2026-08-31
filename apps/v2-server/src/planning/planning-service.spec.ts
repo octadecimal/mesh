@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  PM_PLAN_REPORT_SCHEMA,
+  deliveryPlanProposalSchema,
   startExecutionEnvelopeSchema,
   workerExecutionSchema,
   type PmDiscoveryAssignment,
@@ -74,7 +76,14 @@ class FakeLauncher implements PmExecutionLauncher {
         profileRevision: this.fixture.pmProfileRevision.revision,
         baseProfileId: null,
         baseRevision: null,
-        document: this.fixture.pmProfileRevision.document,
+        document: {
+          ...this.fixture.pmProfileRevision.document,
+          spec: {
+            ...this.fixture.pmProfileRevision.document.spec,
+            assignmentKinds: [parsed.command.assignment.kind],
+            outputSchema: parsed.command.assignment.outputSchema,
+          },
+        },
         digest: this.fixture.pmProfileRevision.digest,
       },
       skillRequests: { preferred: [], required: [] },
@@ -351,7 +360,550 @@ const firstTurn = (fixture: ReturnType<typeof createV2TestDatabase>) => ({
   },
 });
 
+const seedApprovedRequirement = (context: ReturnType<typeof setup>) => {
+  const cycle: PlanningCycle = {
+    id: randomUUID(),
+    projectId: context.fixture.project.id,
+    lifecycle: 'awaiting_approval',
+    revision: 2,
+    profileId: context.fixture.pmProfileRevision.profileId,
+    profileRevision: context.fixture.pmProfileRevision.revision,
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    latestProposalRevision: 1,
+    activeExecutionId: null,
+    createdAt: now,
+    updatedAt: now,
+    endedAt: null,
+  };
+  const human: PlanningTurn = {
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    ordinal: 1,
+    actor: 'human',
+    message: 'Build Todo.',
+    launchState: 'execution_bound',
+    executionId: context.fixture.execution.id,
+    createdAt: now,
+  };
+  const pm: PlanningTurn = {
+    ...human,
+    id: randomUUID(),
+    ordinal: 2,
+    actor: 'pm',
+    message: 'Approve the requirement.',
+    launchState: null,
+  };
+  const proposal: PlanningProposal = {
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    revision: 1,
+    lifecycle: 'awaiting_approval',
+    baseProjectIntentRevision: null,
+    baseLedgerRevision: null,
+    summary: 'Todo intent',
+    projectIntent: {
+      goal: 'Ship Todo.',
+      targetUsers: ['People'],
+      desiredCapabilities: ['Manage tasks'],
+      constraints: [],
+      nonGoals: [],
+      successConditions: ['Tasks persist'],
+      rationale: 'Requested.',
+      provenance: [
+        { kind: 'conversation_turn', turnId: human.id, rationale: 'Request.' },
+      ],
+    },
+    records: [
+      {
+        operation: 'create',
+        key: 'requirement',
+        recordId: randomUUID(),
+        content: {
+          type: 'requirement',
+          kind: 'functional',
+          status: 'proposed',
+          priority: 'must',
+          statement: 'Users manage tasks.',
+          rationale: 'Core.',
+        },
+        provenance: [
+          {
+            kind: 'conversation_turn',
+            turnId: human.id,
+            rationale: 'Request.',
+          },
+        ],
+      },
+    ],
+    relationships: [],
+    diff: {
+      intentChanges: [
+        'goal',
+        'targetUsers',
+        'desiredCapabilities',
+        'successConditions',
+        'rationale',
+        'provenance',
+      ],
+      recordChanges: { create: 1, revise: 0, reuse: 0 },
+      relationshipChanges: { added: [], removed: [] },
+    },
+    createdByTurnId: pm.id,
+    createdByExecutionId: context.fixture.execution.id,
+    rejectionFeedback: null,
+    createdAt: now,
+    decidedAt: null,
+  };
+  return inImmediateTransaction(context.fixture.database, () => {
+    context.repository.insertCycleInTransaction(cycle);
+    context.repository.insertTurnInTransaction(human);
+    context.repository.insertTurnInTransaction(pm);
+    context.repository.insertProposalInTransaction(proposal);
+    const approved = context.repository.applyApprovedProposalInTransaction(
+      proposal,
+      now,
+    );
+    context.repository.updateProposalInTransaction({
+      ...proposal,
+      lifecycle: 'approved',
+      decidedAt: now,
+    });
+    context.repository.updateCycleInTransaction(
+      { ...cycle, lifecycle: 'approved', revision: 3, endedAt: now },
+      2,
+    );
+    return approved;
+  });
+};
+
+const seedDeliveryPlanProposal = (
+  context: ReturnType<typeof setup>,
+  approved: ReturnType<typeof seedApprovedRequirement>,
+) => {
+  const cycle: PlanningCycle = {
+    id: randomUUID(),
+    projectId: context.fixture.project.id,
+    lifecycle: 'awaiting_approval',
+    revision: 2,
+    profileId: context.fixture.pmProfileRevision.profileId,
+    profileRevision: context.fixture.pmProfileRevision.revision,
+    baseProjectIntentRevision: approved.projectIntent.revision,
+    baseLedgerRevision: approved.ledger.revision,
+    latestProposalRevision: 1,
+    activeExecutionId: null,
+    createdAt: now,
+    updatedAt: now,
+    endedAt: null,
+  };
+  const human: PlanningTurn = {
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    ordinal: 1,
+    actor: 'human',
+    message: 'Plan Todo.',
+    launchState: 'execution_bound',
+    executionId: context.fixture.execution.id,
+    createdAt: now,
+  };
+  const pm: PlanningTurn = {
+    ...human,
+    id: randomUUID(),
+    ordinal: 2,
+    actor: 'pm',
+    message: 'One milestone and task.',
+    launchState: null,
+    executionId: context.fixture.execution.id,
+  };
+  const milestoneId = randomUUID();
+  const taskId = randomUUID();
+  const requirement = approved.records.find(
+    ({ content }) => content.type === 'requirement',
+  )!;
+  const proposal = deliveryPlanProposalSchema.parse({
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    revision: 1,
+    lifecycle: 'awaiting_approval',
+    base: {
+      projectIntentId: approved.projectIntent.id,
+      projectIntentRevision: approved.projectIntent.revision,
+      ledgerId: approved.ledger.id,
+      ledgerRevision: approved.ledger.revision,
+      deliveryPlan: { id: null, revision: null },
+    },
+    proposedPlan: {
+      summary: 'Todo delivery plan.',
+      milestones: [
+        {
+          operation: 'create',
+          key: 'todo',
+          content: {
+            title: 'Todo',
+            outcome: 'Todo works.',
+            stopCondition: 'Todo is usable.',
+            exclusions: [],
+            ordinal: 1,
+          },
+        },
+      ],
+      tasks: [
+        {
+          operation: 'create',
+          key: 'persist',
+          content: {
+            milestone: { kind: 'proposal', key: 'todo' },
+            title: 'Persist tasks',
+            outcome: 'Tasks survive restart.',
+            acceptanceCriteria: ['Task persists.'],
+            verificationCriteria: ['Restart passes.'],
+            priority: 'must',
+            labels: ['storage'],
+            ownedSurfaces: ['storage'],
+            prohibitedSurfaces: [],
+            expectedArtifacts: ['storage.spec.ts'],
+            ordinal: 1,
+          },
+        },
+      ],
+      dependencies: [],
+      traces: [
+        {
+          kind: 'milestone_covers',
+          milestone: { kind: 'proposal', key: 'todo' },
+          requirement: {
+            recordId: requirement.recordId,
+            recordRevision: requirement.revision,
+          },
+        },
+        {
+          kind: 'task_satisfies',
+          task: { kind: 'proposal', key: 'persist' },
+          requirement: {
+            recordId: requirement.recordId,
+            recordRevision: requirement.revision,
+          },
+        },
+      ],
+    },
+    reservations: {
+      milestones: [{ key: 'todo', id: milestoneId }],
+      tasks: [{ key: 'persist', id: taskId }],
+      dependencies: [],
+    },
+    diff: {
+      milestones: { create: 1, reuse: 0, revise: 0, retire: 0, reactivate: 0 },
+      tasks: { create: 1, reuse: 0, revise: 0, retire: 0, reactivate: 0 },
+      dependencies: {
+        create: 0,
+        reuse: 0,
+        revise: 0,
+        retire: 0,
+        reactivate: 0,
+      },
+      traceCreateCount: 2,
+      traceRemoveCount: 0,
+    },
+    createdByTurnId: pm.id,
+    createdByExecutionId: context.fixture.execution.id,
+    createdAt: now,
+    decision: { kind: 'pending' },
+  });
+  inImmediateTransaction(context.fixture.database, () => {
+    context.repository.insertCycleInTransaction(cycle, {
+      planningCycleId: cycle.id,
+      purpose: 'delivery_plan',
+      baseDeliveryPlanId: null,
+      baseDeliveryPlanRevision: null,
+    });
+    context.repository.insertTurnInTransaction(human);
+    context.repository.insertTurnInTransaction(pm);
+    context.repository.insertDeliveryPlanProposalInTransaction(proposal);
+    context.fixture.database
+      .prepare(
+        `UPDATE worker_executions
+         SET lifecycle = 'completed', revision = revision + 1, ended_at = ?
+         WHERE id = ?`,
+      )
+      .run(now, context.fixture.execution.id);
+  });
+  return { cycle, proposal, milestoneId, taskId };
+};
+
 describe('PlanningService', () => {
+  it('stores only a failure receipt when delivery planning has no approved intent', async () => {
+    const context = setup();
+    const beforeCursor = context.fixture.events.cursors(
+      context.fixture.project.id,
+    ).domain;
+    const result = await context.service.submitPlanTurn({
+      idempotencyKey: 'plan-without-intent',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.submit_plan_turn',
+        projectId: context.fixture.project.id,
+        expectedCycleRevision: null,
+        profileId: context.fixture.pmProfileRevision.profileId,
+        profileRevision: context.fixture.pmProfileRevision.revision,
+        expectedProjectIntentId: randomUUID(),
+        expectedProjectIntentRevision: 1,
+        expectedLedgerId: randomUUID(),
+        expectedLedgerRevision: 1,
+        expectedDeliveryPlan: { id: null, revision: null },
+        message: 'Plan Todo delivery.',
+      },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      commandType: 'planning_cycle.submit_plan_turn',
+      error: {
+        code: 'planning_intent_required',
+        message: 'Approved intent is required before delivery planning',
+      },
+    });
+    expect(
+      context.repository.activeCycle(context.fixture.project.id),
+    ).toBeUndefined();
+    expect(
+      context.fixture.events.cursors(context.fixture.project.id).domain,
+    ).toBe(beforeCursor);
+    expect(
+      context.fixture.commands.find('plan-without-intent')?.result,
+    ).toEqual(result);
+  });
+
+  it('atomically approves a plan proposal into canonical Board state', () => {
+    const context = setup();
+    const approved = seedApprovedRequirement(context);
+    const { cycle, proposal, taskId } = seedDeliveryPlanProposal(
+      context,
+      approved,
+    );
+
+    const result = context.service.approvePlanProposal({
+      idempotencyKey: 'approve-plan',
+      actor: { kind: 'human' },
+      command: {
+        type: 'plan_proposal.approve',
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+        proposalId: proposal.id,
+        expectedProposalRevision: proposal.revision,
+        expectedProjectIntentId: approved.projectIntent.id,
+        expectedProjectIntentRevision: approved.projectIntent.revision,
+        expectedLedgerId: approved.ledger.id,
+        expectedLedgerRevision: approved.ledger.revision,
+        expectedDeliveryPlan: { id: null, revision: null },
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      schemaVersion: 2,
+      commandType: 'plan_proposal.approve',
+      planningCycle: { cycle: { lifecycle: 'approved' } },
+      deliveryPlan: { plan: { revision: 1, proposalId: proposal.id } },
+      board: {
+        cards: [{ taskId, readiness: { state: 'actionable', blockers: [] } }],
+      },
+    });
+    expect(
+      context.repository.deliveryPlanProposal(proposal.id)?.decision,
+    ).toMatchObject({
+      kind: 'approved',
+    });
+  });
+
+  it('rejects a plan proposal without materializing canonical work', () => {
+    const context = setup();
+    const approved = seedApprovedRequirement(context);
+    const { cycle, proposal } = seedDeliveryPlanProposal(context, approved);
+
+    const result = context.service.rejectPlanProposal({
+      idempotencyKey: 'reject-plan',
+      actor: { kind: 'human' },
+      command: {
+        type: 'plan_proposal.reject',
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+        proposalId: proposal.id,
+        expectedProposalRevision: proposal.revision,
+        feedback: 'Split the milestone.',
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      schemaVersion: 2,
+      commandType: 'plan_proposal.reject',
+      planningCycle: { cycle: { lifecycle: 'proposal_rejected' } },
+    });
+    expect(
+      context.repository.approvedDeliveryPlan(cycle.projectId),
+    ).toBeUndefined();
+    expect(
+      context.repository.deliveryPlanProposal(proposal.id)?.decision,
+    ).toMatchObject({
+      kind: 'rejected',
+      feedback: 'Split the milestone.',
+    });
+  });
+
+  it('persists a revision-guarded Board filter and reprojects the Board', () => {
+    const context = setup();
+    const approved = seedApprovedRequirement(context);
+    const { cycle, proposal } = seedDeliveryPlanProposal(context, approved);
+    context.service.approvePlanProposal({
+      idempotencyKey: 'approve-before-filter',
+      actor: { kind: 'human' },
+      command: {
+        type: 'plan_proposal.approve',
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+        proposalId: proposal.id,
+        expectedProposalRevision: proposal.revision,
+        expectedProjectIntentId: approved.projectIntent.id,
+        expectedProjectIntentRevision: approved.projectIntent.revision,
+        expectedLedgerId: approved.ledger.id,
+        expectedLedgerRevision: approved.ledger.revision,
+        expectedDeliveryPlan: { id: null, revision: null },
+      },
+    });
+
+    const result = context.service.setBoardFilter({
+      idempotencyKey: 'filter-board',
+      actor: { kind: 'human' },
+      command: {
+        type: 'board_filter.set',
+        projectId: cycle.projectId,
+        expectedFilterRevision: 1,
+        filter: {
+          milestoneIds: [],
+          requirementRecordIds: [],
+          priorities: ['must'],
+          labels: ['storage'],
+          readiness: ['actionable'],
+          taskLifecycles: ['pending'],
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      schemaVersion: 2,
+      commandType: 'board_filter.set',
+      board: {
+        filter: { revision: 2, priorities: ['must'], labels: ['storage'] },
+        matchedTaskCount: 1,
+      },
+    });
+    expect(context.repository.boardFilter(cycle.projectId)?.revision).toBe(2);
+  });
+
+  it('abandons delivery planning by superseding its pending proposal', async () => {
+    const context = setup();
+    const approved = seedApprovedRequirement(context);
+    const { cycle, proposal } = seedDeliveryPlanProposal(context, approved);
+
+    const result = await context.service.abandonCycle({
+      idempotencyKey: 'abandon-plan',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.abandon',
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        expectedCycleRevision: cycle.revision,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      schemaVersion: 2,
+      commandType: 'planning_cycle.abandon',
+      planningCycle: { cycle: { lifecycle: 'abandoned' } },
+    });
+    expect(
+      context.repository.deliveryPlanProposal(proposal.id)?.decision,
+    ).toMatchObject({
+      kind: 'superseded',
+      reason: 'cycle_abandoned',
+      supersededByProposalId: null,
+    });
+  });
+
+  it('starts delivery planning only from the exact approved intent and plan base', async () => {
+    const context = setup();
+    const approved = seedApprovedRequirement(context);
+    const baseProfile = context.fixture.pmProfileRevision;
+    const service = new PlanningService({
+      database: context.fixture.database,
+      repository: context.repository,
+      commands: context.fixture.commands,
+      events: context.fixture.events,
+      executions: context.executions,
+      profiles: {
+        resolveApproved: () => ({
+          profileId: baseProfile.profileId,
+          projectId: null,
+          profileRevision: baseProfile.revision,
+          baseProfileId: null,
+          baseRevision: null,
+          document: {
+            ...baseProfile.document,
+            spec: {
+              ...baseProfile.document.spec,
+              assignmentKinds: ['pm_plan'],
+              outputSchema: PM_PLAN_REPORT_SCHEMA,
+            },
+          },
+          digest: baseProfile.digest,
+        }),
+      },
+      launcher: context.launcher,
+      barrier: context.barrier,
+      reportConsumer: { consume: vi.fn() },
+      now: () => now,
+      publishDomain: context.publish,
+    });
+
+    const result = await service.submitPlanTurn({
+      idempotencyKey: 'plan-first',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.submit_plan_turn',
+        projectId: context.fixture.project.id,
+        expectedCycleRevision: null,
+        profileId: baseProfile.profileId,
+        profileRevision: baseProfile.revision,
+        expectedProjectIntentId: approved.projectIntent.id,
+        expectedProjectIntentRevision: approved.projectIntent.revision,
+        expectedLedgerId: approved.ledger.id,
+        expectedLedgerRevision: approved.ledger.revision,
+        expectedDeliveryPlan: { id: null, revision: null },
+        message: 'Plan two Todo milestones.',
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      schemaVersion: 2,
+      commandType: 'planning_cycle.submit_plan_turn',
+      planningCycle: { purpose: { kind: 'delivery_plan' } },
+    });
+    expect(context.launcher.inputs.at(-1)?.command.assignment).toMatchObject({
+      kind: 'pm_plan',
+      outputSchema: PM_PLAN_REPORT_SCHEMA,
+      input: { approvedIntentLedger: approved, approvedDeliveryPlan: null },
+    });
+  });
   it('commits a human turn, publishes it, binds the exact reservation, then activates', async () => {
     const { fixture, repository, launcher, publish, service } = setup();
 

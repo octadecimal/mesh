@@ -1,13 +1,17 @@
 import {
   V2_PROTOCOL_VERSION,
   abandonPlanningCycleEnvelopeSchema,
+  approvePlanProposalEnvelopeSchema,
   approvePlanningProposalEnvelopeSchema,
   interruptExecutionEnvelopeSchema,
   projectIdSchema,
   projectRegisterEnvelopeSchema,
   profileApprovalEnvelopeSchema,
+  rejectPlanProposalEnvelopeSchema,
   rejectPlanningProposalEnvelopeSchema,
+  setBoardFilterEnvelopeSchema,
   startExecutionEnvelopeSchema,
+  submitPlanTurnEnvelopeSchema,
   submitPlanningTurnEnvelopeSchema,
   v2CommandEnvelopeSchema,
   v2ErrorCodeSchema,
@@ -39,7 +43,14 @@ export type V2RouteDependencies = {
   runtime: Pick<ExecutionRuntime, 'start' | 'interrupt'>;
   planning: Pick<
     PlanningService,
-    'submitTurn' | 'approveProposal' | 'rejectProposal' | 'abandonCycle'
+    | 'submitTurn'
+    | 'submitPlanTurn'
+    | 'approveProposal'
+    | 'rejectProposal'
+    | 'approvePlanProposal'
+    | 'rejectPlanProposal'
+    | 'setBoardFilter'
+    | 'abandonCycle'
   >;
   snapshots: {
     system(): V2SystemSnapshot;
@@ -192,6 +203,12 @@ export const registerV2Routes = (
             submitPlanningTurnEnvelopeSchema.parse(envelope),
           ),
         );
+      case 'planning_cycle.submit_plan_turn':
+        return reply.send(
+          await dependencies.planning.submitPlanTurn(
+            submitPlanTurnEnvelopeSchema.parse(envelope),
+          ),
+        );
       case 'planning_proposal.approve':
         return reply.send(
           dependencies.planning.approveProposal(
@@ -202,6 +219,24 @@ export const registerV2Routes = (
         return reply.send(
           dependencies.planning.rejectProposal(
             rejectPlanningProposalEnvelopeSchema.parse(envelope),
+          ),
+        );
+      case 'plan_proposal.approve':
+        return reply.send(
+          dependencies.planning.approvePlanProposal(
+            approvePlanProposalEnvelopeSchema.parse(envelope),
+          ),
+        );
+      case 'plan_proposal.reject':
+        return reply.send(
+          dependencies.planning.rejectPlanProposal(
+            rejectPlanProposalEnvelopeSchema.parse(envelope),
+          ),
+        );
+      case 'board_filter.set':
+        return reply.send(
+          dependencies.planning.setBoardFilter(
+            setBoardFilterEnvelopeSchema.parse(envelope),
           ),
         );
       case 'planning_cycle.abandon':

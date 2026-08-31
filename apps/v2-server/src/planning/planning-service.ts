@@ -2,23 +2,39 @@ import { randomUUID } from 'node:crypto';
 
 import {
   abandonPlanningCycleEnvelopeSchema,
+  approvedDeliveryPlanSchema,
+  approvePlanProposalEnvelopeSchema,
   approvePlanningProposalEnvelopeSchema,
+  deliveryPlanPlanningCycleViewSchema,
+  deliveryPlanIdSchema,
   PM_DISCOVERY_REPORT_SCHEMA,
+  PM_PLAN_REPORT_SCHEMA,
   planningCycleIdSchema,
   planningTurnIdSchema,
+  rejectPlanProposalEnvelopeSchema,
   rejectPlanningProposalEnvelopeSchema,
+  setBoardFilterEnvelopeSchema,
   startExecutionEnvelopeSchema,
+  submitPlanTurnEnvelopeSchema,
   submitPlanningTurnEnvelopeSchema,
   v2CommandResultSchema,
   type AbandonPlanningCycleEnvelope,
+  type ApprovedDeliveryPlan,
+  type ApprovePlanProposalEnvelope,
   type ApprovePlanningProposalEnvelope,
+  type DeliveryPlanProposal,
   type DomainEvent,
   type PlanningCycle,
   type PlanningTurn,
+  type ProposedMilestoneRef,
+  type ProposedTaskRef,
+  type RejectPlanProposalEnvelope,
   type RejectPlanningProposalEnvelope,
   type ResolvedWorkerProfileSnapshot,
+  type SetBoardFilterEnvelope,
   type StartExecutionEnvelope,
   type SubmitPlanningTurnEnvelope,
+  type SubmitPlanTurnEnvelope,
   type V2CommandResult,
   type WorkerExecution,
   type WorkerExecutionId,
@@ -35,6 +51,7 @@ import {
 import { canonicalJson } from '../storage/canonical-json.js';
 import type { V2EventStore } from '../storage/event-store.js';
 import type { PmReportConsumer } from './pm-report-consumer.js';
+import { projectBoard } from './planning-board.js';
 import {
   PlanningProposalInvalidError,
   PlanningRepository,
@@ -250,12 +267,257 @@ export class PlanningService {
           projectId: cycle.projectId,
           occurredAt: at,
           type: 'planning_cycle.changed',
-          payload: { planningCycle },
+          payload: { schemaVersion: 2, planningCycle },
         },
       );
       const success = v2CommandResultSchema.parse({
         ok: true,
+        schemaVersion: 2,
         commandType: 'planning_cycle.submit_turn',
+        planningCycle,
+      });
+      this.dependencies.commands.storeInTransaction({
+        idempotencyKey: envelope.idempotencyKey,
+        commandType: envelope.command.type,
+        requestHash,
+        result: success,
+        createdAt: at,
+      });
+      return success;
+    });
+
+    if (event) this.dependencies.publishDomain?.(event);
+    if (result.ok && turn) await this.drainTurn(turn);
+    return result;
+  }
+
+  async submitPlanTurn(
+    input: SubmitPlanTurnEnvelope,
+  ): Promise<V2CommandResult> {
+    this.dependencies.barrier.assertHealthy();
+    const envelope = submitPlanTurnEnvelopeSchema.parse(input);
+    const requestHash = hashV2Command(envelope.command);
+    const replay = this.dependencies.commands.find(
+      envelope.idempotencyKey,
+      requestHash,
+    );
+    if (replay) return replay.result;
+
+    let turn: PlanningTurn | undefined;
+    let event: DomainEvent | undefined;
+    const result = this.auditTransaction(() => {
+      const at = this.now();
+      const existing =
+        'planningCycleId' in envelope.command
+          ? this.dependencies.repository.cycle(envelope.command.planningCycleId)
+          : this.dependencies.repository.activeCycle(
+              envelope.command.projectId,
+            );
+      let cycle: PlanningCycle;
+      let turnOrdinal = 1;
+
+      if (!('planningCycleId' in envelope.command)) {
+        if (existing) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_cycle_active_conflict',
+            'A planning cycle is already active for this project',
+            at,
+          );
+        }
+        const ledger = this.dependencies.repository.approvedIntentLedger(
+          envelope.command.projectId,
+        );
+        if (!ledger) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_intent_required',
+            'Approved intent is required before delivery planning',
+            at,
+          );
+        }
+        if (
+          !ledger.records.some(
+            ({ content }) =>
+              content.type === 'requirement' && content.status === 'approved',
+          )
+        ) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_requirements_required',
+            'At least one approved requirement is required before delivery planning',
+            at,
+          );
+        }
+        const approvedPlan =
+          this.dependencies.repository.approvedDeliveryPlan(
+            envelope.command.projectId,
+          ) ?? null;
+        const expectedPlan = envelope.command.expectedDeliveryPlan;
+        if (
+          ledger.projectIntent.id !==
+            envelope.command.expectedProjectIntentId ||
+          ledger.projectIntent.revision !==
+            envelope.command.expectedProjectIntentRevision ||
+          ledger.ledger.id !== envelope.command.expectedLedgerId ||
+          ledger.ledger.revision !== envelope.command.expectedLedgerRevision ||
+          (approvedPlan?.plan.id ?? null) !== expectedPlan.id ||
+          (approvedPlan?.plan.revision ?? null) !== expectedPlan.revision
+        ) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'plan_canonical_base_conflict',
+            'Delivery plan canonical base does not match',
+            at,
+          );
+        }
+        const profile = this.resolvePlanProfile(
+          envelope.command.profileId,
+          envelope.command.profileRevision,
+          envelope.command.projectId,
+        );
+        if (!profile) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_profile_incompatible',
+            'The selected profile cannot run delivery planning',
+            at,
+          );
+        }
+        const cycleId = planningCycleIdSchema.parse(randomUUID());
+        cycle = this.dependencies.repository.insertCycleInTransaction(
+          {
+            id: cycleId,
+            projectId: envelope.command.projectId,
+            lifecycle: 'launch_pending',
+            revision: 1,
+            profileId: profile.profileId,
+            profileRevision: profile.profileRevision,
+            baseProjectIntentRevision: ledger.projectIntent.revision,
+            baseLedgerRevision: ledger.ledger.revision,
+            latestProposalRevision: 0,
+            activeExecutionId: null,
+            createdAt: at,
+            updatedAt: at,
+            endedAt: null,
+          },
+          {
+            planningCycleId: cycleId,
+            purpose: 'delivery_plan',
+            baseDeliveryPlanId: approvedPlan?.plan.id ?? null,
+            baseDeliveryPlanRevision: approvedPlan?.plan.revision ?? null,
+          },
+        );
+      } else {
+        if (!existing || existing.projectId !== envelope.command.projectId) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_cycle_not_found',
+            'Planning cycle was not found',
+            at,
+          );
+        }
+        const purpose = this.dependencies.repository.cyclePurpose(existing.id);
+        if (
+          purpose?.purpose !== 'delivery_plan' ||
+          existing.revision !== envelope.command.expectedCycleRevision ||
+          ![
+            'discovering',
+            'awaiting_human',
+            'awaiting_approval',
+            'attention_required',
+          ].includes(existing.lifecycle)
+        ) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_cycle_revision_conflict',
+            'Planning cycle revision or lifecycle does not accept a turn',
+            at,
+          );
+        }
+        const ledger = this.dependencies.repository.approvedIntentLedger(
+          existing.projectId,
+        );
+        const approvedPlan =
+          this.dependencies.repository.approvedDeliveryPlan(
+            existing.projectId,
+          ) ?? null;
+        if (
+          !ledger ||
+          ledger.projectIntent.revision !==
+            existing.baseProjectIntentRevision ||
+          ledger.ledger.revision !== existing.baseLedgerRevision ||
+          (approvedPlan?.plan.id ?? null) !== purpose.baseDeliveryPlanId ||
+          (approvedPlan?.plan.revision ?? null) !==
+            purpose.baseDeliveryPlanRevision
+        ) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'plan_canonical_base_conflict',
+            'Delivery plan canonical base changed during planning',
+            at,
+          );
+        }
+        const view = this.dependencies.repository.cycleView(existing.id)!;
+        if (
+          view.turns.filter(({ actor }) => actor === 'human').length >= 32 ||
+          view.deliveryPlanProposals.length >= 16
+        ) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'planning_cycle_history_limit',
+            'Planning cycle reached its history limit',
+            at,
+          );
+        }
+        turnOrdinal = view.turns.length + 1;
+        cycle = this.dependencies.repository.updateCycleInTransaction(
+          {
+            ...existing,
+            lifecycle: 'launch_pending',
+            revision: existing.revision + 1,
+            activeExecutionId: null,
+            updatedAt: at,
+            endedAt: null,
+          },
+          existing.revision,
+        );
+      }
+
+      turn = this.dependencies.repository.insertTurnInTransaction({
+        id: planningTurnIdSchema.parse(randomUUID()),
+        projectId: cycle.projectId,
+        planningCycleId: cycle.id,
+        ordinal: turnOrdinal,
+        actor: 'human',
+        message: envelope.command.message,
+        launchState: 'launch_pending',
+        executionId: null,
+        createdAt: at,
+      });
+      const planningCycle = this.dependencies.repository.cycleView(cycle.id)!;
+      event = this.dependencies.events.appendDomainInTransaction(
+        cycle.projectId,
+        {
+          projectId: cycle.projectId,
+          occurredAt: at,
+          type: 'planning_cycle.changed',
+          payload: { schemaVersion: 2, planningCycle },
+        },
+      );
+      const success = v2CommandResultSchema.parse({
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'planning_cycle.submit_plan_turn',
         planningCycle,
       });
       this.dependencies.commands.storeInTransaction({
@@ -278,6 +540,90 @@ export class PlanningService {
       approvePlanningProposalEnvelopeSchema.parse(input),
       'approved',
     );
+  }
+
+  approvePlanProposal(input: ApprovePlanProposalEnvelope): V2CommandResult {
+    return this.decidePlanProposal(
+      approvePlanProposalEnvelopeSchema.parse(input),
+      'approved',
+    );
+  }
+
+  rejectPlanProposal(input: RejectPlanProposalEnvelope): V2CommandResult {
+    return this.decidePlanProposal(
+      rejectPlanProposalEnvelopeSchema.parse(input),
+      'rejected',
+    );
+  }
+
+  setBoardFilter(input: SetBoardFilterEnvelope): V2CommandResult {
+    this.dependencies.barrier.assertHealthy();
+    const envelope = setBoardFilterEnvelopeSchema.parse(input);
+    const requestHash = hashV2Command(envelope.command);
+    const replay = this.dependencies.commands.find(
+      envelope.idempotencyKey,
+      requestHash,
+    );
+    if (replay) return replay.result;
+    let event: DomainEvent | undefined;
+    const result = this.auditTransaction(() => {
+      const at = this.now();
+      try {
+        this.dependencies.repository.replaceBoardFilterInTransaction(
+          {
+            projectId: envelope.command.projectId,
+            revision: envelope.command.expectedFilterRevision + 1,
+            ...envelope.command.filter,
+            updatedAt: at,
+          },
+          envelope.command.expectedFilterRevision,
+        );
+      } catch (error) {
+        if (!(error instanceof Error)) throw error;
+        const code = error.message.includes('revision conflict')
+          ? 'board_filter_revision_conflict'
+          : error.message.startsWith('Board filter') ||
+              error.message === 'Approved delivery plan was not found'
+            ? 'board_filter_invalid'
+            : undefined;
+        if (!code) throw error;
+        return this.storeFailure(
+          envelope,
+          requestHash,
+          code,
+          code === 'board_filter_revision_conflict'
+            ? 'Board filter revision does not match'
+            : 'Board filter selection is invalid',
+          at,
+        );
+      }
+      const board = this.board(envelope.command.projectId);
+      event = this.dependencies.events.appendDomainInTransaction(
+        envelope.command.projectId,
+        {
+          projectId: envelope.command.projectId,
+          occurredAt: at,
+          type: 'board.filter_changed',
+          payload: { schemaVersion: 1, board },
+        },
+      );
+      const success = v2CommandResultSchema.parse({
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'board_filter.set',
+        board,
+      });
+      this.dependencies.commands.storeInTransaction({
+        idempotencyKey: envelope.idempotencyKey,
+        commandType: envelope.command.type,
+        requestHash,
+        result: success,
+        createdAt: at,
+      });
+      return success;
+    });
+    if (event) this.dependencies.publishDomain?.(event);
+    return result;
   }
 
   rejectProposal(input: RejectPlanningProposalEnvelope): V2CommandResult {
@@ -418,13 +764,21 @@ export class PlanningService {
           );
         }
         const view = this.dependencies.repository.cycleView(cycle.id)!;
-        const latest = view.proposals.at(-1);
-        if (latest?.lifecycle === 'awaiting_approval') {
-          this.dependencies.repository.updateProposalInTransaction({
-            ...latest,
-            lifecycle: 'superseded',
-            decidedAt: at,
-          });
+        let pendingPlanProposal: DeliveryPlanProposal | undefined;
+        if (view.purpose.kind === 'delivery_plan') {
+          const latest = view.deliveryPlanProposals.at(-1);
+          if (latest?.decision.kind === 'pending') {
+            pendingPlanProposal = latest;
+          }
+        } else {
+          const latest = view.proposals.at(-1);
+          if (latest?.lifecycle === 'awaiting_approval') {
+            this.dependencies.repository.updateProposalInTransaction({
+              ...latest,
+              lifecycle: 'superseded',
+              decidedAt: at,
+            });
+          }
         }
         this.dependencies.repository.updateCycleInTransaction(
           {
@@ -437,6 +791,17 @@ export class PlanningService {
           },
           current.revision,
         );
+        if (pendingPlanProposal) {
+          this.dependencies.repository.settleDeliveryPlanProposalInTransaction(
+            pendingPlanProposal.id,
+            {
+              kind: 'superseded',
+              reason: 'cycle_abandoned',
+              supersededByProposalId: null,
+              decidedAt: at,
+            },
+          );
+        }
         const planningCycle = this.dependencies.repository.cycleView(cycle.id)!;
         event = this.dependencies.events.appendDomainInTransaction(
           cycle.projectId,
@@ -444,11 +809,12 @@ export class PlanningService {
             projectId: cycle.projectId,
             occurredAt: at,
             type: 'planning_cycle.changed',
-            payload: { planningCycle },
+            payload: { schemaVersion: 2, planningCycle },
           },
         );
         const success = v2CommandResultSchema.parse({
           ok: true,
+          schemaVersion: 2,
           commandType: 'planning_cycle.abandon',
           planningCycle,
         });
@@ -545,7 +911,7 @@ export class PlanningService {
           projectId: cycle.projectId,
           occurredAt: this.now(),
           type: 'planning_cycle.changed',
-          payload: { planningCycle },
+          payload: { schemaVersion: 2, planningCycle },
         },
       );
     });
@@ -616,6 +982,7 @@ export class PlanningService {
       }
 
       let intentLedger;
+      let board;
       if (decision === 'approved') {
         const command =
           envelope.command as ApprovePlanningProposalEnvelope['command'];
@@ -638,6 +1005,7 @@ export class PlanningService {
               proposal,
               at,
             );
+          board = this.board(cycle.projectId);
         } catch (error) {
           if (!(error instanceof PlanningProposalInvalidError)) throw error;
           return this.storeFailure(
@@ -679,7 +1047,12 @@ export class PlanningService {
             projectId: cycle.projectId,
             occurredAt: at,
             type: 'intent_ledger.approved',
-            payload: { planningCycle, intentLedger: intentLedger! },
+            payload: {
+              schemaVersion: 2,
+              planningCycle,
+              intentLedger: intentLedger!,
+              board: board!,
+            },
           },
         );
       } else {
@@ -689,7 +1062,7 @@ export class PlanningService {
             projectId: cycle.projectId,
             occurredAt: at,
             type: 'planning_cycle.changed',
-            payload: { planningCycle },
+            payload: { schemaVersion: 2, planningCycle },
           },
         );
       }
@@ -697,12 +1070,15 @@ export class PlanningService {
         decision === 'approved'
           ? {
               ok: true,
+              schemaVersion: 2,
               commandType: 'planning_proposal.approve',
               planningCycle,
               intentLedger,
+              board,
             }
           : {
               ok: true,
+              schemaVersion: 2,
               commandType: 'planning_proposal.reject',
               planningCycle,
             },
@@ -718,6 +1094,375 @@ export class PlanningService {
     });
     if (event) this.dependencies.publishDomain?.(event);
     return result;
+  }
+
+  private decidePlanProposal(
+    envelope: ApprovePlanProposalEnvelope | RejectPlanProposalEnvelope,
+    decision: 'approved' | 'rejected',
+  ): V2CommandResult {
+    this.dependencies.barrier.assertHealthy();
+    const requestHash = hashV2Command(envelope.command);
+    const replay = this.dependencies.commands.find(
+      envelope.idempotencyKey,
+      requestHash,
+    );
+    if (replay) return replay.result;
+    let event: DomainEvent | undefined;
+    const result = this.auditTransaction(() => {
+      const at = this.now();
+      const cycle = this.dependencies.repository.cycle(
+        envelope.command.planningCycleId,
+      );
+      if (!cycle || cycle.projectId !== envelope.command.projectId) {
+        return this.storeFailure(
+          envelope,
+          requestHash,
+          'planning_cycle_not_found',
+          'Planning cycle was not found',
+          at,
+        );
+      }
+      if (
+        this.dependencies.repository.cyclePurpose(cycle.id)?.purpose !==
+          'delivery_plan' ||
+        cycle.revision !== envelope.command.expectedCycleRevision ||
+        cycle.lifecycle !== 'awaiting_approval'
+      ) {
+        return this.storeFailure(
+          envelope,
+          requestHash,
+          'planning_cycle_revision_conflict',
+          'Planning cycle revision or lifecycle does not match',
+          at,
+        );
+      }
+      const proposal = this.dependencies.repository.deliveryPlanProposal(
+        envelope.command.proposalId,
+      );
+      if (!proposal || proposal.planningCycleId !== cycle.id) {
+        return this.storeFailure(
+          envelope,
+          requestHash,
+          'plan_proposal_not_found',
+          'Delivery plan proposal was not found',
+          at,
+        );
+      }
+      if (
+        proposal.revision !== envelope.command.expectedProposalRevision ||
+        proposal.decision.kind !== 'pending'
+      ) {
+        return this.storeFailure(
+          envelope,
+          requestHash,
+          'plan_proposal_revision_conflict',
+          'Delivery plan proposal revision or lifecycle does not match',
+          at,
+        );
+      }
+
+      let deliveryPlan: ApprovedDeliveryPlan | undefined;
+      let board;
+      if (decision === 'approved') {
+        const command =
+          envelope.command as ApprovePlanProposalEnvelope['command'];
+        if (
+          command.expectedProjectIntentId !== proposal.base.projectIntentId ||
+          command.expectedProjectIntentRevision !==
+            proposal.base.projectIntentRevision ||
+          command.expectedLedgerId !== proposal.base.ledgerId ||
+          command.expectedLedgerRevision !== proposal.base.ledgerRevision ||
+          command.expectedDeliveryPlan.id !== proposal.base.deliveryPlan.id ||
+          command.expectedDeliveryPlan.revision !==
+            proposal.base.deliveryPlan.revision
+        ) {
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'plan_canonical_base_conflict',
+            'Delivery plan canonical base does not match',
+            at,
+          );
+        }
+        try {
+          deliveryPlan = this.materializeDeliveryPlan(proposal, at);
+          this.dependencies.repository.applyApprovedDeliveryPlanInTransaction(
+            proposal,
+            deliveryPlan,
+          );
+        } catch (error) {
+          if (!(error instanceof PlanningProposalInvalidError)) throw error;
+          return this.storeFailure(
+            envelope,
+            requestHash,
+            'plan_proposal_invalid',
+            'Delivery plan proposal is not valid for approval',
+            at,
+          );
+        }
+      } else {
+        this.dependencies.repository.settleDeliveryPlanProposalInTransaction(
+          proposal.id,
+          {
+            kind: 'rejected',
+            decidedBy: 'human',
+            feedback: (
+              envelope.command as RejectPlanProposalEnvelope['command']
+            ).feedback,
+            decidedAt: at,
+          },
+        );
+      }
+      this.dependencies.repository.updateCycleInTransaction(
+        {
+          ...cycle,
+          lifecycle: decision === 'approved' ? 'approved' : 'proposal_rejected',
+          revision: cycle.revision + 1,
+          activeExecutionId: null,
+          updatedAt: at,
+          endedAt: at,
+        },
+        cycle.revision,
+      );
+      const planningCycle = deliveryPlanPlanningCycleViewSchema.parse(
+        this.dependencies.repository.cycleView(cycle.id),
+      );
+      if (decision === 'approved') {
+        board = this.board(cycle.projectId);
+        event = this.dependencies.events.appendDomainInTransaction(
+          cycle.projectId,
+          {
+            projectId: cycle.projectId,
+            occurredAt: at,
+            type: 'delivery_plan.approved',
+            payload: {
+              schemaVersion: 1,
+              planningCycle,
+              deliveryPlan: deliveryPlan!,
+              board,
+            },
+          },
+        );
+      } else {
+        event = this.dependencies.events.appendDomainInTransaction(
+          cycle.projectId,
+          {
+            projectId: cycle.projectId,
+            occurredAt: at,
+            type: 'planning_cycle.changed',
+            payload: { schemaVersion: 2, planningCycle },
+          },
+        );
+      }
+      const success = v2CommandResultSchema.parse(
+        decision === 'approved'
+          ? {
+              ok: true,
+              schemaVersion: 2,
+              commandType: 'plan_proposal.approve',
+              planningCycle,
+              deliveryPlan,
+              board,
+            }
+          : {
+              ok: true,
+              schemaVersion: 2,
+              commandType: 'plan_proposal.reject',
+              planningCycle,
+            },
+      );
+      this.dependencies.commands.storeInTransaction({
+        idempotencyKey: envelope.idempotencyKey,
+        commandType: envelope.command.type,
+        requestHash,
+        result: success,
+        createdAt: at,
+      });
+      return success;
+    });
+    if (event) this.dependencies.publishDomain?.(event);
+    return result;
+  }
+
+  private materializeDeliveryPlan(
+    proposal: DeliveryPlanProposal,
+    at: string,
+  ): ApprovedDeliveryPlan {
+    const base =
+      this.dependencies.repository.approvedDeliveryPlan(proposal.projectId) ??
+      null;
+    const planRevision = (proposal.base.deliveryPlan.revision ?? 0) + 1;
+    const milestoneIds = new Map(
+      proposal.reservations.milestones.map(({ key, id }) => [key, id]),
+    );
+    const taskIds = new Map(
+      proposal.reservations.tasks.map(({ key, id }) => [key, id]),
+    );
+    const dependencyIds = new Map(
+      proposal.reservations.dependencies.map(({ key, id }) => [key, id]),
+    );
+    const resolveMilestone = (ref: ProposedMilestoneRef) =>
+      ref.kind === 'canonical' ? ref.milestoneId : milestoneIds.get(ref.key)!;
+    const resolveTask = (ref: ProposedTaskRef) =>
+      ref.kind === 'canonical' ? ref.taskId : taskIds.get(ref.key)!;
+    const milestones = proposal.proposedPlan.milestones.map((member) => {
+      if (member.operation === 'reuse') {
+        return base!.milestones.find(({ id }) => id === member.milestoneId)!;
+      }
+      return {
+        id:
+          member.operation === 'create'
+            ? milestoneIds.get(member.key)!
+            : member.milestoneId,
+        projectId: proposal.projectId,
+        revision:
+          member.operation === 'create' ? 1 : member.expectedRevision + 1,
+        lifecycle:
+          member.operation === 'create'
+            ? ('active' as const)
+            : member.lifecycle,
+        ...member.content,
+        proposalId: proposal.id,
+        deliveryPlanRevision: planRevision,
+        approvedAt: at,
+      };
+    });
+    const taskContracts = proposal.proposedPlan.tasks.map((member) => {
+      if (member.operation === 'reuse') {
+        return base!.taskContracts.find(({ id }) => id === member.taskId)!;
+      }
+      const { milestone, ...content } = member.content;
+      const revision =
+        member.operation === 'create' ? 1 : member.expectedCurrentRevision + 1;
+      return {
+        id:
+          member.operation === 'create'
+            ? taskIds.get(member.key)!
+            : member.taskId,
+        projectId: proposal.projectId,
+        revision,
+        contractRevision: revision,
+        revisionKind: 'plan_contract' as const,
+        lifecycle:
+          member.operation === 'create'
+            ? ('pending' as const)
+            : member.lifecycle,
+        milestoneId: resolveMilestone(milestone),
+        ...content,
+        source: {
+          kind: 'plan' as const,
+          proposalId: proposal.id,
+          deliveryPlanRevision: planRevision,
+        },
+        createdAt: at,
+      };
+    });
+    const dependencies = proposal.proposedPlan.dependencies
+      .map((member) => {
+        if (member.operation === 'reuse') {
+          return base!.dependencies.find(
+            ({ id }) => id === member.dependencyId,
+          )!;
+        }
+        const prior =
+          member.operation === 'revise'
+            ? base!.dependencies.find(({ id }) => id === member.dependencyId)!
+            : undefined;
+        return {
+          id:
+            member.operation === 'create'
+              ? dependencyIds.get(member.key)!
+              : member.dependencyId,
+          projectId: proposal.projectId,
+          revision:
+            member.operation === 'create' ? 1 : member.expectedRevision + 1,
+          prerequisiteTaskId:
+            member.operation === 'create'
+              ? resolveTask(member.prerequisite)
+              : prior!.prerequisiteTaskId,
+          dependentTaskId:
+            member.operation === 'create'
+              ? resolveTask(member.dependent)
+              : prior!.dependentTaskId,
+          lifecycle:
+            member.operation === 'create'
+              ? ('active' as const)
+              : member.lifecycle,
+          proposalId: proposal.id,
+          deliveryPlanRevision: planRevision,
+          approvedAt: at,
+        };
+      })
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const milestoneRevisions = new Map(
+      milestones.map(({ id, revision }) => [id, revision]),
+    );
+    const taskRevisions = new Map(
+      taskContracts.map(({ id, contractRevision }) => [id, contractRevision]),
+    );
+    const traces = proposal.proposedPlan.traces.map((trace) => {
+      if (trace.kind === 'milestone_covers') {
+        const milestoneId = resolveMilestone(trace.milestone);
+        return {
+          kind: trace.kind,
+          milestoneId,
+          milestoneRevision: milestoneRevisions.get(milestoneId)!,
+          requirement: trace.requirement,
+        };
+      }
+      const taskId = resolveTask(trace.task);
+      return {
+        kind: trace.kind,
+        taskId,
+        taskContractRevision: taskRevisions.get(taskId)!,
+        requirement: trace.requirement,
+      };
+    });
+    const taskById = new Map(taskContracts.map((task) => [task.id, task]));
+    const milestoneEdges = new Map<string, string[]>();
+    for (const dependency of dependencies) {
+      if (dependency.lifecycle !== 'active') continue;
+      const prerequisite = taskById.get(dependency.prerequisiteTaskId)!;
+      const dependent = taskById.get(dependency.dependentTaskId)!;
+      if (prerequisite.milestoneId === dependent.milestoneId) continue;
+      const key = `${prerequisite.milestoneId}:${dependent.milestoneId}`;
+      const ids = milestoneEdges.get(key) ?? [];
+      ids.push(dependency.id);
+      milestoneEdges.set(key, ids);
+    }
+    return approvedDeliveryPlanSchema.parse({
+      plan: {
+        id:
+          proposal.base.deliveryPlan.id ??
+          deliveryPlanIdSchema.parse(randomUUID()),
+        projectId: proposal.projectId,
+        revision: planRevision,
+        projectIntentId: proposal.base.projectIntentId,
+        projectIntentRevision: proposal.base.projectIntentRevision,
+        ledgerId: proposal.base.ledgerId,
+        ledgerRevision: proposal.base.ledgerRevision,
+        baseDeliveryPlanRevision: proposal.base.deliveryPlan.revision,
+        proposalId: proposal.id,
+        summary: proposal.proposedPlan.summary,
+        approvedBy: 'human',
+        approvedAt: at,
+      },
+      milestones,
+      taskContracts,
+      dependencies,
+      traces,
+      milestoneDependencies: [...milestoneEdges]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, ids]) => {
+          const [prerequisiteMilestoneId, dependentMilestoneId] =
+            key.split(':');
+          return {
+            prerequisiteMilestoneId,
+            dependentMilestoneId,
+            throughTaskDependencyIds: ids.sort(),
+          };
+        }),
+    });
   }
 
   private async drainTurn(turn: PlanningTurn): Promise<void> {
@@ -820,7 +1565,7 @@ export class PlanningService {
           projectId: cycle.projectId,
           occurredAt: this.now(),
           type: 'planning_cycle.changed',
-          payload: { planningCycle },
+          payload: { schemaVersion: 2, planningCycle },
         },
       );
       bound = true;
@@ -891,6 +1636,49 @@ export class PlanningService {
     const ledger =
       this.dependencies.repository.approvedIntentLedger(cycle.projectId) ??
       null;
+    const conversation = view.turns.slice(0, targetIndex + 1).map((item) => ({
+      turnId: item.id,
+      actor: item.actor,
+      message: item.message,
+    }));
+    if (view.purpose.kind === 'delivery_plan') {
+      if (!ledger) throw new Error('Delivery planning ledger is missing');
+      const approvedDeliveryPlan =
+        this.dependencies.repository.approvedDeliveryPlan(cycle.projectId) ??
+        null;
+      return startExecutionEnvelopeSchema.parse({
+        idempotencyKey: `planning-turn:${turn.id}`,
+        actor: { kind: 'human' },
+        command: {
+          type: 'worker_execution.start',
+          projectId: cycle.projectId,
+          profileId: cycle.profileId,
+          profileRevision: cycle.profileRevision,
+          assignment: {
+            kind: 'pm_plan',
+            projectId: cycle.projectId,
+            outputSchema: PM_PLAN_REPORT_SCHEMA,
+            planningCycleId: cycle.id,
+            humanTurnId: turn.id,
+            expectedCycleRevision: cycle.revision,
+            expectedProposalRevision:
+              (view.deliveryPlanProposals.at(-1)?.revision ?? 0) + 1,
+            baseProjectIntentId: ledger.projectIntent.id,
+            baseProjectIntentRevision: ledger.projectIntent.revision,
+            baseLedgerId: ledger.ledger.id,
+            baseLedgerRevision: ledger.ledger.revision,
+            baseDeliveryPlanId: view.purpose.baseDeliveryPlanId,
+            baseDeliveryPlanRevision: view.purpose.baseDeliveryPlanRevision,
+            input: {
+              conversation,
+              approvedIntentLedger: ledger,
+              latestProposal: view.deliveryPlanProposals.at(-1) ?? null,
+              approvedDeliveryPlan,
+            },
+          },
+        },
+      });
+    }
     return startExecutionEnvelopeSchema.parse({
       idempotencyKey: `planning-turn:${turn.id}`,
       actor: { kind: 'human' },
@@ -910,11 +1698,7 @@ export class PlanningService {
           baseProjectIntentRevision: cycle.baseProjectIntentRevision,
           baseLedgerRevision: cycle.baseLedgerRevision,
           input: {
-            conversation: view.turns.slice(0, targetIndex + 1).map((item) => ({
-              turnId: item.id,
-              actor: item.actor,
-              message: item.message,
-            })),
+            conversation,
             latestProposal: view.proposals.at(-1) ?? null,
             approvedIntentLedger: ledger,
           },
@@ -968,6 +1752,43 @@ export class PlanningService {
       : undefined;
   }
 
+  private resolvePlanProfile(
+    profileId: string,
+    revision: number,
+    projectId: string,
+  ): ResolvedWorkerProfileSnapshot | undefined {
+    let profile: ResolvedWorkerProfileSnapshot;
+    try {
+      profile = this.dependencies.profiles.resolveApproved(profileId, revision);
+    } catch {
+      return undefined;
+    }
+    const spec = profile.document.spec;
+    return profile.profileId === profileId &&
+      profile.profileRevision === revision &&
+      (profile.projectId === null || profile.projectId === projectId) &&
+      spec.assignmentKinds[0] === 'pm_plan' &&
+      spec.outputSchema === PM_PLAN_REPORT_SCHEMA
+      ? profile
+      : undefined;
+  }
+
+  private board(projectId: string) {
+    const intentLedger =
+      this.dependencies.repository.approvedIntentLedger(projectId) ?? null;
+    const deliveryPlan =
+      this.dependencies.repository.approvedDeliveryPlan(projectId) ?? null;
+    return projectBoard({
+      projectId,
+      intentLedger,
+      deliveryPlan,
+      currentTaskRevisions: deliveryPlan
+        ? this.dependencies.repository.currentTaskRevisions(deliveryPlan)
+        : [],
+      filter: this.dependencies.repository.boardFilter(projectId) ?? null,
+    });
+  }
+
   private coordinator(cycleId: string): LaunchCoordinator {
     let coordinator = this.coordinators.get(cycleId);
     if (!coordinator) {
@@ -991,9 +1812,13 @@ export class PlanningService {
   private storeFailure(
     envelope:
       | SubmitPlanningTurnEnvelope
+      | SubmitPlanTurnEnvelope
       | ApprovePlanningProposalEnvelope
       | RejectPlanningProposalEnvelope
-      | AbandonPlanningCycleEnvelope,
+      | AbandonPlanningCycleEnvelope
+      | ApprovePlanProposalEnvelope
+      | RejectPlanProposalEnvelope
+      | SetBoardFilterEnvelope,
     requestHash: string,
     code: Extract<V2CommandResult, { ok: false }>['error']['code'],
     message: string,

@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 
 import {
   PM_DISCOVERY_REPORT_SCHEMA,
+  PM_PLAN_REPORT_SCHEMA,
   type PmDiscoveryAssignment,
+  type PmPlanAssignment,
   type WorkerExecutionStructuredOutputRuntimeEvent,
 } from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -29,7 +31,7 @@ const setup = async () => {
   const launcher = {
     findReserved: vi.fn(() => undefined),
     reserve: vi.fn(async (input) => {
-      const assignment = input.command.assignment as PmDiscoveryAssignment;
+      const assignment = input.command.assignment;
       const execution = {
         ...fixture.execution,
         id: randomUUID(),
@@ -43,7 +45,14 @@ const setup = async () => {
           profileRevision: fixture.pmProfileRevision.revision,
           baseProfileId: null,
           baseRevision: null,
-          document: fixture.pmProfileRevision.document,
+          document: {
+            ...fixture.pmProfileRevision.document,
+            spec: {
+              ...fixture.pmProfileRevision.document.spec,
+              assignmentKinds: [assignment.kind],
+              outputSchema: assignment.outputSchema,
+            },
+          },
           digest: fixture.pmProfileRevision.digest,
         },
         lifecycle: 'starting' as const,
@@ -184,7 +193,11 @@ const runtimeEventFor = (
         adapterCursor: execution.lastAdapterCursor + 1,
         occurredAt: now,
         type: 'worker_execution.structured_output',
-        payload: { schema: PM_DISCOVERY_REPORT_SCHEMA, value },
+        payload: {
+          schema:
+            (value as { schema?: string }).schema ?? PM_DISCOVERY_REPORT_SCHEMA,
+          value,
+        },
       },
     ),
   ) as WorkerExecutionStructuredOutputRuntimeEvent;
@@ -251,7 +264,306 @@ const proposalReport = (context: Awaited<ReturnType<typeof setup>>) => {
   };
 };
 
+const setupPlan = async () => {
+  const context = await setup();
+  context.consumer.consume(
+    context.execution,
+    runtimeEvent(context, proposalReport(context)),
+  );
+  const intentCycle = context.repository.cycleView(
+    (context.execution.assignment as PmDiscoveryAssignment).planningCycleId,
+  )!;
+  const intentProposal = intentCycle.proposals.at(-1)!;
+  context.service.approveProposal({
+    idempotencyKey: 'approve-intent',
+    actor: { kind: 'human' },
+    command: {
+      type: 'planning_proposal.approve',
+      projectId: context.fixture.project.id,
+      planningCycleId: intentCycle.cycle.id,
+      expectedCycleRevision: intentCycle.cycle.revision,
+      proposalId: intentProposal.id,
+      expectedProposalRevision: intentProposal.revision,
+      expectedProjectIntentRevision: null,
+      expectedLedgerRevision: null,
+    },
+  });
+  const approved = context.repository.approvedIntentLedger(
+    context.fixture.project.id,
+  )!;
+  const profile = context.fixture.pmProfileRevision;
+  const service = new PlanningService({
+    database: context.fixture.database,
+    repository: context.repository,
+    commands: context.fixture.commands,
+    events: context.fixture.events,
+    executions: context.executions,
+    profiles: {
+      resolveApproved: () => ({
+        profileId: profile.profileId,
+        projectId: null,
+        profileRevision: profile.revision,
+        baseProfileId: null,
+        baseRevision: null,
+        document: {
+          ...profile.document,
+          spec: {
+            ...profile.document.spec,
+            assignmentKinds: ['pm_plan'],
+            outputSchema: PM_PLAN_REPORT_SCHEMA,
+          },
+        },
+        digest: profile.digest,
+      }),
+    },
+    launcher: context.launcher,
+    barrier: context.serviceBarrier,
+    reportConsumer: context.consumer,
+    now: () => now,
+    publishDomain: vi.fn(),
+  });
+  await service.submitPlanTurn({
+    idempotencyKey: 'first-plan-turn',
+    actor: { kind: 'human' },
+    command: {
+      type: 'planning_cycle.submit_plan_turn',
+      projectId: context.fixture.project.id,
+      expectedCycleRevision: null,
+      profileId: profile.profileId,
+      profileRevision: profile.revision,
+      expectedProjectIntentId: approved.projectIntent.id,
+      expectedProjectIntentRevision: approved.projectIntent.revision,
+      expectedLedgerId: approved.ledger.id,
+      expectedLedgerRevision: approved.ledger.revision,
+      expectedDeliveryPlan: { id: null, revision: null },
+      message: 'Plan Todo delivery.',
+    },
+  });
+  return {
+    ...context,
+    service,
+    approved,
+    execution: context.latestExecution(),
+  };
+};
+
+const planReport = (
+  context: Awaited<ReturnType<typeof setupPlan>>,
+  assignment: PmPlanAssignment,
+  summary: string,
+) => {
+  const requirement = context.approved.records.find(
+    ({ content }) => content.type === 'requirement',
+  )!;
+  return {
+    schema: PM_PLAN_REPORT_SCHEMA,
+    planningCycleId: assignment.planningCycleId,
+    humanTurnId: assignment.humanTurnId,
+    expectedCycleRevision: assignment.expectedCycleRevision,
+    expectedProposalRevision: assignment.expectedProposalRevision,
+    assistantMessage: summary,
+    result: {
+      kind: 'plan_proposal' as const,
+      proposal: {
+        summary,
+        milestones: [
+          {
+            operation: 'create' as const,
+            key: 'foundation',
+            content: {
+              title: 'Foundation',
+              outcome: 'Storage works.',
+              stopCondition: 'Persistence passes.',
+              exclusions: [],
+              ordinal: 1,
+            },
+          },
+        ],
+        tasks: [
+          {
+            operation: 'create' as const,
+            key: 'persist',
+            content: {
+              milestone: { kind: 'proposal' as const, key: 'foundation' },
+              title: 'Persist Todo',
+              outcome: 'Todos survive restart.',
+              acceptanceCriteria: ['Todo is restored.'],
+              verificationCriteria: ['Restart test passes.'],
+              priority: 'must' as const,
+              labels: ['storage'],
+              ownedSurfaces: ['server'],
+              prohibitedSurfaces: [],
+              expectedArtifacts: ['server.spec.ts'],
+              ordinal: 1,
+            },
+          },
+        ],
+        dependencies: [],
+        traces: [
+          {
+            kind: 'milestone_covers' as const,
+            milestone: { kind: 'proposal' as const, key: 'foundation' },
+            requirement: {
+              recordId: requirement.recordId,
+              recordRevision: requirement.revision,
+            },
+          },
+          {
+            kind: 'task_satisfies' as const,
+            task: { kind: 'proposal' as const, key: 'persist' },
+            requirement: {
+              recordId: requirement.recordId,
+              recordRevision: requirement.revision,
+            },
+          },
+        ],
+      },
+    },
+  };
+};
+
 describe('PmReportConsumer', () => {
+  it('accepts a strictly bound delivery plan report as an immutable proposal', async () => {
+    const context = await setupPlan();
+    const assignment = context.execution.assignment as PmPlanAssignment;
+    const requirement = context.approved.records.find(
+      ({ content }) => content.type === 'requirement',
+    )!;
+    const report = {
+      schema: PM_PLAN_REPORT_SCHEMA,
+      planningCycleId: assignment.planningCycleId,
+      humanTurnId: assignment.humanTurnId,
+      expectedCycleRevision: assignment.expectedCycleRevision,
+      expectedProposalRevision: assignment.expectedProposalRevision,
+      assistantMessage: 'Here is the Todo delivery plan.',
+      result: {
+        kind: 'plan_proposal' as const,
+        proposal: {
+          summary: 'Two Todo milestones.',
+          milestones: [
+            {
+              operation: 'create' as const,
+              key: 'foundation',
+              content: {
+                title: 'Foundation',
+                outcome: 'Storage works.',
+                stopCondition: 'Persistence passes.',
+                exclusions: [],
+                ordinal: 1,
+              },
+            },
+          ],
+          tasks: [
+            {
+              operation: 'create' as const,
+              key: 'persist',
+              content: {
+                milestone: { kind: 'proposal' as const, key: 'foundation' },
+                title: 'Persist Todo',
+                outcome: 'Todos survive restart.',
+                acceptanceCriteria: ['Todo is restored.'],
+                verificationCriteria: ['Restart test passes.'],
+                priority: 'must' as const,
+                labels: ['storage'],
+                ownedSurfaces: ['server'],
+                prohibitedSurfaces: [],
+                expectedArtifacts: ['server.spec.ts'],
+                ordinal: 1,
+              },
+            },
+          ],
+          dependencies: [],
+          traces: [
+            {
+              kind: 'milestone_covers' as const,
+              milestone: { kind: 'proposal' as const, key: 'foundation' },
+              requirement: {
+                recordId: requirement.recordId,
+                recordRevision: requirement.revision,
+              },
+            },
+            {
+              kind: 'task_satisfies' as const,
+              task: { kind: 'proposal' as const, key: 'persist' },
+              requirement: {
+                recordId: requirement.recordId,
+                recordRevision: requirement.revision,
+              },
+            },
+          ],
+        },
+      },
+    };
+
+    context.consumer.consume(
+      context.execution,
+      runtimeEventFor(context, context.execution, report),
+    );
+
+    const proposals = context.repository.deliveryPlanProposals(
+      assignment.planningCycleId,
+    );
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toMatchObject({
+      revision: 1,
+      lifecycle: 'awaiting_approval',
+      proposedPlan: report.result.proposal,
+    });
+    expect(
+      context.repository.cycleView(assignment.planningCycleId)?.cycle.lifecycle,
+    ).toBe('awaiting_approval');
+  });
+  it('accepts a complete revision and supersedes only its pending predecessor', async () => {
+    const context = await setupPlan();
+    const firstAssignment = context.execution.assignment as PmPlanAssignment;
+    context.consumer.consume(
+      context.execution,
+      runtimeEventFor(
+        context,
+        context.execution,
+        planReport(context, firstAssignment, 'First Todo delivery plan.'),
+      ),
+    );
+    const firstCycle = context.repository.cycle(
+      firstAssignment.planningCycleId,
+    )!;
+    await context.service.submitPlanTurn({
+      idempotencyKey: 'revise-plan-turn',
+      actor: { kind: 'human' },
+      command: {
+        type: 'planning_cycle.submit_plan_turn',
+        projectId: firstCycle.projectId,
+        planningCycleId: firstCycle.id,
+        expectedCycleRevision: firstCycle.revision,
+        message: 'Revise the Todo plan.',
+      },
+    });
+    const secondExecution = context.latestExecution();
+    const secondAssignment = secondExecution.assignment as PmPlanAssignment;
+    context.consumer.consume(
+      secondExecution,
+      runtimeEventFor(
+        context,
+        secondExecution,
+        planReport(context, secondAssignment, 'Revised Todo delivery plan.'),
+      ),
+    );
+
+    const proposals = context.repository.deliveryPlanProposals(firstCycle.id);
+    expect(proposals).toHaveLength(2);
+    expect(proposals[0].decision).toEqual({
+      kind: 'superseded',
+      reason: 'replacement_accepted',
+      supersededByProposalId: proposals[1].id,
+      decidedAt: now,
+    });
+    expect(proposals[1]).toMatchObject({
+      revision: 2,
+      lifecycle: 'awaiting_approval',
+      proposedPlan: { summary: 'Revised Todo delivery plan.' },
+    });
+  });
+
   it('persists an accepted question receipt, PM turn, questions, and complete event atomically', async () => {
     const context = await setup();
     const report = {
