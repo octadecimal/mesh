@@ -4,6 +4,7 @@ import {
   PM_DISCOVERY_REPORT_SCHEMA,
   PM_PLAN_REPORT_SCHEMA,
   deliveryPlanProposalIdSchema,
+  deliveryPlanProposalSchema,
   ledgerRecordIdSchema,
   milestoneIdSchema,
   pmDiscoveryAssignmentSchema,
@@ -625,7 +626,7 @@ export class PmReportConsumer {
       ),
     };
     const diff = this.deliveryPlanDiff(proposedPlan, reservations, currentPlan);
-    return {
+    return deliveryPlanProposalSchema.parse({
       id: deliveryPlanProposalIdSchema.parse(randomUUID()),
       projectId: execution.projectId,
       planningCycleId: assignment.planningCycleId,
@@ -651,7 +652,7 @@ export class PmReportConsumer {
       createdByExecutionId: execution.id,
       createdAt: at,
       decision: { kind: 'pending' },
-    };
+    });
   }
 
   private deliveryPlanDiff(

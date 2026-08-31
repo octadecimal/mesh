@@ -348,7 +348,7 @@ export class PlanningService {
             envelope,
             requestHash,
             'planning_requirements_required',
-            'At least one approved requirement is required before delivery planning',
+            'At least one approved current requirement is required for delivery planning.',
             at,
           );
         }
@@ -568,6 +568,20 @@ export class PlanningService {
     let event: DomainEvent | undefined;
     const result = this.auditTransaction(() => {
       const at = this.now();
+      if (
+        !this.dependencies.repository.approvedDeliveryPlan(
+          envelope.command.projectId,
+        ) ||
+        !this.dependencies.repository.boardFilter(envelope.command.projectId)
+      ) {
+        return this.storeFailure(
+          envelope,
+          requestHash,
+          'board_filter_not_found',
+          'Board filter state was not found',
+          at,
+        );
+      }
       try {
         this.dependencies.repository.replaceBoardFilterInTransaction(
           {
@@ -1183,6 +1197,39 @@ export class PlanningService {
             'Delivery plan canonical base does not match',
             at,
           );
+        }
+        const currentPlan = this.dependencies.repository.approvedDeliveryPlan(
+          proposal.projectId,
+        );
+        if (proposal.base.deliveryPlan.id !== null) {
+          const currentTasks = new Map(
+            (currentPlan === undefined
+              ? []
+              : this.dependencies.repository.currentTaskRevisions(currentPlan)
+            ).map((task) => [task.id, task]),
+          );
+          const staleTask = proposal.proposedPlan.tasks.some((task) => {
+            if (task.operation === 'create') return false;
+            const current = currentTasks.get(task.taskId);
+            return (
+              current === undefined ||
+              current.contractRevision !== task.expectedContractRevision ||
+              current.revision !== task.expectedCurrentRevision
+            );
+          });
+          if (
+            currentPlan?.plan.id !== proposal.base.deliveryPlan.id ||
+            currentPlan.plan.revision !== proposal.base.deliveryPlan.revision ||
+            staleTask
+          ) {
+            return this.storeFailure(
+              envelope,
+              requestHash,
+              'plan_canonical_base_conflict',
+              'Delivery plan canonical base does not match',
+              at,
+            );
+          }
         }
         try {
           deliveryPlan = this.materializeDeliveryPlan(proposal, at);

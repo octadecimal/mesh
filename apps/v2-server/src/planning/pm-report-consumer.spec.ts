@@ -495,6 +495,7 @@ describe('PmReportConsumer', () => {
       },
     };
 
+    context.publish.mockClear();
     context.consumer.consume(
       context.execution,
       runtimeEventFor(context, context.execution, report),
@@ -512,7 +513,146 @@ describe('PmReportConsumer', () => {
     expect(
       context.repository.cycleView(assignment.planningCycleId)?.cycle.lifecycle,
     ).toBe('awaiting_approval');
+    expect(context.repository.receipt(context.execution.id)).toMatchObject({
+      status: 'accepted',
+      rejectionReason: null,
+    });
+    expect(context.publish).toHaveBeenCalledTimes(1);
+    expect(context.consumerBarrier.status).toBe('healthy');
   });
+
+  it.each([
+    {
+      name: 'wrong report binding',
+      reason: 'report_binding_mismatch',
+      change: (report: ReturnType<typeof planReport>) => ({
+        ...report,
+        humanTurnId: randomUUID(),
+      }),
+      eventSchema: PM_PLAN_REPORT_SCHEMA,
+    },
+    {
+      name: 'wrong event schema',
+      reason: 'event_binding_mismatch',
+      change: (report: ReturnType<typeof planReport>) => report,
+      eventSchema: PM_DISCOVERY_REPORT_SCHEMA,
+    },
+    {
+      name: 'invalid plan semantics',
+      reason: 'invalid_report',
+      change: (report: ReturnType<typeof planReport>) => ({
+        ...report,
+        result: {
+          ...report.result,
+          proposal: {
+            ...report.result.proposal,
+            milestones: report.result.proposal.milestones.map((milestone) => ({
+              ...milestone,
+              content: { ...milestone.content, ordinal: 2 },
+            })),
+          },
+        },
+      }),
+      eventSchema: PM_PLAN_REPORT_SCHEMA,
+    },
+  ])('rejects $name with a durable attention receipt', async (testCase) => {
+    const context = await setupPlan();
+    const assignment = context.execution.assignment as PmPlanAssignment;
+    const report = testCase.change(
+      planReport(context, assignment, 'Todo delivery plan.'),
+    );
+    const event = {
+      ...runtimeEventFor(context, context.execution, report),
+      payload: {
+        schema: testCase.eventSchema,
+        value: report,
+      },
+    };
+    context.publish.mockClear();
+
+    context.consumer.consume(context.execution, event);
+
+    expect(context.repository.receipt(context.execution.id)).toMatchObject({
+      status: 'rejected',
+      rejectionReason: testCase.reason,
+    });
+    expect(context.repository.cycle(assignment.planningCycleId)).toMatchObject({
+      lifecycle: 'attention_required',
+      activeExecutionId: null,
+    });
+    expect(
+      context.repository.deliveryPlanProposals(assignment.planningCycleId),
+    ).toEqual([]);
+    expect(context.publish).toHaveBeenCalledTimes(1);
+    expect(context.consumerBarrier.status).toBe('healthy');
+  });
+
+  it('rejects a conflicting plan digest without replacing the accepted receipt', async () => {
+    const context = await setupPlan();
+    const assignment = context.execution.assignment as PmPlanAssignment;
+    const first = planReport(context, assignment, 'Todo delivery plan.');
+    context.publish.mockClear();
+    context.consumer.consume(
+      context.execution,
+      runtimeEventFor(context, context.execution, first),
+    );
+    const receipt = context.repository.receipt(context.execution.id)!;
+    const currentExecution = context.executions.get(context.execution.id)!;
+
+    expect(() =>
+      context.consumer.consume(
+        currentExecution,
+        runtimeEventFor(
+          context,
+          currentExecution,
+          planReport(context, assignment, 'Conflicting Todo delivery plan.'),
+        ),
+      ),
+    ).toThrow('Conflicting PM output receipt');
+
+    expect(context.repository.receipt(context.execution.id)).toEqual(receipt);
+    expect(
+      context.repository.deliveryPlanProposals(assignment.planningCycleId),
+    ).toHaveLength(1);
+    expect(context.publish).toHaveBeenCalledTimes(1);
+    expect(context.consumerBarrier.status).toBe('tripped');
+  });
+
+  it('rolls a rejected plan receipt back when its attention event audit fails', async () => {
+    const context = await setupPlan();
+    const assignment = context.execution.assignment as PmPlanAssignment;
+    const report = {
+      ...planReport(context, assignment, 'Wrongly bound Todo delivery plan.'),
+      humanTurnId: randomUUID(),
+    };
+    const original = context.fixture.events.appendDomainInTransaction.bind(
+      context.fixture.events,
+    );
+    vi.spyOn(
+      context.fixture.events,
+      'appendDomainInTransaction',
+    ).mockImplementationOnce((projectId, event) => {
+      original(projectId, event);
+      throw new Error('injected plan attention audit failure');
+    });
+    context.publish.mockClear();
+
+    expect(() =>
+      context.consumer.consume(
+        context.execution,
+        runtimeEventFor(context, context.execution, report),
+      ),
+    ).toThrow('injected plan attention audit failure');
+
+    expect(context.repository.receipt(context.execution.id)).toBeUndefined();
+    expect(context.repository.cycle(assignment.planningCycleId)).toMatchObject({
+      lifecycle: 'execution_active',
+      activeExecutionId: context.execution.id,
+    });
+    expect(context.publish).not.toHaveBeenCalled();
+    expect(context.consumerBarrier.status).toBe('tripped');
+  });
+
   it('accepts a complete revision and supersedes only its pending predecessor', async () => {
     const context = await setupPlan();
     const firstAssignment = context.execution.assignment as PmPlanAssignment;

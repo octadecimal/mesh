@@ -634,7 +634,311 @@ const seedDeliveryPlanProposal = (
   return { cycle, proposal, milestoneId, taskId };
 };
 
+const approveSeededDeliveryPlan = (
+  context: ReturnType<typeof setup>,
+  approved: ReturnType<typeof seedApprovedRequirement>,
+  seeded: ReturnType<typeof seedDeliveryPlanProposal>,
+  idempotencyKey: string,
+) =>
+  context.service.approvePlanProposal({
+    idempotencyKey,
+    actor: { kind: 'human' },
+    command: {
+      type: 'plan_proposal.approve',
+      projectId: seeded.cycle.projectId,
+      planningCycleId: seeded.cycle.id,
+      expectedCycleRevision: seeded.cycle.revision,
+      proposalId: seeded.proposal.id,
+      expectedProposalRevision: seeded.proposal.revision,
+      expectedProjectIntentId: approved.projectIntent.id,
+      expectedProjectIntentRevision: approved.projectIntent.revision,
+      expectedLedgerId: approved.ledger.id,
+      expectedLedgerRevision: approved.ledger.revision,
+      expectedDeliveryPlan: seeded.proposal.base.deliveryPlan,
+    },
+  });
+
+const seedReplacementPlanProposal = (
+  context: ReturnType<typeof setup>,
+  approved: ReturnType<typeof seedApprovedRequirement>,
+  operation: 'reuse' | 'revise',
+  expectedCurrentRevision: number,
+) => {
+  const current = context.repository.approvedDeliveryPlan(
+    context.fixture.project.id,
+  )!;
+  const milestone = current.milestones[0];
+  const task = current.taskContracts[0];
+  const requirement = approved.records.find(
+    ({ content }) => content.type === 'requirement',
+  )!;
+  const cycle: PlanningCycle = {
+    id: randomUUID(),
+    projectId: context.fixture.project.id,
+    lifecycle: 'awaiting_approval',
+    revision: 2,
+    profileId: context.fixture.pmProfileRevision.profileId,
+    profileRevision: context.fixture.pmProfileRevision.revision,
+    baseProjectIntentRevision: approved.projectIntent.revision,
+    baseLedgerRevision: approved.ledger.revision,
+    latestProposalRevision: 1,
+    activeExecutionId: null,
+    createdAt: now,
+    updatedAt: now,
+    endedAt: null,
+  };
+  const human: PlanningTurn = {
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    ordinal: 1,
+    actor: 'human',
+    message: 'Replace the Todo plan.',
+    launchState: 'execution_bound',
+    executionId: context.fixture.execution.id,
+    createdAt: now,
+  };
+  const pm: PlanningTurn = {
+    ...human,
+    id: randomUUID(),
+    ordinal: 2,
+    actor: 'pm',
+    message: 'Replacement plan ready.',
+    launchState: null,
+  };
+  const taskMember =
+    operation === 'reuse'
+      ? {
+          operation,
+          taskId: task.id,
+          expectedContractRevision: task.contractRevision,
+          expectedCurrentRevision,
+        }
+      : {
+          operation,
+          taskId: task.id,
+          expectedContractRevision: task.contractRevision,
+          expectedCurrentRevision,
+          lifecycle: 'pending' as const,
+          content: {
+            milestone: {
+              kind: 'canonical' as const,
+              milestoneId: milestone.id,
+            },
+            title: 'Persist revised tasks',
+            outcome: 'Revised tasks survive restart.',
+            acceptanceCriteria: ['Revised task persists.'],
+            verificationCriteria: ['Revised restart passes.'],
+            priority: task.priority,
+            labels: task.labels,
+            ownedSurfaces: task.ownedSurfaces,
+            prohibitedSurfaces: task.prohibitedSurfaces,
+            expectedArtifacts: task.expectedArtifacts,
+            ordinal: task.ordinal,
+          },
+        };
+  const proposal = deliveryPlanProposalSchema.parse({
+    id: randomUUID(),
+    projectId: cycle.projectId,
+    planningCycleId: cycle.id,
+    revision: 1,
+    lifecycle: 'awaiting_approval',
+    base: {
+      projectIntentId: approved.projectIntent.id,
+      projectIntentRevision: approved.projectIntent.revision,
+      ledgerId: approved.ledger.id,
+      ledgerRevision: approved.ledger.revision,
+      deliveryPlan: { id: current.plan.id, revision: current.plan.revision },
+    },
+    proposedPlan: {
+      summary: 'Replacement Todo delivery plan.',
+      milestones: [
+        {
+          operation: 'revise',
+          milestoneId: milestone.id,
+          expectedRevision: milestone.revision,
+          lifecycle: milestone.lifecycle,
+          content: {
+            title: milestone.title,
+            outcome: milestone.outcome,
+            stopCondition: milestone.stopCondition,
+            exclusions: milestone.exclusions,
+            ordinal: milestone.ordinal,
+          },
+        },
+      ],
+      tasks: [taskMember],
+      dependencies: [],
+      traces: [
+        {
+          kind: 'milestone_covers',
+          milestone: { kind: 'canonical', milestoneId: milestone.id },
+          requirement: {
+            recordId: requirement.recordId,
+            recordRevision: requirement.revision,
+          },
+        },
+        {
+          kind: 'task_satisfies',
+          task: { kind: 'canonical', taskId: task.id },
+          requirement: {
+            recordId: requirement.recordId,
+            recordRevision: requirement.revision,
+          },
+        },
+      ],
+    },
+    reservations: { milestones: [], tasks: [], dependencies: [] },
+    diff: {
+      milestones: { create: 0, reuse: 0, revise: 1, retire: 0, reactivate: 0 },
+      tasks: {
+        create: 0,
+        reuse: operation === 'reuse' ? 1 : 0,
+        revise: operation === 'revise' ? 1 : 0,
+        retire: 0,
+        reactivate: 0,
+      },
+      dependencies: {
+        create: 0,
+        reuse: 0,
+        revise: 0,
+        retire: 0,
+        reactivate: 0,
+      },
+      traceCreateCount: 2,
+      traceRemoveCount: 2,
+    },
+    createdByTurnId: pm.id,
+    createdByExecutionId: context.fixture.execution.id,
+    createdAt: now,
+    decision: { kind: 'pending' },
+  });
+  inImmediateTransaction(context.fixture.database, () => {
+    context.repository.insertCycleInTransaction(cycle, {
+      planningCycleId: cycle.id,
+      purpose: 'delivery_plan',
+      baseDeliveryPlanId: current.plan.id,
+      baseDeliveryPlanRevision: current.plan.revision,
+    });
+    context.repository.insertTurnInTransaction(human);
+    context.repository.insertTurnInTransaction(pm);
+    context.repository.insertDeliveryPlanProposalInTransaction(proposal);
+  });
+  return { cycle, proposal };
+};
+
 describe('PlanningService', () => {
+  it('stores a typed no-write failure when Board filter state is absent', () => {
+    const context = setup();
+    const beforeCursor = context.fixture.events.cursors(
+      context.fixture.project.id,
+    ).domain;
+
+    const result = context.service.setBoardFilter({
+      idempotencyKey: 'filter-without-board',
+      actor: { kind: 'human' },
+      command: {
+        type: 'board_filter.set',
+        projectId: context.fixture.project.id,
+        expectedFilterRevision: 1,
+        filter: {
+          milestoneIds: [],
+          requirementRecordIds: [],
+          priorities: [],
+          labels: [],
+          readiness: [],
+          taskLifecycles: ['pending'],
+        },
+      },
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      commandType: 'board_filter.set',
+      error: {
+        code: 'board_filter_not_found',
+        message: 'Board filter state was not found',
+      },
+    });
+    expect(
+      context.repository.boardFilter(context.fixture.project.id),
+    ).toBeUndefined();
+    expect(
+      context.fixture.events.cursors(context.fixture.project.id).domain,
+    ).toBe(beforeCursor);
+    expect(context.publish).not.toHaveBeenCalled();
+    expect(
+      context.fixture.commands.find('filter-without-board')?.result,
+    ).toEqual(result);
+    expect(() => context.barrier.assertHealthy()).not.toThrow();
+  });
+
+  it('stores only one idempotent failure receipt for an empty current requirement ledger', async () => {
+    const context = setup();
+    const approved = seedApprovedRequirement(context);
+    const requirement = approved.records.find(
+      ({ content }) => content.type === 'requirement',
+    )!;
+    context.fixture.database
+      .prepare(
+        'UPDATE ledger_record_revisions SET content_json = ? WHERE record_id = ?',
+      )
+      .run(
+        JSON.stringify({ ...requirement.content, status: 'retired' }),
+        requirement.recordId,
+      );
+    const beforeCursor = context.fixture.events.cursors(
+      context.fixture.project.id,
+    ).domain;
+    const input = {
+      idempotencyKey: 'plan-without-current-requirement',
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'planning_cycle.submit_plan_turn' as const,
+        projectId: context.fixture.project.id,
+        expectedCycleRevision: null,
+        profileId: context.fixture.pmProfileRevision.profileId,
+        profileRevision: context.fixture.pmProfileRevision.revision,
+        expectedProjectIntentId: approved.projectIntent.id,
+        expectedProjectIntentRevision: approved.projectIntent.revision,
+        expectedLedgerId: approved.ledger.id,
+        expectedLedgerRevision: approved.ledger.revision,
+        expectedDeliveryPlan: { id: null, revision: null } as const,
+        message: 'Plan Todo delivery.',
+      },
+    };
+
+    const first = await context.service.submitPlanTurn(input);
+    const replay = await context.service.submitPlanTurn(input);
+
+    expect(first).toEqual({
+      ok: false,
+      commandType: 'planning_cycle.submit_plan_turn',
+      error: {
+        code: 'planning_requirements_required',
+        message:
+          'At least one approved current requirement is required for delivery planning.',
+      },
+    });
+    expect(replay).toEqual(first);
+    expect(
+      context.repository.activeCycle(context.fixture.project.id),
+    ).toBeUndefined();
+    expect(
+      context.fixture.events.cursors(context.fixture.project.id).domain,
+    ).toBe(beforeCursor);
+    expect(context.publish).not.toHaveBeenCalled();
+    expect(context.launcher.inputs).toEqual([]);
+    expect(
+      context.fixture.database
+        .prepare(
+          'SELECT COUNT(*) AS count FROM command_results WHERE idempotency_key = ?',
+        )
+        .get(input.idempotencyKey),
+    ).toEqual({ count: 1 });
+    expect(() => context.barrier.assertHealthy()).not.toThrow();
+  });
+
   it('stores only a failure receipt when delivery planning has no approved intent', async () => {
     const context = setup();
     const beforeCursor = context.fixture.events.cursors(
@@ -718,6 +1022,252 @@ describe('PlanningService', () => {
     ).toMatchObject({
       kind: 'approved',
     });
+  });
+
+  it.each(['reuse', 'revise'] as const)(
+    'rejects a %s proposal whose current task revision is stale without mutation',
+    (operation) => {
+      const context = setup();
+      const approved = seedApprovedRequirement(context);
+      const initial = seedDeliveryPlanProposal(context, approved);
+      expect(
+        approveSeededDeliveryPlan(
+          context,
+          approved,
+          initial,
+          `approve-initial-${operation}`,
+        ),
+      ).toMatchObject({ ok: true });
+      const plan = context.repository.approvedDeliveryPlan(
+        context.fixture.project.id,
+      )!;
+      inImmediateTransaction(context.fixture.database, () => {
+        context.repository.appendTaskLifecycleRevisionInTransaction({
+          projectId: context.fixture.project.id,
+          expectedDeliveryPlanRevision: 1,
+          taskId: initial.taskId,
+          expectedContractRevision: 1,
+          expectedCurrentRevision: 1,
+          lifecycle: 'completed',
+          createdAt: now,
+        });
+      });
+      const replacement = seedReplacementPlanProposal(
+        context,
+        approved,
+        operation,
+        1,
+      );
+      const beforeCursor = context.fixture.events.cursors(
+        context.fixture.project.id,
+      ).domain;
+      context.publish.mockClear();
+
+      const result = approveSeededDeliveryPlan(
+        context,
+        approved,
+        replacement,
+        `approve-stale-${operation}`,
+      );
+
+      expect(result).toMatchObject({
+        ok: false,
+        commandType: 'plan_proposal.approve',
+        error: { code: 'plan_canonical_base_conflict' },
+      });
+      expect(
+        context.repository.approvedDeliveryPlan(context.fixture.project.id),
+      ).toEqual(plan);
+      expect(
+        context.repository.deliveryPlanProposal(replacement.proposal.id),
+      ).toEqual(replacement.proposal);
+      expect(context.repository.cycle(replacement.cycle.id)).toEqual(
+        replacement.cycle,
+      );
+      expect(
+        context.repository
+          .currentTaskRevisions(plan)
+          .find(({ id }) => id === initial.taskId),
+      ).toMatchObject({
+        revision: 2,
+        contractRevision: 1,
+        lifecycle: 'completed',
+      });
+      expect(
+        context.fixture.events.cursors(context.fixture.project.id).domain,
+      ).toBe(beforeCursor);
+      expect(context.publish).not.toHaveBeenCalled();
+      expect(
+        context.fixture.commands.find(`approve-stale-${operation}`)?.result,
+      ).toEqual(result);
+      expect(() => context.barrier.assertHealthy()).not.toThrow();
+    },
+  );
+
+  it('accepts a correctly guarded task revision while preserving revision one', () => {
+    const context = setup();
+    const approved = seedApprovedRequirement(context);
+    const initial = seedDeliveryPlanProposal(context, approved);
+    expect(
+      approveSeededDeliveryPlan(
+        context,
+        approved,
+        initial,
+        'approve-initial-correct-guard',
+      ),
+    ).toMatchObject({ ok: true });
+    const revisionOne = structuredClone(
+      context.repository.approvedDeliveryPlan(context.fixture.project.id)!,
+    );
+    inImmediateTransaction(context.fixture.database, () => {
+      context.repository.appendTaskLifecycleRevisionInTransaction({
+        projectId: context.fixture.project.id,
+        expectedDeliveryPlanRevision: 1,
+        taskId: initial.taskId,
+        expectedContractRevision: 1,
+        expectedCurrentRevision: 1,
+        lifecycle: 'completed',
+        createdAt: now,
+      });
+    });
+    const replacement = seedReplacementPlanProposal(
+      context,
+      approved,
+      'revise',
+      2,
+    );
+
+    const result = approveSeededDeliveryPlan(
+      context,
+      approved,
+      replacement,
+      'approve-correctly-guarded-replacement',
+    );
+
+    expect(result).toMatchObject({
+      ok: true,
+      schemaVersion: 2,
+      deliveryPlan: {
+        plan: {
+          id: revisionOne.plan.id,
+          revision: 2,
+          baseDeliveryPlanRevision: 1,
+        },
+        taskContracts: [
+          {
+            id: initial.taskId,
+            revision: 3,
+            contractRevision: 3,
+            title: 'Persist revised tasks',
+          },
+        ],
+      },
+    });
+    expect(
+      context.repository.deliveryPlanProposal(initial.proposal.id)?.decision,
+    ).toMatchObject({ kind: 'approved' });
+    expect(revisionOne).toMatchObject({
+      plan: { revision: 1, proposalId: initial.proposal.id },
+      taskContracts: [{ id: initial.taskId, revision: 1, contractRevision: 1 }],
+    });
+    expect(
+      context.repository.currentTaskRevisions(
+        context.repository.approvedDeliveryPlan(context.fixture.project.id)!,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: initial.taskId,
+          revision: 3,
+          contractRevision: 3,
+        }),
+      ]),
+    );
+  });
+
+  it('rolls back every approval write seam and trips the audit barrier', () => {
+    for (const seam of [
+      'materialization',
+      'board_projection',
+      'event_append',
+      'command_result',
+    ] as const) {
+      const context = setup();
+      const approved = seedApprovedRequirement(context);
+      const seeded = seedDeliveryPlanProposal(context, approved);
+      const failure = new Error(`forced ${seam} failure`);
+      if (seam === 'materialization') {
+        const original =
+          context.repository.applyApprovedDeliveryPlanInTransaction.bind(
+            context.repository,
+          );
+        vi.spyOn(
+          context.repository,
+          'applyApprovedDeliveryPlanInTransaction',
+        ).mockImplementation((proposal, plan) => {
+          original(proposal, plan);
+          throw failure;
+        });
+      } else if (seam === 'board_projection') {
+        vi.spyOn(context.repository, 'currentTaskRevisions').mockImplementation(
+          () => {
+            throw failure;
+          },
+        );
+      } else if (seam === 'event_append') {
+        const original = context.fixture.events.appendDomainInTransaction.bind(
+          context.fixture.events,
+        );
+        vi.spyOn(
+          context.fixture.events,
+          'appendDomainInTransaction',
+        ).mockImplementation((projectId, event) => {
+          original(projectId, event);
+          throw failure;
+        });
+      } else {
+        const original = context.fixture.commands.storeInTransaction.bind(
+          context.fixture.commands,
+        );
+        vi.spyOn(
+          context.fixture.commands,
+          'storeInTransaction',
+        ).mockImplementation((receipt) => {
+          original(receipt);
+          throw failure;
+        });
+      }
+      const beforeCursor = context.fixture.events.cursors(
+        context.fixture.project.id,
+      ).domain;
+
+      expect(() =>
+        approveSeededDeliveryPlan(
+          context,
+          approved,
+          seeded,
+          `approve-forced-${seam}`,
+        ),
+      ).toThrow(failure);
+
+      expect(
+        context.repository.approvedDeliveryPlan(context.fixture.project.id),
+      ).toBeUndefined();
+      expect(
+        context.repository.deliveryPlanProposal(seeded.proposal.id),
+      ).toEqual(seeded.proposal);
+      expect(context.repository.cycle(seeded.cycle.id)).toEqual(seeded.cycle);
+      expect(
+        context.fixture.events.cursors(context.fixture.project.id).domain,
+      ).toBe(beforeCursor);
+      expect(
+        context.fixture.commands.find(`approve-forced-${seam}`),
+      ).toBeUndefined();
+      expect(context.publish).not.toHaveBeenCalled();
+      expect(() => context.barrier.assertHealthy()).toThrow(
+        'Audit barrier is tripped',
+      );
+    }
   });
 
   it('rejects a plan proposal without materializing canonical work', () => {
