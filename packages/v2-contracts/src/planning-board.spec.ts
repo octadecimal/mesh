@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   PM_PLAN_REPORT_SCHEMA,
+  boardFilterSchema,
+  boardFilterSelectionSchema,
+  boardTaskCardSchema,
   boardViewSchema,
   deliveryPlanIdSchema,
   deliveryPlanProposalSchema,
@@ -563,6 +566,70 @@ describe('planning and Board contracts', () => {
       },
     };
     expect(pmPlanAssignmentSchema.parse(assignment)).toEqual(assignment);
+    const approvedDeliveryPlan = {
+      plan: {
+        id: planId,
+        projectId,
+        revision: 1,
+        projectIntentId: intentId,
+        projectIntentRevision: 1,
+        ledgerId,
+        ledgerRevision: 1,
+        baseDeliveryPlanRevision: null,
+        proposalId: planProposalId,
+        summary: 'Approved empty plan.',
+        approvedBy: 'human',
+        approvedAt: now,
+      },
+      milestones: [],
+      taskContracts: [],
+      dependencies: [],
+      traces: [],
+      milestoneDependencies: [],
+    };
+    const assignmentWithPlan = {
+      ...assignment,
+      baseDeliveryPlanId: planId,
+      baseDeliveryPlanRevision: 1,
+      input: { ...assignment.input, approvedDeliveryPlan },
+    };
+    expect(pmPlanAssignmentSchema.parse(assignmentWithPlan)).toEqual(
+      assignmentWithPlan,
+    );
+    expect(
+      pmPlanAssignmentSchema.safeParse({
+        ...assignmentWithPlan,
+        input: {
+          ...assignmentWithPlan.input,
+          approvedDeliveryPlan: {
+            ...approvedDeliveryPlan,
+            plan: { ...approvedDeliveryPlan.plan, projectId: id('90') },
+          },
+        },
+      }).success,
+    ).toBe(false);
+    for (const plan of [
+      {
+        ...approvedDeliveryPlan.plan,
+        projectIntentId: id('91'),
+      },
+      {
+        ...approvedDeliveryPlan.plan,
+        projectIntentRevision: 2,
+      },
+      { ...approvedDeliveryPlan.plan, ledgerId: id('92') },
+      { ...approvedDeliveryPlan.plan, ledgerRevision: 2 },
+    ]) {
+      expect(
+        pmPlanAssignmentSchema.safeParse({
+          ...assignmentWithPlan,
+          input: {
+            ...assignmentWithPlan.input,
+            approvedDeliveryPlan: { ...approvedDeliveryPlan, plan },
+          },
+        }).success,
+      ).toBe(false);
+    }
     expect(
       pmPlanAssignmentSchema.safeParse({
         ...assignment,
@@ -634,6 +701,134 @@ describe('planning and Board contracts', () => {
         ],
       }).success,
     ).toBe(false);
+  });
+
+  it('accepts normalizable command filters but requires canonical stored filters', () => {
+    const normalizableSelection = {
+      milestoneIds: [id('42'), id('41'), id('42')],
+      taskLifecycles: ['completed', 'pending', 'completed'],
+      readiness: ['inactive', 'actionable', 'inactive'],
+      priorities: ['could', 'must', 'could'],
+      labels: ['zeta', 'alpha', 'zeta'],
+      requirementRecordIds: [id('44'), id('43'), id('44')],
+    };
+    expect(boardFilterSelectionSchema.parse(normalizableSelection)).toEqual(
+      normalizableSelection,
+    );
+    expect(
+      v2CommandEnvelopeSchema.parse({
+        idempotencyKey: 'normalizable-board-filter',
+        actor: { kind: 'human' },
+        command: {
+          type: 'board_filter.set',
+          projectId,
+          expectedFilterRevision: 1,
+          filter: normalizableSelection,
+        },
+      }).command,
+    ).toMatchObject({ filter: normalizableSelection });
+    expect(
+      boardFilterSchema.safeParse({
+        projectId,
+        revision: 1,
+        ...normalizableSelection,
+        updatedAt: now,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('binds Board task lifecycle to deterministic readiness', () => {
+    const card = activeBoard.cards[0];
+    expect(
+      boardTaskCardSchema.safeParse({ ...card, lifecycle: 'completed' })
+        .success,
+    ).toBe(false);
+    expect(
+      boardTaskCardSchema.safeParse({
+        ...card,
+        lifecycle: 'retired',
+        readiness: {
+          state: 'blocked',
+          blockers: [
+            {
+              kind: 'dependency_incomplete',
+              dependencyId: id('45'),
+              prerequisiteTaskId: id('46'),
+            },
+          ],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      boardTaskCardSchema.safeParse({
+        ...card,
+        readiness: {
+          state: 'inactive',
+          blockers: [{ kind: 'task_completed' }],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      boardTaskCardSchema.safeParse({
+        ...card,
+        lifecycle: 'completed',
+        readiness: {
+          state: 'inactive',
+          blockers: [{ kind: 'milestone_retired', milestoneId: id('47') }],
+        },
+      }).success,
+    ).toBe(false);
+    for (const candidate of [
+      {
+        ...card,
+        lifecycle: 'completed',
+        readiness: {
+          state: 'inactive',
+          blockers: [{ kind: 'task_completed' }],
+        },
+      },
+      {
+        ...card,
+        lifecycle: 'retired',
+        readiness: {
+          state: 'inactive',
+          blockers: [{ kind: 'task_retired' }],
+        },
+      },
+      {
+        ...card,
+        lifecycle: 'completed',
+        readiness: {
+          state: 'inactive',
+          blockers: [{ kind: 'milestone_retired', milestoneId }],
+        },
+      },
+      {
+        ...card,
+        lifecycle: 'retired',
+        readiness: {
+          state: 'inactive',
+          blockers: [{ kind: 'milestone_retired', milestoneId }],
+        },
+      },
+    ]) {
+      expect(boardTaskCardSchema.safeParse(candidate).success).toBe(true);
+    }
+  });
+
+  it('requires an exact pre-plan Board empty reason', () => {
+    expect(boardViewSchema.parse(emptyBoard)).toEqual(emptyBoard);
+    for (const emptyReason of [null, 'plan_empty', 'filter_empty'] as const) {
+      expect(
+        boardViewSchema.safeParse({ ...emptyBoard, emptyReason }).success,
+      ).toBe(false);
+    }
+    expect(
+      boardViewSchema.safeParse({
+        ...emptyBoard,
+        emptyReason: 'intent_required',
+      }).success,
+    ).toBe(true);
   });
 
   it('parses strict plan commands with exact new-cycle bases', () => {

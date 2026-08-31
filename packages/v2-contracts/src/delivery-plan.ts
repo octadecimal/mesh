@@ -1707,7 +1707,14 @@ export const pmPlanAssignmentSchema = z
     const approvedPlan = value.input.approvedDeliveryPlan?.plan ?? null;
     if (
       (approvedPlan?.id ?? null) !== value.baseDeliveryPlanId ||
-      (approvedPlan?.revision ?? null) !== value.baseDeliveryPlanRevision
+      (approvedPlan?.revision ?? null) !== value.baseDeliveryPlanRevision ||
+      (approvedPlan !== null &&
+        (approvedPlan.projectId !== value.projectId ||
+          approvedPlan.projectIntentId !== value.baseProjectIntentId ||
+          approvedPlan.projectIntentRevision !==
+            value.baseProjectIntentRevision ||
+          approvedPlan.ledgerId !== value.baseLedgerId ||
+          approvedPlan.ledgerRevision !== value.baseLedgerRevision))
     ) {
       context.addIssue({
         code: 'custom',

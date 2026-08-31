@@ -247,6 +247,70 @@ export const v2ProjectSnapshotSchema = z
         message: 'Intent ledger must match the snapshot project',
       });
     }
+    const newestApprovedPlanCycle = value.planningCycles
+      .filter(
+        ({ cycle, purpose }) =>
+          cycle.lifecycle === 'approved' && purpose.kind === 'delivery_plan',
+      )
+      .reduce<(typeof value.planningCycles)[number] | null>(
+        (newest, candidate) => {
+          if (newest === null) return candidate;
+          const candidateRevision =
+            (candidate.purpose.baseDeliveryPlanRevision ?? 0) + 1;
+          const newestRevision =
+            (newest.purpose.baseDeliveryPlanRevision ?? 0) + 1;
+          return candidateRevision > newestRevision ? candidate : newest;
+        },
+        null,
+      );
+    if (newestApprovedPlanCycle !== null && value.deliveryPlan === null) {
+      context.addIssue({
+        code: 'custom',
+        path: ['deliveryPlan'],
+        message: 'Approved plan history requires a canonical delivery plan',
+      });
+    }
+    if (
+      newestApprovedPlanCycle === null &&
+      !value.planningHistoryTruncated &&
+      value.deliveryPlan !== null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['deliveryPlan'],
+        message:
+          'Untruncated snapshot without plan approval cannot have a delivery plan',
+      });
+    }
+    if (newestApprovedPlanCycle !== null && value.deliveryPlan !== null) {
+      const latestProposal =
+        newestApprovedPlanCycle.deliveryPlanProposals.at(-1);
+      const expectedRevision =
+        (newestApprovedPlanCycle.purpose.baseDeliveryPlanRevision ?? 0) + 1;
+      const basePlanId = newestApprovedPlanCycle.purpose.baseDeliveryPlanId;
+      if (
+        latestProposal === undefined ||
+        value.deliveryPlan.plan.proposalId !== latestProposal.id ||
+        value.deliveryPlan.plan.revision !== expectedRevision ||
+        value.deliveryPlan.plan.baseDeliveryPlanRevision !==
+          newestApprovedPlanCycle.purpose.baseDeliveryPlanRevision ||
+        (basePlanId !== null && value.deliveryPlan.plan.id !== basePlanId) ||
+        value.deliveryPlan.plan.projectIntentId !==
+          latestProposal.base.projectIntentId ||
+        value.deliveryPlan.plan.projectIntentRevision !==
+          latestProposal.base.projectIntentRevision ||
+        value.deliveryPlan.plan.ledgerId !== latestProposal.base.ledgerId ||
+        value.deliveryPlan.plan.ledgerRevision !==
+          latestProposal.base.ledgerRevision
+      ) {
+        context.addIssue({
+          code: 'custom',
+          path: ['deliveryPlan'],
+          message:
+            'Snapshot delivery plan must match the newest approved plan cycle',
+        });
+      }
+    }
     if (value.deliveryPlan !== null) {
       if (
         value.intentLedger === null ||

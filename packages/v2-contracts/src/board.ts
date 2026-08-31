@@ -75,6 +75,9 @@ const uniqueArray = <T extends z.ZodType>(
       }
     });
 
+const boundedArray = <T extends z.ZodType>(schema: T, maximum: number) =>
+  z.array(schema).max(maximum).readonly();
+
 const enumOrder = (values: readonly string[]) => {
   const ranks = new Map(values.map((value, index) => [value, index] as const));
   return (left: string, right: string) =>
@@ -82,6 +85,15 @@ const enumOrder = (values: readonly string[]) => {
 };
 
 const boardFilterSelectionShape = {
+  milestoneIds: boundedArray(milestoneIdSchema, 20),
+  taskLifecycles: boundedArray(taskLifecycleSchema, 3),
+  readiness: boundedArray(readinessStateSchema, 3),
+  priorities: boundedArray(taskPrioritySchema, 3),
+  labels: boundedArray(planLabelSchema, 100),
+  requirementRecordIds: boundedArray(ledgerRecordIdSchema, 300),
+};
+
+const canonicalBoardFilterSelectionShape = {
   milestoneIds: uniqueArray(milestoneIdSchema, 20, compareUnicodeCodePoints),
   taskLifecycles: uniqueArray(
     taskLifecycleSchema,
@@ -114,7 +126,7 @@ export type BoardFilterSelection = z.infer<typeof boardFilterSelectionSchema>;
 export const boardFilterSchema = z.strictObject({
   projectId: projectIdSchema,
   revision: positiveIntegerSchema,
-  ...boardFilterSelectionShape,
+  ...canonicalBoardFilterSelectionShape,
   updatedAt: isoTimestampSchema,
 });
 export type BoardFilter = z.infer<typeof boardFilterSchema>;
@@ -272,6 +284,32 @@ export const boardTaskCardSchema = z
         message: 'Board task labels must be unique',
       });
     }
+    const blocker = value.readiness.blockers[0];
+    const retiredMilestone = blocker?.kind === 'milestone_retired';
+    const terminalTaskBlocker =
+      blocker?.kind === 'task_completed' || blocker?.kind === 'task_retired';
+    if (
+      (value.lifecycle === 'pending' && terminalTaskBlocker) ||
+      (value.lifecycle === 'completed' &&
+        !retiredMilestone &&
+        blocker?.kind !== 'task_completed') ||
+      (value.lifecycle === 'retired' &&
+        !retiredMilestone &&
+        blocker?.kind !== 'task_retired')
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['readiness'],
+        message: 'Board task readiness must match its task lifecycle',
+      });
+    }
+    if (retiredMilestone && blocker.milestoneId !== value.milestoneId) {
+      context.addIssue({
+        code: 'custom',
+        path: ['readiness', 'blockers', 0, 'milestoneId'],
+        message: 'Retired-milestone readiness must name the task milestone',
+      });
+    }
     const dependencyIds = value.dependencies.map(
       (dependency) => dependency.dependencyId,
     );
@@ -365,6 +403,18 @@ export const boardViewSchema = z
         path: ['filter'],
         message:
           'Approved plans require one Board filter and pre-plan Boards forbid one',
+      });
+    }
+    if (
+      beforePlan &&
+      value.emptyReason !== 'intent_required' &&
+      value.emptyReason !== 'planning_required'
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['emptyReason'],
+        message:
+          'Pre-plan Board requires an intent-required or planning-required reason',
       });
     }
     const fixedFacetValues = {

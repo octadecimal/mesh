@@ -1920,6 +1920,294 @@ describe('V2 intent ledger contracts', () => {
         board: boardWithoutPlan('planning_required'),
       }).success,
     ).toBe(true);
+
+    const planCycleId = randomUUID();
+    const planHumanTurnId = randomUUID();
+    const planPmTurnId = randomUUID();
+    const planExecutionId = randomUUID();
+    const planProposalId = randomUUID();
+    const planId = randomUUID();
+    const historicalMilestoneId = randomUUID();
+    const historicalTaskId = randomUUID();
+    const approvedPlanCycle = {
+      cycle: {
+        id: planCycleId,
+        projectId,
+        lifecycle: 'approved' as const,
+        revision: 2,
+        profileId,
+        profileRevision: 1,
+        baseProjectIntentRevision: 2,
+        baseLedgerRevision: 2,
+        latestProposalRevision: 1,
+        activeExecutionId: null,
+        createdAt: now,
+        updatedAt: now,
+        endedAt: now,
+      },
+      purpose: {
+        kind: 'delivery_plan' as const,
+        baseDeliveryPlanId: null,
+        baseDeliveryPlanRevision: null,
+      },
+      turns: [
+        {
+          id: planHumanTurnId,
+          projectId,
+          planningCycleId: planCycleId,
+          ordinal: 1,
+          actor: 'human' as const,
+          message: 'Approve an empty completed plan.',
+          launchState: 'execution_bound' as const,
+          executionId: planExecutionId,
+          createdAt: now,
+        },
+        {
+          id: planPmTurnId,
+          projectId,
+          planningCycleId: planCycleId,
+          ordinal: 2,
+          actor: 'pm' as const,
+          message: 'No actionable work remains.',
+          launchState: null,
+          executionId: planExecutionId,
+          createdAt: now,
+        },
+      ],
+      questions: [],
+      proposals: [],
+      deliveryPlanProposals: [
+        {
+          id: planProposalId,
+          projectId,
+          planningCycleId: planCycleId,
+          revision: 1,
+          lifecycle: 'approved' as const,
+          base: {
+            projectIntentId: laterApprovedIntentLedger.projectIntent.id,
+            projectIntentRevision: 2,
+            ledgerId: laterApprovedIntentLedger.ledger.id,
+            ledgerRevision: 2,
+            deliveryPlan: { id: null, revision: null },
+          },
+          proposedPlan: {
+            summary: 'No actionable work remains.',
+            milestones: [
+              {
+                operation: 'reuse' as const,
+                milestoneId: historicalMilestoneId,
+                expectedRevision: 1,
+              },
+            ],
+            tasks: [
+              {
+                operation: 'reuse' as const,
+                taskId: historicalTaskId,
+                expectedContractRevision: 1,
+                expectedCurrentRevision: 1,
+              },
+            ],
+            dependencies: [],
+            traces: [
+              {
+                kind: 'milestone_covers' as const,
+                milestone: {
+                  kind: 'canonical' as const,
+                  milestoneId: historicalMilestoneId,
+                },
+                requirement: { recordId: requirementId, recordRevision: 1 },
+              },
+              {
+                kind: 'task_satisfies' as const,
+                task: {
+                  kind: 'canonical' as const,
+                  taskId: historicalTaskId,
+                },
+                requirement: { recordId: requirementId, recordRevision: 1 },
+              },
+            ],
+          },
+          reservations: { milestones: [], tasks: [], dependencies: [] },
+          diff: {
+            milestones: {
+              create: 0,
+              reuse: 1,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            tasks: {
+              create: 0,
+              reuse: 1,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            dependencies: {
+              create: 0,
+              reuse: 0,
+              revise: 0,
+              retire: 0,
+              reactivate: 0,
+            },
+            traceCreateCount: 0,
+            traceRemoveCount: 0,
+          },
+          createdByTurnId: planPmTurnId,
+          createdByExecutionId: planExecutionId,
+          createdAt: now,
+          decision: {
+            kind: 'approved' as const,
+            decidedBy: 'human' as const,
+            decidedAt: now,
+          },
+        },
+      ],
+    };
+    const approvedDeliveryPlan = {
+      plan: {
+        id: planId,
+        projectId,
+        revision: 1,
+        projectIntentId: laterApprovedIntentLedger.projectIntent.id,
+        projectIntentRevision: 2,
+        ledgerId: laterApprovedIntentLedger.ledger.id,
+        ledgerRevision: 2,
+        baseDeliveryPlanRevision: null,
+        proposalId: planProposalId,
+        summary: 'No actionable work remains.',
+        approvedBy: 'human' as const,
+        approvedAt: now,
+      },
+      milestones: [],
+      taskContracts: [],
+      dependencies: [],
+      traces: [],
+      milestoneDependencies: [],
+    };
+    const emptyApprovedBoard = {
+      projectId,
+      deliveryPlanRevision: 1,
+      stale: false,
+      emptyReason: 'plan_empty' as const,
+      filter: {
+        projectId,
+        revision: 1,
+        milestoneIds: [],
+        taskLifecycles: [],
+        readiness: [],
+        priorities: [],
+        labels: [],
+        requirementRecordIds: [],
+        updatedAt: now,
+      },
+      totalTaskCount: 0,
+      matchedTaskCount: 0,
+      facets: {
+        milestones: [],
+        taskLifecycles: [
+          {
+            value: 'pending' as const,
+            label: 'Pending',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+          {
+            value: 'completed' as const,
+            label: 'Completed',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+          {
+            value: 'retired' as const,
+            label: 'Retired',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+        ],
+        readiness: [
+          {
+            value: 'actionable' as const,
+            label: 'Actionable',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+          {
+            value: 'blocked' as const,
+            label: 'Blocked',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+          {
+            value: 'inactive' as const,
+            label: 'Inactive',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+        ],
+        priorities: [
+          {
+            value: 'must' as const,
+            label: 'Must',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+          {
+            value: 'should' as const,
+            label: 'Should',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+          {
+            value: 'could' as const,
+            label: 'Could',
+            selected: false,
+            matchingTaskCount: 0,
+          },
+        ],
+        labels: [],
+        requirements: [],
+      },
+      cards: [],
+    };
+    const approvedPlanHistory = {
+      ...approvedHistory,
+      planningCycles: [...approvedHistory.planningCycles, approvedPlanCycle],
+      deliveryPlan: approvedDeliveryPlan,
+      board: emptyApprovedBoard,
+    };
+    expect(v2ProjectSnapshotSchema.parse(approvedPlanHistory)).toEqual(
+      approvedPlanHistory,
+    );
+    expect(
+      v2ProjectSnapshotSchema.safeParse({
+        ...approvedPlanHistory,
+        deliveryPlan: null,
+        board: boardWithoutPlan('planning_required'),
+      }).success,
+    ).toBe(false);
+    expect(
+      v2ProjectSnapshotSchema.safeParse({
+        ...approvedPlanHistory,
+        deliveryPlan: {
+          ...approvedDeliveryPlan,
+          plan: { ...approvedDeliveryPlan.plan, proposalId: randomUUID() },
+        },
+      }).success,
+    ).toBe(false);
+    const omittedPlanApproval = {
+      ...approvedPlanHistory,
+      planningCycles: approvedHistory.planningCycles,
+    };
+    expect(v2ProjectSnapshotSchema.safeParse(omittedPlanApproval).success).toBe(
+      false,
+    );
+    expect(
+      v2ProjectSnapshotSchema.safeParse({
+        ...omittedPlanApproval,
+        planningHistoryTruncated: true,
+      }).success,
+    ).toBe(true);
   });
 
   it('accepts revised members and server-resolved create identities', () => {
