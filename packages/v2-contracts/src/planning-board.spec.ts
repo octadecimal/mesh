@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   PM_PLAN_REPORT_SCHEMA,
+  approvedDeliveryPlanMaterializationSchema,
   boardFilterSchema,
   boardFilterSelectionSchema,
   boardTaskCardSchema,
@@ -1065,6 +1066,115 @@ describe('planning and Board contracts', () => {
       ).toBe(false);
     }
 
+    const reservationCollisions = [
+      {
+        proposedPlan: {
+          ...revisionProposal.proposedPlan,
+          milestones: [
+            ...revisionProposal.proposedPlan.milestones,
+            {
+              operation: 'create' as const,
+              key: 'collision-milestone',
+              content: {
+                ...proposedPlan.milestones[0].content,
+                title: 'Colliding milestone',
+                ordinal: 3,
+              },
+            },
+          ],
+          traces: [
+            ...revisionProposal.proposedPlan.traces,
+            {
+              kind: 'milestone_covers' as const,
+              milestone: {
+                kind: 'proposal' as const,
+                key: 'collision-milestone',
+              },
+              requirement: { recordId: requirementId, recordRevision: 1 },
+            },
+          ],
+        },
+        reservations: {
+          ...revisionProposal.reservations,
+          milestones: [{ key: 'collision-milestone', id: milestoneId }],
+        },
+        diff: {
+          ...revisionProposal.diff,
+          milestones: { ...revisionProposal.diff.milestones, create: 1 },
+        },
+      },
+      {
+        proposedPlan: {
+          ...revisionProposal.proposedPlan,
+          tasks: [
+            ...revisionProposal.proposedPlan.tasks,
+            {
+              operation: 'create' as const,
+              key: 'collision-task',
+              content: {
+                ...proposedPlan.tasks[0].content,
+                milestone: { kind: 'canonical' as const, milestoneId },
+                title: 'Colliding task',
+                ordinal: 2,
+              },
+            },
+          ],
+          traces: [
+            ...revisionProposal.proposedPlan.traces,
+            {
+              kind: 'task_satisfies' as const,
+              task: { kind: 'proposal' as const, key: 'collision-task' },
+              requirement: { recordId: requirementId, recordRevision: 1 },
+            },
+          ],
+        },
+        reservations: {
+          ...revisionProposal.reservations,
+          tasks: [{ key: 'collision-task', id: taskId }],
+        },
+        diff: {
+          ...revisionProposal.diff,
+          tasks: { ...revisionProposal.diff.tasks, create: 1 },
+        },
+      },
+      {
+        proposedPlan: {
+          ...revisionProposal.proposedPlan,
+          dependencies: [
+            ...revisionProposal.proposedPlan.dependencies,
+            {
+              operation: 'create' as const,
+              key: 'collision-dependency',
+              prerequisite: { kind: 'canonical' as const, taskId },
+              dependent: {
+                kind: 'canonical' as const,
+                taskId: secondTaskId,
+              },
+            },
+          ],
+        },
+        reservations: {
+          ...revisionProposal.reservations,
+          dependencies: [{ key: 'collision-dependency', id: dependencyId }],
+        },
+        diff: {
+          ...revisionProposal.diff,
+          dependencies: { ...revisionProposal.diff.dependencies, create: 1 },
+        },
+      },
+    ];
+    for (const collision of reservationCollisions) {
+      expect(
+        pmPlanAssignmentSchema.safeParse({
+          ...assignment,
+          input: {
+            ...assignment.input,
+            latestProposal: { ...revisionProposal, ...collision },
+          },
+        }).success,
+      ).toBe(false);
+    }
+
     const retiredDependencyProposal = {
       ...revisionProposal,
       proposedPlan: {
@@ -1116,6 +1226,211 @@ describe('planning and Board contracts', () => {
               ],
             },
           },
+        },
+      }).success,
+    ).toBe(false);
+
+    const revisionProposalId = id('78');
+    const approvedRevisionProposal = {
+      ...revisionProposal,
+      id: revisionProposalId,
+      lifecycle: 'approved' as const,
+      decision: {
+        kind: 'approved' as const,
+        decidedBy: 'human' as const,
+        decidedAt: now,
+      },
+    };
+    const revisedDeliveryPlan = {
+      ...approvedPlanWithDependency,
+      plan: {
+        ...approvedPlanWithDependency.plan,
+        revision: 2,
+        baseDeliveryPlanRevision: 1,
+        proposalId: revisionProposalId,
+        summary: revisionProposal.proposedPlan.summary,
+      },
+    };
+    const materialization = {
+      proposal: approvedRevisionProposal,
+      baseDeliveryPlan: approvedPlanWithDependency,
+      deliveryPlan: revisedDeliveryPlan,
+    };
+    expect(
+      approvedDeliveryPlanMaterializationSchema.safeParse(materialization)
+        .success,
+    ).toBe(true);
+    for (const deliveryPlan of [
+      {
+        ...revisedDeliveryPlan,
+        milestones: revisedDeliveryPlan.milestones.map((milestone, index) =>
+          index === 0
+            ? { ...milestone, title: 'Changed reused title' }
+            : milestone,
+        ),
+      },
+      {
+        ...revisedDeliveryPlan,
+        milestones: revisedDeliveryPlan.milestones.map((milestone, index) =>
+          index === 0
+            ? { ...milestone, proposalId: revisionProposalId }
+            : milestone,
+        ),
+      },
+      {
+        ...revisedDeliveryPlan,
+        taskContracts: revisedDeliveryPlan.taskContracts.map((task, index) =>
+          index === 0 ? { ...task, title: 'Changed reused task' } : task,
+        ),
+      },
+      {
+        ...revisedDeliveryPlan,
+        taskContracts: revisedDeliveryPlan.taskContracts.map((task, index) =>
+          index === 0
+            ? {
+                ...task,
+                source: {
+                  kind: 'plan' as const,
+                  proposalId: revisionProposalId,
+                  deliveryPlanRevision: 1,
+                },
+              }
+            : task,
+        ),
+      },
+      {
+        ...revisedDeliveryPlan,
+        dependencies: revisedDeliveryPlan.dependencies.map((dependency) => ({
+          ...dependency,
+          prerequisiteTaskId: secondTaskId,
+          dependentTaskId: taskId,
+        })),
+        milestoneDependencies: [
+          {
+            prerequisiteMilestoneId: secondMilestoneId,
+            dependentMilestoneId: milestoneId,
+            throughTaskDependencyIds: [dependencyId],
+          },
+        ],
+      },
+    ]) {
+      expect(
+        approvedDeliveryPlanMaterializationSchema.safeParse({
+          ...materialization,
+          deliveryPlan,
+        }).success,
+      ).toBe(false);
+    }
+
+    const revisedDependencyProposalId = id('80');
+    const approvedRetiredDependencyProposal = {
+      ...retiredDependencyProposal,
+      id: revisedDependencyProposalId,
+      lifecycle: 'approved' as const,
+      decision: {
+        kind: 'approved' as const,
+        decidedBy: 'human' as const,
+        decidedAt: now,
+      },
+    };
+    const retiredDependencyPlan = {
+      ...revisedDeliveryPlan,
+      plan: {
+        ...revisedDeliveryPlan.plan,
+        proposalId: revisedDependencyProposalId,
+      },
+      dependencies: revisedDeliveryPlan.dependencies.map((dependency) => ({
+        ...dependency,
+        revision: 2,
+        lifecycle: 'retired' as const,
+        proposalId: revisedDependencyProposalId,
+        deliveryPlanRevision: 2,
+      })),
+      milestoneDependencies: [],
+    };
+    expect(
+      approvedDeliveryPlanMaterializationSchema.safeParse({
+        proposal: approvedRetiredDependencyProposal,
+        baseDeliveryPlan: approvedPlanWithDependency,
+        deliveryPlan: retiredDependencyPlan,
+      }).success,
+    ).toBe(true);
+    expect(
+      approvedDeliveryPlanMaterializationSchema.safeParse({
+        proposal: approvedRetiredDependencyProposal,
+        baseDeliveryPlan: approvedPlanWithDependency,
+        deliveryPlan: {
+          ...retiredDependencyPlan,
+          dependencies: retiredDependencyPlan.dependencies.map(
+            (dependency) => ({
+              ...dependency,
+              prerequisiteTaskId: secondTaskId,
+              dependentTaskId: taskId,
+            }),
+          ),
+        },
+      }).success,
+    ).toBe(false);
+
+    const revisionCycle = {
+      ...approvedPlanCycle,
+      purpose: {
+        kind: 'delivery_plan' as const,
+        baseDeliveryPlanId: planId,
+        baseDeliveryPlanRevision: 1,
+      },
+      deliveryPlanProposals: [approvedRevisionProposal],
+    };
+    const revisionBoard = { ...activeBoard, deliveryPlanRevision: 2 };
+    expect(
+      v2CommandResultSchema.safeParse({
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'plan_proposal.approve',
+        planningCycle: revisionCycle,
+        baseDeliveryPlan: approvedPlanWithDependency,
+        deliveryPlan: revisedDeliveryPlan,
+        board: revisionBoard,
+      }).success,
+    ).toBe(true);
+    expect(
+      v2CommandResultSchema.safeParse({
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'plan_proposal.approve',
+        planningCycle: revisionCycle,
+        deliveryPlan: revisedDeliveryPlan,
+        board: revisionBoard,
+      }).success,
+    ).toBe(false);
+    expect(
+      domainEventSchema.safeParse({
+        id: id('79'),
+        projectId,
+        sequence: 79,
+        occurredAt: now,
+        type: 'delivery_plan.approved',
+        payload: {
+          schemaVersion: 1,
+          planningCycle: revisionCycle,
+          baseDeliveryPlan: approvedPlanWithDependency,
+          deliveryPlan: revisedDeliveryPlan,
+          board: revisionBoard,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      domainEventSchema.safeParse({
+        id: id('79'),
+        projectId,
+        sequence: 79,
+        occurredAt: now,
+        type: 'delivery_plan.approved',
+        payload: {
+          schemaVersion: 1,
+          planningCycle: revisionCycle,
+          deliveryPlan: revisedDeliveryPlan,
+          board: revisionBoard,
         },
       }).success,
     ).toBe(false);
@@ -1886,6 +2201,42 @@ describe('planning and Board contracts', () => {
         deliveryPlanProposalSchema.safeParse({
           ...pendingPlanProposal,
           diff,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it('requires contiguous ordinals for an initial all-create proposal', () => {
+    for (const proposedPlan of [
+      {
+        ...pendingPlanProposal.proposedPlan,
+        milestones: [
+          {
+            ...pendingPlanProposal.proposedPlan.milestones[0],
+            content: {
+              ...pendingPlanProposal.proposedPlan.milestones[0].content,
+              ordinal: 2,
+            },
+          },
+        ],
+      },
+      {
+        ...pendingPlanProposal.proposedPlan,
+        tasks: [
+          {
+            ...pendingPlanProposal.proposedPlan.tasks[0],
+            content: {
+              ...pendingPlanProposal.proposedPlan.tasks[0].content,
+              ordinal: 2,
+            },
+          },
+        ],
+      },
+    ]) {
+      expect(
+        deliveryPlanProposalSchema.safeParse({
+          ...pendingPlanProposal,
+          proposedPlan,
         }).success,
       ).toBe(false);
     }

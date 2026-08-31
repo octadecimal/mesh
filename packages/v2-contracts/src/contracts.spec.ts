@@ -2321,6 +2321,12 @@ describe('V2 intent ledger contracts', () => {
     expect(
       v2ProjectSnapshotSchema.safeParse({
         ...approvedPlanHistory,
+        baseDeliveryPlan: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      v2ProjectSnapshotSchema.safeParse({
+        ...approvedPlanHistory,
         deliveryPlan: null,
         board: boardWithoutPlan('planning_required'),
       }).success,

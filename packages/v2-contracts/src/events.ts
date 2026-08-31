@@ -130,6 +130,7 @@ export const deliveryPlanApprovedPayloadSchema = z
   .strictObject({
     schemaVersion: z.literal(1),
     planningCycle: deliveryPlanPlanningCycleViewSchema,
+    baseDeliveryPlan: approvedDeliveryPlanSchema.nullable().optional(),
     deliveryPlan: approvedDeliveryPlanSchema,
     board: boardViewSchema,
   })
@@ -165,6 +166,7 @@ export const deliveryPlanApprovedPayloadSchema = z
     if (latest !== undefined) {
       const materialized = approvedDeliveryPlanMaterializationSchema.safeParse({
         proposal: latest,
+        baseDeliveryPlan: value.baseDeliveryPlan ?? null,
         deliveryPlan: value.deliveryPlan,
       });
       if (!materialized.success) {

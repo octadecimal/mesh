@@ -621,6 +621,32 @@ export const deliveryPlanProposalSchema = z
         message: 'A null plan base forbids canonical operations and references',
       });
     }
+    if (value.base.deliveryPlan.id === null) {
+      const milestoneOrdinalsMatch = value.proposedPlan.milestones.every(
+        (member, index) =>
+          member.operation !== 'create' || member.content.ordinal === index + 1,
+      );
+      const taskOrdinals = new Map<string, number>();
+      const taskOrdinalsMatch = value.proposedPlan.tasks.every((member) => {
+        if (
+          member.operation !== 'create' ||
+          member.content.milestone.kind !== 'proposal'
+        ) {
+          return true;
+        }
+        const expected =
+          (taskOrdinals.get(member.content.milestone.key) ?? 0) + 1;
+        taskOrdinals.set(member.content.milestone.key, expected);
+        return member.content.ordinal === expected;
+      });
+      if (!milestoneOrdinalsMatch || !taskOrdinalsMatch) {
+        context.addIssue({
+          code: 'custom',
+          path: ['proposedPlan'],
+          message: 'Initial plan ordinals must be ordered and contiguous',
+        });
+      }
+    }
     if (
       value.base.deliveryPlan.id === null &&
       (value.diff.traceCreateCount !== value.proposedPlan.traces.length ||
@@ -1143,6 +1169,7 @@ const sameJson = (left: unknown, right: unknown) =>
 
 const matchesApprovedMaterialization = (
   proposal: DeliveryPlanProposal,
+  baseDeliveryPlan: ApprovedDeliveryPlan | null,
   deliveryPlan: ApprovedDeliveryPlan,
 ) => {
   const { plan } = deliveryPlan;
@@ -1197,7 +1224,16 @@ const matchesApprovedMaterialization = (
         : member.milestoneId;
     if (materialized?.id !== id) return false;
     if (member.operation === 'reuse') {
-      if (materialized.revision !== member.expectedRevision) return false;
+      const prior = baseDeliveryPlan?.milestones.find(
+        ({ id }) => id === member.milestoneId,
+      );
+      if (
+        materialized.revision !== member.expectedRevision ||
+        prior === undefined ||
+        !sameJson(materialized, prior)
+      ) {
+        return false;
+      }
       continue;
     }
     if (
@@ -1226,7 +1262,14 @@ const matchesApprovedMaterialization = (
         : member.taskId;
     if (materialized?.id !== id) return false;
     if (member.operation === 'reuse') {
-      if (materialized.revision !== member.expectedContractRevision)
+      const prior = baseDeliveryPlan?.taskContracts.find(
+        ({ id }) => id === member.taskId,
+      );
+      if (
+        materialized.revision !== member.expectedContractRevision ||
+        prior === undefined ||
+        !sameJson(materialized, prior)
+      )
         return false;
       continue;
     }
@@ -1281,9 +1324,24 @@ const matchesApprovedMaterialization = (
     const materialized = id === undefined ? undefined : dependencies.get(id);
     if (materialized === undefined) return false;
     if (member.operation === 'reuse') {
-      if (materialized.revision !== member.expectedRevision) return false;
+      const prior = baseDeliveryPlan?.dependencies.find(
+        ({ id }) => id === member.dependencyId,
+      );
+      if (
+        materialized.revision !== member.expectedRevision ||
+        prior === undefined ||
+        !sameJson(materialized, prior)
+      ) {
+        return false;
+      }
       continue;
     }
+    const prior =
+      member.operation === 'revise'
+        ? baseDeliveryPlan?.dependencies.find(
+            ({ id }) => id === member.dependencyId,
+          )
+        : undefined;
     if (
       materialized.revision !==
         (member.operation === 'create' ? 1 : member.expectedRevision + 1) ||
@@ -1293,6 +1351,9 @@ const matchesApprovedMaterialization = (
         (materialized.prerequisiteTaskId !==
           resolveTaskId(member.prerequisite) ||
           materialized.dependentTaskId !== resolveTaskId(member.dependent))) ||
+      (member.operation === 'revise' &&
+        (materialized.prerequisiteTaskId !== prior?.prerequisiteTaskId ||
+          materialized.dependentTaskId !== prior?.dependentTaskId)) ||
       materialized.proposalId !== proposal.id ||
       materialized.deliveryPlanRevision !== plan.revision ||
       materialized.approvedAt !== plan.approvedAt
@@ -1336,25 +1397,32 @@ const matchesApprovedMaterialization = (
   );
 };
 
-export const approvedDeliveryPlanMaterializationSchema = z
-  .strictObject({
-    proposal: deliveryPlanProposalSchema,
-    deliveryPlan: approvedDeliveryPlanSchema,
-  })
-  .refine(
-    ({ proposal, deliveryPlan }) =>
-      matchesApprovedMaterialization(proposal, deliveryPlan),
-    {
-      path: ['deliveryPlan'],
-      message:
-        'Approved delivery plan must exactly materialize its plan proposal',
-    },
-  );
-
-const proposalDiffMatchesBase = (
+function proposalDiffMatchesBase(
   proposal: DeliveryPlanProposal,
   base: ApprovedDeliveryPlan,
-) => {
+) {
+  if (
+    proposal.reservations.milestones.some(
+      ({ id }) =>
+        base.milestones.some((member) => member.id === id) ||
+        base.traces.some(
+          (trace) =>
+            trace.kind === 'milestone_covers' && trace.milestoneId === id,
+        ),
+    ) ||
+    proposal.reservations.tasks.some(
+      ({ id }) =>
+        base.taskContracts.some((member) => member.id === id) ||
+        base.traces.some(
+          (trace) => trace.kind === 'task_satisfies' && trace.taskId === id,
+        ),
+    ) ||
+    proposal.reservations.dependencies.some(({ id }) =>
+      base.dependencies.some((member) => member.id === id),
+    )
+  ) {
+    return false;
+  }
   const baseCollections = {
     milestones: new Map(base.milestones.map((member) => [member.id, member])),
     tasks: new Map(base.taskContracts.map((member) => [member.id, member])),
@@ -1530,7 +1598,43 @@ const proposalDiffMatchesBase = (
     proposal.diff.traceRemoveCount ===
       [...baseTraceKeys].filter((trace) => !proposedTraceKeys.has(trace)).length
   );
-};
+}
+
+export const approvedDeliveryPlanMaterializationSchema = z
+  .strictObject({
+    proposal: deliveryPlanProposalSchema,
+    baseDeliveryPlan: approvedDeliveryPlanSchema.nullable(),
+    deliveryPlan: approvedDeliveryPlanSchema,
+  })
+  .refine(
+    ({ proposal, baseDeliveryPlan, deliveryPlan }) => {
+      const base = proposal.base.deliveryPlan;
+      const baseMatches =
+        base.id === null
+          ? baseDeliveryPlan === null
+          : baseDeliveryPlan !== null &&
+            baseDeliveryPlan.plan.id === base.id &&
+            baseDeliveryPlan.plan.revision === base.revision &&
+            baseDeliveryPlan.plan.projectId === proposal.projectId &&
+            baseDeliveryPlan.plan.projectIntentId ===
+              proposal.base.projectIntentId &&
+            baseDeliveryPlan.plan.projectIntentRevision ===
+              proposal.base.projectIntentRevision &&
+            baseDeliveryPlan.plan.ledgerId === proposal.base.ledgerId &&
+            baseDeliveryPlan.plan.ledgerRevision ===
+              proposal.base.ledgerRevision &&
+            proposalDiffMatchesBase(proposal, baseDeliveryPlan);
+      return (
+        baseMatches &&
+        matchesApprovedMaterialization(proposal, baseDeliveryPlan, deliveryPlan)
+      );
+    },
+    {
+      path: ['deliveryPlan'],
+      message:
+        'Approved delivery plan must exactly materialize its plan proposal',
+    },
+  );
 
 export const taskReadinessBlockerSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('plan_not_approved') }),
