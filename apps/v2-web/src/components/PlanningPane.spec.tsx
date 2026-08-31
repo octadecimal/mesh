@@ -1,15 +1,18 @@
 import { render, screen } from '@testing-library/react';
+import { fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
   approvedIntentLedgerSchema,
   planningCycleViewSchema,
+  type ApprovedDeliveryPlan,
+  type DeliveryPlanPlanningCycleView,
   type PlanningCycleView,
   type PlanningProposal,
   workerProfileSummarySchema,
 } from '@mesh/v2-contracts';
 import { describe, expect, it, vi } from 'vitest';
 
-import { PlanningPane } from './PlanningPane';
+import { DeliveryPlanningPane, PlanningPane } from './PlanningPane';
 
 const projectId = '11111111-1111-4111-8111-111111111111';
 const cycleId = '22222222-2222-4222-8222-222222222222';
@@ -53,6 +56,11 @@ const baseCycle = planningCycleViewSchema.parse({
     updatedAt: '2026-08-29T00:00:01.000Z',
     endedAt: null,
   },
+  purpose: {
+    kind: 'intent',
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+  },
   turns: [
     {
       id: turnId,
@@ -90,6 +98,7 @@ const baseCycle = planningCycleViewSchema.parse({
     },
   ],
   proposals: [],
+  deliveryPlanProposals: [],
 });
 
 const approvedIntentLedger = approvedIntentLedgerSchema.parse({
@@ -1051,5 +1060,338 @@ describe('PlanningPane', () => {
     expect(
       screen.getByText('This planning cycle was abandoned.'),
     ).toBeVisible();
+  });
+});
+
+const deliveryCycle = {
+  cycle: {
+    ...baseCycle.cycle,
+    lifecycle: 'awaiting_approval',
+    baseProjectIntentRevision: 1,
+    baseLedgerRevision: 1,
+    latestProposalRevision: 1,
+  },
+  purpose: {
+    kind: 'delivery_plan',
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+  },
+  turns: baseCycle.turns,
+  questions: [],
+  proposals: [],
+  deliveryPlanProposals: [
+    {
+      id: proposalId,
+      projectId,
+      planningCycleId: cycleId,
+      revision: 1,
+      lifecycle: 'awaiting_approval',
+      base: {
+        projectIntentId: approvedIntentLedger.projectIntent.id,
+        projectIntentRevision: 1,
+        ledgerId: approvedIntentLedger.ledger.id,
+        ledgerRevision: 1,
+        deliveryPlan: { id: null, revision: null },
+      },
+      proposedPlan: {
+        summary: 'Deliver Todo across two milestones.',
+        milestones: [
+          {
+            operation: 'create',
+            key: 'foundation',
+            content: {
+              title: 'Foundation',
+              outcome: 'Todo data is durable.',
+              stopCondition: 'Refresh preserves Todo items.',
+              exclusions: ['Execution automation'],
+              ordinal: 1,
+            },
+          },
+          {
+            operation: 'create',
+            key: 'experience',
+            content: {
+              title: 'Experience',
+              outcome: 'Todo work is usable.',
+              stopCondition: 'Operators can complete a task.',
+              exclusions: [],
+              ordinal: 2,
+            },
+          },
+        ],
+        tasks: [
+          {
+            operation: 'create',
+            key: 'persist-todo',
+            content: {
+              milestone: { kind: 'proposal', key: 'foundation' },
+              title: 'Persist Todo',
+              outcome: 'Todo state survives refresh.',
+              acceptanceCriteria: ['Todo items are durable.'],
+              verificationCriteria: ['Refresh the built app.'],
+              priority: 'must',
+              labels: ['backend'],
+              ownedSurfaces: ['Todo persistence'],
+              prohibitedSurfaces: ['Execution runtime'],
+              expectedArtifacts: ['Persistence tests'],
+              ordinal: 1,
+            },
+          },
+          {
+            operation: 'create',
+            key: 'show-todo',
+            content: {
+              milestone: { kind: 'proposal', key: 'experience' },
+              title: 'Show Todo',
+              outcome: 'Todo items are visible.',
+              acceptanceCriteria: ['Todo items appear.'],
+              verificationCriteria: ['Render the Todo list.'],
+              priority: 'should',
+              labels: ['web'],
+              ownedSurfaces: ['Todo view'],
+              prohibitedSurfaces: ['Execution runtime'],
+              expectedArtifacts: ['View tests'],
+              ordinal: 1,
+            },
+          },
+        ],
+        dependencies: [
+          {
+            operation: 'create',
+            key: 'foundation-before-experience',
+            prerequisite: { kind: 'proposal', key: 'persist-todo' },
+            dependent: { kind: 'proposal', key: 'show-todo' },
+          },
+        ],
+        traces: [
+          {
+            kind: 'milestone_covers',
+            milestone: { kind: 'proposal', key: 'foundation' },
+            requirement: { recordId: reuseRecordId, recordRevision: 3 },
+          },
+          {
+            kind: 'task_satisfies',
+            task: { kind: 'proposal', key: 'persist-todo' },
+            requirement: { recordId: reuseRecordId, recordRevision: 3 },
+          },
+        ],
+      },
+      diff: {
+        milestones: {
+          create: 2,
+          reuse: 0,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        tasks: { create: 2, reuse: 0, revise: 0, retire: 0, reactivate: 0 },
+        dependencies: {
+          create: 1,
+          reuse: 0,
+          revise: 0,
+          retire: 0,
+          reactivate: 0,
+        },
+        traceCreateCount: 2,
+        traceRemoveCount: 0,
+      },
+      decision: { kind: 'pending' },
+    },
+  ],
+} as unknown as DeliveryPlanPlanningCycleView;
+
+describe('DeliveryPlanningPane', () => {
+  it('gates and submits a new delivery planning cycle with exact frozen bases', async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={null}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={onSubmit}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Plan delivery' }));
+    expect(screen.getByLabelText('Message to project manager')).toHaveValue(
+      'Propose a delivery plan for the approved intent and requirement ledger.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+    expect(onSubmit).toHaveBeenCalledWith({
+      type: 'planning_cycle.submit_plan_turn',
+      projectId,
+      expectedCycleRevision: null,
+      profileId: profile.profileId,
+      profileRevision: 1,
+      expectedProjectIntentId: approvedIntentLedger.projectIntent.id,
+      expectedProjectIntentRevision: 1,
+      expectedLedgerId: approvedIntentLedger.ledger.id,
+      expectedLedgerRevision: 1,
+      expectedDeliveryPlan: { id: null, revision: null },
+      message:
+        'Propose a delivery plan for the approved intent and requirement ledger.',
+    });
+  });
+
+  it('explains requirements and profile gates', () => {
+    render(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        approvedIntentLedger={{ ...approvedIntentLedger, records: [] }}
+        deliveryPlan={null}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[]}
+        submitting={false}
+        onSubmit={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText(
+        'Approve at least one current requirement before planning delivery.',
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText('No compatible PM profiles are available.'),
+    ).toBeVisible();
+    expect(
+      screen.getByRole('button', { name: 'Plan delivery' }),
+    ).toBeDisabled();
+  });
+
+  it('submits a replacement against the exact approved plan base', async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const planId = 'abababab-abab-4bab-8bab-abababababab';
+    render(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={{
+          plan: { id: planId, revision: 2 } as ApprovedDeliveryPlan['plan'],
+        }}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={onSubmit}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByText('Approved delivery plan revision 2 · current'),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Replace plan' }));
+    expect(screen.getByLabelText('Message to project manager')).toHaveValue(
+      'Revise the approved delivery plan against the current intent and requirement ledger.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedDeliveryPlan: { id: planId, revision: 2 },
+      }),
+    );
+  });
+
+  it('renders the complete proposal and emits atomic approval or feedback commands', async () => {
+    const user = userEvent.setup();
+    const onApprove = vi.fn();
+    const onReject = vi.fn();
+    const onAbandon = vi.fn();
+    const onSubmit = vi.fn();
+    render(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        cycle={deliveryCycle}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={null}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={onSubmit}
+        onApprove={onApprove}
+        onReject={onReject}
+        onAbandon={onAbandon}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Proposal revision 1 · Awaiting approval/),
+    ).toBeVisible();
+    expect(screen.getByLabelText('Proposal revision')).toHaveValue('1');
+    expect(screen.getByText('Foundation')).toBeVisible();
+    expect(screen.getByText('Persist Todo')).toBeVisible();
+    expect(screen.getByText(/foundation-before-experience/)).toBeVisible();
+    expect(screen.getAllByText(new RegExp(reuseRecordId))).toHaveLength(2);
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Approve full plan' }));
+    expect(onApprove).toHaveBeenCalledWith({
+      type: 'plan_proposal.approve',
+      projectId,
+      planningCycleId: cycleId,
+      expectedCycleRevision: 3,
+      proposalId,
+      expectedProposalRevision: 1,
+      expectedProjectIntentId: approvedIntentLedger.projectIntent.id,
+      expectedProjectIntentRevision: 1,
+      expectedLedgerId: approvedIntentLedger.ledger.id,
+      expectedLedgerRevision: 1,
+      expectedDeliveryPlan: { id: null, revision: null },
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+    await user.type(
+      screen.getByLabelText('Message to project manager'),
+      'Split the experience milestone.',
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Send revision request' }),
+    );
+    expect(onSubmit).toHaveBeenCalledWith({
+      type: 'planning_cycle.submit_plan_turn',
+      projectId,
+      planningCycleId: cycleId,
+      expectedCycleRevision: 3,
+      message: 'Split the experience milestone.',
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
+    fireEvent.change(screen.getByLabelText('Rejection feedback'), {
+      target: { value: 'Split the second milestone.' },
+    });
+    await user.click(screen.getByRole('button', { name: 'Confirm rejection' }));
+    expect(onReject).toHaveBeenCalledWith({
+      type: 'plan_proposal.reject',
+      projectId,
+      planningCycleId: cycleId,
+      expectedCycleRevision: 3,
+      proposalId,
+      expectedProposalRevision: 1,
+      feedback: 'Split the second milestone.',
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Abandon cycle' }));
+    expect(onAbandon).toHaveBeenCalledWith({
+      type: 'planning_cycle.abandon',
+      projectId,
+      planningCycleId: cycleId,
+      expectedCycleRevision: 3,
+    });
   });
 });

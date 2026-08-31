@@ -1,6 +1,8 @@
 import { render, screen } from '@testing-library/react';
 import {
   PM_DISCOVERY_REPORT_SCHEMA,
+  PM_PLAN_REPORT_SCHEMA,
+  pmPlanAssignmentSchema,
   type RuntimeEvent,
   type WorkerExecution,
 } from '@mesh/v2-contracts';
@@ -95,6 +97,128 @@ const children: readonly ChildActivity[] = [
 ];
 
 describe('ExecutionActivity', () => {
+  it('uses the deterministic PM delivery planning label', () => {
+    const pmPlanExecution: WorkerExecution = {
+      ...execution,
+      assignment: pmPlanAssignmentSchema.parse({
+        kind: 'pm_plan',
+        projectId: execution.projectId,
+        outputSchema: PM_PLAN_REPORT_SCHEMA,
+        planningCycleId: '99999999-9999-4999-8999-999999999999',
+        humanTurnId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        expectedCycleRevision: 1,
+        expectedProposalRevision: 1,
+        baseProjectIntentId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        baseProjectIntentRevision: 1,
+        baseLedgerId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+        baseLedgerRevision: 1,
+        baseDeliveryPlanId: null,
+        baseDeliveryPlanRevision: null,
+        input: {
+          conversation: [
+            {
+              turnId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+              actor: 'human',
+              message: 'Plan delivery.',
+            },
+          ],
+          approvedIntentLedger: {
+            projectIntent: {
+              id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+              projectId: execution.projectId,
+              revision: 1,
+              proposalId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+              approvedBy: 'human',
+              approvedAt: '2026-08-30T00:00:00.000Z',
+              content: {
+                goal: 'Ship Todo planning.',
+                targetUsers: ['Operators'],
+                desiredCapabilities: ['Plan Todo delivery'],
+                constraints: [],
+                nonGoals: [],
+                successConditions: ['A plan can be approved'],
+                rationale: 'Planning is required.',
+                provenance: [
+                  {
+                    kind: 'conversation_turn',
+                    turnId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                    rationale: 'Operator request',
+                  },
+                ],
+              },
+            },
+            ledger: {
+              id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+              projectId: execution.projectId,
+              revision: 1,
+              proposalId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+              approvedBy: 'human',
+              approvedAt: '2026-08-30T00:00:00.000Z',
+            },
+            records: [
+              {
+                recordId: '12121212-1212-4212-8212-121212121212',
+                projectId: execution.projectId,
+                revision: 1,
+                proposalId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+                approvedBy: 'human',
+                approvedAt: '2026-08-30T00:00:00.000Z',
+                content: {
+                  type: 'requirement',
+                  statement: 'Preserve completed tasks.',
+                  rationale: 'Operators need durable progress.',
+                  kind: 'quality',
+                  status: 'approved',
+                  priority: 'must',
+                },
+                provenance: [
+                  {
+                    kind: 'conversation_turn',
+                    turnId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                    rationale: 'Operator request',
+                  },
+                ],
+              },
+            ],
+            relationships: [],
+          },
+          latestProposal: null,
+          approvedDeliveryPlan: null,
+        },
+      }),
+    };
+    const structured = {
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      projectId: execution.projectId,
+      executionId: execution.id,
+      diagnosticId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      sequence: 13,
+      adapterCursor: 1,
+      occurredAt: '2026-08-30T00:00:01.000Z',
+      type: 'worker_execution.structured_output',
+      payload: { schema: PM_PLAN_REPORT_SCHEMA, value: {} },
+    } satisfies RuntimeEvent;
+
+    render(
+      <ExecutionActivity
+        execution={pmPlanExecution}
+        runtimeActivity={[structured]}
+        projectCursors={{ domain: 4, runtime: 13 }}
+      />,
+    );
+
+    expect(
+      screen.getByRole('article', {
+        name: 'Project manager delivery planning',
+      }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole('list', {
+        name: 'Runtime activity for Project manager delivery planning',
+      }),
+    ).toHaveTextContent('Structured output mesh.dev/pm-plan-report/v1');
+  });
+
   it('uses the deterministic PM discovery label across accessible activity', () => {
     const pmExecution: WorkerExecution = {
       ...execution,
