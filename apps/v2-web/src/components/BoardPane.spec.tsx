@@ -379,6 +379,118 @@ describe('BoardPane', () => {
     expect(apply).toHaveFocus();
   });
 
+  it.each([
+    {
+      name: 'intent required',
+      board: boardViewSchema.parse({
+        ...board,
+        deliveryPlanRevision: null,
+        emptyReason: 'intent_required',
+        filter: null,
+        totalTaskCount: 0,
+        matchedTaskCount: 0,
+        facets: {
+          milestones: [],
+          taskLifecycles: [],
+          readiness: [],
+          priorities: [],
+          labels: [],
+          requirements: [],
+        },
+        cards: [],
+      }),
+      connection: { status: 'ready' } as const,
+      submitting: false,
+      message: 'Approve project intent and requirements to plan delivery.',
+      apply: 'absent',
+    },
+    {
+      name: 'plan empty',
+      board: boardViewSchema.parse({
+        ...board,
+        emptyReason: 'plan_empty',
+        totalTaskCount: 0,
+        matchedTaskCount: 0,
+        facets: {
+          ...board.facets,
+          milestones: [],
+          taskLifecycles: board.facets.taskLifecycles.map((option) => ({
+            ...option,
+            matchingTaskCount: 0,
+          })),
+          readiness: board.facets.readiness.map((option) => ({
+            ...option,
+            matchingTaskCount: 0,
+          })),
+          priorities: board.facets.priorities.map((option) => ({
+            ...option,
+            matchingTaskCount: 0,
+          })),
+          labels: board.facets.labels.map((option) => ({
+            ...option,
+            matchingTaskCount: 0,
+          })),
+          requirements: board.facets.requirements.map((option) => ({
+            ...option,
+            matchingTaskCount: 0,
+          })),
+        },
+        cards: [],
+      }),
+      connection: { status: 'ready' } as const,
+      submitting: false,
+      message: 'The approved delivery plan has no active tasks.',
+      apply: 'enabled',
+    },
+    {
+      name: 'filter empty',
+      board: boardViewSchema.parse({
+        ...board,
+        emptyReason: 'filter_empty',
+        matchedTaskCount: 0,
+        cards: [],
+      }),
+      connection: { status: 'ready' } as const,
+      submitting: false,
+      message: 'No tasks match the applied Board filters.',
+      apply: 'enabled',
+    },
+    {
+      name: 'stale connection',
+      board,
+      connection: {
+        status: 'stale',
+        message: 'Board projection is stale.',
+      } as const,
+      submitting: false,
+      message: 'Board projection is stale.',
+      apply: 'disabled',
+    },
+    {
+      name: 'submitting',
+      board,
+      connection: { status: 'ready' } as const,
+      submitting: true,
+      message: 'Saving Board filters.',
+      apply: 'disabled',
+    },
+  ])('renders the $name branch without changing server truth', (state) => {
+    render(
+      <BoardPane
+        board={state.board}
+        connection={state.connection}
+        submitting={state.submitting}
+        onApplyFilter={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(state.message)).toBeVisible();
+    const apply = screen.queryByRole('button', { name: 'Apply filters' });
+    if (state.apply === 'absent') expect(apply).not.toBeInTheDocument();
+    else if (state.apply === 'disabled') expect(apply).toBeDisabled();
+    else expect(apply).toBeEnabled();
+  });
+
   it('shows explicit loading, pre-plan, empty, stale, and connection states', () => {
     const { rerender } = render(
       <BoardPane

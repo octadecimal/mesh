@@ -627,18 +627,20 @@ function DeliveryProposalCard({
     };
   });
   const tasks = proposal.proposedPlan.tasks.map((member) => {
+    const current =
+      member.operation === 'reuse'
+        ? deliveryPlan?.taskContracts.find(({ id }) => id === member.taskId)
+        : undefined;
     const approved =
       member.operation === 'reuse'
-        ? deliveryPlan?.taskContracts.find(
-            ({ id, contractRevision }) =>
-              id === member.taskId &&
-              contractRevision === member.expectedContractRevision,
-          )
+        ? current?.contractRevision === member.expectedContractRevision
+          ? current
+          : undefined
         : undefined;
     const content = member.operation === 'reuse' ? approved : member.content;
     const milestoneIdentity =
       member.operation === 'reuse'
-        ? approved?.milestoneId
+        ? current?.milestoneId
         : member.content.milestone.kind === 'proposal'
           ? member.content.milestone.key
           : member.content.milestone.milestoneId;
@@ -926,7 +928,11 @@ export function DeliveryPlanningPane({
     ({ profileId: id }) => id === profileId,
   );
   const continuingProfile = cycle
-    ? profiles.find(({ profileId }) => profileId === cycle.cycle.profileId)
+    ? profiles.find(
+        ({ profileId, approvedRevision }) =>
+          profileId === cycle.cycle.profileId &&
+          approvedRevision === cycle.cycle.profileRevision,
+      )
     : undefined;
   const approvedRequirements =
     approvedIntentLedger?.records.filter(

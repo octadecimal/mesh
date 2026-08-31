@@ -1690,6 +1690,59 @@ describe('DeliveryPlanningPane', () => {
       ),
     ).toBeVisible();
 
+    const newerTaskPlan = approvedDeliveryPlanSchema.parse({
+      ...approvedDeliveryPlan,
+      taskContracts: approvedDeliveryPlan.taskContracts.map((task) =>
+        task.id === approvedTaskIds[0]
+          ? {
+              ...task,
+              revision: 8,
+              contractRevision: 8,
+              title: 'Newer Persistence Contract',
+            }
+          : task,
+      ),
+      traces: approvedDeliveryPlan.traces.map((trace) =>
+        trace.kind === 'task_satisfies' && trace.taskId === approvedTaskIds[0]
+          ? { ...trace, taskContractRevision: 8 }
+          : trace,
+      ),
+    });
+    rerender(
+      <DeliveryPlanningPane
+        projectId={projectId}
+        cycle={reuseCycle}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={newerTaskPlan}
+        planStale={false}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+    const fallbackMilestone = screen.getByRole('listitem', {
+      name: /Existing Foundation/,
+    });
+    const unavailableTask = within(fallbackMilestone).getByText(
+      approvedTaskIds[0],
+    );
+    expect(unavailableTask).toBeVisible();
+    expect(unavailableTask.closest('li')).toHaveTextContent(
+      'contract revision 5 · current revision 5',
+    );
+    expect(
+      within(fallbackMilestone).getByText(
+        'Approved task revision unavailable.',
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByText('Newer Persistence Contract'),
+    ).not.toBeInTheDocument();
+
     const reviseCycle = deliveryPlanPlanningCycleViewSchema.parse({
       ...reuseCycle,
       deliveryPlanProposals: [
@@ -1885,6 +1938,25 @@ describe('DeliveryPlanningPane', () => {
     );
     expect(command).not.toHaveProperty('profileId');
     expect(command).not.toHaveProperty('profileRevision');
+
+    rerender(
+      <DeliveryPlanningPane
+        {...props}
+        profiles={[
+          workerProfileSummarySchema.parse({
+            ...profile,
+            displayName: 'Newer Todo PM',
+            approvedRevision: 2,
+          }),
+        ]}
+      />,
+    );
+    expect(
+      screen.getByText(
+        `Project manager profile ${profile.profileId} · revision 1 (no longer available)`,
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/Newer Todo PM/)).not.toBeInTheDocument();
 
     rerender(<DeliveryPlanningPane {...props} profiles={[]} />);
     expect(
