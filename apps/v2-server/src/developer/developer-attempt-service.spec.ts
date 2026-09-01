@@ -425,9 +425,28 @@ describe('DeveloperAttemptService', () => {
       }),
       (report: ReturnType<typeof completionReport>) => ({
         ...report,
+        criterionCoverage: [
+          ...report.criterionCoverage,
+          { ...report.criterionCoverage[0], index: 99 },
+        ],
+      }),
+      (report: ReturnType<typeof completionReport>) => ({
+        ...report,
+        criterionCoverage: [
+          { ...report.criterionCoverage[0], text: 'Wrong exact text.' },
+        ],
+      }),
+      (report: ReturnType<typeof completionReport>) => ({
+        ...report,
         requirementCoverage: [
           ...report.requirementCoverage,
           report.requirementCoverage[0],
+        ],
+      }),
+      (report: ReturnType<typeof completionReport>) => ({
+        ...report,
+        requirementCoverage: [
+          { ...report.requirementCoverage[0], recordRevision: 2 },
         ],
       }),
       (report: ReturnType<typeof completionReport>) => ({
@@ -471,6 +490,49 @@ describe('DeveloperAttemptService', () => {
         }),
       ]);
     }
+  });
+
+  it('records a rejected receipt without overwriting a settled report', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = completionReport(attempt);
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+    const event = (id: string) =>
+      ({
+        id,
+        type: 'worker_execution.structured_output',
+        executionId: execution.id,
+        projectId: execution.projectId,
+        occurredAt: later,
+        payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+      }) as never;
+
+    context.service.acceptReport(
+      execution as never,
+      event(randomUUID()),
+      report,
+    );
+    context.service.acceptReport(
+      execution as never,
+      event(randomUUID()),
+      report,
+    );
+
+    expect(context.reports).toHaveLength(1);
+    expect(context.attempts[0]).toMatchObject({ lifecycle: 'completed' });
+    expect(context.receipts).toEqual([
+      expect.objectContaining({ status: 'accepted' }),
+      expect.objectContaining({
+        status: 'rejected',
+        rejectionReason: 'report_binding_mismatch',
+      }),
+    ]);
   });
 
   it.each([
