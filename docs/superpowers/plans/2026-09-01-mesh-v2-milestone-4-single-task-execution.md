@@ -314,7 +314,7 @@ Expected: FAIL because the managed workspace functions do not exist.
 
 - [ ] **Step 3: Implement the concrete Git service**
 
-Use `resolve`, `relative`, `realpath`, `mkdir`, `readFile`, `writeFile`, `randomUUID`, and the approved process runner. Reject paths escaping `managedRoot`; never use a shell. Write ownership metadata only inside the newly created managed worktree:
+Use `resolve`, `relative`, `realpath`, `mkdir`, `readFile`, `writeFile`, `randomUUID`, and the approved process runner. Reject paths escaping `managedRoot`; never use a shell. Write ownership metadata only in the newly created worktree's Git administrative directory returned by `git rev-parse --git-dir`, never in its checked-out tree, so the required clean provisioning observation remains true:
 
 ```ts
 const ownership = {
@@ -614,6 +614,8 @@ git commit -m "feat(v2): recover developer attempt lifecycles"
 
 - Modify: `apps/v2-server/src/executions/fake-harness.ts`
 - Modify: `apps/v2-server/src/executions/fake-harness.spec.ts`
+- Modify: `apps/v2-server/src/config.ts`
+- Modify: `apps/v2-server/src/config.spec.ts`
 - Modify: `apps/v2-server/src/http/routes.ts`
 - Modify: `apps/v2-server/src/http/routes.spec.ts`
 - Modify: `apps/v2-server/src/http/snapshots.ts`
@@ -628,7 +630,7 @@ git commit -m "feat(v2): recover developer attempt lifecycles"
 
 - [ ] **Step 1: Write failing fake harness tests**
 
-Add Developer scenarios `completed`, `blocked`, `malformed`, `duplicate`, and `missing_output`. Use the frozen `workspacePath` and Node `writeFile` to change a real test-owned Todo artifact before emitting activity/report/completion. Assert the emitted report binds every frozen criterion and requirement and includes a passed verification plus observed HEAD/dirty state.
+Add Developer scenarios `completed`, `blocked`, `malformed`, `duplicate`, and `missing_output`, parsed from `MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO` with the same test-only configuration discipline as `MESH_V2_TEST_FAKE_PM_SCENARIO`. Here `duplicate` means one completion payload containing duplicate criterion or requirement coverage, so the whole report is invalid and cannot complete the task; the report-consumer unit test separately proves that a second report never overwrites an already accepted report. Use the frozen `workspacePath` and Node `writeFile` to change a real test-owned Todo artifact before emitting activity/report/completion. Assert the emitted report binds every frozen criterion and requirement and includes a passed verification plus observed HEAD/dirty state.
 
 ```ts
 expect(events.map(({ normalized }) => normalized.type)).toEqual([
