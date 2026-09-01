@@ -130,6 +130,16 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
     ),
   ).toBe(true);
   expect(
+    existsSync(
+      join(
+        builtRoot,
+        'db',
+        'migrations',
+        '006_developer_start_reservations.sql',
+      ),
+    ),
+  ).toBe(true);
+  expect(
     existsSync(join(builtRoot, 'migrations', '003_planning_board.sql')),
   ).toBe(true);
   expect(
@@ -138,6 +148,11 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
   expect(
     existsSync(
       join(builtRoot, 'migrations', '005_developer_attempt_commands.sql'),
+    ),
+  ).toBe(true);
+  expect(
+    existsSync(
+      join(builtRoot, 'migrations', '006_developer_start_reservations.sql'),
     ),
   ).toBe(true);
 
@@ -168,6 +183,7 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
       { version: 3, name: '003_planning_board' },
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
+      { version: 6, name: '006_developer_start_reservations' },
     ]);
   } finally {
     database.close();

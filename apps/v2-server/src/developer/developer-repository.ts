@@ -98,6 +98,15 @@ const outputReceiptSchema = z
 
 export type DeveloperOutputReceipt = z.infer<typeof outputReceiptSchema>;
 
+const startReservationSchema = z.strictObject({
+  attemptId: z.string().uuid(),
+  idempotencyKey: z.string().trim().min(1).max(256),
+  requestHash: z.string().regex(/^[0-9a-f]{64}$/),
+  createdAt: z.string().datetime({ offset: true }),
+});
+
+export type DeveloperStartReservation = z.infer<typeof startReservationSchema>;
+
 type OutputReceiptRow = {
   runtime_event_id: string;
   project_id: string;
@@ -210,9 +219,41 @@ export class DeveloperRepository {
     return rows.map((row) => this.toAttempt(row));
   }
 
-  reserveAttemptInTransaction(input: DeveloperAttempt): DeveloperAttempt {
+  startReservation(
+    idempotencyKey: string,
+  ): DeveloperStartReservation | undefined {
+    const row = this.database
+      .prepare(
+        `SELECT attempt_id, idempotency_key, request_hash, created_at
+         FROM developer_start_reservations WHERE idempotency_key = ?`,
+      )
+      .get(idempotencyKey) as
+      | {
+          attempt_id: string;
+          idempotency_key: string;
+          request_hash: string;
+          created_at: string;
+        }
+      | undefined;
+    if (!row) return undefined;
+    return startReservationSchema.parse({
+      attemptId: row.attempt_id,
+      idempotencyKey: row.idempotency_key,
+      requestHash: row.request_hash,
+      createdAt: row.created_at,
+    });
+  }
+
+  reserveAttemptInTransaction(
+    input: DeveloperAttempt,
+    start?: DeveloperStartReservation,
+  ): DeveloperAttempt {
     this.assertTransaction();
     const attempt = developerAttemptSchema.parse(input);
+    const reservation = start ? startReservationSchema.parse(start) : undefined;
+    if (reservation && reservation.attemptId !== attempt.id) {
+      throw new Error('Developer start reservation does not match attempt');
+    }
     this.assertReservation(attempt);
     const previous = this.database
       .prepare(
@@ -281,6 +322,20 @@ export class DeveloperRepository {
         attempt.createdAt,
         attempt.updatedAt,
       );
+    if (reservation) {
+      this.database
+        .prepare(
+          `INSERT INTO developer_start_reservations (
+            attempt_id, idempotency_key, request_hash, created_at
+          ) VALUES (?, ?, ?, ?)`,
+        )
+        .run(
+          reservation.attemptId,
+          reservation.idempotencyKey,
+          reservation.requestHash,
+          reservation.createdAt,
+        );
+    }
     return attempt;
   }
 

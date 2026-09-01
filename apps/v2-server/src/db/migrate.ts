@@ -58,12 +58,22 @@ const developerAttemptCommandsMigration = {
   ),
 };
 
+const developerStartReservationsMigration = {
+  version: 6,
+  name: '006_developer_start_reservations',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '006_developer_start_reservations.sql'),
+    'utf8',
+  ),
+};
+
 const migrations = [
   foundationMigration,
   intentLedgerMigration,
   planningBoardMigration,
   developerAttemptsMigration,
   developerAttemptCommandsMigration,
+  developerStartReservationsMigration,
 ] as const;
 
 type MigrationLedgerRow = { version: number; name: string };

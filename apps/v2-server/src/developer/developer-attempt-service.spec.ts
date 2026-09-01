@@ -161,6 +161,8 @@ const setupPersistedAttempt = async ({
   };
   const published: unknown[] = [];
   const trips: unknown[] = [];
+  const workspaceCalls: ManagedWorkspace[] = [];
+  const reserveStartCalls: unknown[] = [];
   let execution = fixture.execution;
   const dependencies = {
     database: fixture.database,
@@ -177,6 +179,7 @@ const setupPersistedAttempt = async ({
           assignment: unknown;
         };
       }) => {
+        reserveStartCalls.push(input);
         execution = {
           ...fixture.execution,
           profileId: input.command.profileId,
@@ -248,12 +251,15 @@ const setupPersistedAttempt = async ({
         createdAt: input.createdAt,
         updatedAt: input.createdAt,
       }),
-      create: async (workspace: ManagedWorkspace) => ({
-        ...workspace,
-        lifecycle: 'ready' as const,
-        observedHead: fixture.project.headCommit,
-        observedDirty: false,
-      }),
+      create: async (workspace: ManagedWorkspace) => {
+        workspaceCalls.push(workspace);
+        return {
+          ...workspace,
+          lifecycle: 'ready' as const,
+          observedHead: fixture.project.headCommit,
+          observedDirty: false,
+        };
+      },
       observe: async (workspace: ManagedWorkspace) => ({
         ...workspace,
         lifecycle: 'ready' as const,
@@ -278,7 +284,7 @@ const setupPersistedAttempt = async ({
   );
   if (!authority) throw new Error('Test authority was not created');
   const start = new DeveloperAttemptService(dependencies as never);
-  const result = await start.start({
+  const startEnvelope: StartDeveloperAttemptEnvelope = {
     idempotencyKey: 'persisted-developer-attempt-start',
     actor: { kind: 'human' },
     command: {
@@ -291,7 +297,8 @@ const setupPersistedAttempt = async ({
       profileId: profile.profileId,
       profileRevision: profile.profileRevision,
     },
-  });
+  };
+  const result = await start.start(startEnvelope);
   if (!result.ok) throw new Error(result.error.message);
   const attempt = developers.attempt(result.attempt.id);
   if (!attempt || attempt.lifecycle !== 'active')
@@ -396,6 +403,9 @@ const setupPersistedAttempt = async ({
     trips,
     insertRuntimeEvent,
     dependencies,
+    startEnvelope,
+    workspaceCalls,
+    reserveStartCalls,
   };
 };
 
@@ -434,6 +444,10 @@ const setup = (
     ? [options.existingAttempt]
     : [];
   const commands = new Map<string, { requestHash: string; result: unknown }>();
+  const startReservations = new Map<
+    string,
+    { attemptId: string; requestHash: string }
+  >();
   const workspaceCalls: ManagedWorkspace[] = [];
   const workspaceDerivations: unknown[] = [];
   const inspectionCalls: unknown[] = [];
@@ -442,6 +456,7 @@ const setup = (
   const reports: unknown[] = [];
   const receipts: unknown[] = [];
   const receiptsByRuntimeEvent = new Map<string, unknown>();
+  const trips: unknown[] = [];
   let inspectionHook: (() => void) | undefined;
   const dependencies = {
     database: fixture.database,
@@ -474,8 +489,20 @@ const setup = (
       attempt: (id) => attempts.find((attempt) => attempt.id === id),
       attemptsForProject: () => attempts,
       nonterminalAttempts: () => attempts,
-      reserveAttemptInTransaction: (attempt) => {
+      startReservation: (idempotencyKey) => {
+        const reservation = startReservations.get(idempotencyKey);
+        return reservation
+          ? { ...reservation, idempotencyKey, createdAt: now }
+          : undefined;
+      },
+      reserveAttemptInTransaction: (attempt, start) => {
         attempts.push(attempt);
+        if (start) {
+          startReservations.set(start.idempotencyKey, {
+            attemptId: start.attemptId,
+            requestHash: start.requestHash,
+          });
+        }
         return attempt;
       },
       recordWorkspaceObservationInTransaction: (workspace) => {
@@ -521,6 +548,12 @@ const setup = (
         return stored as never;
       },
       storeInTransaction: (stored) => {
+        const existing = commands.get(stored.idempotencyKey);
+        if (existing) {
+          if (existing.requestHash !== stored.requestHash)
+            throw new Error('conflict');
+          return;
+        }
         commands.set(stored.idempotencyKey, stored);
       },
     },
@@ -679,7 +712,7 @@ const setup = (
       assertHealthy: () => {
         if (options.healthy === false) throw new Error('audit barrier tripped');
       },
-      trip: () => undefined,
+      trip: (error: unknown) => trips.push(error),
     },
     billingConflicts: options.billingConflicts ?? [],
     managedWorkspaceRoot: 'C:/mesh-managed-workspaces',
@@ -695,10 +728,13 @@ const setup = (
     workspaceDerivations,
     inspectionCalls,
     executionCalls,
+    commands,
+    startReservations,
     executionRecords,
     events,
     reports,
     receipts,
+    trips,
     fixture,
     dependencies,
     getAuthority: () => authority,
@@ -889,6 +925,7 @@ describe('DeveloperAttemptService', () => {
         code: 'developer_attempt_transition_conflict',
         message: 'Controlling execution requires attention',
       },
+      endedAt: later,
     });
   });
 
@@ -1011,14 +1048,21 @@ describe('DeveloperAttemptService', () => {
       report,
     );
     const published = context.events.length;
+    let observations = 0;
+    context.dependencies.workspace.observe = async () => {
+      observations += 1;
+      throw new Error('workspace should not be observed for receipt replay');
+    };
     await context.service.acceptReport(
       execution as never,
       event as never,
       report,
     );
+    expect(observations).toBe(0);
     expect(context.receipts).toHaveLength(1);
     expect(context.reports).toHaveLength(1);
     expect(context.events).toHaveLength(published);
+    expect(context.trips).toEqual([]);
     await expect(
       context.service.acceptReport(
         execution as never,
@@ -1033,6 +1077,106 @@ describe('DeveloperAttemptService', () => {
       ),
     ).rejects.toThrow('conflicts with prior receipt');
     expect(context.reports).toHaveLength(1);
+    expect(context.trips).toHaveLength(1);
+  });
+
+  it('settles a durably emitted report before a concurrent interrupt', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = completionReport(attempt);
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+    const event = {
+      id: randomUUID(),
+      type: 'worker_execution.structured_output',
+      executionId: execution.id,
+      projectId: execution.projectId,
+      occurredAt: later,
+      payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+    };
+    let observationStarted!: () => void;
+    const observing = new Promise<void>((resolve) => {
+      observationStarted = resolve;
+    });
+    let releaseObservation!: () => void;
+    const observationReleased = new Promise<void>((resolve) => {
+      releaseObservation = resolve;
+    });
+    const publications: unknown[] = [];
+    context.dependencies.publishDomain = (domainEvent) =>
+      publications.push(domainEvent);
+    context.dependencies.workspace.observe = async (workspace) => {
+      observationStarted();
+      await observationReleased;
+      return {
+        ...workspace,
+        lifecycle: 'ready' as const,
+        observedHead: context.fixture.project.headCommit,
+        observedDirty: false,
+        failure: null,
+      };
+    };
+
+    const settling = context.service.acceptReport(
+      execution as never,
+      event as never,
+      report,
+    );
+    await observing;
+    const interrupting = context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: attempt.projectId,
+        attemptId: attempt.id,
+        expectedAttemptRevision: attempt.revision,
+      },
+    });
+    releaseObservation();
+
+    await settling;
+    await expect(interrupting).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'developer_attempt_transition_conflict' },
+    });
+    expect(context.attempts[0]).toMatchObject({ lifecycle: 'completed' });
+    expect(context.getAuthority()!.task.lifecycle).toBe('completed');
+    expect(context.receipts).toEqual([
+      expect.objectContaining({ status: 'accepted' }),
+    ]);
+    expect(context.reports).toHaveLength(1);
+    expect(
+      publications.filter(
+        (domainEvent) =>
+          (domainEvent as { type?: string }).type ===
+          'developer_report.recorded',
+      ),
+    ).toHaveLength(1);
+
+    await context.service.acceptReport(
+      execution as never,
+      event as never,
+      report,
+    );
+    expect(publications).toHaveLength(3);
+    await context.service.acceptReport(
+      execution as never,
+      { ...event, id: randomUUID() } as never,
+      report,
+    );
+    expect(context.receipts).toEqual([
+      expect.objectContaining({ status: 'accepted' }),
+      expect.objectContaining({
+        status: 'rejected',
+        rejectionReason: 'report_binding_mismatch',
+      }),
+    ]);
   });
 
   it.each(['receipt', 'report', 'attempt', 'event', 'task'] as const)(
@@ -1258,6 +1402,105 @@ describe('DeveloperAttemptService', () => {
     expect(context.executionCalls).toHaveLength(2);
   });
 
+  it('replays a reserved start after a process loss without duplicate effects', async () => {
+    const context = await setupPersistedAttempt();
+    const active = context.attempt;
+    const reserved: DeveloperAttempt = {
+      ...active,
+      lifecycle: 'reserved',
+      revision: 0,
+      controllingExecutionId: null,
+      executionIds: [],
+      workspace: {
+        ...active.workspace,
+        lifecycle: 'creating',
+        observedHead: null,
+        observedDirty: null,
+        failure: null,
+        revision: 0,
+      },
+      attention: null,
+      endedAt: null,
+    };
+    inImmediateTransaction(context.fixture.database, () => {
+      context.fixture.database
+        .prepare(
+          `UPDATE developer_attempts SET
+            lifecycle = 'reserved', revision = 0, controlling_execution_id = NULL,
+            attention_json = NULL, updated_at = ?, ended_at = NULL
+           WHERE id = ?`,
+        )
+        .run(now, reserved.id);
+      context.fixture.database
+        .prepare(
+          'DELETE FROM developer_attempt_executions WHERE attempt_id = ?',
+        )
+        .run(reserved.id);
+      context.fixture.database
+        .prepare(
+          `UPDATE developer_workspaces SET
+            lifecycle = 'creating', observed_head = NULL, observed_dirty = NULL,
+            failure_json = NULL, revision = 0, workspace_json = ?, updated_at = ?
+           WHERE attempt_id = ?`,
+        )
+        .run(canonicalJson(reserved.workspace), now, reserved.id);
+      context.fixture.database
+        .prepare(
+          `UPDATE developer_workspace_operations SET
+            state = 'creating', observation_json = NULL, updated_at = ?
+           WHERE attempt_id = ? AND ordinal = 1`,
+        )
+        .run(now, reserved.id);
+      context.fixture.database
+        .prepare('DELETE FROM command_results WHERE idempotency_key = ?')
+        .run(context.startEnvelope.idempotencyKey);
+    });
+    expect(
+      context.developers.startReservation(context.startEnvelope.idempotencyKey),
+    ).toMatchObject({ attemptId: reserved.id });
+    expect(
+      context.fixture.commands.find(context.startEnvelope.idempotencyKey),
+    ).toBeUndefined();
+    context.workspaceCalls.splice(0);
+    context.reserveStartCalls.splice(0);
+    context.dependencies.profiles.resolveApproved = () => {
+      throw new Error('profile revision drifted after reservation');
+    };
+    context.dependencies.workspace.inspectProject = async () => {
+      throw new Error('repository HEAD drifted after reservation');
+    };
+    const taskAuthority =
+      context.dependencies.planning.taskExecutionAuthority.bind(
+        context.dependencies.planning,
+      );
+    context.dependencies.planning.taskExecutionAuthority = (...input) => {
+      const authority = taskAuthority(...input);
+      return authority
+        ? {
+            ...authority,
+            task: { ...authority.task, revision: authority.task.revision + 1 },
+          }
+        : authority;
+    };
+
+    const recovered = new DeveloperAttemptService(context.dependencies);
+    const result = await recovered.start(context.startEnvelope);
+    const replay = await recovered.start(context.startEnvelope);
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.start',
+      attempt: { id: reserved.id, lifecycle: 'active' },
+    });
+    expect(replay).toEqual(result);
+    expect(context.workspaceCalls).toHaveLength(1);
+    expect(context.reserveStartCalls).toHaveLength(1);
+    expect(context.developers.attempt(reserved.id)).toMatchObject({
+      lifecycle: 'active',
+      controllingExecutionId: active.controllingExecutionId,
+    });
+  });
+
   it.each([
     [
       'missing authority',
@@ -1389,8 +1632,13 @@ describe('DeveloperAttemptService', () => {
     });
 
     const result = await context.service.start(context.command);
+    const replay = await context.service.start(context.command);
 
-    expect(result).toMatchObject({ ok: true });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'developer_workspace_conflict' },
+    });
+    expect(replay).toEqual(result);
     expect(context.attempts).toHaveLength(1);
     expect(context.attempts[0]).toMatchObject({
       lifecycle: 'attention_required',
@@ -1423,6 +1671,64 @@ describe('DeveloperAttemptService', () => {
     });
     expect(context.attempts[0].executionIds).toHaveLength(1);
   });
+
+  it('returns the stored adapter failure when attention publication fails', async () => {
+    const context = setup({ executionReservationFails: true });
+    const publish = context.dependencies.publishDomain;
+    context.dependencies.publishDomain = (event) => {
+      if (
+        (event as { payload?: { attempt?: DeveloperAttempt } }).payload?.attempt
+          ?.lifecycle === 'attention_required'
+      )
+        throw new Error('attention publication failed');
+      publish(event);
+    };
+
+    const result = await context.service.start(context.command);
+    const replay = await context.service.start(context.command);
+
+    expect(result).toMatchObject({
+      ok: false,
+      commandType: 'developer_attempt.start',
+      error: { code: 'adapter_unavailable' },
+    });
+    expect(replay).toEqual(result);
+  });
+
+  it.each(['publication', 'activation'] as const)(
+    'returns the stored start result after post-commit %s failure',
+    async (failure) => {
+      const context = setup();
+      if (failure === 'publication') {
+        const publish = context.dependencies.publishDomain;
+        context.dependencies.publishDomain = (event) => {
+          if (
+            (event as { payload?: { attempt?: DeveloperAttempt } }).payload
+              ?.attempt?.lifecycle === 'active'
+          )
+            throw new Error('active publication failed');
+          publish(event);
+        };
+      } else {
+        context.dependencies.execution.activateReserved = async () => {
+          throw new Error('activation failed');
+        };
+      }
+
+      const result = await context.service.start(context.command);
+      const replay = await context.service.start(context.command);
+
+      expect(result).toMatchObject({
+        ok: true,
+        commandType: 'developer_attempt.start',
+        attempt: { lifecycle: 'active' },
+      });
+      expect(replay).toEqual(result);
+      expect(context.attempts[0]).toMatchObject({
+        lifecycle: 'attention_required',
+      });
+    },
+  );
 
   it('drains committed active reservations through ExecutionRuntime activation', async () => {
     const context = setup();
@@ -1470,6 +1776,63 @@ describe('DeveloperAttemptService', () => {
       controllingExecutionId: active.controllingExecutionId,
       executionIds: active.executionIds,
       workspace: active.workspace,
+    });
+  });
+
+  it('serializes concurrent interrupt replay through runtime settlement', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    const envelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.interrupt' as const,
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    };
+    const runtimeInterrupt = context.dependencies.execution.interrupt;
+    let runtimeCalls = 0;
+    let runtimeStarted!: () => void;
+    const runtimeStarting = new Promise<void>((resolve) => {
+      runtimeStarted = resolve;
+    });
+    let releaseRuntime!: () => void;
+    const runtimeReleased = new Promise<void>((resolve) => {
+      releaseRuntime = resolve;
+    });
+    context.dependencies.execution.interrupt = async (input) => {
+      runtimeCalls += 1;
+      runtimeStarted();
+      await runtimeReleased;
+      return runtimeInterrupt(input);
+    };
+    const publications: unknown[] = [];
+    context.dependencies.publishDomain = (event) => publications.push(event);
+
+    const first = context.service.interrupt(envelope);
+    await runtimeStarting;
+    const replay = context.service.interrupt(envelope);
+    releaseRuntime();
+
+    await expect(first).resolves.toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.interrupt',
+      attempt: { lifecycle: 'interrupted' },
+    });
+    await expect(replay).resolves.toEqual(await first);
+    expect(runtimeCalls).toBe(1);
+    expect(publications).toHaveLength(1);
+    await expect(
+      context.service.interrupt({
+        ...envelope,
+        idempotencyKey: randomUUID(),
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'developer_attempt_transition_conflict' },
     });
   });
 

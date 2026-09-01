@@ -70,6 +70,7 @@ type Dependencies = {
     | 'attempt'
     | 'attemptsForProject'
     | 'nonterminalAttempts'
+    | 'startReservation'
     | 'reserveAttemptInTransaction'
     | 'recordWorkspaceObservationInTransaction'
     | 'linkExecutionInTransaction'
@@ -162,6 +163,8 @@ const outputDigest = (value: unknown) =>
   createHash('sha256').update(canonicalJson(value)).digest('hex');
 
 export class DeveloperAttemptService {
+  private readonly attemptTails = new Map<string, Promise<void>>();
+
   constructor(private readonly dependencies: Dependencies) {}
 
   async acceptReport(
@@ -174,6 +177,25 @@ export class DeveloperAttemptService {
       execution.assignment,
     );
     if (!assignment.success) return;
+    const digest = outputDigest(event.payload.value);
+    if (this.receiptMatches(event.id, digest)) return;
+    await this.inAttemptOrder(assignment.data.attemptId, () =>
+      this.acceptReportLocked(execution, event, report),
+    );
+  }
+
+  private async acceptReportLocked(
+    execution: WorkerExecution,
+    event: WorkerExecutionStructuredOutputRuntimeEvent,
+    report: DeveloperReport | null,
+  ): Promise<void> {
+    this.dependencies.barrier.assertHealthy();
+    const assignment = developerTaskAssignmentSchema.safeParse(
+      execution.assignment,
+    );
+    if (!assignment.success) return;
+    const digest = outputDigest(event.payload.value);
+    if (this.receiptMatches(event.id, digest)) return;
     const candidate = this.dependencies.developers.attempt(
       assignment.data.attemptId,
     );
@@ -189,7 +211,6 @@ export class DeveloperAttemptService {
         throw error;
       }
     }
-    const digest = outputDigest(event.payload.value);
     const committed: DomainEvent[] = [];
     try {
       inImmediateTransaction(this.dependencies.database, () => {
@@ -444,7 +465,7 @@ export class DeveloperAttemptService {
                   }
                 : null,
               updatedAt: execution.updatedAt,
-              endedAt: null,
+              endedAt: requiresAttention ? execution.updatedAt : null,
             },
             attempt.revision,
           );
@@ -482,12 +503,6 @@ export class DeveloperAttemptService {
     }
 
     const requestHash = hashV2Command(command.command);
-    const replay = this.dependencies.commands.find(
-      command.idempotencyKey,
-      requestHash,
-    );
-    if (replay) return replay.result;
-
     try {
       this.dependencies.barrier.assertHealthy();
     } catch (error) {
@@ -496,6 +511,24 @@ export class DeveloperAttemptService {
         'audit_barrier_tripped',
       );
     }
+    const replay = this.dependencies.commands.find(
+      command.idempotencyKey,
+      requestHash,
+    );
+    if (replay) return replay.result;
+    const reservation = this.dependencies.developers.startReservation(
+      command.idempotencyKey,
+    );
+    if (reservation && reservation.requestHash !== requestHash) {
+      return failure(
+        'Idempotency key was already used',
+        'idempotency_conflict',
+      );
+    }
+    const recovering = reservation
+      ? this.dependencies.developers.attempt(reservation.attemptId)
+      : undefined;
+    if (recovering) return this.resumeStart(command, requestHash, recovering);
     if (this.dependencies.billingConflicts.length > 0) {
       return failure('Billing override is configured');
     }
@@ -589,6 +622,66 @@ export class DeveloperAttemptService {
           requestHash,
         );
         if (stored) return { result: stored.result };
+        const reservation = this.dependencies.developers.startReservation(
+          command.idempotencyKey,
+        );
+        if (reservation && reservation.requestHash !== requestHash) {
+          throw typedError(
+            'idempotency_conflict',
+            'Idempotency key was already used',
+          );
+        }
+        const resumed = reservation
+          ? this.dependencies.developers.attempt(reservation.attemptId)
+          : undefined;
+        if (resumed) {
+          const recoveryAuthority =
+            this.dependencies.planning.taskExecutionAuthorityInTransaction(
+              resumed.projectId,
+              resumed.taskId,
+            );
+          if (!recoveryAuthority) {
+            throw typedError(
+              'developer_task_stale',
+              'Task execution authority was not found',
+            );
+          }
+          if (!['reserved', 'provisioning'].includes(resumed.lifecycle)) {
+            const result: V2CommandResult =
+              resumed.lifecycle === 'active'
+                ? {
+                    ok: true,
+                    commandType: 'developer_attempt.start',
+                    schemaVersion: 1,
+                    attempt: resumed,
+                    board: recoveryAuthority.board,
+                  }
+                : failure(
+                    resumed.attention?.message ??
+                      'Developer start did not finish',
+                    'adapter_unavailable',
+                  );
+            this.dependencies.commands.storeInTransaction({
+              idempotencyKey: command.idempotencyKey,
+              commandType: command.command.type,
+              requestHash,
+              result,
+              createdAt: resumed.updatedAt,
+            });
+            return { result };
+          }
+          return {
+            result: {
+              ok: true,
+              commandType: 'developer_attempt.start',
+              schemaVersion: 1,
+              attempt: resumed,
+              board: recoveryAuthority.board,
+            },
+            attempt: resumed,
+            authority: recoveryAuthority,
+          };
+        }
         this.dependencies.barrier.assertHealthy();
         if (this.dependencies.billingConflicts.length > 0) {
           throw new Error('Billing override is configured');
@@ -656,7 +749,12 @@ export class DeveloperAttemptService {
         const attempt = this.newAttempt(reservedAuthority, command, profile);
         reservationWritesStarted = true;
         const reserved =
-          this.dependencies.developers.reserveAttemptInTransaction(attempt);
+          this.dependencies.developers.reserveAttemptInTransaction(attempt, {
+            attemptId: attempt.id,
+            idempotencyKey: command.idempotencyKey,
+            requestHash,
+            createdAt: attempt.createdAt,
+          });
         const result: V2CommandResult = {
           ok: true,
           commandType: 'developer_attempt.start',
@@ -664,13 +762,6 @@ export class DeveloperAttemptService {
           attempt: reserved,
           board: reservedAuthority.board,
         };
-        this.dependencies.commands.storeInTransaction({
-          idempotencyKey: command.idempotencyKey,
-          commandType: command.command.type,
-          requestHash,
-          result,
-          createdAt: attempt.createdAt,
-        });
         const event = this.dependencies.events.appendDomainInTransaction(
           reservedAuthority.project.id,
           {
@@ -702,71 +793,168 @@ export class DeveloperAttemptService {
     }
     if (!started.attempt) return started.result;
     if (started.event) this.dependencies.publishDomain(started.event);
+    return this.inAttemptOrder(started.attempt.id, () =>
+      this.launchStart(command, requestHash, profile, started),
+    );
+  }
+
+  private async resumeStart(
+    command: StartDeveloperAttemptEnvelope,
+    requestHash: string,
+    attempt: DeveloperAttempt,
+  ): Promise<V2CommandResult> {
+    const authority = this.dependencies.planning.taskExecutionAuthority(
+      attempt.projectId,
+      attempt.taskId,
+    );
+    if (!authority)
+      return failure(
+        'Task execution authority was not found',
+        'developer_task_stale',
+      );
+    const result: V2CommandResult = {
+      ok: true,
+      commandType: 'developer_attempt.start',
+      schemaVersion: 1,
+      attempt,
+      board: authority.board,
+    };
+    if (!['reserved', 'provisioning'].includes(attempt.lifecycle)) {
+      const settled =
+        attempt.lifecycle === 'active'
+          ? result
+          : failure(
+              attempt.attention?.message ?? 'Developer start did not finish',
+              'adapter_unavailable',
+            );
+      try {
+        inImmediateTransaction(this.dependencies.database, () => {
+          this.dependencies.commands.storeInTransaction({
+            idempotencyKey: command.idempotencyKey,
+            commandType: command.command.type,
+            requestHash,
+            result: settled,
+            createdAt: attempt.updatedAt,
+          });
+        });
+      } catch (error) {
+        this.dependencies.barrier.trip(error, this.dependencies.now());
+        return failureFrom(error, 'audit_barrier_tripped');
+      }
+      return settled;
+    }
+    return this.inAttemptOrder(attempt.id, () =>
+      this.launchStart(
+        command,
+        requestHash,
+        {
+          profileId: attempt.profileId,
+          profileRevision: attempt.profileRevision,
+        },
+        { result, attempt, authority },
+      ),
+    );
+  }
+
+  private async launchStart(
+    command: StartDeveloperAttemptEnvelope,
+    requestHash: string,
+    profile: Pick<
+      ResolvedWorkerProfileSnapshot,
+      'profileId' | 'profileRevision'
+    >,
+    started: StartTransaction,
+  ): Promise<V2CommandResult> {
     const startedAuthority = started.authority!;
+    const current = this.requireAttempt(started.attempt!.id);
+    if (!['reserved', 'provisioning'].includes(current.lifecycle)) {
+      return (
+        this.dependencies.commands.find(command.idempotencyKey, requestHash)
+          ?.result ?? started.result
+      );
+    }
 
     try {
-      const observation = await this.dependencies.workspace.create(
-        started.attempt.workspace,
-      );
-      let provisioned: DeveloperAttempt;
-      let workspaceEvent: DomainEvent;
-      ({ provisioned, workspaceEvent } = inImmediateTransaction(
-        this.dependencies.database,
-        () => {
-          const current = this.requireAttempt(started.attempt!.id);
-          const workspace =
-            this.dependencies.developers.recordWorkspaceObservationInTransaction(
+      let provisioned = current;
+      if (current.lifecycle === 'reserved') {
+        const observation = await this.dependencies.workspace.create(
+          current.workspace,
+        );
+        let workspaceEvent: DomainEvent;
+        ({ provisioned, workspaceEvent } = inImmediateTransaction(
+          this.dependencies.database,
+          () => {
+            const persisted = this.requireAttempt(current.id);
+            const workspace =
+              this.dependencies.developers.recordWorkspaceObservationInTransaction(
+                {
+                  ...observation,
+                  revision: persisted.workspace.revision + 1,
+                  updatedAt: this.dependencies.now(),
+                },
+                persisted.workspace.revision,
+              );
+            const attention =
+              workspace.lifecycle === 'attention_required'
+                ? (workspace.failure ?? {
+                    code: 'workspace_attention_required',
+                    message: 'Managed workspace requires attention',
+                  })
+                : null;
+            const next =
+              this.dependencies.developers.transitionAttemptInTransaction(
+                {
+                  ...persisted,
+                  lifecycle:
+                    workspace.lifecycle === 'ready'
+                      ? 'provisioning'
+                      : 'attention_required',
+                  revision: persisted.revision + 1,
+                  workspace,
+                  attention,
+                  updatedAt: this.dependencies.now(),
+                  endedAt:
+                    workspace.lifecycle === 'ready'
+                      ? null
+                      : this.dependencies.now(),
+                },
+                persisted.revision,
+              );
+            const event = this.dependencies.events.appendDomainInTransaction(
+              startedAuthority.project.id,
               {
-                ...observation,
-                revision: current.workspace.revision + 1,
-                updatedAt: this.dependencies.now(),
+                projectId: startedAuthority.project.id,
+                occurredAt: next.updatedAt,
+                type: 'developer_workspace.changed',
+                payload: {
+                  schemaVersion: 1,
+                  attempt: next,
+                  board: startedAuthority.board,
+                },
               },
-              current.workspace.revision,
             );
-          const attention =
-            workspace.lifecycle === 'attention_required'
-              ? (workspace.failure ?? {
-                  code: 'workspace_attention_required',
-                  message: 'Managed workspace requires attention',
-                })
-              : null;
-          const next =
-            this.dependencies.developers.transitionAttemptInTransaction(
-              {
-                ...this.requireAttempt(current.id),
-                lifecycle:
-                  workspace.lifecycle === 'ready'
-                    ? 'provisioning'
-                    : 'attention_required',
-                revision: current.revision + 1,
-                workspace,
-                attention,
-                updatedAt: this.dependencies.now(),
-                endedAt:
-                  workspace.lifecycle === 'ready'
-                    ? null
-                    : this.dependencies.now(),
-              },
-              current.revision,
-            );
-          const event = this.dependencies.events.appendDomainInTransaction(
-            startedAuthority.project.id,
-            {
-              projectId: startedAuthority.project.id,
-              occurredAt: next.updatedAt,
-              type: 'developer_workspace.changed',
-              payload: {
-                schemaVersion: 1,
-                attempt: next,
-                board: startedAuthority.board,
-              },
-            },
-          );
-          return { provisioned: next, workspaceEvent: event };
-        },
-      ));
-      this.dependencies.publishDomain(workspaceEvent);
-      if (provisioned.workspace.lifecycle !== 'ready') return started.result;
+            return { provisioned: next, workspaceEvent: event };
+          },
+        ));
+        this.dependencies.publishDomain(workspaceEvent);
+      }
+      if (provisioned.workspace.lifecycle !== 'ready') {
+        return this.markAttention(
+          provisioned.id,
+          startedAuthority,
+          new Error(
+            provisioned.workspace.failure?.message ??
+              'Managed workspace requires attention',
+          ),
+          failure(
+            provisioned.workspace.failure?.message ??
+              'Managed workspace requires attention',
+            'developer_workspace_conflict',
+          ),
+          command,
+          requestHash,
+        );
+      }
 
       const execution = await this.dependencies.execution.reserveStart({
         idempotencyKey: `developer-attempt:${provisioned.id}:execution:1`,
@@ -788,20 +976,20 @@ export class DeveloperAttemptService {
             updatedAt: this.dependencies.now(),
           });
         });
-        this.markAttention(
+        return this.markAttention(
           provisioned.id,
           startedAuthority,
           new ExecutionReservationError(execution.result),
-        );
-        return failure(
-          execution.result.error.message,
-          execution.result.error.code,
+          failure(execution.result.error.message, execution.result.error.code),
+          command,
+          requestHash,
         );
       }
 
-      let active: DeveloperAttempt;
+      let result: V2CommandResult;
       let activeEvent: DomainEvent;
-      ({ active, activeEvent } = inImmediateTransaction(
+      let active: DeveloperAttempt;
+      ({ active, activeEvent, result } = inImmediateTransaction(
         this.dependencies.database,
         () => {
           const linked =
@@ -821,6 +1009,20 @@ export class DeveloperAttemptService {
               },
               linked.revision,
             );
+          const nextResult: V2CommandResult = {
+            ok: true,
+            commandType: 'developer_attempt.start',
+            schemaVersion: 1,
+            attempt: next,
+            board: startedAuthority.board,
+          };
+          this.dependencies.commands.storeInTransaction({
+            idempotencyKey: command.idempotencyKey,
+            commandType: command.command.type,
+            requestHash,
+            result: nextResult,
+            createdAt: next.updatedAt,
+          });
           const event = this.dependencies.events.appendDomainInTransaction(
             startedAuthority.project.id,
             {
@@ -834,7 +1036,7 @@ export class DeveloperAttemptService {
               },
             },
           );
-          return { active: next, activeEvent: event };
+          return { active: next, activeEvent: event, result: nextResult };
         },
       ));
       this.dependencies.publishDomain(activeEvent);
@@ -843,10 +1045,39 @@ export class DeveloperAttemptService {
           active.controllingExecutionId!,
         );
       }
-      return started.result;
+      return result;
     } catch (error) {
-      this.markAttention(started.attempt.id, startedAuthority, error);
-      return failureFrom(error, 'adapter_unavailable');
+      const failureResult = failureFrom(error, 'adapter_unavailable');
+      const stored = this.dependencies.commands.find(
+        command.idempotencyKey,
+        requestHash,
+      );
+      if (stored) {
+        try {
+          this.markAttention(
+            current.id,
+            startedAuthority,
+            error,
+            failureResult,
+            command,
+            requestHash,
+          );
+        } catch (attentionError) {
+          this.dependencies.barrier.trip(
+            attentionError,
+            this.dependencies.now(),
+          );
+        }
+        return stored.result;
+      }
+      return this.markAttention(
+        current.id,
+        startedAuthority,
+        error,
+        failureResult,
+        command,
+        requestHash,
+      );
     }
   }
 
@@ -861,11 +1092,22 @@ export class DeveloperAttemptService {
       );
     const command = parsed.data;
     const requestHash = hashV2Command(command.command);
+    return this.inAttemptOrder(command.command.attemptId, async () => {
+      const reserved = this.reserveInterrupt(command, requestHash);
+      if (reserved.event) this.dependencies.publishDomain(reserved.event);
+      return this.settleInterrupt(command, reserved.result);
+    });
+  }
+
+  private reserveInterrupt(
+    command: InterruptDeveloperAttemptEnvelope,
+    requestHash: string,
+  ): { result: V2CommandResult; event?: DomainEvent } {
     const replay = this.dependencies.commands.find(
       command.idempotencyKey,
       requestHash,
     );
-    if (replay) return this.settleInterrupt(command, replay.result);
+    if (replay) return { result: replay.result };
     this.dependencies.barrier.assertHealthy();
 
     let accepted: V2CommandResult = mutationFailure(
@@ -959,8 +1201,7 @@ export class DeveloperAttemptService {
         },
       );
     });
-    if (acceptedEvent) this.dependencies.publishDomain(acceptedEvent);
-    return this.settleInterrupt(command, accepted);
+    return { result: accepted, event: acceptedEvent };
   }
 
   private async settleInterrupt(
@@ -1422,6 +1663,39 @@ export class DeveloperAttemptService {
     return attempt;
   }
 
+  private receiptMatches(runtimeEventId: string, digest: string): boolean {
+    const prior = this.dependencies.developers.outputReceipt(runtimeEventId);
+    if (prior && prior.outputDigest !== digest) {
+      const error = new Error(
+        'Developer output receipt conflicts with prior receipt',
+      );
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      throw error;
+    }
+    return prior !== undefined;
+  }
+
+  private async inAttemptOrder<T>(
+    attemptId: string,
+    operation: () => Promise<T> | T,
+  ): Promise<T> {
+    const prior = this.attemptTails.get(attemptId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = prior.catch(() => undefined).then(() => gate);
+    this.attemptTails.set(attemptId, current);
+    await prior.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.attemptTails.get(attemptId) === current)
+        this.attemptTails.delete(attemptId);
+    }
+  }
+
   private markAttemptAttention(
     expected: DeveloperAttempt,
     code: string,
@@ -1495,7 +1769,10 @@ export class DeveloperAttemptService {
     attemptId: string,
     authority: TaskExecutionAuthority,
     error: unknown,
-  ): void {
+    result: V2CommandResult,
+    command: StartDeveloperAttemptEnvelope,
+    requestHash: string,
+  ): V2CommandResult {
     const message = error instanceof Error ? error.message : 'Launch failed';
     let event: DomainEvent | undefined;
     try {
@@ -1532,24 +1809,34 @@ export class DeveloperAttemptService {
                 },
                 current.revision,
               );
-        event = this.dependencies.events.appendDomainInTransaction(
-          authority.project.id,
-          {
-            projectId: authority.project.id,
-            occurredAt: next.updatedAt,
-            type: 'developer_attempt.changed',
-            payload: {
-              schemaVersion: 1,
-              attempt: next,
-              board: authority.board,
+        this.dependencies.commands.storeInTransaction({
+          idempotencyKey: command.idempotencyKey,
+          commandType: command.command.type,
+          requestHash,
+          result,
+          createdAt: next.updatedAt,
+        });
+        if (next !== current) {
+          event = this.dependencies.events.appendDomainInTransaction(
+            authority.project.id,
+            {
+              projectId: authority.project.id,
+              occurredAt: next.updatedAt,
+              type: 'developer_attempt.changed',
+              payload: {
+                schemaVersion: 1,
+                attempt: next,
+                board: authority.board,
+              },
             },
-          },
-        );
+          );
+        }
       });
     } catch (error) {
       this.dependencies.barrier.trip(error, this.dependencies.now());
-      return;
+      return failureFrom(error, 'audit_barrier_tripped');
     }
     if (event) this.dependencies.publishDomain(event);
+    return result;
   }
 }

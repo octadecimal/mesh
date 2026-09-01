@@ -200,6 +200,7 @@ describe('V2 database identity and migration', () => {
       { version: 3, name: '003_planning_board' },
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
+      { version: 6, name: '006_developer_start_reservations' },
     ]);
   });
 
@@ -270,7 +271,7 @@ describe('V2 database identity and migration', () => {
       reopened
         .prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations')
         .get(),
-    ).toEqual({ count: 5 });
+    ).toEqual({ count: 6 });
   });
 
   it('migrates an identified pre-foundation V2 database forward', () => {
@@ -298,6 +299,7 @@ describe('V2 database identity and migration', () => {
       { version: 3 },
       { version: 4 },
       { version: 5 },
+      { version: 6 },
     ]);
   });
 
@@ -891,6 +893,7 @@ describe('V2 database identity and migration', () => {
       { version: 3 },
       { version: 4 },
       { version: 5 },
+      { version: 6 },
     ]);
   });
 
@@ -1377,6 +1380,7 @@ describe('V2 database identity and migration', () => {
       { version: 3, name: '003_planning_board' },
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
+      { version: 6, name: '006_developer_start_reservations' },
     ]);
     database.close();
 

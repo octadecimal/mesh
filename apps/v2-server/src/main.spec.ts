@@ -914,8 +914,12 @@ describe('startV2Server', () => {
         environment: await environment(repositoryPath, fixture.path),
         test: { adapter: unavailableAdapter },
       });
-      const command = (profileId: string, profileRevision: number) => ({
-        idempotencyKey: randomUUID(),
+      const command = (
+        profileId: string,
+        profileRevision: number,
+        idempotencyKey = randomUUID(),
+      ) => ({
+        idempotencyKey,
         actor: { kind: 'human' },
         command: {
           type: 'developer_attempt.start',
@@ -942,17 +946,30 @@ describe('startV2Server', () => {
       expect(await incompatible.json()).toMatchObject({
         error: { code: 'developer_profile_incompatible' },
       });
+      const unavailableEnvelope = command(
+        developerProfile.profileId,
+        developerProfile.revision,
+      );
       const unavailable = await fetch(`${server.origin}/api/v2/commands`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(
-          command(developerProfile.profileId, developerProfile.revision),
-        ),
+        body: JSON.stringify(unavailableEnvelope),
       });
       expect(unavailable.status).toBe(503);
-      expect(await unavailable.json()).toMatchObject({
+      const unavailableBody = await unavailable.json();
+      expect(unavailableBody).toMatchObject({
         error: { code: 'adapter_unavailable' },
       });
+      const unavailableReplay = await fetch(
+        `${server.origin}/api/v2/commands`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(unavailableEnvelope),
+        },
+      );
+      expect(unavailableReplay.status).toBe(503);
+      expect(await unavailableReplay.json()).toEqual(unavailableBody);
       const snapshot = v2ProjectSnapshotSchema.parse(
         await fetch(
           `${server.origin}/api/v2/projects/${fixture.project.id}/snapshot`,
@@ -962,6 +979,12 @@ describe('startV2Server', () => {
       expect(snapshot.developerAttempts).toMatchObject([
         { lifecycle: 'attention_required' },
       ]);
+      expect(snapshot.developerAttempts).toHaveLength(1);
+      expect(
+        snapshot.executions.filter(
+          (execution) => execution.assignment.kind === 'developer_task',
+        ),
+      ).toHaveLength(0);
     } finally {
       await server?.close();
       if (workspacePath) {
