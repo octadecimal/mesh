@@ -225,7 +225,24 @@ export class DeveloperAttemptService {
         (command.command.type === 'developer_attempt.start'
           ? result.commandType === 'developer_attempt.start' &&
             result.attempt.projectId === command.command.projectId &&
+            result.attempt.assignment.projectId === command.command.projectId &&
             result.attempt.taskId === command.command.taskId &&
+            result.attempt.assignment.taskId === command.command.taskId &&
+            result.attempt.taskCurrentRevision ===
+              command.command.expectedTaskRevision &&
+            result.attempt.assignment.taskCurrentRevision ===
+              command.command.expectedTaskRevision &&
+            result.attempt.deliveryPlanId ===
+              command.command.expectedDeliveryPlanId &&
+            result.attempt.assignment.deliveryPlanId ===
+              command.command.expectedDeliveryPlanId &&
+            result.attempt.deliveryPlanRevision ===
+              command.command.expectedDeliveryPlanRevision &&
+            result.attempt.assignment.deliveryPlanRevision ===
+              command.command.expectedDeliveryPlanRevision &&
+            result.attempt.profileId === command.command.profileId &&
+            result.attempt.profileRevision ===
+              command.command.profileRevision &&
             result.board.projectId === command.command.projectId
           : command.command.type === 'developer_attempt.interrupt'
             ? result.commandType === 'developer_attempt.interrupt' &&

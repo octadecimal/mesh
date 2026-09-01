@@ -523,6 +523,8 @@ const seedDeveloperStartRecoveryCase = async (
     repositoryPath,
     workspacePath: workspace.path,
     attemptId,
+    attempt,
+    board: authority.board,
     envelope,
   };
 };
@@ -1445,6 +1447,150 @@ describe('startV2Server', () => {
     },
     30_000,
   );
+
+  it('fails closed when successful start replay identity is corrupt', async () => {
+    const seeded = await seedDeveloperStartRecoveryCase('reserved_before_git');
+    const requestHash = hashV2Command(seeded.envelope.command);
+    const exactResult = {
+      ok: true as const,
+      commandType: 'developer_attempt.start' as const,
+      schemaVersion: 1 as const,
+      attempt: seeded.attempt,
+      board: seeded.board,
+    };
+    const corruptions = [
+      ['attempt.projectId', randomUUID()],
+      ['attempt.assignment.projectId', randomUUID()],
+      ['board.projectId', randomUUID()],
+      ['attempt.taskId', randomUUID()],
+      ['attempt.assignment.taskId', randomUUID()],
+      ['attempt.taskCurrentRevision', seeded.attempt.taskCurrentRevision + 1],
+      [
+        'attempt.assignment.taskCurrentRevision',
+        seeded.attempt.assignment.taskCurrentRevision + 1,
+      ],
+      ['attempt.deliveryPlanId', randomUUID()],
+      ['attempt.assignment.deliveryPlanId', randomUUID()],
+      ['attempt.deliveryPlanRevision', seeded.attempt.deliveryPlanRevision + 1],
+      [
+        'attempt.assignment.deliveryPlanRevision',
+        seeded.attempt.assignment.deliveryPlanRevision + 1,
+      ],
+      ['attempt.profileId', randomUUID()],
+      ['attempt.profileRevision', seeded.attempt.profileRevision + 1],
+    ] as const;
+    const setPath = (path: string, value: string | number) => {
+      const result = structuredClone(exactResult) as unknown as Record<
+        string,
+        unknown
+      >;
+      const segments = path.split('.');
+      const property = segments.pop()!;
+      let target = result;
+      for (const segment of segments) {
+        target = target[segment] as Record<string, unknown>;
+      }
+      target[property] = value;
+      return result;
+    };
+    inImmediateTransaction(seeded.fixture.database, () => {
+      new V2CommandRepository(seeded.fixture.database).storeInTransaction({
+        idempotencyKey: seeded.envelope.idempotencyKey,
+        commandType: seeded.envelope.command.type,
+        requestHash,
+        result: exactResult,
+        createdAt: seeded.attempt.createdAt,
+      });
+      const insert = seeded.fixture.database.prepare(
+        `INSERT INTO command_results (
+           idempotency_key, command_type, request_hash, result_json, created_at
+         ) VALUES (?, 'developer_attempt.start', ?, ?, ?)`,
+      );
+      for (const [path, value] of corruptions) {
+        insert.run(
+          `corrupt-start:${path}`,
+          requestHash,
+          canonicalJson(setPath(path, value)),
+          seeded.attempt.createdAt,
+        );
+      }
+    });
+    const fake = new FakeHarnessAdapter();
+    const publications: ServerRealtimeMessage[] = [];
+    const gitAdds: readonly string[][] = [];
+    seeded.fixture.database.close();
+    let server: RunningV2Server | undefined;
+    try {
+      server = await startV2Server({
+        environment: await environment(
+          seeded.repositoryPath,
+          seeded.fixture.path,
+        ),
+        test: {
+          adapter: fake,
+          onPublished: (message) => publications.push(message),
+          onGitCall: (args) => {
+            if (args.includes('add') && args.includes('worktree')) {
+              (gitAdds as string[][]).push([...args]);
+            }
+          },
+        },
+      });
+      const durableCounts = () => {
+        const database = openV2Database(seeded.fixture.path);
+        try {
+          return ['domain_events', 'worker_executions'].map(
+            (table) =>
+              (
+                database
+                  .prepare(`SELECT COUNT(*) AS count FROM ${table}`)
+                  .get() as { count: number }
+              ).count,
+          );
+        } finally {
+          database.close();
+        }
+      };
+      const before = durableCounts();
+      const publishedBefore = publications.length;
+      for (const [path] of corruptions) {
+        const response = await fetch(`${server.origin}/api/v2/commands`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            ...seeded.envelope,
+            idempotencyKey: `corrupt-start:${path}`,
+          }),
+        });
+        expect(response.status, path).toBe(503);
+        expect(await response.json(), path).toMatchObject({
+          ok: false,
+          commandType: 'developer_attempt.start',
+          error: { code: 'audit_barrier_tripped' },
+        });
+      }
+      const exact = await fetch(`${server.origin}/api/v2/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(seeded.envelope),
+      });
+      expect(exact.status).toBe(200);
+      expect(await exact.json()).toEqual(exactResult);
+      expect(
+        await fetch(`${server.origin}/api/v2/health`).then((response) =>
+          response.json(),
+        ),
+      ).toMatchObject({ status: 'audit_barrier_tripped' });
+      expect(durableCounts()).toEqual(before);
+      expect(publications).toHaveLength(publishedBefore);
+      expect(fake.startCount).toBe(0);
+      expect(gitAdds).toHaveLength(0);
+      expect(existsSync(seeded.workspacePath)).toBe(false);
+    } finally {
+      await server?.close();
+      seeded.fixture.close();
+    }
+  }, 30_000);
 
   it.each([
     'developer_attempt.start',
