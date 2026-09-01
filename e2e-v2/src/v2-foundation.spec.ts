@@ -2,7 +2,7 @@ import { access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { relative, resolve } from 'node:path';
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
 
 import { V2ProcessFixture } from './fixtures/v2-process.js';
 
@@ -91,6 +91,78 @@ const sendCommand = (page: Page, command: unknown) =>
     });
     return { status: response.status, body: await response.json() };
   }, command);
+
+const controlAppSubscription = async (page: Page) => {
+  let pending = false;
+  let projectId: string | undefined;
+  let held: { upstream: WebSocketRoute; message: string | Buffer } | undefined;
+  let resync: unknown;
+
+  const parsedMessage = (message: string | Buffer) => {
+    try {
+      return JSON.parse(String(message)) as {
+        type?: string;
+        projectId?: string;
+        reason?: string;
+      };
+    } catch {
+      return undefined;
+    }
+  };
+
+  await page.routeWebSocket(/\/api\/v2\/realtime$/u, (route) => {
+    const upstream = route.connectToServer();
+    route.onMessage((message) => {
+      const parsed = parsedMessage(message);
+      if (
+        pending &&
+        parsed?.type === 'v2.subscribe' &&
+        parsed.projectId === projectId
+      ) {
+        pending = false;
+        held = { upstream, message };
+        return;
+      }
+      upstream.send(message);
+    });
+    upstream.onMessage((message) => {
+      const parsed = parsedMessage(message);
+      if (
+        parsed?.type === 'v2.resync_required' &&
+        parsed.projectId === projectId
+      ) {
+        resync = parsed;
+      }
+      route.send(message);
+    });
+    route.onClose(() => upstream.close());
+    upstream.onClose(() => route.close());
+  });
+
+  return {
+    holdNext(targetProjectId: string) {
+      projectId = targetProjectId;
+      pending = true;
+    },
+    async waitUntilHeld() {
+      await expect.poll(() => held !== undefined).toBe(true);
+    },
+    release() {
+      if (!held) throw new Error('The App subscription was not held');
+      held.upstream.send(held.message);
+    },
+    async waitForResync() {
+      await expect
+        .poll(() => resync)
+        .toMatchObject({
+          type: 'v2.resync_required',
+          projectId,
+          reason: 'retained_gap',
+        });
+      return resync;
+    },
+  };
+};
 
 const registerTodo = async (
   page: Page,
@@ -799,35 +871,6 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
     await page.getByRole('tab', { name: 'Requirements' }).click();
     await expectRequirementsProjection();
 
-    const resynced = await fixture.forceProjectResync(page);
-    const resyncedConversation = page.getByRole('list', {
-      name: 'Planning conversation',
-    });
-    for (const message of [
-      firstDescription,
-      'I need two details before proposing Todo intent.',
-      answer,
-    ]) {
-      await expect(resyncedConversation).toContainText(message);
-    }
-    const resyncedQuestions = page.getByRole('region', {
-      name: 'Planning questions',
-    });
-    for (const prompt of [
-      'How should Todo items persist?',
-      'Should all Todo controls be keyboard operable?',
-    ]) {
-      await expect(
-        resyncedQuestions.getByRole('heading', { name: prompt }),
-      ).toBeVisible();
-    }
-    await page.getByRole('tab', { name: 'Requirements' }).click();
-    await expectRequirementsProjection();
-    expect(resynced.intentLedger).toEqual(approved.intentLedger);
-    expect(resynced.planningCycles[0]?.turns).toEqual(
-      approved.planningCycles[0]?.turns,
-    );
-
     const approvalRestartOrigin = await fixture.restartWithFreshFake();
     await page.goto(`${approvalRestartOrigin}/projects/${fixture.projectId}`);
     await page.getByRole('tab', { name: 'Requirements' }).click();
@@ -1055,7 +1098,9 @@ test('one Todo task completes with durable workspace evidence across restart', a
   const fixture = await V2ProcessFixture.createTodo({
     fakePmScenario: 'todo',
     fakeDeveloperScenario: 'completed',
+    gitBarrier: true,
   });
+  const appSocket = await controlAppSubscription(page);
   try {
     await registerTodo(page, fixture, { holdAfterAdapterCursor: 2 });
     await approveTodoIntent(page, fixture);
@@ -1083,6 +1128,59 @@ test('one Todo task completes with durable workspace evidence across restart', a
     await board
       .getByRole('button', { name: 'Start Developer attempt' })
       .click();
+
+    await fixture.waitForGitWorktreeAdd();
+    await expect
+      .poll(async () => {
+        const snapshot = await fixture.projectSnapshot();
+        const reservedAttempt = snapshot.developerAttempts[0];
+        return reservedAttempt
+          ? {
+              attempt: reservedAttempt,
+              executions: snapshot.executions.filter(
+                ({ assignment }) => assignment.kind === 'developer_task',
+              ).length,
+            }
+          : undefined;
+      })
+      .toMatchObject({
+        attempt: {
+          lifecycle: 'reserved',
+          executionIds: [],
+          workspace: { lifecycle: 'creating' },
+        },
+        executions: 0,
+      });
+    const beforeGit = await fixture.projectSnapshot();
+    const reservedAttempt = beforeGit.developerAttempts[0];
+    if (!reservedAttempt) throw new Error('Developer attempt was not reserved');
+    expect(
+      await fixture.managedWorkspacePresence(reservedAttempt.workspace.path),
+    ).toEqual({ workspace: false, artifact: false });
+    expect(await fixture.gitWorktreeAddCount()).toBe(1);
+    const reservationEvents = await fixture.domainEventsAfter(
+      beforeStart.cursors.domain,
+    );
+    expect(reservationEvents.events).toContainEqual(
+      expect.objectContaining({
+        type: 'developer_attempt.changed',
+        payload: expect.objectContaining({
+          attempt: expect.objectContaining({
+            id: reservedAttempt.id,
+            lifecycle: 'reserved',
+          }),
+        }),
+      }),
+    );
+    expect(
+      reservationEvents.events.some(
+        (event) =>
+          event.type === 'developer_attempt.changed' &&
+          event.payload.attempt.id === reservedAttempt.id &&
+          event.payload.attempt.lifecycle === 'active',
+      ),
+    ).toBe(false);
+    await fixture.releaseGitWorktreeAdd();
 
     await expect
       .poll(
@@ -1455,10 +1553,35 @@ test('one Todo task completes with durable workspace evidence across restart', a
     ).toBeVisible();
     await expect(page.getByText('todo-m4.txt').first()).toBeVisible();
 
-    await completedBoard
+    expect(await fixture.gitWorktreeAddCount()).toBe(1);
+
+    appSocket.holdNext(fixture.projectId);
+    await page.getByRole('button', { name: 'Deselect project' }).click();
+    await page.getByRole('button', { name: 'Select Todo' }).click();
+    await appSocket.waitUntilHeld();
+
+    const staleSnapshot = await fixture.projectSnapshot();
+    await expect(
+      page.getByText(
+        `Domain cursor ${staleSnapshot.cursors.domain}; runtime cursor ${staleSnapshot.cursors.runtime}`,
+      ),
+    ).toBeVisible();
+
+    const staleBoard = page.getByRole('tabpanel', { name: 'Board' });
+    await staleBoard
       .getByRole('button', { name: 'View Build Todo controls details' })
       .click();
-    await completedBoard
+    await expect(
+      staleBoard.getByRole('button', { name: 'Start Developer attempt' }),
+    ).toBeDisabled();
+
+    const actorPage = await page.context().newPage();
+    await actorPage.goto(`${fixture.origin}/projects/${fixture.projectId}`);
+    const actorBoard = actorPage.getByRole('tabpanel', { name: 'Board' });
+    await actorBoard
+      .getByRole('button', { name: 'View Build Todo controls details' })
+      .click();
+    await actorBoard
       .getByRole('button', { name: 'Start Developer attempt' })
       .click();
     await expect
@@ -1477,9 +1600,106 @@ test('one Todo task completes with durable workspace evidence across restart', a
           )?.readiness.state,
       )
       .toBe('actionable');
+    await actorPage.close();
 
     const beforeResync = await fixture.projectSnapshot();
-    const resynced = await fixture.forceProjectResync(page);
+    expect(beforeResync.cursors.domain).toBeGreaterThan(
+      staleSnapshot.cursors.domain + 1,
+    );
+    expect(beforeResync.cursors.runtime).toBeGreaterThan(
+      staleSnapshot.cursors.runtime + 1,
+    );
+    const buildCard = staleBoard.locator('article.planning-board-card').filter({
+      has: page.getByRole('heading', {
+        name: 'Build Todo controls',
+        exact: true,
+      }),
+    });
+    await expect(buildCard.getByText(/^pending ·/u)).toBeVisible();
+    const staleDeveloper = staleBoard.getByRole('region', {
+      name: 'Developer for Build Todo controls',
+    });
+    await expect(
+      staleDeveloper.getByText('No Developer attempts yet.'),
+    ).toBeVisible();
+    const workerActivity = page.getByRole('region', {
+      name: 'Worker activity',
+    });
+    await expect(
+      workerActivity.getByRole('heading', {
+        name: 'Build Todo controls',
+        exact: true,
+      }),
+    ).toHaveCount(0);
+
+    const retainedWindows = await fixture.expireRetainedEventsThrough(
+      staleSnapshot.cursors,
+    );
+    let navigations = 0;
+    const countNavigation = () => {
+      navigations += 1;
+    };
+    page.on('framenavigated', countNavigation);
+    appSocket.release();
+    await appSocket.waitForResync();
+    await expect(
+      page.getByText(
+        `Domain cursor ${beforeResync.cursors.domain}; runtime cursor ${beforeResync.cursors.runtime}`,
+      ),
+    ).toBeVisible();
+    page.off('framenavigated', countNavigation);
+    expect(navigations).toBe(0);
+    await expect(buildCard.getByText(/^completed ·/u)).toBeVisible();
+    await expect(
+      buildCard.getByText('Inactive because the task is completed.'),
+    ).toBeVisible();
+    await expect(
+      staleBoard.getByRole('list', {
+        name: 'Readiness for Integrate Todo workflow',
+      }),
+    ).toHaveCount(0);
+
+    const buildDeveloper = staleBoard.getByRole('region', {
+      name: 'Developer for Build Todo controls',
+    });
+    await expect(
+      buildDeveloper.getByRole('heading', { name: 'Attempt 1', exact: true }),
+    ).toHaveCount(1);
+    await expect(
+      buildDeveloper.getByRole('region', {
+        name: 'Developer completion report',
+      }),
+    ).toHaveCount(1);
+    await expect(
+      buildDeveloper.getByRole('heading', {
+        name: 'Build Todo controls',
+        exact: true,
+      }),
+    ).toHaveCount(1);
+    await expect(
+      buildDeveloper.getByRole('region', {
+        name: 'Runtime activity for Build Todo controls',
+      }),
+    ).toHaveCount(1);
+    await expect(
+      workerActivity.getByRole('heading', {
+        name: 'Build Todo controls',
+        exact: true,
+      }),
+    ).toHaveCount(1);
+    await expect(
+      workerActivity.getByRole('region', {
+        name: 'Runtime activity for Build Todo controls',
+      }),
+    ).toHaveCount(1);
+
+    expect(retainedWindows.domain.lowWater).toBeGreaterThan(
+      staleSnapshot.cursors.domain + 1,
+    );
+    expect(retainedWindows.runtime.lowWater).toBeGreaterThan(
+      staleSnapshot.cursors.runtime + 1,
+    );
+    const resynced = await fixture.projectSnapshot();
     expect(resynced.developerAttempts).toEqual(beforeResync.developerAttempts);
     expect(resynced.developerReports).toEqual(beforeResync.developerReports);
     expect(resynced.board).toEqual(beforeResync.board);
@@ -1489,16 +1709,20 @@ test('one Todo task completes with durable workspace evidence across restart', a
       2,
     );
     expect(new Set(resynced.developerReports.map(({ id }) => id)).size).toBe(2);
-    const allDomain = await fixture.domainEventsAfter(0);
+    const allDomain = await fixture.domainEventsAfter(
+      retainedWindows.domain.lowWater - 1,
+    );
     expect(allDomain.events.map(({ sequence }) => sequence)).toEqual(
-      contiguousAfter(0, allDomain.highWater),
+      contiguousAfter(allDomain.lowWater - 1, allDomain.highWater),
     );
     expect(new Set(allDomain.events.map(({ id }) => id)).size).toBe(
       allDomain.events.length,
     );
-    const allRuntime = await fixture.runtimeEventsAfter(0);
+    const allRuntime = await fixture.runtimeEventsAfter(
+      retainedWindows.runtime.lowWater - 1,
+    );
     expect(allRuntime.events.map(({ sequence }) => sequence)).toEqual(
-      contiguousAfter(0, allRuntime.highWater),
+      contiguousAfter(allRuntime.lowWater - 1, allRuntime.highWater),
     );
     expect(new Set(allRuntime.events.map(({ id }) => id)).size).toBe(
       allRuntime.events.length,

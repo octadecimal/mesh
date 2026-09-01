@@ -11,7 +11,7 @@ session state and Claude driver processes. The browser sends validated commands
 over HTTP, receives snapshots over HTTP, and follows durable events plus
 transient streaming deltas over a WebSocket connection.
 
-This established session platform is V1. The implemented V2 Milestones 1–3
+This established session platform is V1. The implemented V2 Milestones 1–4
 run beside it with separate applications, contracts, settings, and storage;
 they do not replace or migrate V1. See
 [`v2-foundation.md`](v2-foundation.md) for operating instructions.
