@@ -40,10 +40,20 @@ const planningBoardMigration = {
   ),
 };
 
+const developerAttemptsMigration = {
+  version: 4,
+  name: '004_developer_attempts',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '004_developer_attempts.sql'),
+    'utf8',
+  ),
+};
+
 const migrations = [
   foundationMigration,
   intentLedgerMigration,
   planningBoardMigration,
+  developerAttemptsMigration,
 ] as const;
 
 type MigrationLedgerRow = { version: number; name: string };

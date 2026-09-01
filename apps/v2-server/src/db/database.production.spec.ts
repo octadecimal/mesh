@@ -120,7 +120,15 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
     existsSync(join(builtRoot, 'db', 'migrations', '003_planning_board.sql')),
   ).toBe(true);
   expect(
+    existsSync(
+      join(builtRoot, 'db', 'migrations', '004_developer_attempts.sql'),
+    ),
+  ).toBe(true);
+  expect(
     existsSync(join(builtRoot, 'migrations', '003_planning_board.sql')),
+  ).toBe(true);
+  expect(
+    existsSync(join(builtRoot, 'migrations', '004_developer_attempts.sql')),
   ).toBe(true);
 
   const built = createRequire(__filename)(builtDatabase) as {
@@ -148,6 +156,7 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
       { version: 1, name: '001_foundation' },
       { version: 2, name: '002_intent_ledger' },
       { version: 3, name: '003_planning_board' },
+      { version: 4, name: '004_developer_attempts' },
     ]);
   } finally {
     database.close();

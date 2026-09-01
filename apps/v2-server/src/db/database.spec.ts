@@ -173,6 +173,7 @@ describe('V2 database identity and migration', () => {
       { version: 1, name: '001_foundation' },
       { version: 2, name: '002_intent_ledger' },
       { version: 3, name: '003_planning_board' },
+      { version: 4, name: '004_developer_attempts' },
     ]);
   });
 
@@ -209,7 +210,7 @@ describe('V2 database identity and migration', () => {
       reopened
         .prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations')
         .get(),
-    ).toEqual({ count: 3 });
+    ).toEqual({ count: 4 });
   });
 
   it('migrates an identified pre-foundation V2 database forward', () => {
@@ -231,7 +232,7 @@ describe('V2 database identity and migration', () => {
     expect(tableNames(migrated)).toContain('worker_executions');
     expect(
       migrated.prepare('SELECT version FROM v2_schema_migrations').all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
   });
 
   it.each([
@@ -421,6 +422,12 @@ describe('V2 database identity and migration', () => {
         'delivery_plan_revision_dependencies',
         'delivery_plan_revision_traces',
         'board_filters',
+        'developer_attempts',
+        'developer_workspaces',
+        'developer_workspace_operations',
+        'developer_attempt_executions',
+        'developer_reports',
+        'developer_output_receipts',
       ]),
     );
     expect(
@@ -435,6 +442,7 @@ describe('V2 database identity and migration', () => {
       expect.arrayContaining([
         'execution_operations_pending',
         'execution_operations_start_request',
+        'developer_attempt_one_controlling_task',
         'planning_cycles_one_nonterminal',
         'planning_turns_one_pending',
         'runtime_events_project_execution_identity',
@@ -653,6 +661,7 @@ describe('V2 database identity and migration', () => {
         return (
           name !== 'command_results' &&
           !name.startsWith('planning_') &&
+          !name.startsWith('developer_') &&
           !name.startsWith('pm_output_') &&
           !name.startsWith('project_intent_') &&
           !name.startsWith('ledger_') &&
@@ -1184,6 +1193,7 @@ describe('V2 database identity and migration', () => {
       { version: 1, name: '001_foundation' },
       { version: 2, name: '002_intent_ledger' },
       { version: 3, name: '003_planning_board' },
+      { version: 4, name: '004_developer_attempts' },
     ]);
     database.close();
 
