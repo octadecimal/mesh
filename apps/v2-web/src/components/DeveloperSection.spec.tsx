@@ -525,7 +525,7 @@ describe('DeveloperSection', () => {
       card,
       [],
       [developerProfile],
-      'A Developer command is in progress.',
+      'A project command is in progress.',
     ],
     [
       'non-actionable task',

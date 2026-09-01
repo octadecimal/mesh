@@ -1,3 +1,5 @@
+import { useId } from 'react';
+
 import type {
   ProjectEventCursors,
   ResolvedSkillSnapshot,
@@ -87,7 +89,7 @@ export function ExecutionActivity({
   runtimeActivity?: readonly RuntimeEvent[];
   projectCursors: ProjectEventCursors;
 }) {
-  const headingId = `execution-${execution.id}`;
+  const headingId = useId();
   const label = assignmentLabel(execution);
   return (
     <article className="v2-execution" aria-labelledby={headingId}>

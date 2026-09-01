@@ -1061,6 +1061,11 @@ describe('App', () => {
     expect(
       screen.getByRole('button', { name: 'Apply filters' }),
     ).toBeDisabled();
+    expect(
+      screen
+        .getAllByRole('button', { name: 'Interrupt execution' })
+        .every((button) => button.hasAttribute('disabled')),
+    ).toBe(true);
   });
 
   it('sends exact Developer start, interrupt, and replacement commands without optimistic lifecycle changes', async () => {
@@ -1213,6 +1218,169 @@ describe('App', () => {
       attemptId: developerAttemptId,
       expectedAttemptRevision: 6,
     });
+  });
+
+  it('gives repeated Developer execution activity unique accessible labels', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => ({
+      ...developerSnapshot,
+      developerAttempts: [activeDeveloperAttempt],
+    }));
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+
+    await user.click(
+      screen.getByRole('button', { name: 'View Persist Todo details' }),
+    );
+
+    const executionArticles = screen.getAllByRole('article', {
+      name: 'Persist Todo',
+    });
+    expect(executionArticles).toHaveLength(2);
+    const labelIds = executionArticles.map((article) =>
+      article.getAttribute('aria-labelledby'),
+    );
+    expect(labelIds.every(Boolean)).toBe(true);
+    expect(new Set(labelIds).size).toBe(2);
+    executionArticles.forEach((article, index) => {
+      const label = article.ownerDocument.getElementById(labelIds[index]!);
+      expect(label).not.toBeNull();
+      expect(article).toContainElement(label);
+    });
+
+    const renderedIds = [...app.container.querySelectorAll('[id]')].map(
+      (element) => element.id,
+    );
+    expect(new Set(renderedIds).size).toBe(renderedIds.length);
+  });
+
+  it('describes a deferred Developer submission as a project command across families', async () => {
+    const user = userEvent.setup();
+    let resolveCommand!: (
+      result: Awaited<ReturnType<V2Api['command']>>,
+    ) => void;
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => developerSnapshot);
+    vi.mocked(api.command).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCommand = resolve;
+        }),
+    );
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+    await user.click(
+      screen.getByRole('button', { name: 'View Persist Todo details' }),
+    );
+
+    const start = screen.getByRole('button', {
+      name: 'Start Developer attempt',
+    });
+    await user.click(start);
+    await waitFor(() => expect(api.command).toHaveBeenCalledOnce());
+
+    const developer = screen.getByRole('region', {
+      name: 'Developer for Persist Todo',
+    });
+    const board = screen.getByRole('region', { name: 'Board' });
+    expect(start).toBeDisabled();
+    expect(
+      screen.getByRole('button', { name: 'Apply filters' }),
+    ).toBeDisabled();
+    expect(
+      within(developer).getByText('A project command is in progress.'),
+    ).toBeVisible();
+    expect(board.querySelector(':scope > [role="status"]')).toHaveTextContent(
+      'A project command is in progress.',
+    );
+    expect(
+      screen.queryAllByText('A Developer command is in progress.'),
+    ).toHaveLength(0);
+    expect(screen.queryAllByText('Saving Board filters.')).toHaveLength(0);
+    expect(
+      screen.queryAllByText('A planning command is in progress.'),
+    ).toHaveLength(0);
+    expect(
+      screen.queryAllByText('An interruption request is in progress.'),
+    ).toHaveLength(0);
+
+    act(() =>
+      resolveCommand({
+        ok: true,
+        commandType: 'developer_attempt.start',
+        schemaVersion: 1,
+        attempt: activeDeveloperAttempt,
+        board: developerBoard,
+      }),
+    );
+    await waitFor(() => expect(start).toBeEnabled());
+  });
+
+  it('keeps Developer controls truthfully locked during a Board submission', async () => {
+    const user = userEvent.setup();
+    let resolveCommand!: (
+      result: Awaited<ReturnType<V2Api['command']>>,
+    ) => void;
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => developerSnapshot);
+    vi.mocked(api.command).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCommand = resolve;
+        }),
+    );
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+    await user.click(
+      screen.getByRole('button', { name: 'View Persist Todo details' }),
+    );
+
+    const apply = screen.getByRole('button', { name: 'Apply filters' });
+    await user.click(apply);
+    await waitFor(() => expect(api.command).toHaveBeenCalledOnce());
+
+    const developer = screen.getByRole('region', {
+      name: 'Developer for Persist Todo',
+    });
+    const start = within(developer).getByRole('button', {
+      name: 'Start Developer attempt',
+    });
+    expect(apply).toBeDisabled();
+    expect(start).toBeDisabled();
+    expect(
+      within(developer).getByText('A project command is in progress.'),
+    ).toBeVisible();
+    expect(
+      screen
+        .getByRole('region', { name: 'Board' })
+        .querySelector(':scope > [role="status"]'),
+    ).toHaveTextContent('A project command is in progress.');
+    expect(
+      screen.queryAllByText('A Developer command is in progress.'),
+    ).toHaveLength(0);
+    expect(screen.queryAllByText('Saving Board filters.')).toHaveLength(0);
+    expect(
+      screen.queryAllByText('A planning command is in progress.'),
+    ).toHaveLength(0);
+
+    act(() =>
+      resolveCommand({
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'board_filter.set',
+        board: developerBoard,
+      }),
+    );
+    await waitFor(() => expect(start).toBeEnabled());
   });
 
   it('keeps a typed Developer conflict in task detail, focuses it, and requests fresh truth', async () => {

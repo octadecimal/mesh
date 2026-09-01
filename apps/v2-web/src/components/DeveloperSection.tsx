@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 
 import type {
   BoardTaskCard,
@@ -32,11 +32,6 @@ const lifecycleLabel = (lifecycle: string) =>
     .map((part) => `${part[0].toUpperCase()}${part.slice(1)}`)
     .join(' ');
 
-const exactDeveloperProfile = (profile: ResolvedWorkerProfileSnapshot) =>
-  profile.document.spec.assignmentKinds.length === 1 &&
-  profile.document.spec.assignmentKinds[0] === 'developer_task' &&
-  profile.document.spec.outputSchema === 'mesh.dev/developer-report/v1';
-
 function commandDisabledReason(
   connection: PlanningConnection,
   submitting: boolean,
@@ -46,7 +41,7 @@ function commandDisabledReason(
       ? 'Wait for the current project snapshot.'
       : connection.message;
   }
-  if (submitting) return 'A Developer command is in progress.';
+  if (submitting) return 'A project command is in progress.';
   return undefined;
 }
 
@@ -354,9 +349,11 @@ export function DeveloperSection({
   onInterrupt: (attempt: DeveloperAttempt) => void;
   onReplace: (attempt: DeveloperAttempt) => void;
 }) {
-  const compatibleProfiles = useMemo(
-    () => profiles.filter(exactDeveloperProfile),
-    [profiles],
+  const compatibleProfiles = profiles.filter(
+    (profile) =>
+      profile.document.spec.assignmentKinds.length === 1 &&
+      profile.document.spec.assignmentKinds[0] === 'developer_task' &&
+      profile.document.spec.outputSchema === 'mesh.dev/developer-report/v1',
   );
   const [profileKey, setProfileKey] = useState('');
   const errorRef = useRef<HTMLDivElement>(null);

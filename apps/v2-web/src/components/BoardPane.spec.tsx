@@ -539,7 +539,7 @@ describe('BoardPane', () => {
       board,
       connection: { status: 'ready' } as const,
       submitting: true,
-      message: 'Saving Board filters.',
+      message: 'A project command is in progress.',
       apply: 'disabled',
     },
   ])('renders the $name branch without changing server truth', (state) => {

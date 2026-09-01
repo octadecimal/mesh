@@ -354,7 +354,7 @@ export function PlanningPane({
       ? 'Planning is loading.'
       : connection.message
     : submitting
-      ? 'A planning command is in progress.'
+      ? 'A project command is in progress.'
       : undefined;
 
   useEffect(() => {

@@ -268,7 +268,9 @@ export function BoardPane({
       {connection.status === 'disconnected' || connection.status === 'stale' ? (
         <p role="status">{connection.message}</p>
       ) : null}
-      {submitting ? <p role="status">Saving Board filters.</p> : null}
+      {submitting ? (
+        <p role="status">A project command is in progress.</p>
+      ) : null}
       {board?.stale ? <p role="status">Approved plan is stale.</p> : null}
       {board ? (
         <p role="status" aria-live="polite">

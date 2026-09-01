@@ -233,7 +233,7 @@ function ProjectConnection({
     auditHealthy && !submitting,
     !auditHealthy
       ? 'Audit barrier is active.'
-      : 'An interruption request is in progress.',
+      : 'A project command is in progress.',
   );
   const model: ProjectShellViewModel = !snapshot
     ? error
