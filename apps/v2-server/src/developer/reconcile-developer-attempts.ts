@@ -158,6 +158,15 @@ export const reconcileDeveloperAttempts = async (
         const execution = current.controllingExecutionId
           ? dependencies.executions.get(current.controllingExecutionId)
           : undefined;
+        if (
+          observed.lifecycle === 'ready' &&
+          current.lifecycle === 'interrupted' &&
+          current.controllingExecutionId === original.controllingExecutionId &&
+          execution?.lifecycle === 'running'
+        ) {
+          pendingInterruptAttemptIds.push(current.id);
+          return;
+        }
         const desired = desiredLifecycle(current, observed, execution);
         const workspaceChanged = !sameWorkspaceObservation(
           current.workspace,
@@ -170,12 +179,6 @@ export const reconcileDeveloperAttempts = async (
         ) {
           if (execution?.lifecycle === 'starting') {
             pendingActivationIds.push(execution.id);
-          }
-          if (
-            current.lifecycle === 'interrupted' &&
-            execution?.lifecycle === 'running'
-          ) {
-            pendingInterruptAttemptIds.push(current.id);
           }
           return;
         }

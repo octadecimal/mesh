@@ -1557,6 +1557,76 @@ describe('DeveloperAttemptService', () => {
     expect(publicationAttempts).toBe(1);
   });
 
+  it('replays a durable interrupt after a dirty recovery observation', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    const envelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.interrupt' as const,
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    };
+    const interrupt = context.dependencies.execution.interrupt;
+    let genericInterrupts = 0;
+    context.dependencies.execution.interrupt = async (input) => {
+      genericInterrupts += 1;
+      return interrupt(input);
+    };
+    let publicationAttempts = 0;
+    context.dependencies.publishDomain = () => {
+      publicationAttempts += 1;
+      throw new Error('accepted publication failed');
+    };
+
+    await expect(context.service.interrupt(envelope)).rejects.toThrow(
+      'accepted publication failed',
+    );
+    const receipt = context.attempts[0];
+    const beforeEvents = context.events.length;
+    context.dependencies.workspace.observe = async (workspace) => ({
+      ...workspace,
+      observedDirty: true,
+    });
+
+    await expect(
+      reconcileDeveloperAttempts({
+        database: context.dependencies.database,
+        developers: context.dependencies.developers,
+        executions: context.dependencies.executions,
+        workspace: { observe: context.dependencies.workspace.observe },
+        planning: {
+          taskExecutionAuthorityInTransaction:
+            context.dependencies.planning.taskExecutionAuthorityInTransaction,
+        },
+        events: context.dependencies.events,
+        barrier: context.dependencies.barrier,
+        now: context.dependencies.now,
+      } as never),
+    ).resolves.toEqual({
+      events: [],
+      pendingActivationIds: [],
+      pendingInterruptAttemptIds: [active.id],
+    });
+    expect(context.attempts[0]).toEqual(receipt);
+    expect(context.events).toHaveLength(beforeEvents);
+
+    await expect(context.service.interrupt(envelope)).resolves.toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.interrupt',
+      attempt: { lifecycle: 'interrupted' },
+    });
+    expect(
+      context.executionRecords.get(active.controllingExecutionId!)?.lifecycle,
+    ).toBe('interrupted');
+    expect(genericInterrupts).toBe(1);
+    expect(publicationAttempts).toBe(1);
+  });
+
   it('passes the exact persisted execution revision to a rejected interrupt', async () => {
     const context = setup();
     await context.service.start(context.command);
