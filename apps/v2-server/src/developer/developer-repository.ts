@@ -1,4 +1,5 @@
 import {
+  boardViewSchema,
   developerAttemptSchema,
   developerReportRecordSchema,
   runtimeEventSchema,
@@ -100,8 +101,11 @@ export type DeveloperOutputReceipt = z.infer<typeof outputReceiptSchema>;
 
 const startReservationSchema = z.strictObject({
   attemptId: z.string().uuid(),
+  projectId: z.string().uuid(),
   idempotencyKey: z.string().trim().min(1).max(256),
+  commandType: z.literal('developer_attempt.start'),
   requestHash: z.string().regex(/^[0-9a-f]{64}$/),
+  board: boardViewSchema,
   createdAt: z.string().datetime({ offset: true }),
 });
 
@@ -222,24 +226,44 @@ export class DeveloperRepository {
   startReservation(
     idempotencyKey: string,
   ): DeveloperStartReservation | undefined {
+    return this.readStartReservation('idempotency_key', idempotencyKey);
+  }
+
+  startReservationForAttempt(
+    attemptId: string,
+  ): DeveloperStartReservation | undefined {
+    return this.readStartReservation('attempt_id', attemptId);
+  }
+
+  private readStartReservation(
+    column: 'attempt_id' | 'idempotency_key',
+    value: string,
+  ): DeveloperStartReservation | undefined {
     const row = this.database
       .prepare(
-        `SELECT attempt_id, idempotency_key, request_hash, created_at
-         FROM developer_start_reservations WHERE idempotency_key = ?`,
+        `SELECT attempt_id, project_id, idempotency_key, command_type,
+                request_hash, board_json, created_at
+         FROM developer_start_reservations WHERE ${column} = ?`,
       )
-      .get(idempotencyKey) as
+      .get(value) as
       | {
           attempt_id: string;
+          project_id: string;
           idempotency_key: string;
+          command_type: 'developer_attempt.start';
           request_hash: string;
+          board_json: string;
           created_at: string;
         }
       | undefined;
     if (!row) return undefined;
     return startReservationSchema.parse({
       attemptId: row.attempt_id,
+      projectId: row.project_id,
       idempotencyKey: row.idempotency_key,
+      commandType: row.command_type,
       requestHash: row.request_hash,
+      board: parseJson(row.board_json),
       createdAt: row.created_at,
     });
   }
@@ -251,7 +275,11 @@ export class DeveloperRepository {
     this.assertTransaction();
     const attempt = developerAttemptSchema.parse(input);
     const reservation = start ? startReservationSchema.parse(start) : undefined;
-    if (reservation && reservation.attemptId !== attempt.id) {
+    if (
+      reservation &&
+      (reservation.attemptId !== attempt.id ||
+        reservation.projectId !== attempt.projectId)
+    ) {
       throw new Error('Developer start reservation does not match attempt');
     }
     this.assertReservation(attempt);
@@ -326,13 +354,17 @@ export class DeveloperRepository {
       this.database
         .prepare(
           `INSERT INTO developer_start_reservations (
-            attempt_id, idempotency_key, request_hash, created_at
-          ) VALUES (?, ?, ?, ?)`,
+            attempt_id, project_id, idempotency_key, command_type,
+            request_hash, board_json, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           reservation.attemptId,
+          reservation.projectId,
           reservation.idempotencyKey,
+          reservation.commandType,
           reservation.requestHash,
+          canonicalJson(reservation.board),
           reservation.createdAt,
         );
     }

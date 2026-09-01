@@ -19,6 +19,7 @@ const createRecoveryContext = (
     execution?: WorkerExecution | undefined;
     reportIds?: readonly string[];
     workspace?: Partial<ManagedWorkspace>;
+    hasStartClaim?: boolean;
   } = {},
 ) => {
   const fixture = createV2TestDatabase();
@@ -110,6 +111,10 @@ const createRecoveryContext = (
         developers: {
           attempt: () => attempt,
           nonterminalAttempts: () => [attempt],
+          startReservationForAttempt: (attemptId: string) =>
+            options.hasStartClaim && attemptId === attempt.id
+              ? ({ attemptId } as never)
+              : undefined,
           recordWorkspaceObservationInTransaction: (
             workspace: ManagedWorkspace,
           ) => {
@@ -248,9 +253,30 @@ describe('reconcileDeveloperAttempts', () => {
       expect(recovery.pendingActivationIds).toEqual(
         testCase.pending ? [context.executionId] : [],
       );
+      expect(recovery.pendingStartAttemptIds).toEqual([]);
       expect(recovery.pendingInterruptAttemptIds).toEqual(
         testCase.pendingInterrupt ? [context.attempt.id] : [],
       );
+    } finally {
+      context.fixture.close();
+    }
+  });
+
+  it('preserves a claim-backed reserved attempt for start replay', async () => {
+    const context = createRecoveryContext({
+      attemptLifecycle: 'reserved',
+      hasStartClaim: true,
+    });
+    try {
+      const recovery = await context.reconcile();
+
+      expect(context.attempt.lifecycle).toBe('reserved');
+      expect(recovery).toEqual({
+        events: [],
+        pendingStartAttemptIds: [context.attempt.id],
+        pendingActivationIds: [],
+        pendingInterruptAttemptIds: [],
+      });
     } finally {
       context.fixture.close();
     }
@@ -303,6 +329,7 @@ describe('reconcileDeveloperAttempts', () => {
       });
       expect(recovery.events).toHaveLength(1);
       expect(recovery.pendingActivationIds).toEqual([]);
+      expect(recovery.pendingStartAttemptIds).toEqual([]);
       expect(recovery.pendingInterruptAttemptIds).toEqual([]);
     } finally {
       context.fixture.close();
@@ -336,6 +363,7 @@ describe('reconcileDeveloperAttempts', () => {
           expect.objectContaining({ type: 'developer_attempt.changed' }),
         ],
         pendingActivationIds: [context.executionId],
+        pendingStartAttemptIds: [],
         pendingInterruptAttemptIds: [],
       });
       expect(context.attempt).toMatchObject({
@@ -374,6 +402,7 @@ describe('reconcileDeveloperAttempts', () => {
       expect(recovery).toEqual({
         events: [],
         pendingActivationIds: [],
+        pendingStartAttemptIds: [],
         pendingInterruptAttemptIds: [],
       });
     } finally {
@@ -409,6 +438,7 @@ describe('reconcileDeveloperAttempts', () => {
       expect(recovery).toEqual({
         events: [],
         pendingActivationIds: [],
+        pendingStartAttemptIds: [],
         pendingInterruptAttemptIds: [],
       });
     } finally {

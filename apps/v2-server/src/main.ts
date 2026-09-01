@@ -389,6 +389,9 @@ export const startV2Server = async (
     }
     options.test?.onStartupPhase?.('recovered_sessions_attached');
     await planning.service.drainPendingLaunches();
+    await developerAttempts.drainPendingStarts(
+      developerRecovery.pendingStartAttemptIds,
+    );
     await developerAttempts.drainPendingActivations();
     await developerAttempts.drainPendingInterrupts(
       developerRecovery.pendingInterruptAttemptIds,

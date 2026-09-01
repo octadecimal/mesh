@@ -21,6 +21,10 @@ import { PlanningRepository } from '../planning/planning-repository.js';
 import { approveTestDeliveryPlan } from '../test/approved-delivery-plan.js';
 import { DeveloperReportConsumer } from './developer-report-consumer.js';
 import { canonicalJson } from '../storage/canonical-json.js';
+import {
+  hashV2Command,
+  V2IdempotencyConflictError,
+} from '../storage/command-repository.js';
 import { V2EventStore } from '../storage/event-store.js';
 import { DeveloperRepository } from './developer-repository.js';
 import { ExecutionRepository } from '../executions/execution-repository.js';
@@ -409,6 +413,80 @@ const setupPersistedAttempt = async ({
   };
 };
 
+const rewindPersistedStart = (
+  context: Awaited<ReturnType<typeof setupPersistedAttempt>>,
+) => {
+  const active = context.attempt;
+  const reserved: DeveloperAttempt = {
+    ...active,
+    lifecycle: 'reserved',
+    revision: 0,
+    controllingExecutionId: null,
+    executionIds: [],
+    workspace: {
+      ...active.workspace,
+      lifecycle: 'creating',
+      observedHead: null,
+      observedDirty: null,
+      failure: null,
+      revision: 0,
+    },
+    attention: null,
+    endedAt: null,
+  };
+  inImmediateTransaction(context.fixture.database, () => {
+    context.fixture.database
+      .prepare(
+        `UPDATE developer_attempts SET
+          lifecycle = 'reserved', revision = 0, controlling_execution_id = NULL,
+          attention_json = NULL, updated_at = ?, ended_at = NULL
+         WHERE id = ?`,
+      )
+      .run(now, reserved.id);
+    context.fixture.database
+      .prepare('DELETE FROM developer_attempt_executions WHERE attempt_id = ?')
+      .run(reserved.id);
+    context.fixture.database
+      .prepare(
+        `UPDATE developer_workspaces SET
+          lifecycle = 'creating', observed_head = NULL, observed_dirty = NULL,
+          failure_json = NULL, revision = 0, workspace_json = ?, updated_at = ?
+         WHERE attempt_id = ?`,
+      )
+      .run(canonicalJson(reserved.workspace), now, reserved.id);
+    context.fixture.database
+      .prepare(
+        `UPDATE developer_workspace_operations SET
+          state = 'creating', observation_json = NULL, updated_at = ?
+         WHERE attempt_id = ? AND ordinal = 1`,
+      )
+      .run(now, reserved.id);
+    context.fixture.database
+      .prepare('DELETE FROM command_results WHERE idempotency_key = ?')
+      .run(context.startEnvelope.idempotencyKey);
+    context.fixture.database
+      .prepare(
+        `INSERT INTO developer_start_reservations (
+          attempt_id, project_id, idempotency_key, command_type,
+          request_hash, board_json, created_at
+        ) VALUES (?, ?, ?, 'developer_attempt.start', ?, ?, ?)`,
+      )
+      .run(
+        reserved.id,
+        reserved.projectId,
+        context.startEnvelope.idempotencyKey,
+        hashV2Command(context.startEnvelope.command),
+        canonicalJson(context.authority.board),
+        now,
+      );
+  });
+  context.workspaceCalls.splice(0);
+  context.reserveStartCalls.splice(0);
+  context.published.splice(0);
+  context.trips.splice(0);
+  return reserved;
+};
+
 const setup = (
   options: {
     authority?: TaskExecutionAuthority | undefined;
@@ -446,7 +524,13 @@ const setup = (
   const commands = new Map<string, { requestHash: string; result: unknown }>();
   const startReservations = new Map<
     string,
-    { attemptId: string; requestHash: string }
+    {
+      attemptId: string;
+      projectId: string;
+      commandType: 'developer_attempt.start';
+      requestHash: string;
+      board: TaskExecutionAuthority['board'];
+    }
   >();
   const workspaceCalls: ManagedWorkspace[] = [];
   const workspaceDerivations: unknown[] = [];
@@ -495,12 +579,22 @@ const setup = (
           ? { ...reservation, idempotencyKey, createdAt: now }
           : undefined;
       },
+      startReservationForAttempt: (attemptId) => {
+        for (const [idempotencyKey, reservation] of startReservations) {
+          if (reservation.attemptId === attemptId)
+            return { ...reservation, idempotencyKey, createdAt: now };
+        }
+        return undefined;
+      },
       reserveAttemptInTransaction: (attempt, start) => {
         attempts.push(attempt);
         if (start) {
           startReservations.set(start.idempotencyKey, {
             attemptId: start.attemptId,
+            projectId: start.projectId,
+            commandType: start.commandType,
             requestHash: start.requestHash,
+            board: start.board,
           });
         }
         return attempt;
@@ -544,17 +638,24 @@ const setup = (
       find: (key, requestHash) => {
         const stored = commands.get(key);
         if (stored && requestHash !== stored.requestHash)
-          throw new Error('conflict');
+          throw new V2IdempotencyConflictError(key);
         return stored as never;
       },
       storeInTransaction: (stored) => {
         const existing = commands.get(stored.idempotencyKey);
         if (existing) {
           if (existing.requestHash !== stored.requestHash)
-            throw new Error('conflict');
+            throw new V2IdempotencyConflictError(stored.idempotencyKey);
           return;
         }
         commands.set(stored.idempotencyKey, stored);
+        const reservation = startReservations.get(stored.idempotencyKey);
+        if (
+          reservation &&
+          stored.commandType === reservation.commandType &&
+          stored.requestHash === reservation.requestHash
+        )
+          startReservations.delete(stored.idempotencyKey);
       },
     },
     events: {
@@ -1053,6 +1154,9 @@ describe('DeveloperAttemptService', () => {
       observations += 1;
       throw new Error('workspace should not be observed for receipt replay');
     };
+    context.dependencies.barrier.assertHealthy = () => {
+      throw new Error('audit barrier is already tripped');
+    };
     await context.service.acceptReport(
       execution as never,
       event as never,
@@ -1405,64 +1509,13 @@ describe('DeveloperAttemptService', () => {
   it('replays a reserved start after a process loss without duplicate effects', async () => {
     const context = await setupPersistedAttempt();
     const active = context.attempt;
-    const reserved: DeveloperAttempt = {
-      ...active,
-      lifecycle: 'reserved',
-      revision: 0,
-      controllingExecutionId: null,
-      executionIds: [],
-      workspace: {
-        ...active.workspace,
-        lifecycle: 'creating',
-        observedHead: null,
-        observedDirty: null,
-        failure: null,
-        revision: 0,
-      },
-      attention: null,
-      endedAt: null,
-    };
-    inImmediateTransaction(context.fixture.database, () => {
-      context.fixture.database
-        .prepare(
-          `UPDATE developer_attempts SET
-            lifecycle = 'reserved', revision = 0, controlling_execution_id = NULL,
-            attention_json = NULL, updated_at = ?, ended_at = NULL
-           WHERE id = ?`,
-        )
-        .run(now, reserved.id);
-      context.fixture.database
-        .prepare(
-          'DELETE FROM developer_attempt_executions WHERE attempt_id = ?',
-        )
-        .run(reserved.id);
-      context.fixture.database
-        .prepare(
-          `UPDATE developer_workspaces SET
-            lifecycle = 'creating', observed_head = NULL, observed_dirty = NULL,
-            failure_json = NULL, revision = 0, workspace_json = ?, updated_at = ?
-           WHERE attempt_id = ?`,
-        )
-        .run(canonicalJson(reserved.workspace), now, reserved.id);
-      context.fixture.database
-        .prepare(
-          `UPDATE developer_workspace_operations SET
-            state = 'creating', observation_json = NULL, updated_at = ?
-           WHERE attempt_id = ? AND ordinal = 1`,
-        )
-        .run(now, reserved.id);
-      context.fixture.database
-        .prepare('DELETE FROM command_results WHERE idempotency_key = ?')
-        .run(context.startEnvelope.idempotencyKey);
-    });
+    const reserved = rewindPersistedStart(context);
     expect(
       context.developers.startReservation(context.startEnvelope.idempotencyKey),
     ).toMatchObject({ attemptId: reserved.id });
     expect(
       context.fixture.commands.find(context.startEnvelope.idempotencyKey),
     ).toBeUndefined();
-    context.workspaceCalls.splice(0);
-    context.reserveStartCalls.splice(0);
     context.dependencies.profiles.resolveApproved = () => {
       throw new Error('profile revision drifted after reservation');
     };
@@ -1483,6 +1536,19 @@ describe('DeveloperAttemptService', () => {
         : authority;
     };
 
+    context.dependencies.barrier.assertHealthy = () => {
+      throw new Error('audit barrier is already tripped');
+    };
+    const blocked = await new DeveloperAttemptService(
+      context.dependencies,
+    ).start(context.startEnvelope);
+    expect(blocked).toMatchObject({
+      ok: false,
+      error: { code: 'audit_barrier_tripped' },
+    });
+    expect(context.workspaceCalls).toHaveLength(0);
+    expect(context.reserveStartCalls).toHaveLength(0);
+    context.dependencies.barrier.assertHealthy = () => undefined;
     const recovered = new DeveloperAttemptService(context.dependencies);
     const result = await recovered.start(context.startEnvelope);
     const replay = await recovered.start(context.startEnvelope);
@@ -1499,6 +1565,140 @@ describe('DeveloperAttemptService', () => {
       lifecycle: 'active',
       controllingExecutionId: active.controllingExecutionId,
     });
+  });
+
+  it('rolls back workspace failure settlement and replays it atomically after a crash', async () => {
+    const context = await setupPersistedAttempt();
+    const reserved = rewindPersistedStart(context);
+    context.dependencies.workspace.create = async (workspace) => ({
+      ...workspace,
+      lifecycle: 'attention_required' as const,
+      observedHead: 'b'.repeat(40),
+      observedDirty: true,
+      failure: {
+        code: 'workspace_create_failed',
+        message: 'Git worktree creation failed',
+      },
+    });
+    const crashing = new DeveloperAttemptService({
+      ...context.dependencies,
+      events: {
+        appendDomainInTransaction: () => {
+          throw new Error('simulated crash before workspace settlement commit');
+        },
+      },
+    } as never);
+
+    const interrupted = await crashing.start(context.startEnvelope);
+
+    expect(interrupted).toMatchObject({
+      ok: false,
+      error: { code: 'audit_barrier_tripped' },
+    });
+    expect(context.developers.attempt(reserved.id)).toMatchObject({
+      lifecycle: 'reserved',
+      revision: 0,
+      workspace: { lifecycle: 'creating', revision: 0 },
+    });
+    expect(
+      context.fixture.commands.find(context.startEnvelope.idempotencyKey),
+    ).toBeUndefined();
+    expect(
+      context.developers.startReservation(context.startEnvelope.idempotencyKey),
+    ).toMatchObject({ attemptId: reserved.id });
+
+    const healthy = new DeveloperAttemptService(context.dependencies);
+    const settled = await healthy.start(context.startEnvelope);
+    const replay = await healthy.start(context.startEnvelope);
+
+    expect(settled).toMatchObject({
+      ok: false,
+      error: { code: 'developer_workspace_conflict' },
+    });
+    expect(replay).toEqual(settled);
+    expect(context.developers.attempt(reserved.id)).toMatchObject({
+      lifecycle: 'attention_required',
+      workspace: {
+        lifecycle: 'attention_required',
+        failure: { code: 'workspace_create_failed' },
+      },
+    });
+    expect(
+      context.developers.startReservation(context.startEnvelope.idempotencyKey),
+    ).toBeUndefined();
+  });
+
+  it('rolls back failed execution settlement and replays it atomically after a crash', async () => {
+    const context = await setupPersistedAttempt();
+    const reserved = rewindPersistedStart(context);
+    const adapterFailure = {
+      ok: false as const,
+      commandType: 'worker_execution.start' as const,
+      error: {
+        code: 'adapter_unavailable' as const,
+        message: 'Adapter reservation failed',
+      },
+    };
+    context.dependencies.execution.reserveStart = async () => ({
+      execution: context.execution,
+      result: adapterFailure,
+      activationRequired: false,
+    });
+    const appendDomain = context.events.appendDomainInTransaction.bind(
+      context.events,
+    );
+    const crashing = new DeveloperAttemptService({
+      ...context.dependencies,
+      events: {
+        appendDomainInTransaction: (projectId, draft) => {
+          if (draft.type === 'developer_attempt.changed') {
+            throw new Error(
+              'simulated crash before execution settlement commit',
+            );
+          }
+          return appendDomain(projectId, draft);
+        },
+      },
+    } as never);
+
+    const interrupted = await crashing.start(context.startEnvelope);
+
+    expect(interrupted).toMatchObject({
+      ok: false,
+      error: { code: 'audit_barrier_tripped' },
+    });
+    expect(context.developers.attempt(reserved.id)).toMatchObject({
+      lifecycle: 'provisioning',
+      controllingExecutionId: null,
+      executionIds: [],
+      workspace: { lifecycle: 'ready' },
+    });
+    expect(
+      context.fixture.commands.find(context.startEnvelope.idempotencyKey),
+    ).toBeUndefined();
+    expect(
+      context.developers.startReservation(context.startEnvelope.idempotencyKey),
+    ).toMatchObject({ attemptId: reserved.id });
+
+    const healthy = new DeveloperAttemptService(context.dependencies);
+    const settled = await healthy.start(context.startEnvelope);
+    const replay = await healthy.start(context.startEnvelope);
+
+    expect(settled).toMatchObject({
+      ok: false,
+      commandType: 'developer_attempt.start',
+      error: adapterFailure.error,
+    });
+    expect(replay).toEqual(settled);
+    expect(context.developers.attempt(reserved.id)).toMatchObject({
+      lifecycle: 'attention_required',
+      controllingExecutionId: context.execution.id,
+      executionIds: [context.execution.id],
+      attention: { code: 'developer_attempt_start_failed' },
+    });
+    expect(
+      context.developers.startReservation(context.startEnvelope.idempotencyKey),
+    ).toBeUndefined();
   });
 
   it.each([
@@ -1617,6 +1817,118 @@ describe('DeveloperAttemptService', () => {
     expect(context.events).toHaveLength(0);
   });
 
+  it('single-flights concurrent starts through delayed inspection and cleans up after failure', async () => {
+    const context = setup();
+    let release!: () => void;
+    const inspected = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let inspectedStart!: () => void;
+    const inspectionStarted = new Promise<void>((resolve) => {
+      inspectedStart = resolve;
+    });
+    let inspections = 0;
+    context.dependencies.workspace.inspectProject = async () => {
+      inspections += 1;
+      inspectedStart();
+      await inspected;
+      throw new Error('transient inspection failure');
+    };
+
+    const first = context.service.start(context.command);
+    const second = context.service.start(context.command);
+    await inspectionStarted;
+    expect(inspections).toBe(1);
+    await expect(
+      context.service.start({
+        ...context.command,
+        command: {
+          ...context.command.command,
+          projectId: randomUUID(),
+        },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'idempotency_conflict' },
+    });
+    expect(context.trips).toEqual([]);
+    release();
+    const [failed, joined] = await Promise.all([first, second]);
+
+    expect(joined).toEqual(failed);
+    expect(context.attempts).toHaveLength(0);
+    expect(context.workspaceCalls).toHaveLength(0);
+    context.dependencies.workspace.inspectProject = async () => ({
+      repositoryIdentity: context.fixture.project.repositoryIdentity,
+      headCommit: context.fixture.project.headCommit,
+    });
+    const recovered = await context.service.start(context.command);
+    expect(recovered).toMatchObject({ ok: true });
+    expect(context.attempts).toHaveLength(1);
+    expect(context.workspaceCalls).toHaveLength(1);
+  });
+
+  it('reports Developer command idempotency conflicts without poisoning the barrier', async () => {
+    const context = setup();
+    const idempotencyKey = randomUUID();
+    context.commands.set(idempotencyKey, {
+      requestHash: 'a'.repeat(64),
+      result: {
+        ok: false,
+        commandType: 'developer_attempt.start',
+        error: { code: 'invalid_request', message: 'prior result' },
+      },
+    });
+    const start = {
+      ...context.command,
+      idempotencyKey,
+    };
+    const interrupt = {
+      idempotencyKey,
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.interrupt' as const,
+        projectId: context.command.command.projectId,
+        attemptId: randomUUID(),
+        expectedAttemptRevision: 1,
+      },
+    };
+    const replacement = {
+      ...interrupt,
+      command: {
+        ...interrupt.command,
+        type: 'developer_attempt.replace_execution' as const,
+      },
+    };
+
+    await expect(context.service.start(start)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'idempotency_conflict' },
+    });
+    await expect(context.service.interrupt(interrupt)).rejects.toMatchObject({
+      code: 'idempotency_conflict',
+    });
+    await expect(
+      context.service.replaceExecution(replacement),
+    ).rejects.toMatchObject({ code: 'idempotency_conflict' });
+    expect(context.trips).toEqual([]);
+  });
+
+  it('trips the barrier when durable start replay is unreadable', async () => {
+    const context = setup();
+    context.dependencies.commands.find = () => {
+      throw new Error('stored command result is corrupt');
+    };
+
+    await expect(context.service.start(context.command)).resolves.toMatchObject(
+      {
+        ok: false,
+        error: { code: 'audit_barrier_tripped' },
+      },
+    );
+    expect(context.trips).toHaveLength(1);
+  });
+
   it('persists Task 3 attention observations with their observed facts', async () => {
     const context = setup({
       workspaceObservation: (workspace) => ({
@@ -1653,6 +1965,7 @@ describe('DeveloperAttemptService', () => {
       },
     });
     expect(context.executionCalls).toHaveLength(0);
+    expect(context.startReservations).toEqual(new Map());
   });
 
   it('returns the durable adapter reservation failure after marking the attempt attention-required', async () => {
@@ -1670,6 +1983,7 @@ describe('DeveloperAttemptService', () => {
       controllingExecutionId: context.attempts[0].executionIds[0],
     });
     expect(context.attempts[0].executionIds).toHaveLength(1);
+    expect(context.startReservations).toEqual(new Map());
   });
 
   it('returns the stored adapter failure when attention publication fails', async () => {
@@ -2025,6 +2339,7 @@ describe('DeveloperAttemptService', () => {
     ).resolves.toEqual({
       events: [],
       pendingActivationIds: [],
+      pendingStartAttemptIds: [],
       pendingInterruptAttemptIds: [active.id],
     });
     expect(context.attempts[0]).toMatchObject({
@@ -2097,6 +2412,7 @@ describe('DeveloperAttemptService', () => {
     ).resolves.toEqual({
       events: [],
       pendingActivationIds: [],
+      pendingStartAttemptIds: [],
       pendingInterruptAttemptIds: [active.id],
     });
     expect(context.attempts[0]).toEqual(receipt);

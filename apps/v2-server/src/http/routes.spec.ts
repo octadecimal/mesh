@@ -27,6 +27,7 @@ import { PlanningRepository } from '../planning/planning-repository';
 import { ProjectRepository } from '../projects/project-repository';
 import { ProjectService } from '../projects/project-service';
 import { WorkerProfileService } from '../profiles/profile-service';
+import { V2IdempotencyConflictError } from '../storage/command-repository';
 import { createV2TestDatabase } from '../test/create-v2-test-database';
 
 const projectId = '11111111-1111-4111-8111-111111111111';
@@ -710,6 +711,123 @@ describe('V2 HTTP routes', () => {
       },
     });
   });
+
+  it('allows a Developer replay through a tripped barrier while new work remains gated', async () => {
+    const dependencies = createDependencies();
+    const replayKey = randomUUID();
+    const start = vi.fn(async (envelope) =>
+      envelope.idempotencyKey === replayKey
+        ? failed('developer_attempt.start', 'stored developer result')
+        : ({
+            ok: false,
+            commandType: 'developer_attempt.start',
+            error: {
+              code: 'audit_barrier_tripped',
+              message: 'Audit persistence failed.',
+            },
+          } as const),
+    );
+    dependencies.developer.start = start;
+    dependencies.health = () => ({
+      status: 'audit_barrier_tripped',
+      error: {
+        code: 'audit_barrier_tripped',
+        message: 'Audit persistence failed.',
+      },
+    });
+
+    const app = createApp(dependencies);
+    const payload = (idempotencyKey: string) => ({
+      idempotencyKey,
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.start',
+        projectId,
+        taskId,
+        expectedTaskRevision: 1,
+        expectedDeliveryPlanId: deliveryPlanId,
+        expectedDeliveryPlanRevision: 1,
+        profileId,
+        profileRevision: 1,
+      },
+    });
+    const replay = await app.inject({
+      method: 'POST',
+      url: '/api/v2/commands',
+      payload: payload(replayKey),
+    });
+    const fresh = await app.inject({
+      method: 'POST',
+      url: '/api/v2/commands',
+      payload: payload(randomUUID()),
+    });
+
+    expect(replay.statusCode).toBe(400);
+    expect(replay.json()).toMatchObject({
+      error: { message: 'stored developer result' },
+    });
+    expect(fresh.statusCode).toBe(503);
+    expect(fresh.json()).toMatchObject({
+      error: { code: 'audit_barrier_tripped' },
+    });
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [
+      'start',
+      {
+        type: 'developer_attempt.start',
+        projectId,
+        taskId,
+        expectedTaskRevision: 1,
+        expectedDeliveryPlanId: deliveryPlanId,
+        expectedDeliveryPlanRevision: 1,
+        profileId,
+        profileRevision: 1,
+      },
+    ],
+    [
+      'interrupt',
+      {
+        type: 'developer_attempt.interrupt',
+        projectId,
+        attemptId,
+        expectedAttemptRevision: 1,
+      },
+    ],
+    [
+      'replaceExecution',
+      {
+        type: 'developer_attempt.replace_execution',
+        projectId,
+        attemptId,
+        expectedAttemptRevision: 1,
+      },
+    ],
+  ] as const)(
+    'maps thrown Developer %s idempotency conflicts to 409',
+    async (method, command) => {
+      const dependencies = createDependencies();
+      dependencies.developer[method] = async () => {
+        throw new V2IdempotencyConflictError(randomUUID());
+      };
+      const response = await createApp(dependencies).inject({
+        method: 'POST',
+        url: '/api/v2/commands',
+        payload: {
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command,
+        },
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({
+        error: { code: 'idempotency_conflict' },
+      });
+    },
+  );
 
   it('rechecks the audit barrier after repository identity resolution', async () => {
     const fixture = createV2TestDatabase();

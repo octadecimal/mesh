@@ -176,6 +176,45 @@ export const registerV2Routes = (
         .status(503)
         .send(errorBody('internal_error', 'Server is stopping.'));
     }
+    const replayCandidate = v2CommandEnvelopeSchema.safeParse(request.body);
+    if (
+      replayCandidate.success &&
+      replayCandidate.data.command.type.startsWith('developer_attempt.')
+    ) {
+      if (!localOrigin(request, dependencies)) {
+        return reply
+          .status(403)
+          .send(errorBody('invalid_origin', 'Origin is not allowed.'));
+      }
+      switch (replayCandidate.data.command.type) {
+        case 'developer_attempt.start': {
+          const result = await dependencies.developer.start(
+            startDeveloperAttemptEnvelopeSchema.parse(replayCandidate.data),
+          );
+          return result.ok
+            ? reply.send(result)
+            : reply.status(statusFor(result.error.code)).send(result);
+        }
+        case 'developer_attempt.interrupt': {
+          const result = await dependencies.developer.interrupt(
+            interruptDeveloperAttemptEnvelopeSchema.parse(replayCandidate.data),
+          );
+          return result.ok
+            ? reply.send(result)
+            : reply.status(statusFor(result.error.code)).send(result);
+        }
+        case 'developer_attempt.replace_execution': {
+          const result = await dependencies.developer.replaceExecution(
+            replaceDeveloperAttemptExecutionEnvelopeSchema.parse(
+              replayCandidate.data,
+            ),
+          );
+          return result.ok
+            ? reply.send(result)
+            : reply.status(statusFor(result.error.code)).send(result);
+        }
+      }
+    }
     const health = dependencies.health();
     if (health.status === 'audit_barrier_tripped') {
       return reply.status(503).send({ error: health.error });
@@ -185,7 +224,9 @@ export const registerV2Routes = (
         .status(403)
         .send(errorBody('invalid_origin', 'Origin is not allowed.'));
     }
-    const envelope = v2CommandEnvelopeSchema.parse(request.body);
+    const envelope = replayCandidate.success
+      ? replayCandidate.data
+      : v2CommandEnvelopeSchema.parse(request.body);
     switch (envelope.command.type) {
       case 'project.register':
         return reply.send(

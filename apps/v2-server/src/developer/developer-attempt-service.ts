@@ -12,6 +12,7 @@ import {
   type DeveloperAttempt,
   type DeveloperReport,
   type DomainEvent,
+  type BoardView,
   type ManagedWorkspace,
   type ResolvedWorkerProfileSnapshot,
   type V2Command,
@@ -34,11 +35,15 @@ import type {
   TaskExecutionAuthority,
 } from '../planning/planning-repository.js';
 import type { V2CommandRepository } from '../storage/command-repository.js';
-import { hashV2Command } from '../storage/command-repository.js';
+import {
+  hashV2Command,
+  V2IdempotencyConflictError,
+} from '../storage/command-repository.js';
 import { canonicalJson } from '../storage/canonical-json.js';
 import type { V2EventStore } from '../storage/event-store.js';
 import {
   DeveloperAttemptConflictError,
+  type DeveloperStartReservation,
   type DeveloperRepository,
 } from './developer-repository.js';
 import type { DeriveManagedWorkspaceInput } from './managed-workspace.js';
@@ -71,6 +76,7 @@ type Dependencies = {
     | 'attemptsForProject'
     | 'nonterminalAttempts'
     | 'startReservation'
+    | 'startReservationForAttempt'
     | 'reserveAttemptInTransaction'
     | 'recordWorkspaceObservationInTransaction'
     | 'linkExecutionInTransaction'
@@ -112,7 +118,19 @@ type StartTransaction = {
   result: V2CommandResult;
   attempt?: DeveloperAttempt;
   event?: DomainEvent;
-  authority?: TaskExecutionAuthority;
+  launch?: StartLaunchProjection;
+};
+
+type StartLaunchProjection = {
+  projectId: string;
+  board: BoardView;
+};
+
+type StartFlight = {
+  projectId: string;
+  commandType: 'developer_attempt.start';
+  requestHash: string;
+  promise: Promise<V2CommandResult>;
 };
 
 const failure = (
@@ -164,21 +182,88 @@ const outputDigest = (value: unknown) =>
 
 export class DeveloperAttemptService {
   private readonly attemptTails = new Map<string, Promise<void>>();
+  private readonly startTails = new Map<string, Promise<void>>();
+  private readonly startFlights = new Map<string, StartFlight>();
 
   constructor(private readonly dependencies: Dependencies) {}
+
+  private replayStart(
+    command: StartDeveloperAttemptEnvelope,
+    requestHash: string,
+  ): V2CommandResult | undefined {
+    try {
+      return this.dependencies.commands.find(
+        command.idempotencyKey,
+        requestHash,
+      )?.result;
+    } catch (error) {
+      if (error instanceof V2IdempotencyConflictError)
+        return failureFrom(error, 'idempotency_conflict');
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      return failureFrom(error, 'audit_barrier_tripped');
+    }
+  }
+
+  private startReservationMismatch(
+    reservation: DeveloperStartReservation,
+    command: StartDeveloperAttemptEnvelope,
+    requestHash: string,
+  ): V2CommandResult | undefined {
+    if (
+      reservation.requestHash === requestHash &&
+      reservation.commandType === command.command.type &&
+      reservation.projectId === command.command.projectId
+    )
+      return undefined;
+    return failure('Idempotency key was already used', 'idempotency_conflict');
+  }
+
+  private async singleFlightStart(
+    command: StartDeveloperAttemptEnvelope,
+    requestHash: string,
+    operation: () => Promise<V2CommandResult>,
+  ): Promise<V2CommandResult> {
+    const existing = this.startFlights.get(command.idempotencyKey);
+    if (existing) {
+      if (
+        existing.projectId === command.command.projectId &&
+        existing.commandType === command.command.type &&
+        existing.requestHash === requestHash
+      )
+        return existing.promise;
+      return failure(
+        'Idempotency key was already used',
+        'idempotency_conflict',
+      );
+    }
+    const promise = operation();
+    const current: StartFlight = {
+      projectId: command.command.projectId,
+      commandType: command.command.type,
+      requestHash,
+      promise,
+    };
+    this.startFlights.set(command.idempotencyKey, current);
+    try {
+      return await promise;
+    } finally {
+      if (this.startFlights.get(command.idempotencyKey) === current)
+        this.startFlights.delete(command.idempotencyKey);
+    }
+  }
 
   async acceptReport(
     execution: WorkerExecution,
     event: WorkerExecutionStructuredOutputRuntimeEvent,
     report: DeveloperReport | null,
   ): Promise<void> {
-    this.dependencies.barrier.assertHealthy();
     const assignment = developerTaskAssignmentSchema.safeParse(
       execution.assignment,
     );
     if (!assignment.success) return;
     const digest = outputDigest(event.payload.value);
     if (this.receiptMatches(event.id, digest)) return;
+    this.dependencies.barrier.assertHealthy();
     await this.inAttemptOrder(assignment.data.attemptId, () =>
       this.acceptReportLocked(execution, event, report),
     );
@@ -189,13 +274,13 @@ export class DeveloperAttemptService {
     event: WorkerExecutionStructuredOutputRuntimeEvent,
     report: DeveloperReport | null,
   ): Promise<void> {
-    this.dependencies.barrier.assertHealthy();
     const assignment = developerTaskAssignmentSchema.safeParse(
       execution.assignment,
     );
     if (!assignment.success) return;
     const digest = outputDigest(event.payload.value);
     if (this.receiptMatches(event.id, digest)) return;
+    this.dependencies.barrier.assertHealthy();
     const candidate = this.dependencies.developers.attempt(
       assignment.data.attemptId,
     );
@@ -503,6 +588,49 @@ export class DeveloperAttemptService {
     }
 
     const requestHash = hashV2Command(command.command);
+    const replay = this.replayStart(command, requestHash);
+    if (replay) return replay;
+    return this.singleFlightStart(command, requestHash, () =>
+      this.inStartOrder(command.idempotencyKey, () =>
+        this.startLocked(command, requestHash),
+      ),
+    );
+  }
+
+  private async startLocked(
+    command: StartDeveloperAttemptEnvelope,
+    requestHash: string,
+  ): Promise<V2CommandResult> {
+    const repeated = this.replayStart(command, requestHash);
+    if (repeated) return repeated;
+    const reservation = this.dependencies.developers.startReservation(
+      command.idempotencyKey,
+    );
+    if (reservation) {
+      const mismatch = this.startReservationMismatch(
+        reservation,
+        command,
+        requestHash,
+      );
+      if (mismatch) return mismatch;
+      try {
+        this.dependencies.barrier.assertHealthy();
+      } catch (error) {
+        return failure(
+          error instanceof Error ? error.message : 'Audit barrier tripped',
+          'audit_barrier_tripped',
+        );
+      }
+      const recovering = this.dependencies.developers.attempt(
+        reservation.attemptId,
+      );
+      if (!recovering) {
+        const error = new Error('Developer start claim has no attempt');
+        this.dependencies.barrier.trip(error, this.dependencies.now());
+        return failure(error.message, 'audit_barrier_tripped');
+      }
+      return this.resumeStart(command, requestHash, recovering, reservation);
+    }
     try {
       this.dependencies.barrier.assertHealthy();
     } catch (error) {
@@ -511,24 +639,6 @@ export class DeveloperAttemptService {
         'audit_barrier_tripped',
       );
     }
-    const replay = this.dependencies.commands.find(
-      command.idempotencyKey,
-      requestHash,
-    );
-    if (replay) return replay.result;
-    const reservation = this.dependencies.developers.startReservation(
-      command.idempotencyKey,
-    );
-    if (reservation && reservation.requestHash !== requestHash) {
-      return failure(
-        'Idempotency key was already used',
-        'idempotency_conflict',
-      );
-    }
-    const recovering = reservation
-      ? this.dependencies.developers.attempt(reservation.attemptId)
-      : undefined;
-    if (recovering) return this.resumeStart(command, requestHash, recovering);
     if (this.dependencies.billingConflicts.length > 0) {
       return failure('Billing override is configured');
     }
@@ -625,27 +735,21 @@ export class DeveloperAttemptService {
         const reservation = this.dependencies.developers.startReservation(
           command.idempotencyKey,
         );
-        if (reservation && reservation.requestHash !== requestHash) {
-          throw typedError(
-            'idempotency_conflict',
-            'Idempotency key was already used',
-          );
-        }
-        const resumed = reservation
-          ? this.dependencies.developers.attempt(reservation.attemptId)
-          : undefined;
-        if (resumed) {
-          const recoveryAuthority =
-            this.dependencies.planning.taskExecutionAuthorityInTransaction(
-              resumed.projectId,
-              resumed.taskId,
-            );
-          if (!recoveryAuthority) {
+        if (reservation) {
+          if (
+            reservation.requestHash !== requestHash ||
+            reservation.commandType !== command.command.type ||
+            reservation.projectId !== command.command.projectId
+          ) {
             throw typedError(
-              'developer_task_stale',
-              'Task execution authority was not found',
+              'idempotency_conflict',
+              'Idempotency key was already used',
             );
           }
+          const resumed = this.dependencies.developers.attempt(
+            reservation.attemptId,
+          );
+          if (!resumed) throw new Error('Developer start claim has no attempt');
           if (!['reserved', 'provisioning'].includes(resumed.lifecycle)) {
             const result: V2CommandResult =
               resumed.lifecycle === 'active'
@@ -654,7 +758,7 @@ export class DeveloperAttemptService {
                     commandType: 'developer_attempt.start',
                     schemaVersion: 1,
                     attempt: resumed,
-                    board: recoveryAuthority.board,
+                    board: reservation.board,
                   }
                 : failure(
                     resumed.attention?.message ??
@@ -676,10 +780,13 @@ export class DeveloperAttemptService {
               commandType: 'developer_attempt.start',
               schemaVersion: 1,
               attempt: resumed,
-              board: recoveryAuthority.board,
+              board: reservation.board,
             },
             attempt: resumed,
-            authority: recoveryAuthority,
+            launch: {
+              projectId: reservation.projectId,
+              board: reservation.board,
+            },
           };
         }
         this.dependencies.barrier.assertHealthy();
@@ -751,8 +858,11 @@ export class DeveloperAttemptService {
         const reserved =
           this.dependencies.developers.reserveAttemptInTransaction(attempt, {
             attemptId: attempt.id,
+            projectId: attempt.projectId,
             idempotencyKey: command.idempotencyKey,
+            commandType: command.command.type,
             requestHash,
+            board: reservedAuthority.board,
             createdAt: attempt.createdAt,
           });
         const result: V2CommandResult = {
@@ -779,7 +889,10 @@ export class DeveloperAttemptService {
           result,
           attempt: reserved,
           event,
-          authority: reservedAuthority,
+          launch: {
+            projectId: reservedAuthority.project.id,
+            board: reservedAuthority.board,
+          },
         };
       });
     } catch (error) {
@@ -802,22 +915,14 @@ export class DeveloperAttemptService {
     command: StartDeveloperAttemptEnvelope,
     requestHash: string,
     attempt: DeveloperAttempt,
+    reservation: DeveloperStartReservation,
   ): Promise<V2CommandResult> {
-    const authority = this.dependencies.planning.taskExecutionAuthority(
-      attempt.projectId,
-      attempt.taskId,
-    );
-    if (!authority)
-      return failure(
-        'Task execution authority was not found',
-        'developer_task_stale',
-      );
     const result: V2CommandResult = {
       ok: true,
       commandType: 'developer_attempt.start',
       schemaVersion: 1,
       attempt,
-      board: authority.board,
+      board: reservation.board,
     };
     if (!['reserved', 'provisioning'].includes(attempt.lifecycle)) {
       const settled =
@@ -851,7 +956,14 @@ export class DeveloperAttemptService {
           profileId: attempt.profileId,
           profileRevision: attempt.profileRevision,
         },
-        { result, attempt, authority },
+        {
+          result,
+          attempt,
+          launch: {
+            projectId: reservation.projectId,
+            board: reservation.board,
+          },
+        },
       ),
     );
   }
@@ -865,7 +977,7 @@ export class DeveloperAttemptService {
     >,
     started: StartTransaction,
   ): Promise<V2CommandResult> {
-    const startedAuthority = started.authority!;
+    const launch = started.launch!;
     const current = this.requireAttempt(started.attempt!.id);
     if (!['reserved', 'provisioning'].includes(current.lifecycle)) {
       return (
@@ -876,14 +988,14 @@ export class DeveloperAttemptService {
 
     try {
       let provisioned = current;
+      let workspaceFailure: V2CommandResult | undefined;
       if (current.lifecycle === 'reserved') {
         const observation = await this.dependencies.workspace.create(
           current.workspace,
         );
         let workspaceEvent: DomainEvent;
-        ({ provisioned, workspaceEvent } = inImmediateTransaction(
-          this.dependencies.database,
-          () => {
+        ({ provisioned, workspaceEvent, workspaceFailure } =
+          inImmediateTransaction(this.dependencies.database, () => {
             const persisted = this.requireAttempt(current.id);
             const workspace =
               this.dependencies.developers.recordWorkspaceObservationInTransaction(
@@ -921,27 +1033,48 @@ export class DeveloperAttemptService {
                 persisted.revision,
               );
             const event = this.dependencies.events.appendDomainInTransaction(
-              startedAuthority.project.id,
+              launch.projectId,
               {
-                projectId: startedAuthority.project.id,
+                projectId: launch.projectId,
                 occurredAt: next.updatedAt,
                 type: 'developer_workspace.changed',
                 payload: {
                   schemaVersion: 1,
                   attempt: next,
-                  board: startedAuthority.board,
+                  board: launch.board,
                 },
               },
             );
-            return { provisioned: next, workspaceEvent: event };
-          },
-        ));
+            const failureResult =
+              workspace.lifecycle === 'ready'
+                ? undefined
+                : failure(
+                    workspace.failure?.message ??
+                      'Managed workspace requires attention',
+                    'developer_workspace_conflict',
+                  );
+            if (failureResult) {
+              this.dependencies.commands.storeInTransaction({
+                idempotencyKey: command.idempotencyKey,
+                commandType: command.command.type,
+                requestHash,
+                result: failureResult,
+                createdAt: next.updatedAt,
+              });
+            }
+            return {
+              provisioned: next,
+              workspaceEvent: event,
+              workspaceFailure: failureResult,
+            };
+          }));
         this.dependencies.publishDomain(workspaceEvent);
       }
+      if (workspaceFailure) return workspaceFailure;
       if (provisioned.workspace.lifecycle !== 'ready') {
         return this.markAttention(
           provisioned.id,
-          startedAuthority,
+          launch,
           new Error(
             provisioned.workspace.failure?.message ??
               'Managed workspace requires attention',
@@ -961,29 +1094,86 @@ export class DeveloperAttemptService {
         actor: command.actor,
         command: {
           type: 'worker_execution.start',
-          projectId: startedAuthority.project.id,
+          projectId: launch.projectId,
           profileId: profile.profileId,
           profileRevision: profile.profileRevision,
           assignment: provisioned.assignment,
         },
       });
       if (!execution.result.ok) {
-        inImmediateTransaction(this.dependencies.database, () => {
-          this.dependencies.developers.linkExecutionInTransaction({
-            attemptId: provisioned.id,
-            executionId: execution.execution.id,
-            expectedRevision: provisioned.revision,
-            updatedAt: this.dependencies.now(),
-          });
-        });
-        return this.markAttention(
-          provisioned.id,
-          startedAuthority,
-          new ExecutionReservationError(execution.result),
-          failure(execution.result.error.message, execution.result.error.code),
-          command,
-          requestHash,
-        );
+        const executionFailure = execution.result as Extract<
+          V2CommandResult,
+          { ok: false }
+        >;
+        let failedEvent: DomainEvent;
+        let failedResult: V2CommandResult;
+        ({ failedEvent, failedResult } = inImmediateTransaction(
+          this.dependencies.database,
+          () => {
+            const linked =
+              this.dependencies.developers.linkExecutionInTransaction({
+                attemptId: provisioned.id,
+                executionId: execution.execution.id,
+                expectedRevision: provisioned.revision,
+                updatedAt: this.dependencies.now(),
+              });
+            const message = executionFailure.error.message;
+            const workspace =
+              this.dependencies.developers.recordWorkspaceObservationInTransaction(
+                {
+                  ...linked.workspace,
+                  lifecycle: 'attention_required',
+                  failure: {
+                    code: 'developer_attempt_start_failed',
+                    message,
+                  },
+                  revision: linked.workspace.revision + 1,
+                  updatedAt: this.dependencies.now(),
+                },
+                linked.workspace.revision,
+              );
+            const next =
+              this.dependencies.developers.transitionAttemptInTransaction(
+                {
+                  ...linked,
+                  lifecycle: 'attention_required',
+                  revision: linked.revision + 1,
+                  workspace,
+                  attention: {
+                    code: 'developer_attempt_start_failed',
+                    message,
+                  },
+                  updatedAt: this.dependencies.now(),
+                  endedAt: this.dependencies.now(),
+                },
+                linked.revision,
+              );
+            const result = failure(message, executionFailure.error.code);
+            this.dependencies.commands.storeInTransaction({
+              idempotencyKey: command.idempotencyKey,
+              commandType: command.command.type,
+              requestHash,
+              result,
+              createdAt: next.updatedAt,
+            });
+            const event = this.dependencies.events.appendDomainInTransaction(
+              launch.projectId,
+              {
+                projectId: launch.projectId,
+                occurredAt: next.updatedAt,
+                type: 'developer_attempt.changed',
+                payload: {
+                  schemaVersion: 1,
+                  attempt: next,
+                  board: launch.board,
+                },
+              },
+            );
+            return { failedEvent: event, failedResult: result };
+          },
+        ));
+        this.dependencies.publishDomain(failedEvent);
+        return failedResult;
       }
 
       let result: V2CommandResult;
@@ -1014,7 +1204,7 @@ export class DeveloperAttemptService {
             commandType: 'developer_attempt.start',
             schemaVersion: 1,
             attempt: next,
-            board: startedAuthority.board,
+            board: launch.board,
           };
           this.dependencies.commands.storeInTransaction({
             idempotencyKey: command.idempotencyKey,
@@ -1024,15 +1214,15 @@ export class DeveloperAttemptService {
             createdAt: next.updatedAt,
           });
           const event = this.dependencies.events.appendDomainInTransaction(
-            startedAuthority.project.id,
+            launch.projectId,
             {
-              projectId: startedAuthority.project.id,
+              projectId: launch.projectId,
               occurredAt: next.updatedAt,
               type: 'developer_attempt.changed',
               payload: {
                 schemaVersion: 1,
                 attempt: next,
-                board: startedAuthority.board,
+                board: launch.board,
               },
             },
           );
@@ -1056,7 +1246,7 @@ export class DeveloperAttemptService {
         try {
           this.markAttention(
             current.id,
-            startedAuthority,
+            launch,
             error,
             failureResult,
             command,
@@ -1072,7 +1262,7 @@ export class DeveloperAttemptService {
       }
       return this.markAttention(
         current.id,
-        startedAuthority,
+        launch,
         error,
         failureResult,
         command,
@@ -1103,10 +1293,15 @@ export class DeveloperAttemptService {
     command: InterruptDeveloperAttemptEnvelope,
     requestHash: string,
   ): { result: V2CommandResult; event?: DomainEvent } {
-    const replay = this.dependencies.commands.find(
-      command.idempotencyKey,
-      requestHash,
-    );
+    let replay;
+    try {
+      replay = this.dependencies.commands.find(
+        command.idempotencyKey,
+        requestHash,
+      );
+    } catch (error) {
+      throw error;
+    }
     if (replay) return { result: replay.result };
     this.dependencies.barrier.assertHealthy();
 
@@ -1284,10 +1479,15 @@ export class DeveloperAttemptService {
       );
     const command = parsed.data;
     const requestHash = hashV2Command(command.command);
-    const replay = this.dependencies.commands.find(
-      command.idempotencyKey,
-      requestHash,
-    );
+    let replay;
+    try {
+      replay = this.dependencies.commands.find(
+        command.idempotencyKey,
+        requestHash,
+      );
+    } catch (error) {
+      throw error;
+    }
     if (replay) return replay.result;
     this.dependencies.barrier.assertHealthy();
 
@@ -1552,6 +1752,42 @@ export class DeveloperAttemptService {
     }
   }
 
+  async drainPendingStarts(attemptIds: readonly string[]): Promise<void> {
+    for (const attemptId of attemptIds) {
+      const reservation =
+        this.dependencies.developers.startReservationForAttempt(attemptId);
+      const attempt = this.dependencies.developers.attempt(attemptId);
+      if (!reservation || !attempt) continue;
+      const command: StartDeveloperAttemptEnvelope = {
+        idempotencyKey: reservation.idempotencyKey,
+        actor: { kind: 'human' },
+        command: {
+          type: 'developer_attempt.start',
+          projectId: attempt.projectId,
+          taskId: attempt.taskId,
+          expectedTaskRevision: attempt.taskCurrentRevision,
+          expectedDeliveryPlanId: attempt.deliveryPlanId,
+          expectedDeliveryPlanRevision: attempt.deliveryPlanRevision,
+          profileId: attempt.profileId,
+          profileRevision: attempt.profileRevision,
+        },
+      };
+      const requestHash = hashV2Command(command.command);
+      const mismatch = this.startReservationMismatch(
+        reservation,
+        command,
+        requestHash,
+      );
+      if (mismatch)
+        throw new Error(
+          mismatch.ok ? 'Unexpected start result' : mismatch.error.message,
+        );
+      await this.inStartOrder(reservation.idempotencyKey, () =>
+        this.resumeStart(command, requestHash, attempt, reservation),
+      );
+    }
+  }
+
   async drainPendingInterrupts(attemptIds: readonly string[]): Promise<void> {
     for (const attemptId of attemptIds) {
       const attempt = this.dependencies.developers.attempt(attemptId);
@@ -1679,20 +1915,34 @@ export class DeveloperAttemptService {
     attemptId: string,
     operation: () => Promise<T> | T,
   ): Promise<T> {
-    const prior = this.attemptTails.get(attemptId) ?? Promise.resolve();
+    return this.inOrder(this.attemptTails, attemptId, operation);
+  }
+
+  private async inStartOrder<T>(
+    idempotencyKey: string,
+    operation: () => Promise<T> | T,
+  ): Promise<T> {
+    return this.inOrder(this.startTails, idempotencyKey, operation);
+  }
+
+  private async inOrder<T>(
+    tails: Map<string, Promise<void>>,
+    key: string,
+    operation: () => Promise<T> | T,
+  ): Promise<T> {
+    const prior = tails.get(key) ?? Promise.resolve();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
     const current = prior.catch(() => undefined).then(() => gate);
-    this.attemptTails.set(attemptId, current);
+    tails.set(key, current);
     await prior.catch(() => undefined);
     try {
       return await operation();
     } finally {
       release();
-      if (this.attemptTails.get(attemptId) === current)
-        this.attemptTails.delete(attemptId);
+      if (tails.get(key) === current) tails.delete(key);
     }
   }
 
@@ -1767,7 +2017,7 @@ export class DeveloperAttemptService {
 
   private markAttention(
     attemptId: string,
-    authority: TaskExecutionAuthority,
+    launch: StartLaunchProjection,
     error: unknown,
     result: V2CommandResult,
     command: StartDeveloperAttemptEnvelope,
@@ -1818,15 +2068,15 @@ export class DeveloperAttemptService {
         });
         if (next !== current) {
           event = this.dependencies.events.appendDomainInTransaction(
-            authority.project.id,
+            launch.projectId,
             {
-              projectId: authority.project.id,
+              projectId: launch.projectId,
               occurredAt: next.updatedAt,
               type: 'developer_attempt.changed',
               payload: {
                 schemaVersion: 1,
                 attempt: next,
-                board: authority.board,
+                board: launch.board,
               },
             },
           );

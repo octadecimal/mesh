@@ -16,6 +16,7 @@ import {
   DEVELOPER_REPORT_SCHEMA,
   PM_DISCOVERY_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
+  developerAttemptSchema,
   developerTaskAssignmentSchema,
   serverRealtimeMessageSchema,
   startExecutionEnvelopeSchema,
@@ -36,10 +37,15 @@ import { ExecutionRepository } from './executions/execution-repository';
 import { ExecutionRuntime } from './executions/execution-runtime';
 import { OperationRepository } from './executions/operation-repository';
 import { DeveloperRepository } from './developer/developer-repository';
+import { deriveManagedWorkspace } from './developer/managed-workspace';
 import { startV2Server, type RunningV2Server } from './main';
 import { PlanningRepository } from './planning/planning-repository';
 import { approveV2GitExecutable } from './platform/process-runner';
 import { canonicalJson } from './storage/canonical-json';
+import {
+  hashV2Command,
+  V2CommandRepository,
+} from './storage/command-repository';
 import { approveTestDeliveryPlan } from './test/approved-delivery-plan';
 import { createV2TestDatabase } from './test/create-v2-test-database';
 import { inImmediateTransaction, openV2Database } from './db/database';
@@ -232,6 +238,255 @@ const seedPlanningRecoveryCase = async (kind: PlanningRecoveryCase) => {
     operationId,
     startCount: fake.startCount,
     resumeCount: fake.resumeCount,
+  };
+};
+
+type DeveloperStartRecoveryCase = 'reserved' | 'provisioning' | 'unclaimed';
+
+const seedDeveloperStartRecoveryCase = async (
+  kind: DeveloperStartRecoveryCase,
+) => {
+  const fixture = createV2TestDatabase();
+  const root = temporaryDirectory();
+  const repositoryPath = join(root, 'repository');
+  const git = await approveV2GitExecutable({
+    pathValue: process.env.PATH ?? process.env.Path,
+    workspaceRoot: root,
+  });
+  mkdirSync(repositoryPath);
+  execFileSync(git.path, ['init', repositoryPath], { shell: false });
+  execFileSync(
+    git.path,
+    ['-C', repositoryPath, 'config', 'user.email', 'test@mesh.local'],
+    { shell: false },
+  );
+  execFileSync(
+    git.path,
+    ['-C', repositoryPath, 'config', 'user.name', 'Mesh test'],
+    { shell: false },
+  );
+  writeFileSync(join(repositoryPath, 'README.md'), 'test\n');
+  execFileSync(git.path, ['-C', repositoryPath, 'add', 'README.md'], {
+    shell: false,
+  });
+  execFileSync(git.path, ['-C', repositoryPath, 'commit', '-m', 'fixture'], {
+    shell: false,
+  });
+  const headCommit = execFileSync(
+    git.path,
+    ['-C', repositoryPath, 'rev-parse', 'HEAD'],
+    { encoding: 'utf8', shell: false },
+  ).trim();
+  const commonDirectory = join(repositoryPath, '.git');
+  const repositoryIdentity =
+    process.platform === 'win32'
+      ? commonDirectory.toLowerCase()
+      : commonDirectory;
+  fixture.database
+    .prepare(
+      `UPDATE projects SET repository_path = ?, git_common_directory = ?,
+         repository_identity = ?, head_commit = ? WHERE id = ?`,
+    )
+    .run(
+      repositoryPath,
+      commonDirectory,
+      repositoryIdentity,
+      headCommit,
+      fixture.project.id,
+    );
+  const developerProfile = workerProfileRevisionSchema.parse({
+    ...fixture.profileRevision,
+    name: 'developer-worker',
+    displayName: 'Developer worker',
+    document: {
+      ...fixture.profileRevision.document,
+      metadata: {
+        ...fixture.profileRevision.document.metadata,
+        name: 'developer-worker',
+        displayName: 'Developer worker',
+      },
+      spec: {
+        ...fixture.profileRevision.document.spec,
+        assignmentKinds: ['developer_task'],
+        outputSchema: DEVELOPER_REPORT_SCHEMA,
+      },
+    },
+  });
+  fixture.database
+    .prepare(
+      `UPDATE worker_profiles SET name = ?, display_name = ? WHERE id = ?`,
+    )
+    .run(
+      developerProfile.name,
+      developerProfile.displayName,
+      developerProfile.profileId,
+    );
+  fixture.database
+    .prepare(
+      `UPDATE worker_profile_revisions SET normalized_json = ?
+       WHERE profile_id = ? AND revision = ?`,
+    )
+    .run(
+      canonicalJson(developerProfile.document),
+      developerProfile.profileId,
+      developerProfile.revision,
+    );
+  const planning = new PlanningRepository(fixture.database);
+  const seeded = approveTestDeliveryPlan(fixture, planning);
+  const authority = planning.taskExecutionAuthority(
+    fixture.project.id,
+    seeded.taskId,
+  );
+  if (!authority) throw new Error('Developer task authority was not seeded');
+  const attemptId = developerAttemptSchema.shape.id.parse(randomUUID());
+  const createdAt = '2026-09-01T12:00:00.000Z';
+  const workspace = deriveManagedWorkspace({
+    managedRoot: join(dirname(fixture.path), 'developer-worktrees'),
+    projectId: authority.project.id,
+    taskId: authority.task.id,
+    attemptId,
+    repositoryPath,
+    repositoryIdentity,
+    baseCommit: headCommit,
+    createdAt,
+  });
+  const assignment = developerTaskAssignmentSchema.parse({
+    kind: 'developer_task',
+    projectId: authority.project.id,
+    attemptId,
+    taskId: authority.task.id,
+    taskContractRevision: authority.task.contractRevision,
+    taskCurrentRevision: authority.task.revision,
+    deliveryPlanId: authority.deliveryPlan.plan.id,
+    deliveryPlanRevision: authority.deliveryPlan.plan.revision,
+    requirementRevisions: authority.requirementRevisions,
+    baseCommit: headCommit,
+    workspacePath: workspace.path,
+    title: authority.task.title,
+    outcome: authority.task.outcome,
+    acceptanceCriteria: authority.task.acceptanceCriteria,
+    verification: authority.task.verificationCriteria,
+    expectedArtifacts: authority.task.expectedArtifacts,
+    outputSchema: DEVELOPER_REPORT_SCHEMA,
+  });
+  const attempt = developerAttemptSchema.parse({
+    id: attemptId,
+    projectId: authority.project.id,
+    taskId: authority.task.id,
+    ordinal: 1,
+    lifecycle: 'reserved',
+    revision: 0,
+    deliveryPlanId: authority.deliveryPlan.plan.id,
+    deliveryPlanRevision: authority.deliveryPlan.plan.revision,
+    intentRevision: authority.intentRevision,
+    ledgerRevision: authority.ledgerRevision,
+    taskContractRevision: authority.task.contractRevision,
+    taskCurrentRevision: authority.task.revision,
+    requirementRevisions: authority.requirementRevisions,
+    baseCommit: headCommit,
+    profileId: developerProfile.profileId,
+    profileRevision: developerProfile.revision,
+    assignment,
+    workspace,
+    controllingExecutionId: null,
+    executionIds: [],
+    reportIds: [],
+    attention: null,
+    createdAt,
+    updatedAt: createdAt,
+    endedAt: null,
+  });
+  const envelope = {
+    idempotencyKey: `developer-recovery-${kind}-${randomUUID()}`,
+    actor: { kind: 'human' as const },
+    command: {
+      type: 'developer_attempt.start' as const,
+      projectId: attempt.projectId,
+      taskId: attempt.taskId,
+      expectedTaskRevision: attempt.taskCurrentRevision,
+      expectedDeliveryPlanId: attempt.deliveryPlanId,
+      expectedDeliveryPlanRevision: attempt.deliveryPlanRevision,
+      profileId: attempt.profileId,
+      profileRevision: attempt.profileRevision,
+    },
+  };
+  const developers = new DeveloperRepository(fixture.database);
+  inImmediateTransaction(fixture.database, () => {
+    developers.reserveAttemptInTransaction(
+      attempt,
+      kind === 'unclaimed'
+        ? undefined
+        : {
+            attemptId,
+            projectId: attempt.projectId,
+            idempotencyKey: envelope.idempotencyKey,
+            commandType: envelope.command.type,
+            requestHash: hashV2Command(envelope.command),
+            board: authority.board,
+            createdAt,
+          },
+    );
+  });
+  if (kind === 'provisioning') {
+    mkdirSync(dirname(workspace.path), { recursive: true });
+    execFileSync(
+      git.path,
+      [
+        '-C',
+        repositoryPath,
+        'worktree',
+        'add',
+        '-b',
+        workspace.branch,
+        workspace.path,
+        workspace.baseCommit,
+      ],
+      { shell: false },
+    );
+    const gitDirectory = execFileSync(
+      git.path,
+      ['-C', workspace.path, 'rev-parse', '--git-dir'],
+      { encoding: 'utf8', shell: false },
+    ).trim();
+    writeFileSync(
+      resolve(workspace.path, gitDirectory, 'mesh-owner.json'),
+      `${JSON.stringify({
+        schema: 'mesh.v2/developer-workspace-owner/v1',
+        attemptId,
+        ownershipToken: workspace.ownershipToken,
+        repositoryIdentity,
+        branch: workspace.branch,
+        baseCommit: workspace.baseCommit,
+      })}\n`,
+    );
+    const ready = {
+      ...workspace,
+      lifecycle: 'ready' as const,
+      observedHead: workspace.baseCommit,
+      observedDirty: false,
+      revision: 1,
+      updatedAt: createdAt,
+    };
+    inImmediateTransaction(fixture.database, () => {
+      developers.recordWorkspaceObservationInTransaction(ready, 0);
+      developers.transitionAttemptInTransaction(
+        {
+          ...attempt,
+          lifecycle: 'provisioning',
+          revision: 1,
+          workspace: ready,
+        },
+        0,
+      );
+    });
+  }
+  return {
+    fixture,
+    git,
+    repositoryPath,
+    workspacePath: workspace.path,
+    attemptId,
+    envelope,
   };
 };
 
@@ -1004,6 +1259,104 @@ describe('startV2Server', () => {
       fixture.close();
     }
   }, 30_000);
+
+  it.each([
+    ['reserved', 'active', 1],
+    ['provisioning', 'active', 1],
+    ['unclaimed', 'attention_required', 0],
+  ] as const)(
+    'drains a %s Developer start reservation before accepting commands',
+    async (kind, expectedLifecycle, expectedStarts) => {
+      const seeded = await seedDeveloperStartRecoveryCase(kind);
+      const fake = new FakeHarnessAdapter({
+        developerScenario: 'missing_output',
+        holdAfterAdapterCursor: 1,
+      });
+      const phases: string[] = [];
+      let server: RunningV2Server | undefined;
+      seeded.fixture.database.close();
+      try {
+        server = await startV2Server({
+          environment: await environment(
+            seeded.repositoryPath,
+            seeded.fixture.path,
+          ),
+          test: {
+            adapter: fake,
+            onStartupPhase: (phase) => phases.push(phase),
+          },
+        });
+        const snapshot = v2ProjectSnapshotSchema.parse(
+          await fetch(
+            `${server.origin}/api/v2/projects/${seeded.fixture.project.id}/snapshot`,
+          ).then((response) => response.json()),
+        );
+        expect(
+          snapshot.developerAttempts?.find(({ id }) => id === seeded.attemptId),
+        ).toMatchObject({ lifecycle: expectedLifecycle });
+        expect(fake.startCount).toBe(expectedStarts);
+        if (kind !== 'unclaimed') {
+          const replay = await fetch(`${server.origin}/api/v2/commands`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(seeded.envelope),
+          });
+          expect(replay.status).toBe(200);
+          expect(
+            v2CommandResultSchema.parse(await replay.json()),
+          ).toMatchObject({
+            ok: true,
+            commandType: 'developer_attempt.start',
+            attempt: { id: seeded.attemptId, lifecycle: 'active' },
+          });
+          expect(fake.startCount).toBe(1);
+        }
+        const verification = openV2Database(seeded.fixture.path);
+        try {
+          expect(
+            new DeveloperRepository(verification).startReservation(
+              seeded.envelope.idempotencyKey,
+            ),
+          ).toBeUndefined();
+          const stored = new V2CommandRepository(verification).find(
+            seeded.envelope.idempotencyKey,
+          );
+          if (kind === 'unclaimed') expect(stored).toBeUndefined();
+          else expect(stored).toBeDefined();
+        } finally {
+          verification.close();
+        }
+        expect(phases).toEqual([
+          'executions_reconciled',
+          'developer_attempts_reconciled',
+          'planning_bound_cycles_reconciled',
+          'planning_pending_reservations_reconciled',
+          'recovery_window_published',
+          'recovered_sessions_attached',
+          'pending_launches_drained',
+          'accepting_commands',
+        ]);
+      } finally {
+        await server?.close();
+        if (existsSync(seeded.workspacePath)) {
+          execFileSync(
+            seeded.git.path,
+            [
+              '-C',
+              seeded.repositoryPath,
+              'worktree',
+              'remove',
+              '--force',
+              seeded.workspacePath,
+            ],
+            { shell: false },
+          );
+        }
+        seeded.fixture.close();
+      }
+    },
+    30_000,
+  );
 
   it('replays an unreceipted Developer report after forced process loss before accepting commands', async () => {
     const fixture = createV2TestDatabase();

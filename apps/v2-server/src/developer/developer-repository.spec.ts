@@ -7,7 +7,7 @@ import {
 } from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { inImmediateTransaction } from '../db/database.js';
+import { inImmediateTransaction, openV2Database } from '../db/database.js';
 import { DeveloperRepository } from './developer-repository.js';
 import {
   createV2TestDatabase,
@@ -233,6 +233,273 @@ afterEach(() => {
 });
 
 describe('DeveloperRepository', () => {
+  it('keeps a claimed start key out of other command results until finalization', () => {
+    const { fixture, repository } = createRepository();
+    const attempt = createAttempt(fixture);
+    const key = `developer-start-${randomUUID()}`;
+
+    inImmediateTransaction(fixture.database, () => {
+      repository.reserveAttemptInTransaction(attempt);
+      fixture.database
+        .prepare(
+          `INSERT INTO developer_start_reservations (
+            attempt_id, project_id, idempotency_key, command_type,
+            request_hash, board_json, created_at
+          ) VALUES (?, ?, ?, 'developer_attempt.start', ?, ?, ?)`,
+        )
+        .run(attempt.id, attempt.projectId, key, 'a'.repeat(64), '{}', now);
+    });
+
+    const second = openV2Database(fixture.path);
+    try {
+      expect(() =>
+        inImmediateTransaction(second, () =>
+          second
+            .prepare(
+              `INSERT INTO command_results (
+                idempotency_key, command_type, request_hash, result_json, created_at
+              ) VALUES (?, 'project.register', ?, '{}', ?)`,
+            )
+            .run(key, 'b'.repeat(64), later),
+        ),
+      ).toThrow(/claimed/i);
+      expect(() =>
+        inImmediateTransaction(second, () => {
+          second
+            .prepare(
+              `INSERT INTO command_results (
+                idempotency_key, command_type, request_hash, result_json, created_at
+              ) VALUES (?, 'developer_attempt.start', ?, '{}', ?)`,
+            )
+            .run(key, 'a'.repeat(64), later);
+          throw new Error('rollback finalization');
+        }),
+      ).toThrow('rollback finalization');
+      expect(
+        fixture.database
+          .prepare(
+            'SELECT idempotency_key FROM developer_start_reservations WHERE idempotency_key = ?',
+          )
+          .get(key),
+      ).toEqual({ idempotency_key: key });
+      expect(
+        fixture.database
+          .prepare(
+            'SELECT idempotency_key FROM command_results WHERE idempotency_key = ?',
+          )
+          .get(key),
+      ).toBeUndefined();
+
+      inImmediateTransaction(second, () =>
+        second
+          .prepare(
+            `INSERT INTO command_results (
+              idempotency_key, command_type, request_hash, result_json, created_at
+            ) VALUES (?, 'developer_attempt.start', ?, '{}', ?)`,
+          )
+          .run(key, 'a'.repeat(64), later),
+      );
+    } finally {
+      second.close();
+    }
+    expect(
+      fixture.database
+        .prepare(
+          'SELECT idempotency_key FROM developer_start_reservations WHERE idempotency_key = ?',
+        )
+        .get(key),
+    ).toBeUndefined();
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        fixture.database
+          .prepare(
+            `INSERT INTO developer_start_reservations (
+              attempt_id, project_id, idempotency_key, command_type,
+              request_hash, board_json, created_at
+            ) VALUES (?, ?, ?, 'developer_attempt.start', ?, '{}', ?)`,
+          )
+          .run(attempt.id, attempt.projectId, key, 'a'.repeat(64), later),
+      ),
+    ).toThrow(/finalized/i);
+  });
+
+  it('serializes cross-connection key races and rolls back the losing claim', () => {
+    const { fixture, repository } = createRepository();
+    const attempt = createAttempt(fixture);
+    inImmediateTransaction(fixture.database, () =>
+      repository.reserveAttemptInTransaction(attempt),
+    );
+    const key = `developer-start-race-${randomUUID()}`;
+    const second = openV2Database(fixture.path);
+    second.pragma('busy_timeout = 1');
+    fixture.database.exec('BEGIN IMMEDIATE');
+    try {
+      fixture.database
+        .prepare(
+          `INSERT INTO developer_start_reservations (
+            attempt_id, project_id, idempotency_key, command_type,
+            request_hash, board_json, created_at
+          ) VALUES (?, ?, ?, 'developer_attempt.start', ?, '{}', ?)`,
+        )
+        .run(attempt.id, attempt.projectId, key, 'a'.repeat(64), now);
+      expect(() =>
+        inImmediateTransaction(second, () =>
+          second
+            .prepare(
+              `INSERT INTO command_results (
+                idempotency_key, command_type, request_hash, result_json, created_at
+              ) VALUES (?, 'developer_attempt.start', ?, '{}', ?)`,
+            )
+            .run(key, 'a'.repeat(64), later),
+        ),
+      ).toThrow(/locked/i);
+      fixture.database.exec('ROLLBACK');
+
+      expect(
+        fixture.database
+          .prepare(
+            'SELECT idempotency_key FROM developer_start_reservations WHERE idempotency_key = ?',
+          )
+          .get(key),
+      ).toBeUndefined();
+      inImmediateTransaction(second, () =>
+        second
+          .prepare(
+            `INSERT INTO command_results (
+              idempotency_key, command_type, request_hash, result_json, created_at
+            ) VALUES (?, 'developer_attempt.start', ?, '{}', ?)`,
+          )
+          .run(key, 'a'.repeat(64), later),
+      );
+      expect(() =>
+        inImmediateTransaction(fixture.database, () =>
+          fixture.database
+            .prepare(
+              `INSERT INTO developer_start_reservations (
+                attempt_id, project_id, idempotency_key, command_type,
+                request_hash, board_json, created_at
+              ) VALUES (?, ?, ?, 'developer_attempt.start', ?, '{}', ?)`,
+            )
+            .run(attempt.id, attempt.projectId, key, 'a'.repeat(64), now),
+        ),
+      ).toThrow(/finalized/i);
+    } finally {
+      if (fixture.database.inTransaction) fixture.database.exec('ROLLBACK');
+      second.close();
+    }
+  });
+
+  it('keeps start claim and command ownership identities immutable', () => {
+    const { fixture, repository } = createRepository();
+    const attempt = createAttempt(fixture);
+    const key = `developer-start-${randomUUID()}`;
+    inImmediateTransaction(fixture.database, () => {
+      repository.reserveAttemptInTransaction(attempt);
+      fixture.database
+        .prepare(
+          `INSERT INTO developer_start_reservations (
+            attempt_id, project_id, idempotency_key, command_type,
+            request_hash, board_json, created_at
+          ) VALUES (?, ?, ?, 'developer_attempt.start', ?, '{}', ?)`,
+        )
+        .run(attempt.id, attempt.projectId, key, 'a'.repeat(64), now);
+    });
+    expect(() =>
+      fixture.database
+        .prepare(
+          'UPDATE developer_start_reservations SET request_hash = ? WHERE idempotency_key = ?',
+        )
+        .run('b'.repeat(64), key),
+    ).toThrow(/immutable/i);
+    expect(() =>
+      fixture.database
+        .prepare(
+          'UPDATE developer_start_reservations SET project_id = ? WHERE idempotency_key = ?',
+        )
+        .run(randomUUID(), key),
+    ).toThrow(/immutable/i);
+    fixture.database
+      .prepare(
+        'DELETE FROM developer_start_reservations WHERE idempotency_key = ?',
+      )
+      .run(key);
+    expect(() =>
+      fixture.database
+        .prepare(
+          `INSERT INTO developer_start_reservations (
+            attempt_id, project_id, idempotency_key, command_type,
+            request_hash, board_json, created_at
+          ) VALUES (?, ?, ?, 'developer_attempt.start', ?, '{}', ?)`,
+        )
+        .run(attempt.id, randomUUID(), randomUUID(), 'a'.repeat(64), now),
+    ).toThrow(/FOREIGN KEY/i);
+
+    inImmediateTransaction(fixture.database, () => {
+      fixture.database
+        .prepare(
+          `INSERT INTO developer_start_reservations (
+            attempt_id, project_id, idempotency_key, command_type,
+            request_hash, board_json, created_at
+          ) VALUES (?, ?, ?, 'developer_attempt.start', ?, '{}', ?)`,
+        )
+        .run(attempt.id, attempt.projectId, key, 'a'.repeat(64), now);
+      fixture.database
+        .prepare(
+          `INSERT INTO command_results (
+            idempotency_key, command_type, request_hash, result_json, created_at
+          ) VALUES (?, 'developer_attempt.start', ?, '{}', ?)`,
+        )
+        .run(key, 'a'.repeat(64), later);
+    });
+    expect(() =>
+      fixture.database
+        .prepare(
+          'UPDATE command_results SET request_hash = ? WHERE idempotency_key = ?',
+        )
+        .run('b'.repeat(64), key),
+    ).toThrow(/immutable/i);
+  });
+
+  it('retains the frozen start projection with its owned attempt', () => {
+    const { fixture, repository } = createRepository();
+    const attempt = createAttempt(fixture);
+    const claim = {
+      attemptId: attempt.id,
+      projectId: attempt.projectId,
+      idempotencyKey: `developer-start-${randomUUID()}`,
+      commandType: 'developer_attempt.start',
+      requestHash: 'a'.repeat(64),
+      board: {
+        projectId: attempt.projectId,
+        deliveryPlanRevision: null,
+        stale: false,
+        emptyReason: 'planning_required',
+        filter: null,
+        totalTaskCount: 0,
+        matchedTaskCount: 0,
+        facets: {
+          milestones: [],
+          taskLifecycles: [],
+          readiness: [],
+          priorities: [],
+          labels: [],
+          requirements: [],
+        },
+        cards: [],
+      },
+      createdAt: now,
+    };
+
+    inImmediateTransaction(fixture.database, () =>
+      repository.reserveAttemptInTransaction(
+        attempt,
+        claim as Parameters<typeof repository.reserveAttemptInTransaction>[1],
+      ),
+    );
+
+    expect(repository.startReservation(claim.idempotencyKey)).toEqual(claim);
+  });
+
   it('rejects a second nonterminal reservation for the same task', () => {
     const { fixture, repository } = createRepository();
     const first = createAttempt(fixture);

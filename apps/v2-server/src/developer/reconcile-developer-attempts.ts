@@ -14,6 +14,7 @@ import type { DeveloperRepository } from './developer-repository.js';
 
 export type DeveloperAttemptReconciliation = {
   events: readonly DomainEvent[];
+  pendingStartAttemptIds: readonly string[];
   pendingActivationIds: readonly WorkerExecutionId[];
   pendingInterruptAttemptIds: readonly string[];
 };
@@ -24,6 +25,7 @@ type Dependencies = {
     DeveloperRepository,
     | 'attempt'
     | 'nonterminalAttempts'
+    | 'startReservationForAttempt'
     | 'recordWorkspaceObservationInTransaction'
     | 'transitionAttemptInTransaction'
   >;
@@ -130,11 +132,19 @@ export const reconcileDeveloperAttempts = async (
 ): Promise<DeveloperAttemptReconciliation> => {
   dependencies.barrier.assertHealthy();
   const events: DomainEvent[] = [];
+  const pendingStartAttemptIds: string[] = [];
   const pendingActivationIds: WorkerExecutionId[] = [];
   const pendingInterruptAttemptIds: string[] = [];
 
   for (const original of dependencies.developers.nonterminalAttempts()) {
     dependencies.barrier.assertHealthy();
+    if (
+      ['reserved', 'provisioning'].includes(original.lifecycle) &&
+      dependencies.developers.startReservationForAttempt(original.id)
+    ) {
+      pendingStartAttemptIds.push(original.id);
+      continue;
+    }
     let observed: ManagedWorkspace;
     try {
       observed = await dependencies.workspace.observe(original.workspace);
@@ -237,5 +247,10 @@ export const reconcileDeveloperAttempts = async (
       throw error;
     }
   }
-  return { events, pendingActivationIds, pendingInterruptAttemptIds };
+  return {
+    events,
+    pendingStartAttemptIds,
+    pendingActivationIds,
+    pendingInterruptAttemptIds,
+  };
 };

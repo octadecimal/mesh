@@ -58,6 +58,11 @@ const migration4Path = join(
   'migrations',
   '004_developer_attempts.sql',
 );
+const migration5Path = join(
+  __dirname,
+  'migrations',
+  '005_developer_attempt_commands.sql',
+);
 
 const createMigration1Database = (path: string) => {
   const database = new BetterSqlite3(path);
@@ -94,6 +99,16 @@ const createMigration4Database = (path: string) => {
     ${readFileSync(migration4Path, 'utf8')}
     INSERT INTO v2_schema_migrations (version, name, applied_at)
     VALUES (4, '004_developer_attempts', '2026-08-31T00:00:00.000Z');
+  `);
+  return database;
+};
+
+const createMigration5Database = (path: string) => {
+  const database = createMigration4Database(path);
+  database.exec(`
+    ${readFileSync(migration5Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (5, '005_developer_attempt_commands', '2026-09-01T00:00:00.000Z');
   `);
   return database;
 };
@@ -768,7 +783,8 @@ describe('V2 database identity and migration', () => {
           name !== 'board_filters' &&
           name !== 'execution_operations_start_request' &&
           name !== 'runtime_events_project_execution_identity' &&
-          name !== 'worker_executions_project_identity'
+          name !== 'worker_executions_project_identity' &&
+          name !== 'command_result_identity_is_immutable'
         );
       }),
     ).toEqual(beforeM1Schema);
@@ -895,6 +911,53 @@ describe('V2 database identity and migration', () => {
       { version: 5 },
       { version: 6 },
     ]);
+  });
+
+  it('upgrades migration 5 to the final migration 6 without changing command rows', () => {
+    const database = createMigration5Database(
+      join(temporaryDirectory(), 'upgrade-migration-5.sqlite'),
+    );
+    openDatabases.push(database);
+    database
+      .prepare(
+        `INSERT INTO command_results (
+          idempotency_key, command_type, request_hash, result_json, created_at
+        ) VALUES (?, 'developer_attempt.start', ?, ?, ?)`,
+      )
+      .run(
+        'migration-5-developer-start',
+        'a'.repeat(64),
+        '{"ok":false,"commandType":"developer_attempt.start","error":{"code":"invalid_request","message":"preserved"}}',
+        '2026-09-01T00:00:00.000Z',
+      );
+    const before = database.prepare('SELECT * FROM command_results').all();
+
+    migrateV2Database(database);
+
+    expect(database.prepare('SELECT * FROM command_results').all()).toEqual(
+      before,
+    );
+    expect(
+      database
+        .prepare(
+          'SELECT version, name FROM v2_schema_migrations ORDER BY version',
+        )
+        .all(),
+    ).toEqual([
+      { version: 1, name: '001_foundation' },
+      { version: 2, name: '002_intent_ledger' },
+      { version: 3, name: '003_planning_board' },
+      { version: 4, name: '004_developer_attempts' },
+      { version: 5, name: '005_developer_attempt_commands' },
+      { version: 6, name: '006_developer_start_reservations' },
+    ]);
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'developer_start_reservations'",
+        )
+        .get(),
+    ).toEqual({ name: 'developer_start_reservations' });
   });
 
   it('upgrades a nonempty migration 2 database without changing audit bytes, checksums, or cursors', () => {
