@@ -2284,11 +2284,17 @@ describe('DeveloperAttemptService', () => {
   it('drains committed active reservations through ExecutionRuntime activation', async () => {
     const context = setup();
     const attemptId = randomUUID();
+    const executionId = context.getAuthority()!.project.id;
     context.attempts.push({
       id: attemptId,
       lifecycle: 'active',
-      controllingExecutionId: context.getAuthority()!.project.id,
+      controllingExecutionId: executionId,
     } as DeveloperAttempt);
+    context.executionRecords.set(executionId, {
+      ...context.fixture.execution,
+      id: executionId as WorkerExecution['id'],
+      lifecycle: 'starting',
+    });
 
     await (
       context.service as DeveloperAttemptService & {
@@ -2296,10 +2302,34 @@ describe('DeveloperAttemptService', () => {
       }
     ).drainPendingActivations();
 
-    expect(context.executionCalls).toEqual([
-      context.getAuthority()!.project.id,
-    ]);
+    expect(context.executionCalls).toEqual([executionId]);
   });
+
+  it.each(['running', 'completed'] as const)(
+    'does not reactivate an active attempt whose execution is already %s',
+    async (lifecycle) => {
+      const context = setup();
+      const attemptId = randomUUID();
+      const executionId = context.fixture.execution.id;
+      const execution = {
+        ...context.fixture.execution,
+        lifecycle,
+        revision: 2,
+        lastAdapterCursor: 2,
+      } as WorkerExecution;
+      context.attempts.push({
+        id: attemptId,
+        lifecycle: 'active',
+        controllingExecutionId: executionId,
+      } as DeveloperAttempt);
+      context.executionRecords.set(executionId, execution);
+
+      await context.service.drainPendingActivations();
+
+      expect(context.executionCalls).toEqual([]);
+      expect(context.executionRecords.get(executionId)).toEqual(execution);
+    },
+  );
 
   it('settles a proven interrupt from the exact active attempt revision', async () => {
     const context = setup();

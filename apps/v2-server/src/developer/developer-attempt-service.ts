@@ -1815,6 +1815,10 @@ export class DeveloperAttemptService {
     for (const attempt of this.dependencies.developers.nonterminalAttempts()) {
       if (attempt.lifecycle !== 'active' || !attempt.controllingExecutionId)
         continue;
+      const execution = this.dependencies.executions.get(
+        attempt.controllingExecutionId,
+      );
+      if (execution?.lifecycle !== 'starting') continue;
       await this.dependencies.execution.activateReserved(
         attempt.controllingExecutionId,
       );
