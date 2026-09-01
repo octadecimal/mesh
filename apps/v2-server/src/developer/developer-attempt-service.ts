@@ -1198,9 +1198,7 @@ export class DeveloperAttemptService {
           V2CommandResult,
           { ok: false }
         >;
-        let failedEvent: DomainEvent;
-        let failedResult: V2CommandResult;
-        ({ failedEvent, failedResult } = inImmediateTransaction(
+        const { failedEvent, failedResult } = inImmediateTransaction(
           this.dependencies.database,
           () => {
             const linked =
@@ -1264,15 +1262,12 @@ export class DeveloperAttemptService {
             );
             return { failedEvent: event, failedResult: result };
           },
-        ));
+        );
         this.dependencies.publishDomain(failedEvent);
         return failedResult;
       }
 
-      let result: V2CommandResult;
-      let activeEvent: DomainEvent;
-      let active: DeveloperAttempt;
-      ({ active, activeEvent, result } = inImmediateTransaction(
+      const { active, activeEvent, result } = inImmediateTransaction(
         this.dependencies.database,
         () => {
           const linked =
@@ -1321,7 +1316,7 @@ export class DeveloperAttemptService {
           );
           return { active: next, activeEvent: event, result: nextResult };
         },
-      ));
+      );
       this.dependencies.publishDomain(activeEvent);
       if (execution.activationRequired) {
         await this.dependencies.execution.activateReserved(

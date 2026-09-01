@@ -300,9 +300,8 @@ function ProjectConnection({
           const message = result.ok
             ? 'Unexpected command result.'
             : result.error.message;
-          developerCommand
-            ? setDeveloperError(message)
-            : setCommandError(message);
+          if (developerCommand) setDeveloperError(message);
+          else setCommandError(message);
           if (!result.ok && freshnessConflictCodes.has(result.error.code)) {
             dispatch({
               type: 'resync.required',
@@ -327,9 +326,8 @@ function ProjectConnection({
             dispatch({ type: 'resync.required', reason: cause.code });
           }
         }
-        developerCommand
-          ? setDeveloperError(errorMessage(cause))
-          : setCommandError(errorMessage(cause));
+        if (developerCommand) setDeveloperError(errorMessage(cause));
+        else setCommandError(errorMessage(cause));
       } finally {
         if (activeCommand.current?.token === token) {
           activeCommand.current = undefined;

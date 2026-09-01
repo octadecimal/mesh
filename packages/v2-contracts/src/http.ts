@@ -105,7 +105,10 @@ export const v2ProjectSnapshotSchema = z
     profiles: z.array(resolvedWorkerProfileSnapshotSchema).readonly(),
     executions: z.array(workerExecutionSchema).readonly(),
     developerAttempts: z.array(developerAttemptSchema).readonly().optional(),
-    developerReports: z.array(developerReportRecordSchema).readonly().optional(),
+    developerReports: z
+      .array(developerReportRecordSchema)
+      .readonly()
+      .optional(),
     attentionItems: z.array(v2AttentionItemSchema).readonly(),
     planningCycles: z.array(planningCycleViewSchema).max(20).readonly(),
     planningHistoryTruncated: z.boolean(),

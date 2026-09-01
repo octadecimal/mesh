@@ -395,16 +395,19 @@ describe('planning observer', () => {
   });
 
   it('contains an observer audit failure without recording an adapter failure', async () => {
-    let context!: ReturnType<typeof createPmRuntime>;
+    const holder: { context?: ReturnType<typeof createPmRuntime> } = {};
     const observer: ExecutionRuntimeObserver = {
       structuredOutput: () => {
+        const context = holder.context;
+        if (!context) throw new Error('Runtime context is not initialized');
         const error = new Error('Developer receipt audit failed');
         context.barrier.trip(error);
         throw error;
       },
       terminal: vi.fn(),
     };
-    context = createPmRuntime('todo', {}, undefined, observer);
+    const context = createPmRuntime('todo', {}, undefined, observer);
+    holder.context = context;
 
     const result = await context.runtime.start(context.start);
     await context.runtime.drain();

@@ -387,7 +387,8 @@ const requireHarnessProjectCoherence = (
     context.addIssue({
       code: 'custom',
       path: ['profile', 'document', 'spec', 'outputSchema'],
-      message: 'Developer harness output schemas must match the Developer schema',
+      message:
+        'Developer harness output schemas must match the Developer schema',
     });
   }
 };

@@ -181,10 +181,10 @@ describe('V2 Developer attempt contracts', () => {
         evidence: [],
       },
     ],
-    changedArtifacts: [{ path: 'src/todos.ts', summary: 'Persisted Todo items.' }],
-    verification: [
-      { command: 'pnpm test todos', passed: true, evidence: [] },
+    changedArtifacts: [
+      { path: 'src/todos.ts', summary: 'Persisted Todo items.' },
     ],
+    verification: [{ command: 'pnpm test todos', passed: true, evidence: [] }],
     unresolvedConcerns: [],
     workspace: { headCommit: assignment.baseCommit, dirty: false },
   };
@@ -193,7 +193,9 @@ describe('V2 Developer attempt contracts', () => {
     expect(DEVELOPER_REPORT_SCHEMA).toBe('mesh.dev/developer-report/v1');
     expect(developerTaskAssignmentSchema.parse(assignment)).toEqual(assignment);
     expect(managedWorkspaceSchema.parse(workspace)).toEqual(workspace);
-    expect(developerCompletionReportSchema.parse(completion)).toEqual(completion);
+    expect(developerCompletionReportSchema.parse(completion)).toEqual(
+      completion,
+    );
     expect(
       developerBlockerReportSchema.parse({
         schema: DEVELOPER_REPORT_SCHEMA,
@@ -266,14 +268,20 @@ describe('V2 Developer attempt contracts', () => {
       'duplicate criterion indexes',
       {
         ...completion,
-        criterionCoverage: [...completion.criterionCoverage, completion.criterionCoverage[0]],
+        criterionCoverage: [
+          ...completion.criterionCoverage,
+          completion.criterionCoverage[0],
+        ],
       },
     ],
     [
       'duplicate requirement IDs',
       {
         ...completion,
-        requirementCoverage: [...completion.requirementCoverage, completion.requirementCoverage[0]],
+        requirementCoverage: [
+          ...completion.requirementCoverage,
+          completion.requirementCoverage[0],
+        ],
       },
     ],
   ])('rejects Developer report with %s', (_reason, report) => {
@@ -285,7 +293,11 @@ describe('V2 Developer attempt contracts', () => {
       workerProfileDocumentSchema.safeParse({
         apiVersion: WORKER_PROFILE_API_VERSION,
         kind: 'WorkerProfile',
-        metadata: { name: 'wrong-developer', displayName: 'Wrong Developer', scope: 'global' },
+        metadata: {
+          name: 'wrong-developer',
+          displayName: 'Wrong Developer',
+          scope: 'global',
+        },
         spec: {
           assignmentKinds: ['pm_discovery'],
           preferredRuntime: { harness: 'fake', model: 'fake' },

@@ -139,7 +139,12 @@ export const developerCompletionReportSchema = z
     requirementCoverage: z.array(requirementEvidenceSchema).max(100).readonly(),
     criterionCoverage: z.array(criterionEvidenceSchema).max(100).readonly(),
     changedArtifacts: z
-      .array(z.strictObject({ path: z.string().trim().min(1).max(4096), summary: planTextSchema }))
+      .array(
+        z.strictObject({
+          path: z.string().trim().min(1).max(4096),
+          summary: planTextSchema,
+        }),
+      )
       .max(100)
       .readonly(),
     verification: z
@@ -159,14 +164,22 @@ export const developerCompletionReportSchema = z
     const requirementIds = new Set<string>();
     value.requirementCoverage.forEach((coverage, index) => {
       if (requirementIds.has(coverage.recordId)) {
-        context.addIssue({ code: 'custom', path: ['requirementCoverage', index, 'recordId'], message: 'Requirement IDs must be unique' });
+        context.addIssue({
+          code: 'custom',
+          path: ['requirementCoverage', index, 'recordId'],
+          message: 'Requirement IDs must be unique',
+        });
       }
       requirementIds.add(coverage.recordId);
     });
     const criterionIndexes = new Set<number>();
     value.criterionCoverage.forEach((coverage, index) => {
       if (criterionIndexes.has(coverage.index)) {
-        context.addIssue({ code: 'custom', path: ['criterionCoverage', index, 'index'], message: 'Criterion indexes must be unique' });
+        context.addIssue({
+          code: 'custom',
+          path: ['criterionCoverage', index, 'index'],
+          message: 'Criterion indexes must be unique',
+        });
       }
       criterionIndexes.add(coverage.index);
     });
@@ -183,7 +196,9 @@ export const developerBlockerReportSchema = z.strictObject({
   suggestedNextAction: planTextSchema,
   preserveWorkspace: z.literal(true),
 });
-export type DeveloperBlockerReport = z.infer<typeof developerBlockerReportSchema>;
+export type DeveloperBlockerReport = z.infer<
+  typeof developerBlockerReportSchema
+>;
 
 export const developerReportSchema = z.discriminatedUnion('disposition', [
   developerCompletionReportSchema,
