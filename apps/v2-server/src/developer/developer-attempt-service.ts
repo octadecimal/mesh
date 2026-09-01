@@ -84,7 +84,7 @@ type Dependencies = {
     'reserveStart' | 'reserveReplacement' | 'activateReserved' | 'interrupt'
   >;
   workspace: {
-    inspectProject(): Promise<{
+    inspectProject(repositoryPath: string): Promise<{
       repositoryIdentity: string;
       headCommit: string;
     }>;
@@ -328,6 +328,73 @@ export class DeveloperAttemptService {
       this.dependencies.publishDomain(domainEvent);
   }
 
+  terminal(execution: WorkerExecution): void {
+    this.dependencies.barrier.assertHealthy();
+    const assignment = developerTaskAssignmentSchema.safeParse(
+      execution.assignment,
+    );
+    if (!assignment.success) return;
+    if (
+      !['completed', 'failed', 'interrupted', 'attention_required'].includes(
+        execution.lifecycle,
+      )
+    )
+      return;
+
+    let event: DomainEvent | undefined;
+    try {
+      inImmediateTransaction(this.dependencies.database, () => {
+        const attempt = this.dependencies.developers.attempt(
+          assignment.data.attemptId,
+        );
+        if (
+          !attempt ||
+          attempt.lifecycle !== 'active' ||
+          attempt.controllingExecutionId !== execution.id ||
+          attempt.projectId !== execution.projectId ||
+          attempt.reportIds.length > 0
+        )
+          return;
+        const authority =
+          this.dependencies.planning.taskExecutionAuthorityInTransaction(
+            attempt.projectId,
+            attempt.taskId,
+          );
+        if (!authority)
+          throw new Error('Task execution authority was not found');
+        const next =
+          this.dependencies.developers.transitionAttemptInTransaction(
+            {
+              ...attempt,
+              lifecycle: 'interrupted',
+              revision: attempt.revision + 1,
+              attention: null,
+              updatedAt: execution.updatedAt,
+              endedAt: null,
+            },
+            attempt.revision,
+          );
+        event = this.dependencies.events.appendDomainInTransaction(
+          attempt.projectId,
+          {
+            projectId: attempt.projectId,
+            occurredAt: next.updatedAt,
+            type: 'developer_attempt.changed',
+            payload: {
+              schemaVersion: 1,
+              attempt: next,
+              board: authority.board,
+            },
+          },
+        );
+      });
+    } catch (error) {
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      throw error;
+    }
+    if (event) this.dependencies.publishDomain(event);
+  }
+
   async start(
     envelope: StartDeveloperAttemptEnvelope,
   ): Promise<V2CommandResult> {
@@ -405,7 +472,9 @@ export class DeveloperAttemptService {
 
     let observedProject: { repositoryIdentity: string; headCommit: string };
     try {
-      observedProject = await this.dependencies.workspace.inspectProject();
+      observedProject = await this.dependencies.workspace.inspectProject(
+        authority.project.repositoryPath,
+      );
     } catch (error) {
       return failure(
         error instanceof Error
@@ -1110,6 +1179,42 @@ export class DeveloperAttemptService {
         continue;
       await this.dependencies.execution.activateReserved(
         attempt.controllingExecutionId,
+      );
+    }
+  }
+
+  async drainPendingInterrupts(attemptIds: readonly string[]): Promise<void> {
+    for (const attemptId of attemptIds) {
+      const attempt = this.dependencies.developers.attempt(attemptId);
+      if (
+        !attempt ||
+        attempt.lifecycle !== 'interrupted' ||
+        !attempt.controllingExecutionId
+      )
+        continue;
+      const authority = this.dependencies.planning.taskExecutionAuthority(
+        attempt.projectId,
+        attempt.taskId,
+      );
+      if (!authority) continue;
+      await this.settleInterrupt(
+        {
+          idempotencyKey: `developer-attempt:${attempt.id}:interrupt:${attempt.revision}`,
+          actor: { kind: 'human' },
+          command: {
+            type: 'developer_attempt.interrupt',
+            projectId: attempt.projectId,
+            attemptId: attempt.id,
+            expectedAttemptRevision: attempt.revision,
+          },
+        },
+        {
+          ok: true,
+          commandType: 'developer_attempt.interrupt',
+          schemaVersion: 1,
+          attempt,
+          board: authority.board,
+        },
       );
     }
   }

@@ -13,6 +13,7 @@ type Dependencies = {
       event: WorkerExecutionStructuredOutputRuntimeEvent,
       report: DeveloperReport | null,
     ): void;
+    terminal(execution: WorkerExecution): void;
   };
 };
 
@@ -31,5 +32,11 @@ export class DeveloperReportConsumer {
       event,
       parsed.success ? parsed.data : null,
     );
+  }
+
+  terminal(execution: WorkerExecution): void {
+    if (!developerTaskAssignmentSchema.safeParse(execution.assignment).success)
+      return;
+    this.dependencies.attempts.terminal(execution);
   }
 }

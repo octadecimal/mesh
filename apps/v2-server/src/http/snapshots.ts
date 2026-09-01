@@ -17,6 +17,7 @@ import type {
 import type { WorkerProfileService } from '../profiles/profile-service.js';
 import type { PlanningRepository } from '../planning/planning-repository.js';
 import type { V2EventStore } from '../storage/event-store.js';
+import type { DeveloperRepository } from '../developer/developer-repository.js';
 
 type ProjectReader = {
   list(): Project[];
@@ -30,6 +31,10 @@ export type V2SnapshotDependencies = {
     'approvedGlobal' | 'approvedForProject' | 'resolveApproved'
   >;
   executions: Pick<ExecutionRepository, 'list' | 'listAttentionDetails'>;
+  developers: Pick<
+    DeveloperRepository,
+    'attemptsForProject' | 'reportsForProject'
+  >;
   planning: Pick<PlanningRepository, 'planningSnapshot'>;
   events: Pick<V2EventStore, 'cursors'>;
   barrier: Pick<AuditBarrier, 'health'>;
@@ -117,6 +122,8 @@ export const createV2Snapshots = (dependencies: V2SnapshotDependencies) => ({
       project,
       profiles,
       executions: dependencies.executions.list(projectId),
+      developerAttempts: dependencies.developers.attemptsForProject(projectId),
+      developerReports: dependencies.developers.reportsForProject(projectId),
       attentionItems: dependencies.executions
         .listAttentionDetails(projectId)
         .map(attentionItem),

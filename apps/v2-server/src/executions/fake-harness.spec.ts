@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
@@ -8,7 +11,10 @@ import type {
   HarnessStartRequest,
 } from '@mesh/v2-contracts';
 import {
+  DEVELOPER_REPORT_SCHEMA,
   approvedIntentLedgerSchema,
+  developerReportSchema,
+  harnessStartRequestSchema,
   PM_DISCOVERY_REPORT_SCHEMA,
   PM_PLAN_REPORT_SCHEMA,
   pmDiscoveryReportSchema,
@@ -51,6 +57,56 @@ const collect = async <T>(events: AsyncIterable<T>): Promise<T[]> => {
   const collected: T[] = [];
   for await (const event of events) collected.push(event);
   return collected;
+};
+
+const developerRequest = (
+  fixture: ReturnType<typeof createV2TestDatabase>,
+  workspacePath: string,
+): HarnessStartRequest => {
+  const attemptId = randomUUID();
+  const taskId = randomUUID();
+  const executionId = randomUUID();
+  const requirementId = randomUUID();
+  return harnessStartRequestSchema.parse({
+    executionId,
+    project: fixture.project,
+    assignment: {
+      kind: 'developer_task',
+      projectId: fixture.project.id,
+      attemptId,
+      taskId,
+      taskContractRevision: 1,
+      taskCurrentRevision: 1,
+      deliveryPlanId: randomUUID(),
+      deliveryPlanRevision: 1,
+      requirementRevisions: [{ recordId: requirementId, recordRevision: 1 }],
+      baseCommit: 'a'.repeat(40),
+      workspacePath,
+      title: 'Persist Todo items',
+      outcome: 'Todo items survive application reload.',
+      acceptanceCriteria: ['Todo items survive application reload.'],
+      verification: ['Read todo-m4.txt.'],
+      expectedArtifacts: ['todo-m4.txt'],
+      outputSchema: DEVELOPER_REPORT_SCHEMA,
+    },
+    profile: {
+      profileId: fixture.profileRevision.profileId,
+      projectId: fixture.profileRevision.projectId,
+      profileRevision: fixture.profileRevision.revision,
+      baseProfileId: fixture.profileRevision.baseProfileId,
+      baseRevision: fixture.profileRevision.baseRevision,
+      document: {
+        ...fixture.profileRevision.document,
+        spec: {
+          ...fixture.profileRevision.document.spec,
+          assignmentKinds: ['developer_task'],
+          outputSchema: DEVELOPER_REPORT_SCHEMA,
+        },
+      },
+      digest: fixture.profileRevision.digest,
+    },
+    resolvedSkills: [],
+  });
 };
 
 const pmRequest = (
@@ -923,6 +979,134 @@ describe('FakeHarnessAdapter', () => {
       });
     });
   });
+
+  it('writes frozen completed Developer evidence in its test-owned workspace', async () => {
+    const fixture = createV2TestDatabase();
+    const workspacePath = mkdtempSync(join(tmpdir(), 'mesh-v2-developer-'));
+    try {
+      const request = developerRequest(fixture, workspacePath);
+      const session = await new FakeHarnessAdapter({
+        developerScenario: 'completed',
+      }).start(request);
+      const events = await collect(session.events(0));
+
+      expect(events.map(({ normalized }) => normalized.type)).toEqual([
+        'worker_execution.output',
+        'worker_execution.child_started',
+        'worker_execution.child_finished',
+        'worker_execution.structured_output',
+        'worker_execution.completed',
+      ]);
+      expect(readFileSync(join(workspacePath, 'todo-m4.txt'), 'utf8')).toBe(
+        'persisted\n',
+      );
+      const output = events[3]?.normalized;
+      expect(output).toMatchObject({
+        type: 'worker_execution.structured_output',
+        payload: {
+          schema: DEVELOPER_REPORT_SCHEMA,
+          value: {
+            schema: DEVELOPER_REPORT_SCHEMA,
+            disposition: 'completed',
+            attemptId: request.assignment.attemptId,
+            executionId: request.executionId,
+            taskId: request.assignment.taskId,
+            taskContractRevision: request.assignment.taskContractRevision,
+            requirementCoverage: [
+              {
+                recordId: request.assignment.requirementRevisions[0]?.recordId,
+                recordRevision: 1,
+                passed: true,
+                evidence: [
+                  { summary: 'Todo persistence requirement satisfied.' },
+                ],
+              },
+            ],
+            criterionCoverage: [
+              {
+                index: 0,
+                text: 'Todo items survive application reload.',
+                passed: true,
+                evidence: [{ summary: 'Todo persistence acceptance passed.' }],
+              },
+            ],
+            changedArtifacts: [
+              { path: 'todo-m4.txt', summary: 'Persisted Todo evidence.' },
+            ],
+            verification: [
+              {
+                command: 'Read todo-m4.txt.',
+                passed: true,
+                evidence: [
+                  { summary: 'todo-m4.txt contains persisted Todo evidence.' },
+                ],
+              },
+            ],
+            unresolvedConcerns: [],
+            workspace: { headCommit: 'a'.repeat(40), dirty: false },
+          },
+        },
+      });
+    } finally {
+      fixture.close();
+      rmSync(workspacePath, { force: true, recursive: true });
+    }
+  });
+
+  it('refuses Developer work without an explicit test scenario', async () => {
+    const fixture = createV2TestDatabase();
+    const workspacePath = mkdtempSync(join(tmpdir(), 'mesh-v2-developer-'));
+    try {
+      await expect(
+        new FakeHarnessAdapter().start(
+          developerRequest(fixture, workspacePath),
+        ),
+      ).rejects.toThrow('Fake Developer scenario is test-only');
+      expect(existsSync(join(workspacePath, 'todo-m4.txt'))).toBe(false);
+    } finally {
+      rmSync(workspacePath, { force: true, recursive: true });
+      fixture.close();
+    }
+  });
+
+  it.each([
+    ['blocked', true, true],
+    ['malformed', true, false],
+    ['duplicate', true, false],
+    ['missing_output', false, false],
+  ] as const)(
+    'keeps the %s Developer scenario deterministic and terminal',
+    async (developerScenario, emitsOutput, validReport) => {
+      const fixture = createV2TestDatabase();
+      const workspacePath = mkdtempSync(join(tmpdir(), 'mesh-v2-developer-'));
+      try {
+        const session = await new FakeHarnessAdapter({
+          developerScenario,
+        }).start(developerRequest(fixture, workspacePath));
+        const events = await collect(session.events(0));
+        const output = events.find(
+          ({ normalized }) =>
+            normalized.type === 'worker_execution.structured_output',
+        )?.normalized;
+        expect(output === undefined).toBe(!emitsOutput);
+        if (output?.type === 'worker_execution.structured_output') {
+          expect(
+            developerReportSchema.safeParse(output.payload.value).success,
+          ).toBe(validReport);
+        }
+        expect(events.at(-1)?.normalized).toMatchObject({
+          type: 'worker_execution.completed',
+          payload: { outcome: 'completed' },
+        });
+        expect(readFileSync(join(workspacePath, 'todo-m4.txt'), 'utf8')).toBe(
+          'persisted\n',
+        );
+      } finally {
+        fixture.close();
+        rmSync(workspacePath, { force: true, recursive: true });
+      }
+    },
+  );
 
   it('injects malformed and failed envelopes without cursor duplication', async () => {
     await withRequest(async (request) => {

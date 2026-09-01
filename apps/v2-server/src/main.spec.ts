@@ -13,12 +13,14 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 
 import {
+  DEVELOPER_REPORT_SCHEMA,
   PM_DISCOVERY_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
   serverRealtimeMessageSchema,
   startExecutionEnvelopeSchema,
   v2CommandResultSchema,
   v2ProjectSnapshotSchema,
+  workerProfileRevisionSchema,
   type HarnessAdapter,
   type PlanningCycle,
   type PlanningTurn,
@@ -35,6 +37,8 @@ import { OperationRepository } from './executions/operation-repository';
 import { startV2Server, type RunningV2Server } from './main';
 import { PlanningRepository } from './planning/planning-repository';
 import { approveV2GitExecutable } from './platform/process-runner';
+import { canonicalJson } from './storage/canonical-json';
+import { approveTestDeliveryPlan } from './test/approved-delivery-plan';
 import { createV2TestDatabase } from './test/create-v2-test-database';
 import { inImmediateTransaction } from './db/database';
 
@@ -533,6 +537,224 @@ describe('startV2Server', () => {
     expect(() => server.releaseFakeHold()).not.toThrow();
   });
 
+  it('wires a completed fake Developer attempt through reports, snapshots, and replay', async () => {
+    const fixture = createV2TestDatabase();
+    const root = temporaryDirectory();
+    const repositoryPath = join(root, 'repository');
+    let server: RunningV2Server | undefined;
+    let workspacePath: string | undefined;
+    const git = await approveV2GitExecutable({
+      pathValue: process.env.PATH ?? process.env.Path,
+      workspaceRoot: root,
+    });
+    try {
+      mkdirSync(repositoryPath);
+      execFileSync(git.path, ['init', repositoryPath], { shell: false });
+      execFileSync(
+        git.path,
+        ['-C', repositoryPath, 'config', 'user.email', 'test@mesh.local'],
+        { shell: false },
+      );
+      execFileSync(
+        git.path,
+        ['-C', repositoryPath, 'config', 'user.name', 'Mesh test'],
+        { shell: false },
+      );
+      writeFileSync(join(repositoryPath, 'README.md'), 'test\n');
+      execFileSync(git.path, ['-C', repositoryPath, 'add', 'README.md'], {
+        shell: false,
+      });
+      execFileSync(
+        git.path,
+        ['-C', repositoryPath, 'commit', '-m', 'fixture'],
+        { shell: false },
+      );
+      const headCommit = execFileSync(
+        git.path,
+        ['-C', repositoryPath, 'rev-parse', 'HEAD'],
+        { encoding: 'utf8', shell: false },
+      ).trim();
+      const commonDirectory = join(repositoryPath, '.git');
+      fixture.database
+        .prepare(
+          `UPDATE projects SET repository_path = ?, git_common_directory = ?,
+             repository_identity = ?, head_commit = ? WHERE id = ?`,
+        )
+        .run(
+          repositoryPath,
+          commonDirectory,
+          process.platform === 'win32'
+            ? commonDirectory.toLowerCase()
+            : commonDirectory,
+          headCommit,
+          fixture.project.id,
+        );
+      const developerProfileId = randomUUID();
+      const developerProfile = workerProfileRevisionSchema.parse({
+        ...fixture.profileRevision,
+        profileId: developerProfileId,
+        name: 'developer-worker',
+        displayName: 'Developer worker',
+        document: {
+          ...fixture.profileRevision.document,
+          metadata: {
+            ...fixture.profileRevision.document.metadata,
+            name: 'developer-worker',
+            displayName: 'Developer worker',
+          },
+          spec: {
+            ...fixture.profileRevision.document.spec,
+            assignmentKinds: ['developer_task'],
+            outputSchema: DEVELOPER_REPORT_SCHEMA,
+          },
+        },
+      });
+      fixture.database
+        .prepare(
+          `INSERT INTO worker_profiles (
+            id, scope, project_id, name, display_name, approved_revision,
+            created_at, updated_at
+          ) VALUES (?, 'global', NULL, ?, ?, 1, ?, ?)`,
+        )
+        .run(
+          developerProfileId,
+          developerProfile.name,
+          developerProfile.displayName,
+          developerProfile.approvedAt,
+          developerProfile.approvedAt,
+        );
+      fixture.database
+        .prepare(
+          `INSERT INTO worker_profile_revisions (
+            profile_id, revision, source_yaml, normalized_json,
+            base_profile_id, base_revision, approved_by, approved_at, digest
+          ) VALUES (?, 1, ?, ?, NULL, NULL, ?, ?, ?)`,
+        )
+        .run(
+          developerProfileId,
+          developerProfile.sourceYaml,
+          canonicalJson(developerProfile.document),
+          canonicalJson(developerProfile.approvedBy),
+          developerProfile.approvedAt,
+          developerProfile.digest,
+        );
+      const planning = new PlanningRepository(fixture.database);
+      const seeded = approveTestDeliveryPlan(fixture, planning);
+      const authority = planning.taskExecutionAuthority(
+        fixture.project.id,
+        seeded.taskId,
+      );
+      if (!authority)
+        throw new Error('Developer task authority was not seeded');
+      fixture.database.close();
+
+      let settledResolve!: () => void;
+      const settled = new Promise<void>((resolveSettled) => {
+        settledResolve = resolveSettled;
+      });
+      server = await startV2Server({
+        environment: {
+          ...(await environment(repositoryPath, fixture.path)),
+          MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO: 'completed',
+        },
+        test: {
+          onPublished: (message) => {
+            if (
+              message.type === 'v2.domain_event' &&
+              message.event.type === 'developer_report.recorded'
+            )
+              settledResolve();
+          },
+        },
+      });
+      const start = await fetch(`${server.origin}/api/v2/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'developer_attempt.start',
+            projectId: fixture.project.id,
+            taskId: authority.task.id,
+            expectedTaskRevision: authority.task.revision,
+            expectedDeliveryPlanId: authority.deliveryPlan.plan.id,
+            expectedDeliveryPlanRevision: authority.deliveryPlan.plan.revision,
+            profileId: developerProfile.profileId,
+            profileRevision: developerProfile.revision,
+          },
+        }),
+      });
+      expect(start.status).toBe(200);
+      const started = v2CommandResultSchema.parse(await start.json());
+      if (!started.ok || started.commandType !== 'developer_attempt.start') {
+        throw new Error('Developer attempt did not start');
+      }
+
+      await settled;
+      const snapshot = v2ProjectSnapshotSchema.parse(
+        await fetch(
+          `${server.origin}/api/v2/projects/${fixture.project.id}/snapshot`,
+        ).then((response) => response.json()),
+      );
+      const attempt = snapshot.developerAttempts?.find(
+        ({ id }) => id === started.attempt.id,
+      );
+      workspacePath = attempt?.workspace.path;
+      expect(attempt).toMatchObject({
+        lifecycle: 'completed',
+        reportIds: [expect.any(String)],
+        workspace: {
+          path: expect.stringContaining(
+            join(dirname(fixture.path), 'developer-worktrees'),
+          ),
+          observedDirty: false,
+        },
+      });
+      expect(snapshot.developerReports).toMatchObject([
+        {
+          report: {
+            disposition: 'completed',
+            attemptId: started.attempt.id,
+            executionId: attempt?.controllingExecutionId,
+          },
+        },
+      ]);
+      expect(readFileSync(join(workspacePath!, 'todo-m4.txt'), 'utf8')).toBe(
+        'persisted\n',
+      );
+      const replay = (await fetch(
+        `${server.origin}/api/v2/projects/${fixture.project.id}/events?stream=domain&after=0`,
+      ).then((response) => response.json())) as {
+        events: Array<{ type: string }>;
+      };
+      expect(replay.events.map(({ type }) => type)).toEqual(
+        expect.arrayContaining([
+          'developer_workspace.changed',
+          'developer_report.recorded',
+          'developer_attempt.changed',
+        ]),
+      );
+    } finally {
+      await server?.close();
+      if (workspacePath) {
+        execFileSync(
+          git.path,
+          [
+            '-C',
+            repositoryPath,
+            'worktree',
+            'remove',
+            '--force',
+            workspacePath,
+          ],
+          { shell: false },
+        );
+      }
+      fixture.close();
+    }
+  }, 30_000);
+
   it('serves the packaged canonical V1 guidance without weakening SPA or API routing', async () => {
     const root = temporaryDirectory();
     const canonicalGuidance = readFileSync(
@@ -943,6 +1165,7 @@ describe('startV2Server', () => {
         ).toBe(true);
         expect(phases).toEqual([
           'executions_reconciled',
+          'developer_attempts_reconciled',
           'planning_bound_cycles_reconciled',
           'planning_pending_reservations_reconciled',
           'recovery_window_published',
@@ -1204,6 +1427,7 @@ describe('startV2Server', () => {
       expect(commandResponse.status).toBe(200);
       expect(startupPhases).toEqual([
         'executions_reconciled',
+        'developer_attempts_reconciled',
         'planning_bound_cycles_reconciled',
         'planning_pending_reservations_reconciled',
         'recovery_window_published',

@@ -1,4 +1,6 @@
 import { Buffer } from 'node:buffer';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import {
   harnessCapabilitiesSchema,
@@ -16,6 +18,7 @@ import {
   type HarnessResumeRequest,
   type HarnessSession,
   type HarnessStartRequest,
+  type DeveloperTaskAssignment,
   type LogicalSkillRequest,
   type PmDiscoveryAssignment,
   type PmDiscoveryReport,
@@ -31,6 +34,7 @@ const MAX_HANDLE_BYTES = 4096;
 const FOUNDATION_SCENARIO = 'todo-foundation-v1' as const;
 const PM_SCENARIO = 'pm-discovery-v1' as const;
 const PM_PLAN_SCENARIO = 'pm-plan-v1' as const;
+const DEVELOPER_SCENARIO = 'developer-task-v1' as const;
 
 export type FakePmScenario =
   | 'todo'
@@ -39,26 +43,39 @@ export type FakePmScenario =
   | 'conflicting'
   | 'missing_output';
 
+export type FakeDeveloperScenario =
+  | 'completed'
+  | 'blocked'
+  | 'malformed'
+  | 'duplicate'
+  | 'missing_output';
+
 type FakeHandle = {
   executionId: string;
   scenario:
     | typeof FOUNDATION_SCENARIO
     | typeof PM_SCENARIO
-    | typeof PM_PLAN_SCENARIO;
+    | typeof PM_PLAN_SCENARIO
+    | typeof DEVELOPER_SCENARIO;
   pmScenario?: FakePmScenario;
+  developerScenario?: FakeDeveloperScenario;
   checkpointCursor: number;
 };
 
 const terminalCursor = (handle: FakeHandle): number =>
   handle.scenario === FOUNDATION_SCENARIO
     ? 6
-    : handle.pmScenario === 'duplicate' ||
-        (handle.scenario === PM_PLAN_SCENARIO &&
-          handle.pmScenario === 'conflicting')
-      ? 3
-      : handle.pmScenario === 'todo' || handle.pmScenario === 'malformed'
-        ? 2
-        : 1;
+    : handle.scenario === DEVELOPER_SCENARIO
+      ? handle.developerScenario === 'missing_output'
+        ? 4
+        : 5
+      : handle.pmScenario === 'duplicate' ||
+          (handle.scenario === PM_PLAN_SCENARIO &&
+            handle.pmScenario === 'conflicting')
+        ? 3
+        : handle.pmScenario === 'todo' || handle.pmScenario === 'malformed'
+          ? 2
+          : 1;
 
 export type FakeHarnessOptions = {
   holdAfterAdapterCursor?: number;
@@ -67,6 +84,7 @@ export type FakeHarnessOptions = {
   available?: boolean;
   interruptThrows?: boolean;
   pmScenario?: FakePmScenario;
+  developerScenario?: FakeDeveloperScenario;
 };
 
 const encodeHandle = (value: FakeHandle): string => {
@@ -136,7 +154,8 @@ const decodeHandle = (
       value === null ||
       Array.isArray(value) ||
       (keys !== 'checkpointCursor,executionId,scenario' &&
-        keys !== 'checkpointCursor,executionId,pmScenario,scenario')
+        keys !== 'checkpointCursor,executionId,pmScenario,scenario' &&
+        keys !== 'checkpointCursor,developerScenario,executionId,scenario')
     ) {
       return {
         ok: false,
@@ -149,7 +168,8 @@ const decodeHandle = (
       !workerExecutionIdSchema.safeParse(candidate.executionId).success ||
       (candidate.scenario !== FOUNDATION_SCENARIO &&
         candidate.scenario !== PM_SCENARIO &&
-        candidate.scenario !== PM_PLAN_SCENARIO) ||
+        candidate.scenario !== PM_PLAN_SCENARIO &&
+        candidate.scenario !== DEVELOPER_SCENARIO) ||
       (candidate.scenario === PM_SCENARIO &&
         !['todo', 'malformed', 'duplicate', 'missing_output'].includes(
           String(candidate.pmScenario),
@@ -163,7 +183,17 @@ const decodeHandle = (
           'missing_output',
         ].includes(String(candidate.pmScenario))) ||
       (candidate.scenario === FOUNDATION_SCENARIO &&
-        candidate.pmScenario !== undefined) ||
+        (candidate.pmScenario !== undefined ||
+          candidate.developerScenario !== undefined)) ||
+      (candidate.scenario === DEVELOPER_SCENARIO &&
+        (![
+          'completed',
+          'blocked',
+          'malformed',
+          'duplicate',
+          'missing_output',
+        ].includes(String(candidate.developerScenario)) ||
+          candidate.pmScenario !== undefined)) ||
       !Number.isInteger(candidate.checkpointCursor) ||
       (candidate.checkpointCursor as number) < 0 ||
       (candidate.checkpointCursor as number) >
@@ -699,37 +729,191 @@ const planEnvelope = (
   });
 };
 
+const developerReport = (
+  assignment: DeveloperTaskAssignment,
+  executionId: string,
+  scenario: FakeDeveloperScenario,
+) => {
+  const workspace = { headCommit: assignment.baseCommit, dirty: false };
+  if (scenario === 'blocked') {
+    return {
+      schema: 'mesh.dev/developer-report/v1' as const,
+      disposition: 'blocked' as const,
+      attemptId: assignment.attemptId,
+      executionId,
+      taskId: assignment.taskId,
+      taskContractRevision: assignment.taskContractRevision,
+      blocker: 'The deterministic fake Developer is blocked.',
+      evidence: [{ summary: 'todo-m4.txt was written before the blocker.' }],
+      suggestedNextAction:
+        'Resolve the deterministic blocker and replace the execution.',
+      preserveWorkspace: true as const,
+      workspace,
+    };
+  }
+  const completion = {
+    schema: 'mesh.dev/developer-report/v1' as const,
+    disposition: 'completed' as const,
+    attemptId: assignment.attemptId,
+    executionId,
+    taskId: assignment.taskId,
+    taskContractRevision: assignment.taskContractRevision,
+    requirementCoverage: assignment.requirementRevisions.map((requirement) => ({
+      recordId: requirement.recordId,
+      recordRevision: requirement.recordRevision,
+      passed: true as const,
+      evidence: [{ summary: 'Todo persistence requirement satisfied.' }],
+    })),
+    criterionCoverage: assignment.acceptanceCriteria.map((text, index) => ({
+      index,
+      text,
+      passed: true as const,
+      evidence: [{ summary: 'Todo persistence acceptance passed.' }],
+    })),
+    changedArtifacts: [
+      { path: 'todo-m4.txt', summary: 'Persisted Todo evidence.' },
+    ],
+    verification: assignment.verification.map((command) => ({
+      command,
+      passed: true as const,
+      evidence: [{ summary: 'todo-m4.txt contains persisted Todo evidence.' }],
+    })),
+    unresolvedConcerns: [],
+    workspace,
+  };
+  if (scenario === 'duplicate') {
+    return {
+      ...completion,
+      requirementCoverage: [
+        ...completion.requirementCoverage,
+        completion.requirementCoverage[0]!,
+      ],
+      criterionCoverage: [
+        ...completion.criterionCoverage,
+        completion.criterionCoverage[0]!,
+      ],
+    };
+  }
+  return scenario === 'malformed'
+    ? { schema: 'mesh.dev/developer-report/v1', malformed: true }
+    : completion;
+};
+
+const developerEnvelope = async (
+  request: HarnessStartRequest & { assignment: DeveloperTaskAssignment },
+  adapterCursor: number,
+  options: FakeHarnessOptions,
+): Promise<HarnessEventEnvelope> => {
+  const scenario = options.developerScenario ?? 'missing_output';
+  const base = {
+    projectId: request.project.id,
+    executionId: request.executionId,
+    adapterCursor,
+    occurredAt: new Date(
+      Date.UTC(2026, 8, 1, 0, 0, adapterCursor),
+    ).toISOString(),
+  };
+  if (adapterCursor === 1) {
+    await writeFile(
+      join(request.assignment.workspacePath, 'todo-m4.txt'),
+      'persisted\n',
+      'utf8',
+    );
+  }
+  const normalized =
+    adapterCursor === 1
+      ? {
+          ...base,
+          type: 'worker_execution.output' as const,
+          payload: { text: 'Persisted deterministic Todo evidence.' },
+        }
+      : adapterCursor === 2
+        ? {
+            ...base,
+            type: 'worker_execution.child_started' as const,
+            payload: { childId: 'todo-m4', title: 'Persist Todo evidence' },
+          }
+        : adapterCursor === 3
+          ? {
+              ...base,
+              type: 'worker_execution.child_finished' as const,
+              payload: { childId: 'todo-m4', outcome: 'completed' as const },
+            }
+          : adapterCursor === 4 && scenario !== 'missing_output'
+            ? {
+                ...base,
+                type: 'worker_execution.structured_output' as const,
+                payload: {
+                  schema: 'mesh.dev/developer-report/v1',
+                  value: developerReport(
+                    request.assignment,
+                    request.executionId,
+                    scenario,
+                  ),
+                },
+              }
+            : {
+                ...base,
+                type: 'worker_execution.completed' as const,
+                payload: { outcome: 'completed' as const },
+              };
+  return harnessEventEnvelopeSchema.parse({
+    adapterCursor,
+    raw: { source: 'fake', scenario, adapterCursor },
+    normalized,
+  });
+};
+
 const scriptEnvelope = (
   request: HarnessStartRequest,
   adapterCursor: number,
   options: FakeHarnessOptions,
-): HarnessEventEnvelope =>
+): Promise<HarnessEventEnvelope> =>
   request.assignment.kind === 'pm_discovery'
-    ? pmEnvelope(
-        request as HarnessStartRequest & { assignment: PmDiscoveryAssignment },
-        adapterCursor,
-        options.pmScenario,
-      )
-    : request.assignment.kind === 'pm_plan'
-      ? planEnvelope(
-          request as HarnessStartRequest & { assignment: PmPlanAssignment },
+    ? Promise.resolve(
+        pmEnvelope(
+          request as HarnessStartRequest & {
+            assignment: PmDiscoveryAssignment;
+          },
           adapterCursor,
           options.pmScenario,
+        ),
+      )
+    : request.assignment.kind === 'pm_plan'
+      ? Promise.resolve(
+          planEnvelope(
+            request as HarnessStartRequest & { assignment: PmPlanAssignment },
+            adapterCursor,
+            options.pmScenario,
+          ),
         )
-      : foundationEnvelope(request, adapterCursor);
+      : request.assignment.kind === 'developer_task'
+        ? developerEnvelope(
+            request as HarnessStartRequest & {
+              assignment: DeveloperTaskAssignment;
+            },
+            adapterCursor,
+            options,
+          )
+        : Promise.resolve(foundationEnvelope(request, adapterCursor));
 
 const scriptLength = (
   assignment: HarnessStartRequest['assignment'],
-  scenario: FakePmScenario | undefined,
+  options: FakeHarnessOptions,
 ): number =>
   assignment.kind === 'foundation-check'
     ? 6
-    : scenario === 'duplicate' ||
-        (assignment.kind === 'pm_plan' && scenario === 'conflicting')
-      ? 3
-      : scenario === 'todo' || scenario === 'malformed'
-        ? 2
-        : 1;
+    : assignment.kind === 'developer_task'
+      ? (options.developerScenario ?? 'missing_output') === 'missing_output'
+        ? 4
+        : 5
+      : options.pmScenario === 'duplicate' ||
+          (assignment.kind === 'pm_plan' &&
+            options.pmScenario === 'conflicting')
+        ? 3
+        : options.pmScenario === 'todo' || options.pmScenario === 'malformed'
+          ? 2
+          : 1;
 
 class FakeHarnessSession implements HarnessSession {
   readonly consumedAdapterCursors: number[] = [];
@@ -753,11 +937,18 @@ class FakeHarnessSession implements HarnessSession {
           ? PM_SCENARIO
           : this.request.assignment.kind === 'pm_plan'
             ? PM_PLAN_SCENARIO
-            : FOUNDATION_SCENARIO,
+            : this.request.assignment.kind === 'developer_task'
+              ? DEVELOPER_SCENARIO
+              : FOUNDATION_SCENARIO,
       ...(this.request.assignment.kind === 'pm_discovery' ||
       this.request.assignment.kind === 'pm_plan'
         ? { pmScenario: this.options.pmScenario ?? 'missing_output' }
-        : {}),
+        : this.request.assignment.kind === 'developer_task'
+          ? {
+              developerScenario:
+                this.options.developerScenario ?? 'missing_output',
+            }
+          : {}),
       checkpointCursor: this.checkpointCursor,
     });
   }
@@ -770,17 +961,14 @@ class FakeHarnessSession implements HarnessSession {
         'Fake session checkpoint does not match requested cursor',
       );
     }
-    const length = scriptLength(
-      this.request.assignment,
-      this.options.pmScenario,
-    );
+    const length = scriptLength(this.request.assignment, this.options);
     for (let cursor = afterAdapterCursor + 1; cursor <= length; cursor += 1) {
       if (this.closed) return;
       this.consumedAdapterCursors.push(cursor);
       if (this.options.failAtAdapterCursor === cursor) {
         throw new Error(`fake adapter failure at cursor ${cursor}`);
       }
-      const envelope = scriptEnvelope(this.request, cursor, this.options);
+      const envelope = await scriptEnvelope(this.request, cursor, this.options);
       this.checkpointCursor = cursor;
       if (this.options.malformedAtAdapterCursor === cursor) {
         yield {
@@ -873,6 +1061,12 @@ export class FakeHarnessAdapter implements HarnessAdapter {
 
   async start(input: HarnessStartRequest): Promise<FakeHarnessSession> {
     const request = harnessStartRequestSchema.parse(input);
+    if (
+      request.assignment.kind === 'developer_task' &&
+      this.options.developerScenario === undefined
+    ) {
+      throw new Error('Fake Developer scenario is test-only');
+    }
     this.startCount += 1;
     this.startCalledResolve?.();
     if (this.startBlocked) await this.startRelease;
@@ -907,6 +1101,12 @@ export class FakeHarnessAdapter implements HarnessAdapter {
     if (request.assignment.kind === 'pm_plan') {
       throw new Error('Plan executions are finite and cannot resume');
     }
+    if (
+      request.assignment.kind === 'developer_task' &&
+      this.options.developerScenario === undefined
+    ) {
+      throw new Error('Fake Developer scenario is test-only');
+    }
     const parsed = decodeHandle(request.nativeHandle);
     if (!parsed.ok) throw new Error(parsed.reason);
     if (parsed.value.executionId !== request.executionId) {
@@ -915,7 +1115,9 @@ export class FakeHarnessAdapter implements HarnessAdapter {
     const requestScenario =
       request.assignment.kind === 'pm_discovery'
         ? PM_SCENARIO
-        : request.assignment.fakeScenario;
+        : request.assignment.kind === 'developer_task'
+          ? DEVELOPER_SCENARIO
+          : request.assignment.fakeScenario;
     if (parsed.value.scenario !== requestScenario) {
       throw new Error('Fake handle scenario does not match resume request');
     }
@@ -924,6 +1126,15 @@ export class FakeHarnessAdapter implements HarnessAdapter {
       parsed.value.pmScenario !== (this.options.pmScenario ?? 'missing_output')
     ) {
       throw new Error('Fake handle PM scenario does not match adapter fixture');
+    }
+    if (
+      requestScenario === DEVELOPER_SCENARIO &&
+      parsed.value.developerScenario !==
+        (this.options.developerScenario ?? 'missing_output')
+    ) {
+      throw new Error(
+        'Fake handle Developer scenario does not match adapter fixture',
+      );
     }
     if (parsed.value.checkpointCursor !== request.afterAdapterCursor) {
       throw new Error('Fake handle checkpoint does not match resume cursor');

@@ -17,6 +17,7 @@ import type { V2RouteDependencies } from './routes';
 import { createV2Snapshots } from './snapshots';
 import { inImmediateTransaction } from '../db/database';
 import { AuditBarrier } from '../executions/audit-barrier';
+import { DeveloperRepository } from '../developer/developer-repository';
 import {
   ExecutionRepository,
   type ExecutionAttentionDetail,
@@ -31,6 +32,9 @@ import { createV2TestDatabase } from '../test/create-v2-test-database';
 const projectId = '11111111-1111-4111-8111-111111111111';
 const profileId = '22222222-2222-4222-8222-222222222222';
 const executionId = '33333333-3333-4333-8333-333333333333';
+const taskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const attemptId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const deliveryPlanId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const planningCycleId = '44444444-4444-4444-8444-444444444444';
 const proposalId = '55555555-5555-4555-8555-555555555555';
 const projectIntentId = '66666666-6666-4666-8666-666666666666';
@@ -91,6 +95,17 @@ const createDependencies = (): V2RouteDependencies => ({
     start: async () => failed('worker_execution.start', 'start route'),
     interrupt: async () =>
       failed('worker_execution.interrupt', 'interrupt route'),
+  },
+  developer: {
+    start: async () =>
+      failed('developer_attempt.start', 'developer start route'),
+    interrupt: async () =>
+      failed('developer_attempt.interrupt', 'developer interrupt route'),
+    replaceExecution: async () =>
+      failed(
+        'developer_attempt.replace_execution',
+        'developer replacement route',
+      ),
   },
   planning: {
     submitTurn: async () =>
@@ -331,6 +346,144 @@ describe('V2 HTTP routes', () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ ok: false, error: { message } });
+  });
+
+  it.each([
+    [
+      'developer_attempt.start',
+      {
+        type: 'developer_attempt.start',
+        projectId,
+        taskId,
+        expectedTaskRevision: 1,
+        expectedDeliveryPlanId: deliveryPlanId,
+        expectedDeliveryPlanRevision: 1,
+        profileId,
+        profileRevision: 1,
+      },
+      'developer_task_stale',
+      409,
+    ],
+    [
+      'developer_attempt.interrupt',
+      {
+        type: 'developer_attempt.interrupt',
+        projectId,
+        attemptId,
+        expectedAttemptRevision: 1,
+      },
+      'developer_attempt_conflict',
+      409,
+    ],
+    [
+      'developer_attempt.replace_execution',
+      {
+        type: 'developer_attempt.replace_execution',
+        projectId,
+        attemptId,
+        expectedAttemptRevision: 1,
+      },
+      'developer_replacement_unavailable',
+      409,
+    ],
+  ] as const)(
+    'dispatches strict %s and preserves its typed conflict status',
+    async (commandType, command, code, statusCode) => {
+      const calls: string[] = [];
+      const dependencies = Object.assign(createDependencies(), {
+        developer: {
+          start: async () => {
+            calls.push('developer_attempt.start');
+            return {
+              ok: false as const,
+              commandType: 'developer_attempt.start' as const,
+              error: {
+                code: 'developer_task_stale' as const,
+                message: 'stale',
+              },
+            };
+          },
+          interrupt: async () => {
+            calls.push('developer_attempt.interrupt');
+            return {
+              ok: false as const,
+              commandType: 'developer_attempt.interrupt' as const,
+              error: {
+                code: 'developer_attempt_conflict' as const,
+                message: 'conflict',
+              },
+            };
+          },
+          replaceExecution: async () => {
+            calls.push('developer_attempt.replace_execution');
+            return {
+              ok: false as const,
+              commandType: 'developer_attempt.replace_execution' as const,
+              error: {
+                code: 'developer_replacement_unavailable' as const,
+                message: 'replacement unavailable',
+              },
+            };
+          },
+        },
+      });
+      const response = await createApp(dependencies).inject({
+        method: 'POST',
+        url: '/api/v2/commands',
+        payload: {
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command,
+        },
+      });
+
+      expect(calls).toEqual([commandType]);
+      expect(response.statusCode).toBe(statusCode);
+      expect(response.json()).toMatchObject({ ok: false, error: { code } });
+    },
+  );
+
+  it.each([
+    ['developer_report_binding_invalid', 400],
+    ['developer_report_coverage_invalid', 400],
+    ['adapter_unavailable', 503],
+    ['audit_barrier_tripped', 503],
+  ] as const)('maps Developer %s to HTTP %i', async (code, statusCode) => {
+    const dependencies = Object.assign(createDependencies(), {
+      developer: {
+        start: async () =>
+          ({
+            ok: false,
+            commandType: 'developer_attempt.start',
+            error: { code, message: code },
+          }) as const,
+        interrupt: async () =>
+          failed('developer_attempt.interrupt', 'interrupt route'),
+        replaceExecution: async () =>
+          failed('developer_attempt.replace_execution', 'replacement route'),
+      },
+    });
+    const response = await createApp(dependencies).inject({
+      method: 'POST',
+      url: '/api/v2/commands',
+      payload: {
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'developer_attempt.start',
+          projectId,
+          taskId,
+          expectedTaskRevision: 1,
+          expectedDeliveryPlanId: deliveryPlanId,
+          expectedDeliveryPlanRevision: 1,
+          profileId,
+          profileRevision: 1,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(statusCode);
+    expect(response.json()).toMatchObject({ ok: false, error: { code } });
   });
 
   it('rejects invalid commands without dispatching', async () => {
@@ -664,6 +817,7 @@ describe('V2 snapshots', () => {
         projects,
         profiles,
         executions: new ExecutionRepository(fixture.database),
+        developers: new DeveloperRepository(fixture.database),
         planning: new PlanningRepository(fixture.database),
         events: fixture.events,
         barrier: new AuditBarrier(),
@@ -764,6 +918,10 @@ describe('V2 snapshots', () => {
           list: () => [execution],
           listAttentionDetails: () => [detail],
         },
+        developers: {
+          attemptsForProject: () => [],
+          reportsForProject: () => [],
+        },
         planning: new PlanningRepository(fixture.database),
         events: fixture.events,
         barrier: new AuditBarrier(),
@@ -846,6 +1004,7 @@ describe('V2 snapshots', () => {
           now: () => timestamp,
         }),
         executions: new ExecutionRepository(fixture.database),
+        developers: new DeveloperRepository(fixture.database),
         planning,
         events: fixture.events,
         barrier: new AuditBarrier(),

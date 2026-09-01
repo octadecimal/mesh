@@ -4,12 +4,15 @@ import {
   approvePlanProposalEnvelopeSchema,
   approvePlanningProposalEnvelopeSchema,
   interruptExecutionEnvelopeSchema,
+  interruptDeveloperAttemptEnvelopeSchema,
   projectIdSchema,
   projectRegisterEnvelopeSchema,
   profileApprovalEnvelopeSchema,
   rejectPlanProposalEnvelopeSchema,
   rejectPlanningProposalEnvelopeSchema,
   setBoardFilterEnvelopeSchema,
+  replaceDeveloperAttemptExecutionEnvelopeSchema,
+  startDeveloperAttemptEnvelopeSchema,
   startExecutionEnvelopeSchema,
   submitPlanTurnEnvelopeSchema,
   submitPlanningTurnEnvelopeSchema,
@@ -25,6 +28,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import type { ExecutionRuntime } from '../executions/execution-runtime.js';
+import type { DeveloperAttemptService } from '../developer/developer-attempt-service.js';
 import type { PlanningService } from '../planning/planning-service.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { WorkerProfileService } from '../profiles/profile-service.js';
@@ -41,6 +45,10 @@ export type V2RouteDependencies = {
   projects: Pick<ProjectService, 'get' | 'register'>;
   profiles: Pick<WorkerProfileService, 'approveRevision'>;
   runtime: Pick<ExecutionRuntime, 'start' | 'interrupt'>;
+  developer: Pick<
+    DeveloperAttemptService,
+    'start' | 'interrupt' | 'replaceExecution'
+  >;
   planning: Pick<
     PlanningService,
     | 'submitTurn'
@@ -71,7 +79,13 @@ const statusFor = (code: z.infer<typeof v2ErrorCodeSchema>) => {
   if (code.endsWith('_not_found')) return 404;
   if (code === 'audit_barrier_tripped' || code === 'adapter_unavailable')
     return 503;
-  if (code.includes('conflict')) return 409;
+  if (
+    code.endsWith('_stale') ||
+    code.includes('conflict') ||
+    code === 'developer_workspace_identity_mismatch' ||
+    code === 'developer_replacement_unavailable'
+  )
+    return 409;
   if (code === 'internal_error') return 500;
   return 400;
 };
@@ -197,6 +211,30 @@ export const registerV2Routes = (
             interruptExecutionEnvelopeSchema.parse(envelope),
           ),
         );
+      case 'developer_attempt.start': {
+        const result = await dependencies.developer.start(
+          startDeveloperAttemptEnvelopeSchema.parse(envelope),
+        );
+        return result.ok
+          ? reply.send(result)
+          : reply.status(statusFor(result.error.code)).send(result);
+      }
+      case 'developer_attempt.interrupt': {
+        const result = await dependencies.developer.interrupt(
+          interruptDeveloperAttemptEnvelopeSchema.parse(envelope),
+        );
+        return result.ok
+          ? reply.send(result)
+          : reply.status(statusFor(result.error.code)).send(result);
+      }
+      case 'developer_attempt.replace_execution': {
+        const result = await dependencies.developer.replaceExecution(
+          replaceDeveloperAttemptExecutionEnvelopeSchema.parse(envelope),
+        );
+        return result.ok
+          ? reply.send(result)
+          : reply.status(statusFor(result.error.code)).send(result);
+      }
       case 'planning_cycle.submit_turn':
         return reply.send(
           await dependencies.planning.submitTurn(

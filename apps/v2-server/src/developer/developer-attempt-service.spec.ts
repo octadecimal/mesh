@@ -833,6 +833,32 @@ describe('DeveloperAttemptService', () => {
     }
   });
 
+  it('interrupts a terminal Developer execution without an accepted report', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+
+    context.service.terminal({
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId!,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+      lifecycle: 'completed',
+      revision: context.fixture.execution.revision + 1,
+      updatedAt: later,
+    });
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'interrupted',
+      controllingExecutionId: attempt.controllingExecutionId,
+      reportIds: [],
+      attention: null,
+    });
+    expect(context.events).toContainEqual(
+      expect.objectContaining({ type: 'developer_attempt.changed' }),
+    );
+  });
+
   it('records a rejected receipt without overwriting a settled report', async () => {
     const context = setup();
     await context.service.start(context.command);

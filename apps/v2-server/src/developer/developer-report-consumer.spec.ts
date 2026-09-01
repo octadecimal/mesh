@@ -58,4 +58,37 @@ describe('DeveloperReportConsumer', () => {
 
     expect(acceptReport).toHaveBeenCalledWith(execution, event, null);
   });
+
+  it('forwards terminal Developer executions to the attempt service', () => {
+    const terminal = vi.fn();
+    const consumer = new DeveloperReportConsumer({
+      attempts: { acceptReport: vi.fn(), terminal },
+    });
+    const execution = {
+      id: randomUUID(),
+      assignment: {
+        kind: 'developer_task',
+        projectId: randomUUID(),
+        attemptId: randomUUID(),
+        taskId: randomUUID(),
+        taskContractRevision: 1,
+        taskCurrentRevision: 1,
+        deliveryPlanId: randomUUID(),
+        deliveryPlanRevision: 1,
+        requirementRevisions: [{ recordId: randomUUID(), recordRevision: 1 }],
+        baseCommit: 'a'.repeat(40),
+        workspacePath: 'C:/mesh/test-owned-worktree',
+        title: 'Persist Todo items',
+        outcome: 'Todo items survive reload.',
+        acceptanceCriteria: ['Reload restores one Todo item.'],
+        verification: ['Run the Todo persistence test.'],
+        expectedArtifacts: ['src/todos.ts'],
+        outputSchema: DEVELOPER_REPORT_SCHEMA,
+      },
+    };
+
+    consumer.terminal(execution as never);
+
+    expect(terminal).toHaveBeenCalledWith(execution);
+  });
 });
