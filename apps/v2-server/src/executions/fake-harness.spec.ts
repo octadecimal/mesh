@@ -1043,7 +1043,7 @@ describe('FakeHarnessAdapter', () => {
               },
             ],
             unresolvedConcerns: [],
-            workspace: { headCommit: 'a'.repeat(40), dirty: false },
+            workspace: { headCommit: 'a'.repeat(40), dirty: true },
           },
         },
       });

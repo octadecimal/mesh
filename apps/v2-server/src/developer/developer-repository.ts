@@ -1,9 +1,11 @@
 import {
   developerAttemptSchema,
   developerReportRecordSchema,
+  runtimeEventSchema,
   type DeveloperAttempt,
   type DeveloperReportRecord,
   type ManagedWorkspace,
+  type WorkerExecutionStructuredOutputRuntimeEvent,
 } from '@mesh/v2-contracts';
 import { z } from 'zod';
 
@@ -59,6 +61,18 @@ type ReportRow = {
   execution_id: string;
   report_json: string;
   recorded_at: string;
+};
+
+type RuntimeEventRow = {
+  id: string;
+  project_id: string;
+  execution_id: string;
+  diagnostic_id: string;
+  sequence: number;
+  adapter_cursor: number;
+  occurred_at: string;
+  type: string;
+  payload_json: string;
 };
 
 const outputReceiptSchema = z
@@ -151,6 +165,38 @@ export class DeveloperRepository {
       )
       .get(runtimeEventId) as OutputReceiptRow | undefined;
     return row ? this.toOutputReceipt(row) : undefined;
+  }
+
+  unreceiptedStructuredOutputs(): readonly WorkerExecutionStructuredOutputRuntimeEvent[] {
+    const rows = this.database
+      .prepare(
+        `SELECT e.* FROM runtime_events e
+         JOIN developer_attempt_executions a ON a.execution_id = e.execution_id
+         LEFT JOIN developer_output_receipts r ON r.runtime_event_id = e.id
+         WHERE e.type = 'worker_execution.structured_output'
+           AND r.runtime_event_id IS NULL
+         ORDER BY e.project_id, e.sequence, e.id`,
+      )
+      .all() as RuntimeEventRow[];
+    return rows.map((row) => {
+      const event = runtimeEventSchema.parse({
+        id: row.id,
+        projectId: row.project_id,
+        executionId: row.execution_id,
+        diagnosticId: row.diagnostic_id,
+        sequence: row.sequence,
+        adapterCursor: row.adapter_cursor,
+        occurredAt: row.occurred_at,
+        type: row.type,
+        payload: parseJson(row.payload_json),
+      });
+      if (event.type !== 'worker_execution.structured_output') {
+        throw new Error(
+          'Developer output recovery selected a non-output event',
+        );
+      }
+      return event;
+    });
   }
 
   nonterminalAttempts(): readonly DeveloperAttempt[] {

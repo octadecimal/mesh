@@ -87,6 +87,7 @@ const cloneExecution = (fixture: V2TestDatabase) => {
 const insertRuntimeEvent = (
   fixture: V2TestDatabase,
   runtimeEventId: string,
+  payload = { schema: DEVELOPER_REPORT_SCHEMA, value: {} },
 ) => {
   const diagnosticId = randomUUID();
   fixture.database
@@ -101,7 +102,7 @@ const insertRuntimeEvent = (
       `INSERT INTO runtime_events (
         id, project_id, execution_id, diagnostic_id, sequence, adapter_cursor,
         occurred_at, type, payload_json
-      ) VALUES (?, ?, ?, ?, 1, 1, ?, 'worker_execution.structured_output', '{}')`,
+      ) VALUES (?, ?, ?, ?, 1, 1, ?, 'worker_execution.structured_output', ?)`,
     )
     .run(
       runtimeEventId,
@@ -109,6 +110,7 @@ const insertRuntimeEvent = (
       fixture.execution.id,
       diagnosticId,
       now,
+      JSON.stringify(payload),
     );
 };
 
@@ -361,6 +363,58 @@ describe('DeveloperRepository', () => {
         .prepare('SELECT COUNT(*) AS count FROM developer_output_receipts')
         .get(),
     ).toEqual({ count: 1 });
+  });
+
+  it('lists only durable Developer structured outputs without a receipt', () => {
+    const { fixture, repository } = createRepository();
+    const attempt = createAttempt(fixture);
+    const runtimeEventId = randomUUID();
+    insertRuntimeEvent(fixture, runtimeEventId);
+    inImmediateTransaction(fixture.database, () => {
+      repository.reserveAttemptInTransaction(attempt);
+      repository.linkExecutionInTransaction({
+        attemptId: attempt.id,
+        executionId: fixture.execution.id,
+        expectedRevision: 0,
+        updatedAt: now,
+      });
+    });
+    const outputs = (
+      repository as DeveloperRepository & {
+        unreceiptedStructuredOutputs(): readonly {
+          id: string;
+          executionId: string;
+          type: string;
+        }[];
+      }
+    ).unreceiptedStructuredOutputs();
+
+    expect(outputs).toEqual([
+      expect.objectContaining({
+        id: runtimeEventId,
+        executionId: fixture.execution.id,
+        type: 'worker_execution.structured_output',
+      }),
+    ]);
+    inImmediateTransaction(fixture.database, () =>
+      repository.recordOutputReceiptInTransaction({
+        runtimeEventId,
+        projectId: fixture.project.id,
+        attemptId: attempt.id,
+        executionId: fixture.execution.id,
+        outputDigest: 'a'.repeat(64),
+        status: 'rejected',
+        rejectionReason: 'Rejected by test.',
+        createdAt: later,
+      }),
+    );
+    expect(
+      (
+        repository as DeveloperRepository & {
+          unreceiptedStructuredOutputs(): readonly unknown[];
+        }
+      ).unreceiptedStructuredOutputs(),
+    ).toEqual([]);
   });
 
   it('rejects a transition that smuggles child projections', () => {

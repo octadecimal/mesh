@@ -12,7 +12,7 @@ type Dependencies = {
       execution: WorkerExecution,
       event: WorkerExecutionStructuredOutputRuntimeEvent,
       report: DeveloperReport | null,
-    ): void;
+    ): void | Promise<void>;
     terminal(execution: WorkerExecution): void;
   };
 };
@@ -20,14 +20,14 @@ type Dependencies = {
 export class DeveloperReportConsumer {
   constructor(private readonly dependencies: Dependencies) {}
 
-  structuredOutput(
+  async structuredOutput(
     execution: WorkerExecution,
     event: WorkerExecutionStructuredOutputRuntimeEvent,
-  ): void {
+  ): Promise<void> {
     if (!developerTaskAssignmentSchema.safeParse(execution.assignment).success)
       return;
     const parsed = developerReportSchema.safeParse(event.payload.value);
-    this.dependencies.attempts.acceptReport(
+    await this.dependencies.attempts.acceptReport(
       execution,
       event,
       parsed.success ? parsed.data : null,

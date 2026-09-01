@@ -60,7 +60,7 @@ export type ExecutionRuntimeObserver = {
   structuredOutput(
     execution: WorkerExecution,
     event: WorkerExecutionStructuredOutputRuntimeEvent,
-  ): void;
+  ): void | Promise<void>;
   terminal(execution: WorkerExecution): void;
 };
 
@@ -2019,7 +2019,7 @@ export class ExecutionRuntime {
           return;
         }
         if (owned.fenced) return;
-        this.publishRuntime(runtimeEvent);
+        await this.publishRuntime(runtimeEvent);
         if (owned.fenced) return;
         if (domainEvent) {
           this.publishDomain(domainEvent);
@@ -2122,14 +2122,14 @@ export class ExecutionRuntime {
     }
   }
 
-  private publishRuntime(event: RuntimeEvent): void {
+  private async publishRuntime(event: RuntimeEvent): Promise<void> {
     try {
       this.dependencies.publisher.runtime(event);
     } catch (error) {
       this.dependencies.barrier.record('Runtime publication failed', error);
     }
     if (event.type === 'worker_execution.structured_output') {
-      this.dependencies.observer?.structuredOutput(
+      await this.dependencies.observer?.structuredOutput(
         requireExecution(this.dependencies.executions, event.executionId),
         event,
       );

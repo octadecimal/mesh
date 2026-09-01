@@ -409,6 +409,9 @@ const setup = (
     headCommit?: string;
     existingAttempt?: DeveloperAttempt;
     workspaceObservation?: (workspace: ManagedWorkspace) => ManagedWorkspace;
+    settlementWorkspaceObservation?: (
+      workspace: ManagedWorkspace,
+    ) => ManagedWorkspace;
     executionReservationFails?: boolean;
   } = {},
 ) => {
@@ -539,7 +542,7 @@ const setup = (
               ok: false,
               commandType: 'worker_execution.start',
               error: {
-                code: 'invalid_request',
+                code: 'adapter_unavailable',
                 message: 'Worker execution reservation failed',
               },
             },
@@ -663,11 +666,13 @@ const setup = (
         return observation;
       },
       observe: async (workspace: ManagedWorkspace) => ({
-        ...workspace,
-        lifecycle: 'ready' as const,
-        observedHead: fixture.project.headCommit,
-        observedDirty: workspace.observedDirty ?? false,
-        failure: null,
+        ...(options.settlementWorkspaceObservation?.(workspace) ?? {
+          ...workspace,
+          lifecycle: 'ready' as const,
+          observedHead: fixture.project.headCommit,
+          observedDirty: workspace.observedDirty ?? false,
+          failure: null,
+        }),
       }),
     },
     barrier: {
@@ -735,7 +740,11 @@ describe('DeveloperAttemptService', () => {
       payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
     };
 
-    context.service.acceptReport(execution as never, event as never, report);
+    await context.service.acceptReport(
+      execution as never,
+      event as never,
+      report,
+    );
 
     expect(context.attempts[0]).toMatchObject({
       lifecycle: 'completed',
@@ -806,7 +815,7 @@ describe('DeveloperAttemptService', () => {
         assignment: attempt.assignment,
       };
 
-      context.service.acceptReport(
+      await context.service.acceptReport(
         execution as never,
         {
           id: randomUUID(),
@@ -859,6 +868,79 @@ describe('DeveloperAttemptService', () => {
     );
   });
 
+  it('requires attention when a live controlling execution requires attention', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+
+    context.service.terminal({
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId!,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+      lifecycle: 'attention_required',
+      revision: context.fixture.execution.revision + 1,
+      updatedAt: later,
+    });
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'attention_required',
+      attention: {
+        code: 'developer_attempt_transition_conflict',
+        message: 'Controlling execution requires attention',
+      },
+    });
+  });
+
+  it('records the current workspace observation before accepting report evidence', async () => {
+    const context = setup({
+      settlementWorkspaceObservation: (workspace) => ({
+        ...workspace,
+        lifecycle: 'ready',
+        observedHead: workspace.baseCommit,
+        observedDirty: true,
+        failure: null,
+      }),
+    });
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = {
+      ...completionReport(attempt),
+      workspace: {
+        headCommit: context.fixture.project.headCommit,
+        dirty: true,
+      },
+    };
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+
+    await context.service.acceptReport(
+      execution as never,
+      {
+        id: randomUUID(),
+        type: 'worker_execution.structured_output',
+        executionId: execution.id,
+        projectId: execution.projectId,
+        occurredAt: later,
+        payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+      } as never,
+      report,
+    );
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'completed',
+      workspace: {
+        observedHead: context.fixture.project.headCommit,
+        observedDirty: true,
+      },
+    });
+    expect(context.reports).toHaveLength(1);
+  });
+
   it('records a rejected receipt without overwriting a settled report', async () => {
     const context = setup();
     await context.service.start(context.command);
@@ -880,12 +962,12 @@ describe('DeveloperAttemptService', () => {
         payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
       }) as never;
 
-    context.service.acceptReport(
+    await context.service.acceptReport(
       execution as never,
       event(randomUUID()),
       report,
     );
-    context.service.acceptReport(
+    await context.service.acceptReport(
       execution as never,
       event(randomUUID()),
       report,
@@ -923,13 +1005,21 @@ describe('DeveloperAttemptService', () => {
       payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
     };
 
-    context.service.acceptReport(execution as never, event as never, report);
+    await context.service.acceptReport(
+      execution as never,
+      event as never,
+      report,
+    );
     const published = context.events.length;
-    context.service.acceptReport(execution as never, event as never, report);
+    await context.service.acceptReport(
+      execution as never,
+      event as never,
+      report,
+    );
     expect(context.receipts).toHaveLength(1);
     expect(context.reports).toHaveLength(1);
     expect(context.events).toHaveLength(published);
-    expect(() =>
+    await expect(
       context.service.acceptReport(
         execution as never,
         {
@@ -941,7 +1031,7 @@ describe('DeveloperAttemptService', () => {
         } as never,
         report,
       ),
-    ).toThrow('conflicts with prior receipt');
+    ).rejects.toThrow('conflicts with prior receipt');
     expect(context.reports).toHaveLength(1);
   });
 
@@ -952,9 +1042,9 @@ describe('DeveloperAttemptService', () => {
       const runtimeEventId = randomUUID();
       const event = context.insertRuntimeEvent(runtimeEventId, context.report);
 
-      expect(() =>
+      await expect(
         context.service.acceptReport(context.execution, event, context.report),
-      ).toThrow(`${failure} failure`);
+      ).rejects.toThrow(`${failure} failure`);
       expect(context.trips).toHaveLength(1);
       expect(context.developers.outputReceipt(runtimeEventId)).toBeUndefined();
       expect(
@@ -987,7 +1077,7 @@ describe('DeveloperAttemptService', () => {
     });
     const consumer = new DeveloperReportConsumer({ attempts: context.service });
 
-    consumer.structuredOutput(context.execution, event);
+    await consumer.structuredOutput(context.execution, event);
 
     expect(context.developers.outputReceipt(runtimeEventId)).toMatchObject({
       status: 'rejected',
@@ -1054,7 +1144,11 @@ describe('DeveloperAttemptService', () => {
         } as never,
       };
 
-    context.service.acceptReport(execution as never, event as never, report);
+    await context.service.acceptReport(
+      execution as never,
+      event as never,
+      report,
+    );
 
     expect(context.attempts[0]).toMatchObject({
       lifecycle: 'active',
@@ -1093,7 +1187,7 @@ describe('DeveloperAttemptService', () => {
       assignment: attempt.assignment,
     };
 
-    context.service.acceptReport(
+    await context.service.acceptReport(
       execution as never,
       {
         id: randomUUID(),
@@ -1313,12 +1407,16 @@ describe('DeveloperAttemptService', () => {
     expect(context.executionCalls).toHaveLength(0);
   });
 
-  it('links a durably rejected execution before marking the attempt attention-required', async () => {
+  it('returns the durable adapter reservation failure after marking the attempt attention-required', async () => {
     const context = setup({ executionReservationFails: true });
 
     const result = await context.service.start(context.command);
 
-    expect(result).toMatchObject({ ok: true });
+    expect(result).toMatchObject({
+      ok: false,
+      commandType: 'developer_attempt.start',
+      error: { code: 'adapter_unavailable' },
+    });
     expect(context.attempts[0]).toMatchObject({
       lifecycle: 'attention_required',
       controllingExecutionId: context.attempts[0].executionIds[0],
@@ -1721,7 +1819,7 @@ describe('DeveloperAttemptService', () => {
       projectId: active.projectId,
       assignment: active.assignment,
     };
-    context.service.acceptReport(
+    await context.service.acceptReport(
       execution as never,
       {
         id: randomUUID(),

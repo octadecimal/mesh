@@ -8,6 +8,7 @@ import {
   interruptDeveloperAttemptEnvelopeSchema,
   replaceDeveloperAttemptExecutionEnvelopeSchema,
   startDeveloperAttemptEnvelopeSchema,
+  v2ErrorCodeSchema,
   type DeveloperAttempt,
   type DeveloperReport,
   type DomainEvent,
@@ -16,13 +17,17 @@ import {
   type V2Command,
   type V2CommandEnvelope,
   type V2CommandResult,
+  type V2ErrorCode,
   type WorkerExecution,
   type WorkerExecutionId,
   type WorkerExecutionStructuredOutputRuntimeEvent,
 } from '@mesh/v2-contracts';
 
 import { inImmediateTransaction, type V2Database } from '../db/database.js';
-import type { ExecutionRuntime } from '../executions/execution-runtime.js';
+import {
+  ExecutionReservationError,
+  type ExecutionRuntime,
+} from '../executions/execution-runtime.js';
 import type { AuditBarrier } from '../executions/audit-barrier.js';
 import type {
   PlanningRepository,
@@ -32,7 +37,10 @@ import type { V2CommandRepository } from '../storage/command-repository.js';
 import { hashV2Command } from '../storage/command-repository.js';
 import { canonicalJson } from '../storage/canonical-json.js';
 import type { V2EventStore } from '../storage/event-store.js';
-import type { DeveloperRepository } from './developer-repository.js';
+import {
+  DeveloperAttemptConflictError,
+  type DeveloperRepository,
+} from './developer-repository.js';
 import type { DeriveManagedWorkspaceInput } from './managed-workspace.js';
 
 export type { TaskExecutionAuthority } from '../planning/planning-repository.js';
@@ -106,10 +114,13 @@ type StartTransaction = {
   authority?: TaskExecutionAuthority;
 };
 
-const failure = (message: string): V2CommandResult => ({
+const failure = (
+  message: string,
+  code: V2ErrorCode = 'invalid_request',
+): V2CommandResult => ({
   ok: false,
   commandType: 'developer_attempt.start',
-  error: { code: 'invalid_request', message },
+  error: { code, message },
 });
 
 const mutationFailure = (
@@ -117,11 +128,30 @@ const mutationFailure = (
     | 'developer_attempt.interrupt'
     | 'developer_attempt.replace_execution',
   message: string,
+  code: V2ErrorCode = 'developer_attempt_transition_conflict',
 ): V2CommandResult => ({
   ok: false,
   commandType,
-  error: { code: 'developer_attempt_transition_conflict', message },
+  error: { code, message },
 });
+
+const failureFrom = (
+  error: unknown,
+  fallback: V2ErrorCode,
+): V2CommandResult => {
+  if (error instanceof ExecutionReservationError && !error.result.ok)
+    return failure(error.result.error.message, error.result.error.code);
+  const parsed = v2ErrorCodeSchema.safeParse(
+    (error as { code?: unknown } | undefined)?.code,
+  );
+  return failure(
+    error instanceof Error ? error.message : String(error),
+    parsed.success ? parsed.data : fallback,
+  );
+};
+
+const typedError = (code: V2ErrorCode, message: string): Error =>
+  Object.assign(new Error(message), { code });
 
 const compatible = (profile: ResolvedWorkerProfileSnapshot) =>
   profile.document.spec.assignmentKinds.length === 1 &&
@@ -134,16 +164,31 @@ const outputDigest = (value: unknown) =>
 export class DeveloperAttemptService {
   constructor(private readonly dependencies: Dependencies) {}
 
-  acceptReport(
+  async acceptReport(
     execution: WorkerExecution,
     event: WorkerExecutionStructuredOutputRuntimeEvent,
     report: DeveloperReport | null,
-  ): void {
+  ): Promise<void> {
     this.dependencies.barrier.assertHealthy();
     const assignment = developerTaskAssignmentSchema.safeParse(
       execution.assignment,
     );
     if (!assignment.success) return;
+    const candidate = this.dependencies.developers.attempt(
+      assignment.data.attemptId,
+    );
+    let observation: ManagedWorkspace | undefined;
+    if (candidate) {
+      try {
+        observation = await this.dependencies.workspace.observe(
+          candidate.workspace,
+        );
+        this.dependencies.barrier.assertHealthy();
+      } catch (error) {
+        this.dependencies.barrier.trip(error, this.dependencies.now());
+        throw error;
+      }
+    }
     const digest = outputDigest(event.payload.value);
     const committed: DomainEvent[] = [];
     try {
@@ -157,10 +202,12 @@ export class DeveloperAttemptService {
           }
           return;
         }
-        const attempt = this.dependencies.developers.attempt(
+        const persistedAttempt = this.dependencies.developers.attempt(
           assignment.data.attemptId,
         );
-        if (!attempt) throw new Error('Developer attempt was not found');
+        if (!persistedAttempt)
+          throw new Error('Developer attempt was not found');
+        let attempt: DeveloperAttempt = persistedAttempt;
         const frozenAssignment = developerTaskAssignmentSchema.safeParse(
           attempt.assignment,
         );
@@ -202,8 +249,27 @@ export class DeveloperAttemptService {
           return;
         }
         if (
-          report.workspace.headCommit !== attempt.workspace.observedHead ||
-          report.workspace.dirty !== attempt.workspace.observedDirty
+          !observation ||
+          !candidate ||
+          candidate.workspace.revision !== attempt.workspace.revision
+        ) {
+          reject('workspace_observation_mismatch');
+          return;
+        }
+        const workspace =
+          this.dependencies.developers.recordWorkspaceObservationInTransaction(
+            {
+              ...observation,
+              revision: attempt.workspace.revision + 1,
+              updatedAt: this.dependencies.now(),
+            },
+            attempt.workspace.revision,
+          );
+        attempt = this.requireAttempt(attempt.id);
+        if (
+          workspace.lifecycle !== 'ready' ||
+          report.workspace.headCommit !== workspace.observedHead ||
+          report.workspace.dirty !== workspace.observedDirty
         ) {
           reject('workspace_observation_mismatch');
           return;
@@ -362,13 +428,21 @@ export class DeveloperAttemptService {
           );
         if (!authority)
           throw new Error('Task execution authority was not found');
+        const requiresAttention = execution.lifecycle === 'attention_required';
         const next =
           this.dependencies.developers.transitionAttemptInTransaction(
             {
               ...attempt,
-              lifecycle: 'interrupted',
+              lifecycle: requiresAttention
+                ? 'attention_required'
+                : 'interrupted',
               revision: attempt.revision + 1,
-              attention: null,
+              attention: requiresAttention
+                ? {
+                    code: 'developer_attempt_transition_conflict',
+                    message: 'Controlling execution requires attention',
+                  }
+                : null,
               updatedAt: execution.updatedAt,
               endedAt: null,
             },
@@ -419,6 +493,7 @@ export class DeveloperAttemptService {
     } catch (error) {
       return failure(
         error instanceof Error ? error.message : 'Audit barrier tripped',
+        'audit_barrier_tripped',
       );
     }
     if (this.dependencies.billingConflicts.length > 0) {
@@ -429,7 +504,11 @@ export class DeveloperAttemptService {
       command.command.projectId,
       command.command.taskId,
     );
-    if (!authority) return failure('Task execution authority was not found');
+    if (!authority)
+      return failure(
+        'Task execution authority was not found',
+        'developer_task_stale',
+      );
     if (
       authority.deliveryPlan.plan.id !==
         command.command.expectedDeliveryPlanId ||
@@ -437,17 +516,22 @@ export class DeveloperAttemptService {
         command.command.expectedDeliveryPlanRevision ||
       authority.task.revision !== command.command.expectedTaskRevision
     ) {
-      return failure('Task execution authority is stale');
+      return failure(
+        'Task execution authority is stale',
+        'developer_task_stale',
+      );
     }
-    if (authority.card.readiness.state !== 'actionable') {
-      return failure('Task is not actionable');
-    }
+    if (authority.card.readiness.state !== 'actionable')
+      return failure('Task is not actionable', 'developer_task_not_actionable');
     if (
       this.dependencies.developers
         .nonterminalAttempts()
         .some((attempt) => attempt.taskId === authority.task.id)
     ) {
-      return failure('Task already has a controlling Developer attempt');
+      return failure(
+        'Task already has a controlling Developer attempt',
+        'developer_attempt_conflict',
+      );
     }
 
     let profile: ResolvedWorkerProfileSnapshot;
@@ -459,15 +543,22 @@ export class DeveloperAttemptService {
     } catch (error) {
       return failure(
         error instanceof Error ? error.message : 'Profile was not found',
+        'developer_profile_stale',
       );
     }
     if (!compatible(profile))
-      return failure('Profile is not a Developer profile');
+      return failure(
+        'Profile is not a Developer profile',
+        'developer_profile_incompatible',
+      );
     if (
       profile.projectId !== null &&
       profile.projectId !== authority.project.id
     ) {
-      return failure('Profile is not available for this project');
+      return failure(
+        'Profile is not available for this project',
+        'developer_profile_incompatible',
+      );
     }
 
     let observedProject: { repositoryIdentity: string; headCommit: string };
@@ -476,18 +567,17 @@ export class DeveloperAttemptService {
         authority.project.repositoryPath,
       );
     } catch (error) {
-      return failure(
-        error instanceof Error
-          ? error.message
-          : 'Repository could not be observed',
-      );
+      return failureFrom(error, 'adapter_unavailable');
     }
     if (
       observedProject.repositoryIdentity !==
         authority.project.repositoryIdentity ||
       observedProject.headCommit !== authority.project.headCommit
     ) {
-      return failure('Repository identity or HEAD changed');
+      return failure(
+        'Repository identity or HEAD changed',
+        'developer_workspace_identity_mismatch',
+      );
     }
 
     let started: StartTransaction;
@@ -509,7 +599,10 @@ export class DeveloperAttemptService {
             command.command.taskId,
           );
         if (!reservedAuthority) {
-          throw new Error('Task execution authority was not found');
+          throw typedError(
+            'developer_task_stale',
+            'Task execution authority was not found',
+          );
         }
         if (
           reservedAuthority.deliveryPlan.plan.id !==
@@ -519,31 +612,46 @@ export class DeveloperAttemptService {
           reservedAuthority.task.revision !==
             command.command.expectedTaskRevision
         ) {
-          throw new Error('Task execution authority is stale');
+          throw typedError(
+            'developer_task_stale',
+            'Task execution authority is stale',
+          );
         }
         if (reservedAuthority.card.readiness.state !== 'actionable') {
-          throw new Error('Task is not actionable');
+          throw typedError(
+            'developer_task_not_actionable',
+            'Task is not actionable',
+          );
         }
         if (
           this.dependencies.developers
             .nonterminalAttempts()
             .some((attempt) => attempt.taskId === reservedAuthority.task.id)
         ) {
-          throw new Error('Task already has a controlling Developer attempt');
+          throw typedError(
+            'developer_attempt_conflict',
+            'Task already has a controlling Developer attempt',
+          );
         }
         if (
           !compatible(profile) ||
           (profile.projectId !== null &&
             profile.projectId !== reservedAuthority.project.id)
         ) {
-          throw new Error('Profile is not available for this project');
+          throw typedError(
+            'developer_profile_incompatible',
+            'Profile is not available for this project',
+          );
         }
         if (
           observedProject.repositoryIdentity !==
             reservedAuthority.project.repositoryIdentity ||
           observedProject.headCommit !== reservedAuthority.project.headCommit
         ) {
-          throw new Error('Repository identity or HEAD changed');
+          throw typedError(
+            'developer_workspace_identity_mismatch',
+            'Repository identity or HEAD changed',
+          );
         }
         const attempt = this.newAttempt(reservedAuthority, command, profile);
         reservationWritesStarted = true;
@@ -586,10 +694,11 @@ export class DeveloperAttemptService {
     } catch (error) {
       if (reservationWritesStarted) {
         this.dependencies.barrier.trip(error, this.dependencies.now());
+        return failureFrom(error, 'audit_barrier_tripped');
       }
-      return failure(
-        error instanceof Error ? error.message : 'Attempt reservation failed',
-      );
+      if (error instanceof DeveloperAttemptConflictError)
+        return failure(error.message, error.code);
+      return failureFrom(error, 'invalid_request');
     }
     if (!started.attempt) return started.result;
     if (started.event) this.dependencies.publishDomain(started.event);
@@ -679,7 +788,15 @@ export class DeveloperAttemptService {
             updatedAt: this.dependencies.now(),
           });
         });
-        throw new Error('Developer execution reservation failed');
+        this.markAttention(
+          provisioned.id,
+          startedAuthority,
+          new ExecutionReservationError(execution.result),
+        );
+        return failure(
+          execution.result.error.message,
+          execution.result.error.code,
+        );
       }
 
       let active: DeveloperAttempt;
@@ -729,7 +846,7 @@ export class DeveloperAttemptService {
       return started.result;
     } catch (error) {
       this.markAttention(started.attempt.id, startedAuthority, error);
-      return started.result;
+      return failureFrom(error, 'adapter_unavailable');
     }
   }
 
@@ -946,6 +1063,7 @@ export class DeveloperAttemptService {
       return mutationFailure(
         'developer_attempt.replace_execution',
         'Developer attempt cannot replace its execution',
+        'developer_replacement_unavailable',
       );
     }
     const prior = this.dependencies.executions.get(
@@ -959,6 +1077,7 @@ export class DeveloperAttemptService {
       return mutationFailure(
         'developer_attempt.replace_execution',
         'Prior execution is not interrupted',
+        'developer_replacement_unavailable',
       );
     }
 
@@ -976,6 +1095,7 @@ export class DeveloperAttemptService {
       return mutationFailure(
         'developer_attempt.replace_execution',
         'Workspace ownership could not be proven',
+        'developer_replacement_unavailable',
       );
     }
 
@@ -1004,6 +1124,7 @@ export class DeveloperAttemptService {
       return mutationFailure(
         'developer_attempt.replace_execution',
         'Replacement execution could not be reserved',
+        'developer_replacement_unavailable',
       );
     }
     if (
@@ -1022,6 +1143,7 @@ export class DeveloperAttemptService {
       return mutationFailure(
         'developer_attempt.replace_execution',
         'Replacement execution did not preserve frozen authority',
+        'developer_replacement_unavailable',
       );
     }
 
@@ -1088,13 +1210,19 @@ export class DeveloperAttemptService {
             },
             linked.revision,
           );
-        result = {
-          ok: true,
-          commandType: 'developer_attempt.replace_execution',
-          schemaVersion: 1,
-          attempt: active,
-          board: authority.board,
-        };
+        result = reservation.result.ok
+          ? {
+              ok: true,
+              commandType: 'developer_attempt.replace_execution',
+              schemaVersion: 1,
+              attempt: active,
+              board: authority.board,
+            }
+          : mutationFailure(
+              'developer_attempt.replace_execution',
+              reservation.result.error.message,
+              reservation.result.error.code,
+            );
         this.dependencies.commands.storeInTransaction({
           idempotencyKey: command.idempotencyKey,
           commandType: command.command.type,

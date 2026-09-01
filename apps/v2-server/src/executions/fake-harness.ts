@@ -734,7 +734,7 @@ const developerReport = (
   executionId: string,
   scenario: FakeDeveloperScenario,
 ) => {
-  const workspace = { headCommit: assignment.baseCommit, dirty: false };
+  const workspace = { headCommit: assignment.baseCommit, dirty: true };
   if (scenario === 'blocked') {
     return {
       schema: 'mesh.dev/developer-report/v1' as const,

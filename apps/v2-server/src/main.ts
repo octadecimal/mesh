@@ -245,9 +245,9 @@ export const startV2Server = async (
       barrier,
       now: () => new Date().toISOString(),
       observer: {
-        structuredOutput: (execution, event) => {
+        structuredOutput: async (execution, event) => {
           planningObserver.structuredOutput(execution, event);
-          developerObserver.current?.structuredOutput(execution, event);
+          await developerObserver.current?.structuredOutput(execution, event);
         },
         terminal: (execution) => {
           planningObserver.terminal(execution);
@@ -355,6 +355,12 @@ export const startV2Server = async (
       },
     });
     options.test?.onStartupPhase?.('executions_reconciled');
+    for (const output of developers.unreceiptedStructuredOutputs()) {
+      const execution = executions.get(output.executionId);
+      if (!execution)
+        throw new Error('Durable Developer output execution was not found');
+      await developerObserver.current!.structuredOutput(execution, output);
+    }
     const developerRecovery = await reconcileDeveloperAttempts({
       database,
       developers,

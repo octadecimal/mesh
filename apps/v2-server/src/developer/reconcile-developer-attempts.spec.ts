@@ -191,6 +191,16 @@ describe('reconcileDeveloperAttempts', () => {
       pendingInterrupt: false,
     },
     {
+      name: 'attention-required execution preserves attention after recovery',
+      attemptLifecycle: 'active' as const,
+      executionLifecycle: 'attention_required' as const,
+      reportIds: [],
+      expectedLifecycle: 'attention_required' as const,
+      events: 1,
+      pending: false,
+      pendingInterrupt: false,
+    },
+    {
       name: 'reserved attempt requires attention after recovery',
       attemptLifecycle: 'reserved' as const,
       executionLifecycle: 'completed' as const,
