@@ -42,7 +42,9 @@ type Dependencies = {
   database: V2Database;
   planning: Pick<
     PlanningRepository,
-    'taskExecutionAuthority' | 'appendOperationalTaskLifecycleInTransaction'
+    | 'taskExecutionAuthority'
+    | 'taskExecutionAuthorityInTransaction'
+    | 'appendOperationalTaskLifecycleInTransaction'
   >;
   developers: Pick<
     DeveloperRepository,
@@ -132,6 +134,9 @@ export class DeveloperAttemptService {
           assignment.data.attemptId,
         );
         if (!attempt) throw new Error('Developer attempt was not found');
+        const frozenAssignment = developerTaskAssignmentSchema.safeParse(
+          attempt.assignment,
+        );
         const reject = (reason: string) =>
           this.dependencies.developers.recordOutputReceiptInTransaction({
             runtimeEventId: event.id,
@@ -145,9 +150,16 @@ export class DeveloperAttemptService {
           });
         if (
           report === null ||
+          event.type !== 'worker_execution.structured_output' ||
+          event.executionId !== execution.id ||
+          event.projectId !== execution.projectId ||
+          event.payload.schema !== DEVELOPER_REPORT_SCHEMA ||
           attempt.lifecycle !== 'active' ||
           attempt.controllingExecutionId !== execution.id ||
           execution.projectId !== attempt.projectId ||
+          !frozenAssignment.success ||
+          canonicalJson(assignment.data) !==
+            canonicalJson(frozenAssignment.data) ||
           assignment.data.attemptId !== attempt.id ||
           assignment.data.taskId !== attempt.taskId ||
           assignment.data.taskContractRevision !==
@@ -169,10 +181,11 @@ export class DeveloperAttemptService {
           reject('workspace_observation_mismatch');
           return;
         }
-        const authority = this.dependencies.planning.taskExecutionAuthority(
-          attempt.projectId,
-          attempt.taskId,
-        );
+        const authority =
+          this.dependencies.planning.taskExecutionAuthorityInTransaction(
+            attempt.projectId,
+            attempt.taskId,
+          );
         if (
           !authority ||
           authority.task.revision !== attempt.taskCurrentRevision ||
@@ -222,10 +235,11 @@ export class DeveloperAttemptService {
                 },
               )
             : null;
-        const board = this.dependencies.planning.taskExecutionAuthority(
-          attempt.projectId,
-          attempt.taskId,
-        )?.board;
+        const board =
+          this.dependencies.planning.taskExecutionAuthorityInTransaction(
+            attempt.projectId,
+            attempt.taskId,
+          )?.board;
         if (!board) throw new Error('Task execution authority was not found');
         const settled =
           this.dependencies.developers.transitionAttemptInTransaction(

@@ -171,6 +171,7 @@ const setup = (
     database: fixture.database,
     planning: {
       taskExecutionAuthority: () => authority,
+      taskExecutionAuthorityInTransaction: () => authority,
       appendOperationalTaskLifecycleInTransaction: (input: {
         taskId: string;
         expectedCurrentRevision: number;
@@ -393,8 +394,11 @@ describe('DeveloperAttemptService', () => {
     };
     const event = {
       id: randomUUID(),
+      type: 'worker_execution.structured_output',
+      executionId: execution.id,
+      projectId: execution.projectId,
       occurredAt: later,
-      payload: { value: report },
+      payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
     };
 
     context.service.acceptReport(execution as never, event as never, report);
@@ -446,8 +450,11 @@ describe('DeveloperAttemptService', () => {
         execution as never,
         {
           id: randomUUID(),
+          type: 'worker_execution.structured_output',
+          executionId: execution.id,
+          projectId: execution.projectId,
           occurredAt: later,
-          payload: { value: report },
+          payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
         } as never,
         report,
       );
@@ -464,6 +471,63 @@ describe('DeveloperAttemptService', () => {
         }),
       ]);
     }
+  });
+
+  it.each([
+    ['a foreign event execution id', 'eventExecutionId'],
+    ['a foreign event project id', 'eventProjectId'],
+    ['a foreign output schema', 'eventSchema'],
+    ['a changed frozen acceptance criterion', 'assignment'],
+  ] as const)('rejects %s', async (_name, mutation) => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = completionReport(attempt);
+    let execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+    let event = {
+      id: randomUUID(),
+      type: 'worker_execution.structured_output' as const,
+      executionId: execution.id,
+      projectId: execution.projectId,
+      occurredAt: later,
+      payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+    };
+    if (mutation === 'eventExecutionId')
+      event = { ...event, executionId: randomUUID() as never };
+    if (mutation === 'eventProjectId')
+      event = { ...event, projectId: randomUUID() as never };
+    if (mutation === 'eventSchema')
+      event = {
+        ...event,
+        payload: { ...event.payload, schema: 'mesh.dev/other/v1' as never },
+      };
+    if (mutation === 'assignment')
+      execution = {
+        ...execution,
+        assignment: {
+          ...attempt.assignment,
+          acceptanceCriteria: ['Changed text.'],
+        } as never,
+      };
+
+    context.service.acceptReport(execution as never, event as never, report);
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'active',
+      reportIds: [],
+    });
+    expect(context.reports).toEqual([]);
+    expect(context.receipts).toEqual([
+      expect.objectContaining({
+        status: 'rejected',
+        rejectionReason: 'report_binding_mismatch',
+      }),
+    ]);
   });
 
   it('preserves the task when a valid blocker settles the attempt', async () => {
@@ -494,8 +558,11 @@ describe('DeveloperAttemptService', () => {
       execution as never,
       {
         id: randomUUID(),
+        type: 'worker_execution.structured_output',
+        executionId: execution.id,
+        projectId: execution.projectId,
         occurredAt: later,
-        payload: { value: report },
+        payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
       } as never,
       report,
     );

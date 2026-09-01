@@ -1090,6 +1090,21 @@ const replaceCurrentIntent = (
 };
 
 describe('PlanningRepository', () => {
+  it('reads task execution authority within an immediate transaction', () => {
+    const { fixture, repository } = setup();
+    const { taskId } = approveDeliveryProposal(fixture, repository);
+
+    const authority = inImmediateTransaction(fixture.database, () =>
+      repository.taskExecutionAuthorityInTransaction(
+        fixture.project.id,
+        taskId,
+      ),
+    );
+
+    expect(authority?.task.id).toBe(taskId);
+    expect(authority?.card.readiness.state).toBe('actionable');
+  });
+
   it('appends a completion revision without changing the task contract', () => {
     const { fixture, repository } = setup();
     const { plan, taskId } = approveDeliveryProposal(fixture, repository);

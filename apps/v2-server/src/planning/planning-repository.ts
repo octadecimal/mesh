@@ -530,54 +530,61 @@ export class PlanningRepository {
     projectId: string,
     taskId: string,
   ): TaskExecutionAuthority | undefined {
-    return inImmediateTransaction(this.database, () => {
-      const row = this.database
-        .prepare('SELECT * FROM projects WHERE id = ?')
-        .get(projectId) as ProjectRow | undefined;
-      if (!row) return undefined;
-      const project = projectSchema.parse({
-        id: row.id,
-        displayName: row.display_name,
-        repositoryIdentity: row.repository_identity,
-        repositoryPath: row.repository_path,
-        gitCommonDirectory: row.git_common_directory,
-        headCommit: row.head_commit,
-        revision: row.revision,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-      });
-      const intentLedger = this.approvedIntentLedger(projectId);
-      const deliveryPlan = this.approvedDeliveryPlan(projectId);
-      const filter = this.boardFilter(projectId);
-      if (!intentLedger || !deliveryPlan || !filter) return undefined;
-      const currentTaskRevisions = this.currentTaskRevisions(deliveryPlan);
-      const task = currentTaskRevisions.find(({ id }) => id === taskId);
-      if (!task) return undefined;
-      const board = this.projectPlanningBoard({
-        projectId,
-        intentLedger,
-        deliveryPlan,
-        currentTaskRevisions,
-        filter,
-      });
-      const card = board.cards.find(({ taskId: id }) => id === taskId);
-      if (!card) return undefined;
-      const requirementRevisions = deliveryPlan.traces.flatMap((trace) =>
-        trace.kind === 'task_satisfies' && trace.taskId === taskId
-          ? [trace.requirement]
-          : [],
-      );
-      return {
-        project,
-        deliveryPlan,
-        intentRevision: deliveryPlan.plan.projectIntentRevision,
-        ledgerRevision: deliveryPlan.plan.ledgerRevision,
-        task,
-        requirementRevisions,
-        board,
-        card,
-      };
+    return inImmediateTransaction(this.database, () =>
+      this.taskExecutionAuthorityInTransaction(projectId, taskId),
+    );
+  }
+
+  taskExecutionAuthorityInTransaction(
+    projectId: string,
+    taskId: string,
+  ): TaskExecutionAuthority | undefined {
+    const row = this.database
+      .prepare('SELECT * FROM projects WHERE id = ?')
+      .get(projectId) as ProjectRow | undefined;
+    if (!row) return undefined;
+    const project = projectSchema.parse({
+      id: row.id,
+      displayName: row.display_name,
+      repositoryIdentity: row.repository_identity,
+      repositoryPath: row.repository_path,
+      gitCommonDirectory: row.git_common_directory,
+      headCommit: row.head_commit,
+      revision: row.revision,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
     });
+    const intentLedger = this.approvedIntentLedger(projectId);
+    const deliveryPlan = this.approvedDeliveryPlan(projectId);
+    const filter = this.boardFilter(projectId);
+    if (!intentLedger || !deliveryPlan || !filter) return undefined;
+    const currentTaskRevisions = this.currentTaskRevisions(deliveryPlan);
+    const task = currentTaskRevisions.find(({ id }) => id === taskId);
+    if (!task) return undefined;
+    const board = this.projectPlanningBoard({
+      projectId,
+      intentLedger,
+      deliveryPlan,
+      currentTaskRevisions,
+      filter,
+    });
+    const card = board.cards.find(({ taskId: id }) => id === taskId);
+    if (!card) return undefined;
+    const requirementRevisions = deliveryPlan.traces.flatMap((trace) =>
+      trace.kind === 'task_satisfies' && trace.taskId === taskId
+        ? [trace.requirement]
+        : [],
+    );
+    return {
+      project,
+      deliveryPlan,
+      intentRevision: deliveryPlan.plan.projectIntentRevision,
+      ledgerRevision: deliveryPlan.plan.ledgerRevision,
+      task,
+      requirementRevisions,
+      board,
+      card,
+    };
   }
 
   private planningSnapshotInTransaction(

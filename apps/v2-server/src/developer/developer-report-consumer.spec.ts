@@ -6,6 +6,20 @@ import { describe, expect, it, vi } from 'vitest';
 import { DeveloperReportConsumer } from './developer-report-consumer.js';
 
 describe('DeveloperReportConsumer', () => {
+  it('ignores output from a non-Developer execution', () => {
+    const acceptReport = vi.fn();
+    const consumer = new DeveloperReportConsumer({
+      attempts: { acceptReport },
+    });
+
+    consumer.structuredOutput(
+      { id: randomUUID(), assignment: { kind: 'pm_discovery' } } as never,
+      { id: randomUUID(), payload: { value: {} } } as never,
+    );
+
+    expect(acceptReport).not.toHaveBeenCalled();
+  });
+
   it('passes malformed Developer output to settlement as a rejected report', () => {
     const acceptReport = vi.fn();
     const consumer = new DeveloperReportConsumer({
