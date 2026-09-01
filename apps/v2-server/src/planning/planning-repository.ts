@@ -21,6 +21,7 @@ import {
   planningProposalSchema,
   planningQuestionSchema,
   planningTurnSchema,
+  projectSchema,
   projectIntentContentSchema,
   projectIntentRevisionSchema,
   taskRevisionSchema,
@@ -28,6 +29,7 @@ import {
   type ApprovedDeliveryPlan,
   type ApprovedIntentLedger,
   type BoardFilter,
+  type BoardTaskCard,
   type BoardView,
   type DeliveryPlanProposal,
   type LedgerRecordContent,
@@ -39,6 +41,8 @@ import {
   type PlanningProposal,
   type PlanningQuestion,
   type PlanningTurn,
+  type PlanRequirementRef,
+  type Project,
   type ProjectIntentRevision,
   type TaskRevision,
 } from '@mesh/v2-contracts';
@@ -209,6 +213,18 @@ type TaskRevisionRow = {
   revision_json: string;
 };
 
+type ProjectRow = {
+  id: string;
+  display_name: string;
+  repository_identity: string;
+  repository_path: string;
+  git_common_directory: string;
+  head_commit: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+
 export type PmOutputReceipt = Readonly<{
   executionId: string;
   projectId: string;
@@ -345,6 +361,17 @@ export type PlanningBoardSnapshot = Readonly<{
   intentLedger: ApprovedIntentLedger | null;
   deliveryPlan: ApprovedDeliveryPlan | null;
   board: ReturnType<typeof projectBoard>;
+}>;
+
+export type TaskExecutionAuthority = Readonly<{
+  project: Project;
+  deliveryPlan: ApprovedDeliveryPlan;
+  intentRevision: number;
+  ledgerRevision: number;
+  task: TaskRevision;
+  requirementRevisions: readonly PlanRequirementRef[];
+  board: BoardView;
+  card: BoardTaskCard;
 }>;
 
 export class PlanningRepository {
@@ -497,6 +524,60 @@ export class PlanningRepository {
     return inImmediateTransaction(this.database, () =>
       this.planningSnapshotInTransaction(projectId),
     );
+  }
+
+  taskExecutionAuthority(
+    projectId: string,
+    taskId: string,
+  ): TaskExecutionAuthority | undefined {
+    return inImmediateTransaction(this.database, () => {
+      const row = this.database
+        .prepare('SELECT * FROM projects WHERE id = ?')
+        .get(projectId) as ProjectRow | undefined;
+      if (!row) return undefined;
+      const project = projectSchema.parse({
+        id: row.id,
+        displayName: row.display_name,
+        repositoryIdentity: row.repository_identity,
+        repositoryPath: row.repository_path,
+        gitCommonDirectory: row.git_common_directory,
+        headCommit: row.head_commit,
+        revision: row.revision,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      });
+      const intentLedger = this.approvedIntentLedger(projectId);
+      const deliveryPlan = this.approvedDeliveryPlan(projectId);
+      const filter = this.boardFilter(projectId);
+      if (!intentLedger || !deliveryPlan || !filter) return undefined;
+      const currentTaskRevisions = this.currentTaskRevisions(deliveryPlan);
+      const task = currentTaskRevisions.find(({ id }) => id === taskId);
+      if (!task) return undefined;
+      const board = this.projectPlanningBoard({
+        projectId,
+        intentLedger,
+        deliveryPlan,
+        currentTaskRevisions,
+        filter,
+      });
+      const card = board.cards.find(({ taskId: id }) => id === taskId);
+      if (!card) return undefined;
+      const requirementRevisions = deliveryPlan.traces.flatMap((trace) =>
+        trace.kind === 'task_satisfies' && trace.taskId === taskId
+          ? [trace.requirement]
+          : [],
+      );
+      return {
+        project,
+        deliveryPlan,
+        intentRevision: deliveryPlan.plan.projectIntentRevision,
+        ledgerRevision: deliveryPlan.plan.ledgerRevision,
+        task,
+        requirementRevisions,
+        board,
+        card,
+      };
+    });
   }
 
   private planningSnapshotInTransaction(

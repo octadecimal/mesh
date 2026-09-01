@@ -1090,6 +1090,31 @@ const replaceCurrentIntent = (
 };
 
 describe('PlanningRepository', () => {
+  it('returns one coherent execution authority for an actionable task', () => {
+    const { fixture, repository } = setup();
+    const { plan, taskId } = approveDeliveryProposal(fixture, repository);
+
+    const authority = repository.taskExecutionAuthority(
+      fixture.project.id,
+      taskId,
+    );
+
+    expect(authority).toMatchObject({
+      project: fixture.project,
+      deliveryPlan: plan,
+      intentRevision: plan.plan.projectIntentRevision,
+      ledgerRevision: plan.plan.ledgerRevision,
+      task: { id: taskId, revision: 1, contractRevision: 1 },
+      card: {
+        taskId,
+        readiness: { state: 'actionable', blockers: [] },
+      },
+    });
+    expect(authority?.requirementRevisions).toEqual([
+      { recordId: plan.traces[1].requirement.recordId, recordRevision: 1 },
+    ]);
+  });
+
   it('persists purpose-aware delivery proposals and reservations without canonical state', () => {
     const { fixture, repository } = setup();
     const { proposal, value, milestoneId, taskId } = deliveryProposal(
