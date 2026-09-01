@@ -2086,8 +2086,12 @@ describe('startV2Server', () => {
       ),
       'utf8',
     ).replaceAll('\r\n', '\n');
+    const expectedPublicV2Guidance = canonicalV2Guidance.replace(
+      '[Session platform development](session-platform.md)',
+      '[Session platform development](v1-session-platform.md)',
+    );
     expect(publicGuidance).toBe(canonicalGuidance);
-    expect(publicV2Guidance).toBe(canonicalV2Guidance);
+    expect(publicV2Guidance).toBe(expectedPublicV2Guidance);
 
     const server = await startV2Server({
       environment: await environment(root, join(root, 'mesh-v2.sqlite')),
@@ -2129,7 +2133,9 @@ describe('startV2Server', () => {
     expect(v2GuidanceResponse.headers.get('content-type')).not.toContain(
       'text/html',
     );
-    expect(v2GuidanceBody.replaceAll('\r\n', '\n')).toBe(canonicalV2Guidance);
+    expect(v2GuidanceBody.replaceAll('\r\n', '\n')).toBe(
+      expectedPublicV2Guidance,
+    );
     expect(rootResponse.status).toBe(200);
     expect(directResponse.status).toBe(200);
     expect(directBody).toBe(rootBody);
