@@ -1,6 +1,10 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { boardViewSchema, type BoardView } from '@mesh/v2-contracts';
+import {
+  boardViewSchema,
+  type BoardView,
+  type ResolvedWorkerProfileSnapshot,
+} from '@mesh/v2-contracts';
 import { describe, expect, it, vi } from 'vitest';
 
 import { BoardPane } from './BoardPane';
@@ -9,6 +13,33 @@ const projectId = '11111111-1111-4111-8111-111111111111';
 const milestoneOne = '22222222-2222-4222-8222-222222222222';
 const milestoneTwo = '33333333-3333-4333-8333-333333333333';
 const requirementId = '44444444-4444-4444-8444-444444444444';
+
+const developerProfile = {
+  profileId: '88888888-8888-4888-8888-888888888888',
+  projectId,
+  profileRevision: 2,
+  baseProfileId: null,
+  baseRevision: null,
+  document: {
+    apiVersion: 'mesh.dev/v1alpha1',
+    kind: 'WorkerProfile',
+    metadata: {
+      name: 'developer',
+      displayName: 'Developer',
+      scope: 'project',
+    },
+    spec: {
+      assignmentKinds: ['developer_task'],
+      preferredRuntime: { harness: 'fake', model: 'fake-v1' },
+      alternatives: [],
+      requiredCapabilities: [],
+      skills: { preferred: [], required: [] },
+      instructions: 'Implement one task.',
+      outputSchema: 'mesh.dev/developer-report/v1',
+    },
+  },
+  digest: 'd'.repeat(64),
+} satisfies ResolvedWorkerProfileSnapshot;
 
 const board = boardViewSchema.parse({
   projectId,
@@ -306,6 +337,43 @@ describe('BoardPane', () => {
       'Blocked by Persist Todo',
       'Blocked by Validate Todo',
     ]);
+  });
+
+  it('composes the selected task Developer controls without changing Board cards optimistically', async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+    render(
+      <BoardPane
+        board={board}
+        connection={{ status: 'ready' }}
+        submitting={false}
+        onApplyFilter={vi.fn()}
+        developer={{
+          attempts: [],
+          reports: [],
+          executions: [],
+          profiles: [developerProfile],
+          projectCursors: { domain: 7, runtime: 9 },
+          activityByExecutionId: {},
+          onStart,
+          onInterrupt: vi.fn(),
+          onReplace: vi.fn(),
+        }}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: 'View Persist Todo details' }),
+    );
+
+    expect(
+      screen.getByRole('region', { name: 'Developer for Persist Todo' }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole('button', { name: 'Start Developer attempt' }),
+    );
+    expect(onStart).toHaveBeenCalledWith(board.cards[0], developerProfile);
+    expect(screen.getByText('No Developer attempts yet.')).toBeVisible();
   });
 
   it('keeps draft filters local and submits one complete canonical selection', async () => {

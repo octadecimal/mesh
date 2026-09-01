@@ -50,6 +50,8 @@ const assignmentLabel = (execution: WorkerExecution) => {
       return 'Project manager discovery';
     case 'pm_plan':
       return 'Project manager delivery planning';
+    case 'developer_task':
+      return execution.assignment.title;
   }
 };
 

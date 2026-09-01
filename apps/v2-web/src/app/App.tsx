@@ -3,8 +3,11 @@ import {
   V2_PROTOCOL_VERSION,
   type AbandonPlanningCycleCommand,
   type ApprovePlanProposalCommand,
+  type BoardTaskCard,
+  type DeveloperAttempt,
   type PlanningCycleView,
   type RejectPlanProposalCommand,
+  type ResolvedWorkerProfileSnapshot,
   type SetBoardFilterCommand,
   type SubmitPlanTurnCommand,
   type V2CommandEnvelope,
@@ -87,6 +90,22 @@ const freshnessConflictCodes = new Set([
   'plan_canonical_base_conflict',
   'board_filter_not_found',
   'board_filter_revision_conflict',
+  'developer_task_stale',
+  'developer_plan_stale',
+  'developer_profile_stale',
+  'developer_profile_incompatible',
+  'developer_task_not_actionable',
+  'developer_attempt_conflict',
+  'developer_attempt_transition_conflict',
+  'developer_workspace_conflict',
+  'developer_workspace_identity_mismatch',
+  'developer_replacement_unavailable',
+]);
+
+const developerCommandTypes = new Set<V2CommandEnvelope['command']['type']>([
+  'developer_attempt.start',
+  'developer_attempt.interrupt',
+  'developer_attempt.replace_execution',
 ]);
 
 const planningCommandTypes = new Set<V2CommandEnvelope['command']['type']>([
@@ -185,6 +204,7 @@ function ProjectConnection({
   const activeCommand = useRef<ActiveCommand | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [commandError, setCommandError] = useState<string>();
+  const [developerError, setDeveloperError] = useState<string>();
   const snapshot = useMemo<V2ProjectSnapshot | undefined>(
     () =>
       projection.project && projection.board
@@ -193,6 +213,8 @@ function ProjectConnection({
             project: projection.project,
             profiles: projection.profiles,
             executions: projection.executions,
+            developerAttempts: Object.values(projection.developerAttempts),
+            developerReports: Object.values(projection.developerReports),
             attentionItems: projection.attentionItems,
             planningCycles: projection.planningCycles,
             planningHistoryTruncated: projection.planningHistoryTruncated,
@@ -261,9 +283,11 @@ function ProjectConnection({
       pending.current = { intent, envelope: request };
       const controller = new AbortController();
       const token = Symbol(expectedType);
+      const developerCommand = developerCommandTypes.has(expectedType);
       activeCommand.current = { controller, token };
       setSubmitting(true);
-      setCommandError(undefined);
+      if (developerCommand) setDeveloperError(undefined);
+      else setCommandError(undefined);
       try {
         const requestDomainCursor = projection.domainCursor;
         const result = await api.command(request, controller.signal);
@@ -273,9 +297,12 @@ function ProjectConnection({
           if (!result.ok && result.error.code === 'audit_barrier_tripped') {
             onAuditBarrier(result.error.message);
           }
-          setCommandError(
-            result.ok ? 'Unexpected command result.' : result.error.message,
-          );
+          const message = result.ok
+            ? 'Unexpected command result.'
+            : result.error.message;
+          developerCommand
+            ? setDeveloperError(message)
+            : setCommandError(message);
           if (!result.ok && freshnessConflictCodes.has(result.error.code)) {
             dispatch({
               type: 'resync.required',
@@ -296,8 +323,13 @@ function ProjectConnection({
           if (cause.code === 'audit_barrier_tripped') {
             onAuditBarrier(cause.message);
           }
+          if (freshnessConflictCodes.has(cause.code)) {
+            dispatch({ type: 'resync.required', reason: cause.code });
+          }
         }
-        setCommandError(errorMessage(cause));
+        developerCommand
+          ? setDeveloperError(errorMessage(cause))
+          : setCommandError(errorMessage(cause));
       } finally {
         if (activeCommand.current?.token === token) {
           activeCommand.current = undefined;
@@ -464,6 +496,78 @@ function ProjectConnection({
     [projectId, runCommand],
   );
 
+  const startDeveloperAttempt = useCallback(
+    (card: BoardTaskCard, profile: ResolvedWorkerProfileSnapshot) => {
+      const plan = snapshot?.deliveryPlan?.plan;
+      if (!plan) {
+        setDeveloperError('A current approved delivery plan is required.');
+        return;
+      }
+      const command = {
+        type: 'developer_attempt.start' as const,
+        projectId,
+        taskId: card.taskId,
+        expectedTaskRevision: card.taskCurrentRevision,
+        expectedDeliveryPlanId: plan.id,
+        expectedDeliveryPlanRevision: plan.revision,
+        profileId: profile.profileId,
+        profileRevision: profile.profileRevision,
+      };
+      void runCommand(
+        JSON.stringify(command),
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command,
+        },
+        command.type,
+      );
+    },
+    [projectId, runCommand, snapshot],
+  );
+
+  const interruptDeveloperAttempt = useCallback(
+    (attempt: DeveloperAttempt) => {
+      const command = {
+        type: 'developer_attempt.interrupt' as const,
+        projectId,
+        attemptId: attempt.id,
+        expectedAttemptRevision: attempt.revision,
+      };
+      void runCommand(
+        JSON.stringify(command),
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command,
+        },
+        command.type,
+      );
+    },
+    [projectId, runCommand],
+  );
+
+  const replaceDeveloperExecution = useCallback(
+    (attempt: DeveloperAttempt) => {
+      const command = {
+        type: 'developer_attempt.replace_execution' as const,
+        projectId,
+        attemptId: attempt.id,
+        expectedAttemptRevision: attempt.revision,
+      };
+      void runCommand(
+        JSON.stringify(command),
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command,
+        },
+        command.type,
+      );
+    },
+    [projectId, runCommand],
+  );
+
   return (
     <>
       {error || commandError ? (
@@ -488,6 +592,12 @@ function ProjectConnection({
           onRejectPlan: runPlanningCommand,
           onAbandonPlan: runPlanningCommand,
           onApplyFilter: runPlanningCommand,
+        }}
+        developer={{
+          error: developerError,
+          onStart: startDeveloperAttempt,
+          onInterrupt: interruptDeveloperAttempt,
+          onReplace: replaceDeveloperExecution,
         }}
       />
     </>

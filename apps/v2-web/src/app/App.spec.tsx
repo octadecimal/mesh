@@ -1,17 +1,21 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {
+  DEVELOPER_REPORT_SCHEMA,
   PM_DISCOVERY_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
   boardViewSchema,
+  developerAttemptSchema,
   planningCycleViewSchema,
   resolvedWorkerProfileSnapshotSchema,
   runtimeEventSchema,
   v2ProjectSnapshotSchema,
   v2SystemSnapshotSchema,
   workerExecutionSchema,
+  type ApprovedDeliveryPlan,
   type ServerRealtimeMessage,
   type V2CommandEnvelope,
+  type V2ProjectSnapshot,
 } from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -296,6 +300,306 @@ const newerFilteredBoard = boardViewSchema.parse({
     updatedAt: '2026-08-28T00:00:05.000Z',
   },
 });
+
+const developerProfile = resolvedWorkerProfileSnapshotSchema.parse({
+  ...execution.profileSnapshot,
+  profileId: '12121212-1212-4121-8121-121212121212',
+  projectId,
+  profileRevision: 3,
+  document: {
+    ...execution.profileSnapshot.document,
+    metadata: {
+      ...execution.profileSnapshot.document.metadata,
+      name: 'todo-developer',
+      displayName: 'Todo Developer',
+      scope: 'project',
+    },
+    spec: {
+      ...execution.profileSnapshot.document.spec,
+      assignmentKinds: ['developer_task'],
+      requiredCapabilities: [],
+      skills: { preferred: [], required: [] },
+      outputSchema: DEVELOPER_REPORT_SCHEMA,
+    },
+  },
+  digest: 'd'.repeat(64),
+});
+
+const developerTaskId = '13131313-1313-4131-8131-131313131313';
+const developerMilestoneId = '14141414-1414-4141-8141-141414141414';
+const developerPlanId = '15151515-1515-4151-8151-151515151515';
+const developerProposalId = '16161616-1616-4161-8161-161616161616';
+const developerRequirementId = '17171717-1717-4171-8171-171717171717';
+const developerAttemptId = '18181818-1818-4181-8181-181818181818';
+const developerExecutionId = '19191919-1919-4191-8191-191919191919';
+
+const developerDeliveryPlan = {
+  plan: {
+    id: developerPlanId,
+    projectId,
+    revision: 7,
+    projectIntentId: '20202020-2020-4202-8202-202020202020',
+    projectIntentRevision: 2,
+    ledgerId: '21212121-2121-4212-8212-212121212121',
+    ledgerRevision: 3,
+    baseDeliveryPlanRevision: null,
+    proposalId: developerProposalId,
+    summary: 'Persist Todo data.',
+    approvedBy: 'human',
+    approvedAt: '2026-08-28T00:00:04.000Z',
+  },
+  milestones: [
+    {
+      id: developerMilestoneId,
+      projectId,
+      revision: 2,
+      lifecycle: 'active',
+      title: 'Durable Todo',
+      outcome: 'Todo data survives restart.',
+      stopCondition: 'The restart test passes.',
+      exclusions: [],
+      ordinal: 1,
+      proposalId: developerProposalId,
+      deliveryPlanRevision: 7,
+      approvedAt: '2026-08-28T00:00:04.000Z',
+    },
+  ],
+  taskContracts: [
+    {
+      id: developerTaskId,
+      projectId,
+      revision: 4,
+      contractRevision: 3,
+      revisionKind: 'progress',
+      lifecycle: 'pending',
+      milestoneId: developerMilestoneId,
+      title: 'Persist Todo',
+      outcome: 'Todo state survives restart.',
+      acceptanceCriteria: ['Todo items are durable.'],
+      verificationCriteria: ['Run the restart test.'],
+      priority: 'must',
+      labels: ['backend'],
+      ownedSurfaces: ['Todo persistence'],
+      prohibitedSurfaces: ['Execution runtime'],
+      expectedArtifacts: ['Persistence tests'],
+      ordinal: 1,
+      source: {
+        kind: 'plan',
+        proposalId: developerProposalId,
+        deliveryPlanRevision: 7,
+      },
+      createdAt: '2026-08-28T00:00:04.000Z',
+    },
+  ],
+  dependencies: [],
+  traces: [
+    {
+      kind: 'milestone_covers',
+      milestoneId: developerMilestoneId,
+      milestoneRevision: 2,
+      requirement: {
+        recordId: developerRequirementId,
+        recordRevision: 5,
+      },
+    },
+    {
+      kind: 'task_satisfies',
+      taskId: developerTaskId,
+      taskContractRevision: 3,
+      requirement: {
+        recordId: developerRequirementId,
+        recordRevision: 5,
+      },
+    },
+  ],
+  milestoneDependencies: [],
+} satisfies ApprovedDeliveryPlan;
+
+const developerBoard = boardViewSchema.parse({
+  ...filteredBoard,
+  deliveryPlanRevision: 7,
+  emptyReason: null,
+  filter: {
+    ...filteredBoard.filter!,
+    revision: 5,
+    labels: [],
+  },
+  totalTaskCount: 1,
+  matchedTaskCount: 1,
+  facets: {
+    milestones: [
+      {
+        value: developerMilestoneId,
+        label: 'Durable Todo',
+        selected: false,
+        matchingTaskCount: 1,
+        milestoneRevision: 2,
+        lifecycle: 'active',
+        historical: false,
+      },
+    ],
+    taskLifecycles: filteredBoard.facets.taskLifecycles.map((option) => ({
+      ...option,
+      matchingTaskCount: option.value === 'pending' ? 1 : 0,
+    })),
+    readiness: filteredBoard.facets.readiness.map((option) => ({
+      ...option,
+      matchingTaskCount: option.value === 'actionable' ? 1 : 0,
+    })),
+    priorities: filteredBoard.facets.priorities.map((option) => ({
+      ...option,
+      matchingTaskCount: option.value === 'must' ? 1 : 0,
+    })),
+    labels: [
+      {
+        value: 'backend',
+        label: 'backend',
+        selected: false,
+        matchingTaskCount: 1,
+        historical: false,
+      },
+    ],
+    requirements: [
+      {
+        value: developerRequirementId,
+        label: 'Durable Todo data',
+        selected: false,
+        matchingTaskCount: 1,
+        recordRevision: 5,
+        requirementKind: 'functional',
+        historical: false,
+      },
+    ],
+  },
+  cards: [
+    {
+      taskId: developerTaskId,
+      taskContractRevision: 3,
+      taskCurrentRevision: 4,
+      milestoneId: developerMilestoneId,
+      milestoneRevision: 2,
+      title: 'Persist Todo',
+      outcome: 'Todo state survives restart.',
+      lifecycle: 'pending',
+      priority: 'must',
+      labels: ['backend'],
+      readiness: { state: 'actionable', blockers: [] },
+      dependencies: [],
+      detail: {
+        acceptanceCriteria: ['Todo items are durable.'],
+        verificationCriteria: ['Run the restart test.'],
+        ownedSurfaces: ['Todo persistence'],
+        prohibitedSurfaces: ['Execution runtime'],
+        expectedArtifacts: ['Persistence tests'],
+        milestoneOutcome: 'Todo data survives restart.',
+        milestoneStopCondition: 'The restart test passes.',
+        milestoneExclusions: [],
+        requirementTraces: [
+          {
+            recordId: developerRequirementId,
+            recordRevision: 5,
+            title: 'Durable Todo data',
+          },
+        ],
+      },
+    },
+  ],
+});
+
+const developerAssignment = {
+  kind: 'developer_task' as const,
+  projectId,
+  attemptId: developerAttemptId,
+  taskId: developerTaskId,
+  taskContractRevision: 3,
+  taskCurrentRevision: 4,
+  deliveryPlanId: developerPlanId,
+  deliveryPlanRevision: 7,
+  requirementRevisions: [
+    { recordId: developerRequirementId, recordRevision: 5 },
+  ],
+  baseCommit: project.headCommit,
+  workspacePath: 'C:\\repos\\todo-worktrees\\persist-todo',
+  title: 'Persist Todo',
+  outcome: 'Todo state survives restart.',
+  acceptanceCriteria: ['Todo items are durable.'],
+  verification: ['Run the restart test.'],
+  expectedArtifacts: ['Persistence tests'],
+  outputSchema: DEVELOPER_REPORT_SCHEMA,
+};
+
+const developerExecution = workerExecutionSchema.parse({
+  ...execution,
+  id: developerExecutionId,
+  profileId: developerProfile.profileId,
+  profileRevision: developerProfile.profileRevision,
+  assignment: developerAssignment,
+  profileSnapshot: developerProfile,
+  skillRequests: { preferred: [], required: [] },
+  resolvedSkills: [],
+  lifecycle: 'running',
+  revision: 2,
+  lastAdapterCursor: 2,
+  lastRuntimeSequence: 2,
+  replacementForExecutionId: null,
+  createdAt: '2026-08-28T00:00:05.000Z',
+  updatedAt: '2026-08-28T00:00:06.000Z',
+  endedAt: null,
+});
+
+const activeDeveloperAttempt = developerAttemptSchema.parse({
+  id: developerAttemptId,
+  projectId,
+  taskId: developerTaskId,
+  ordinal: 1,
+  lifecycle: 'active',
+  revision: 5,
+  deliveryPlanId: developerPlanId,
+  deliveryPlanRevision: 7,
+  intentRevision: 2,
+  ledgerRevision: 3,
+  taskContractRevision: 3,
+  taskCurrentRevision: 4,
+  requirementRevisions: developerAssignment.requirementRevisions,
+  baseCommit: project.headCommit,
+  profileId: developerProfile.profileId,
+  profileRevision: developerProfile.profileRevision,
+  assignment: developerAssignment,
+  workspace: {
+    attemptId: developerAttemptId,
+    repositoryPath: project.repositoryPath,
+    repositoryIdentity: project.repositoryIdentity,
+    branch: 'mesh/dev/persist-todo',
+    path: developerAssignment.workspacePath,
+    baseCommit: project.headCommit,
+    lifecycle: 'ready',
+    ownershipToken: 'owned-by-mesh',
+    observedHead: project.headCommit,
+    observedDirty: false,
+    failure: null,
+    revision: 2,
+    createdAt: '2026-08-28T00:00:05.000Z',
+    updatedAt: '2026-08-28T00:00:06.000Z',
+  },
+  controllingExecutionId: developerExecutionId,
+  executionIds: [developerExecutionId],
+  reportIds: [],
+  attention: null,
+  createdAt: '2026-08-28T00:00:05.000Z',
+  updatedAt: '2026-08-28T00:00:06.000Z',
+  endedAt: null,
+});
+
+const developerSnapshot = {
+  ...projectSnapshot,
+  profiles: [...projectSnapshot.profiles, developerProfile],
+  executions: [...projectSnapshot.executions, developerExecution],
+  developerAttempts: [],
+  developerReports: [],
+  deliveryPlan: developerDeliveryPlan,
+  board: developerBoard,
+  cursors: { domain: 3, runtime: 5 },
+} satisfies V2ProjectSnapshot;
 
 const terminalPlanningCycle = planningCycleViewSchema.parse({
   purpose: {
@@ -757,6 +1061,193 @@ describe('App', () => {
     expect(
       screen.getByRole('button', { name: 'Apply filters' }),
     ).toBeDisabled();
+  });
+
+  it('sends exact Developer start, interrupt, and replacement commands without optimistic lifecycle changes', async () => {
+    const user = userEvent.setup();
+    const interruptedAttempt = developerAttemptSchema.parse({
+      ...activeDeveloperAttempt,
+      lifecycle: 'interrupted',
+      revision: 6,
+      updatedAt: '2026-08-28T00:00:08.000Z',
+      endedAt: '2026-08-28T00:00:08.000Z',
+    });
+    const interruptedExecution = workerExecutionSchema.parse({
+      ...developerExecution,
+      lifecycle: 'interrupted',
+      revision: 3,
+      updatedAt: '2026-08-28T00:00:08.000Z',
+      endedAt: '2026-08-28T00:00:08.000Z',
+    });
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => developerSnapshot);
+    api.command = vi.fn(async (envelope) => {
+      switch (envelope.command.type) {
+        case 'developer_attempt.start':
+          return {
+            ok: true,
+            commandType: 'developer_attempt.start',
+            schemaVersion: 1,
+            attempt: activeDeveloperAttempt,
+            board: developerBoard,
+          };
+        case 'developer_attempt.interrupt':
+          return {
+            ok: true,
+            commandType: 'developer_attempt.interrupt',
+            schemaVersion: 1,
+            attempt: interruptedAttempt,
+            board: developerBoard,
+          };
+        case 'developer_attempt.replace_execution':
+          return {
+            ok: true,
+            commandType: 'developer_attempt.replace_execution',
+            schemaVersion: 1,
+            attempt: interruptedAttempt,
+            board: developerBoard,
+          };
+        default:
+          return defaultCommand(envelope);
+      }
+    });
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+    await user.click(
+      screen.getByRole('button', { name: 'View Persist Todo details' }),
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: 'Start Developer attempt' }),
+    );
+    await waitFor(() => expect(api.command).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(api.command).mock.calls[0][0].command).toEqual({
+      type: 'developer_attempt.start',
+      projectId,
+      taskId: developerTaskId,
+      expectedTaskRevision: 4,
+      expectedDeliveryPlanId: developerPlanId,
+      expectedDeliveryPlanRevision: 7,
+      profileId: developerProfile.profileId,
+      profileRevision: developerProfile.profileRevision,
+    });
+    expect(screen.getByText('No Developer attempts yet.')).toBeVisible();
+
+    act(() =>
+      app.sockets[0]?.message({
+        type: 'v2.domain_event',
+        protocolVersion: V2_PROTOCOL_VERSION,
+        projectId,
+        event: {
+          id: '23232323-2323-4232-8232-232323232323',
+          projectId,
+          sequence: 4,
+          occurredAt: '2026-08-28T00:00:06.000Z',
+          type: 'developer_attempt.changed',
+          payload: {
+            schemaVersion: 1,
+            attempt: activeDeveloperAttempt,
+            board: developerBoard,
+          },
+        },
+      }),
+    );
+    const interrupt = await screen.findByRole('button', {
+      name: 'Interrupt attempt 1',
+    });
+    await user.click(interrupt);
+    await waitFor(() => expect(api.command).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.command).mock.calls[1][0].command).toEqual({
+      type: 'developer_attempt.interrupt',
+      projectId,
+      attemptId: developerAttemptId,
+      expectedAttemptRevision: 5,
+    });
+    expect(interrupt).toBeInTheDocument();
+
+    act(() => {
+      app.sockets[0]?.message({
+        type: 'v2.domain_event',
+        protocolVersion: V2_PROTOCOL_VERSION,
+        projectId,
+        event: {
+          id: '24242424-2424-4242-8242-242424242424',
+          projectId,
+          sequence: 5,
+          occurredAt: '2026-08-28T00:00:08.000Z',
+          type: 'worker_execution.lifecycle_changed',
+          payload: { execution: interruptedExecution },
+        },
+      });
+      app.sockets[0]?.message({
+        type: 'v2.domain_event',
+        protocolVersion: V2_PROTOCOL_VERSION,
+        projectId,
+        event: {
+          id: '25252525-2525-4252-8252-252525252525',
+          projectId,
+          sequence: 6,
+          occurredAt: '2026-08-28T00:00:08.000Z',
+          type: 'developer_attempt.changed',
+          payload: {
+            schemaVersion: 1,
+            attempt: interruptedAttempt,
+            board: developerBoard,
+          },
+        },
+      });
+    });
+    await user.click(
+      await screen.findByRole('button', {
+        name: 'Replace attempt 1 execution',
+      }),
+    );
+    await waitFor(() => expect(api.command).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(api.command).mock.calls[2][0].command).toEqual({
+      type: 'developer_attempt.replace_execution',
+      projectId,
+      attemptId: developerAttemptId,
+      expectedAttemptRevision: 6,
+    });
+  });
+
+  it('keeps a typed Developer conflict in task detail, focuses it, and requests fresh truth', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => developerSnapshot);
+    api.command = vi.fn(async () => {
+      throw new V2HttpError(
+        409,
+        'developer_task_stale',
+        'Task changed. Refreshing current project truth.',
+      );
+    });
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+    await user.click(
+      screen.getByRole('button', { name: 'View Persist Todo details' }),
+    );
+    await user.click(
+      screen.getByRole('button', { name: 'Start Developer attempt' }),
+    );
+
+    const developer = screen.getByRole('region', {
+      name: 'Developer for Persist Todo',
+    });
+    const alert = await within(developer).findByRole('alert');
+    expect(alert).toHaveTextContent(
+      'Task changed. Refreshing current project truth.',
+    );
+    expect(alert).toHaveFocus();
+    await waitFor(() => expect(api.projectSnapshot).toHaveBeenCalledTimes(2));
   });
 
   it('registers a repository, navigates from the parsed success, and subscribes from snapshot cursors', async () => {

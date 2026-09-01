@@ -4,12 +4,37 @@ import type {
   BoardFilterSelection,
   BoardTaskCard,
   BoardView,
+  DeveloperAttempt,
+  DeveloperReportRecord,
+  ProjectEventCursors,
+  ResolvedWorkerProfileSnapshot,
   SetBoardFilterCommand,
   TaskReadinessBlocker,
+  WorkerExecution,
 } from '@mesh/v2-contracts';
 
+import {
+  DeveloperSection,
+  type DeveloperActivityProjection,
+} from './DeveloperSection';
 import type { PlanningConnection } from './PlanningPane';
 import './planning-board.css';
+
+export type BoardDeveloperProjection = {
+  attempts: readonly DeveloperAttempt[];
+  reports: readonly DeveloperReportRecord[];
+  executions: readonly WorkerExecution[];
+  profiles: readonly ResolvedWorkerProfileSnapshot[];
+  projectCursors: ProjectEventCursors;
+  activityByExecutionId: Readonly<Record<string, DeveloperActivityProjection>>;
+  error?: string;
+  onStart: (
+    card: BoardTaskCard,
+    profile: ResolvedWorkerProfileSnapshot,
+  ) => void;
+  onInterrupt: (attempt: DeveloperAttempt) => void;
+  onReplace: (attempt: DeveloperAttempt) => void;
+};
 
 const emptySelection: BoardFilterSelection = {
   milestoneIds: [],
@@ -61,7 +86,17 @@ function readinessReason(card: BoardTaskCard, blocker: TaskReadinessBlocker) {
   }
 }
 
-function TaskDetails({ card }: { card: BoardTaskCard }) {
+function TaskDetails({
+  card,
+  developer,
+  connection,
+  submitting,
+}: {
+  card: BoardTaskCard;
+  developer?: BoardDeveloperProjection;
+  connection: PlanningConnection;
+  submitting: boolean;
+}) {
   const headingRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => headingRef.current?.focus(), []);
   return (
@@ -98,6 +133,25 @@ function TaskDetails({ card }: { card: BoardTaskCard }) {
           ))}
         </ul>
       )}
+      {developer ? (
+        <DeveloperSection
+          card={card}
+          attempts={developer.attempts.filter(
+            (attempt) => attempt.taskId === card.taskId,
+          )}
+          reports={developer.reports}
+          executions={developer.executions}
+          profiles={developer.profiles}
+          projectCursors={developer.projectCursors}
+          activityByExecutionId={developer.activityByExecutionId}
+          connection={connection}
+          submitting={submitting}
+          error={developer.error}
+          onStart={(profile) => developer.onStart(card, profile)}
+          onInterrupt={developer.onInterrupt}
+          onReplace={developer.onReplace}
+        />
+      ) : null}
     </section>
   );
 }
@@ -117,12 +171,14 @@ export function BoardPane({
   submitting,
   error,
   onApplyFilter,
+  developer,
 }: {
   board?: BoardView;
   connection: PlanningConnection;
   submitting: boolean;
   error?: string;
   onApplyFilter: (command: SetBoardFilterCommand) => void;
+  developer?: BoardDeveloperProjection;
 }) {
   const [draft, setDraft] = useState(() => selectionFrom(board));
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
@@ -368,7 +424,12 @@ export function BoardPane({
                 </button>
                 {detailTaskId === card.taskId ? (
                   <>
-                    <TaskDetails card={card} />
+                    <TaskDetails
+                      card={card}
+                      developer={developer}
+                      connection={connection}
+                      submitting={submitting}
+                    />
                     <button type="button" onClick={closeDetails}>
                       Close task details
                     </button>

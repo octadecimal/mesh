@@ -6,6 +6,8 @@ import {
   normalizeIntentLedgerApprovedPayload,
   persistedPlanningCommandSuccessSchema,
   planningCycleViewSchema,
+  type DeveloperAttempt,
+  type DeveloperReportRecord,
   type DomainEvent,
   type RetainedRuntimeWindow,
   type RuntimeEvent,
@@ -429,6 +431,98 @@ const execution = {
   endedAt: null,
 };
 
+const developerAttemptId = '00000000-0000-4000-8000-000000000150';
+const developerTaskId = '00000000-0000-4000-8000-000000000143';
+const developerReportId = '00000000-0000-4000-8000-000000000151';
+const developerAttempt = {
+  id: developerAttemptId,
+  projectId,
+  taskId: developerTaskId,
+  ordinal: 1,
+  lifecycle: 'active',
+  revision: 2,
+  deliveryPlanId: approvedDeliveryPlan.plan.id,
+  deliveryPlanRevision: approvedDeliveryPlan.plan.revision,
+  intentRevision: 1,
+  ledgerRevision: 1,
+  taskContractRevision: 1,
+  taskCurrentRevision: 1,
+  requirementRevisions: [
+    {
+      recordId: '00000000-0000-4000-8000-000000000144',
+      recordRevision: 1,
+    },
+  ],
+  baseCommit: 'a'.repeat(40),
+  profileId,
+  profileRevision: 1,
+  assignment: {
+    kind: 'developer_task',
+    projectId,
+    attemptId: developerAttemptId,
+    taskId: developerTaskId,
+    taskContractRevision: 1,
+    taskCurrentRevision: 1,
+    deliveryPlanId: approvedDeliveryPlan.plan.id,
+    deliveryPlanRevision: approvedDeliveryPlan.plan.revision,
+    requirementRevisions: [
+      {
+        recordId: '00000000-0000-4000-8000-000000000144',
+        recordRevision: 1,
+      },
+    ],
+    baseCommit: 'a'.repeat(40),
+    workspacePath: 'C:\\code\\mesh\\.worktrees\\developer',
+    title: 'Show Todo Board',
+    outcome: 'Todo work is visible.',
+    acceptanceCriteria: ['The Board renders.'],
+    verification: ['corepack pnpm nx test v2-web'],
+    expectedArtifacts: ['Board tests'],
+    outputSchema: 'mesh.dev/developer-report/v1',
+  },
+  workspace: {
+    attemptId: developerAttemptId,
+    repositoryPath: 'C:\\code\\mesh',
+    repositoryIdentity: 'repo-1',
+    branch: 'mesh/dev/todo',
+    path: 'C:\\code\\mesh\\.worktrees\\developer',
+    baseCommit: 'a'.repeat(40),
+    lifecycle: 'ready',
+    ownershipToken: 'owned-by-mesh',
+    observedHead: 'a'.repeat(40),
+    observedDirty: false,
+    failure: null,
+    revision: 1,
+    createdAt: '2026-08-28T00:00:00.000Z',
+    updatedAt: '2026-08-28T00:00:01.000Z',
+  },
+  controllingExecutionId: executionId,
+  executionIds: [executionId],
+  reportIds: [],
+  attention: null,
+  createdAt: '2026-08-28T00:00:00.000Z',
+  updatedAt: '2026-08-28T00:00:02.000Z',
+  endedAt: null,
+} satisfies DeveloperAttempt;
+
+const developerReport = {
+  id: developerReportId,
+  recordedAt: '2026-08-28T00:00:03.000Z',
+  report: {
+    schema: 'mesh.dev/developer-report/v1',
+    disposition: 'blocked',
+    attemptId: developerAttemptId,
+    executionId,
+    taskId: developerTaskId,
+    taskContractRevision: 1,
+    blocker: 'The Todo persistence dependency is unavailable.',
+    evidence: [{ summary: 'The dependency probe failed.' }],
+    suggestedNextAction: 'Restore the dependency and replace the execution.',
+    preserveWorkspace: true,
+    workspace: { headCommit: 'a'.repeat(40), dirty: true },
+  },
+} satisfies DeveloperReportRecord;
+
 const snapshot = {
   protocolVersion: V2_PROTOCOL_VERSION,
   project: {
@@ -444,6 +538,8 @@ const snapshot = {
   },
   profiles: [],
   executions: [execution],
+  developerAttempts: [developerAttempt],
+  developerReports: [developerReport],
   attentionItems: [],
   planningCycles: [],
   planningHistoryTruncated: false,
@@ -550,6 +646,115 @@ const independentProjectProfileApproved = {
 } satisfies DomainEvent;
 
 describe('reduceProjectProjection', () => {
+  it('replaces the complete Developer snapshot projection', () => {
+    const populated = ready();
+
+    expect(populated.developerAttempts).toEqual({
+      [developerAttempt.id]: developerAttempt,
+    });
+    expect(populated.developerReports).toEqual({
+      [developerReport.id]: developerReport,
+    });
+
+    const cleared = reduceProjectProjection(populated, {
+      type: 'snapshot.received',
+      snapshot: { ...snapshot, developerAttempts: [], developerReports: [] },
+    });
+
+    expect(cleared.developerAttempts).toEqual({});
+    expect(cleared.developerReports).toEqual({});
+  });
+
+  it.each([
+    'developer_attempt.changed',
+    'developer_workspace.changed',
+  ] as const)('replaces the complete attempt and Board for %s', (type) => {
+    const changed = {
+      ...developerAttempt,
+      lifecycle: 'attention_required' as const,
+      revision: 3,
+      attention: {
+        code: 'developer_blocked',
+        message: 'Developer needs operator attention.',
+      },
+      updatedAt: '2026-08-28T00:00:03.000Z',
+      endedAt: '2026-08-28T00:00:03.000Z',
+    };
+    const result = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000152',
+        projectId,
+        sequence: 3,
+        occurredAt: changed.updatedAt,
+        type,
+        payload: { schemaVersion: 1, attempt: changed, board: filteredBoard },
+      } as DomainEvent,
+    });
+
+    expect(result.developerAttempts).toEqual({ [changed.id]: changed });
+    expect(result.board).toBe(filteredBoard);
+  });
+
+  it('replaces the complete report, attempt, and Board for a recorded report', () => {
+    const changed = {
+      ...developerAttempt,
+      lifecycle: 'attention_required' as const,
+      revision: 3,
+      reportIds: [developerReport.id],
+      attention: {
+        code: 'developer_blocked',
+        message: developerReport.report.blocker,
+      },
+      updatedAt: developerReport.recordedAt,
+      endedAt: developerReport.recordedAt,
+    };
+    const result = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000153',
+        projectId,
+        sequence: 3,
+        occurredAt: developerReport.recordedAt,
+        type: 'developer_report.recorded',
+        payload: {
+          schemaVersion: 1,
+          attempt: changed,
+          report: developerReport,
+          board: filteredBoard,
+        },
+      } as DomainEvent,
+    });
+
+    expect(result.developerAttempts).toEqual({ [changed.id]: changed });
+    expect(result.developerReports).toEqual({
+      [developerReport.id]: developerReport,
+    });
+    expect(result.board).toBe(filteredBoard);
+  });
+
+  it('drops stale Developer rows when a retained-gap resync snapshot arrives', () => {
+    const afterGap = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: { ...completedLifecycle, sequence: 5 },
+    });
+    expect(afterGap.resyncRequested).toBe(true);
+
+    const refreshed = reduceProjectProjection(afterGap, {
+      type: 'snapshot.received',
+      snapshot: {
+        ...snapshot,
+        developerAttempts: [],
+        developerReports: [],
+        cursors: { domain: 5, runtime: 5 },
+      },
+    });
+
+    expect(refreshed.developerAttempts).toEqual({});
+    expect(refreshed.developerReports).toEqual({});
+    expect(refreshed.resyncRequested).toBe(false);
+  });
+
   it('preserves a newer planning event when an older command response resolves', () => {
     const pmTurnId = '00000000-0000-4000-8000-000000000146';
     const awaitingHuman = planningCycleViewSchema.parse({

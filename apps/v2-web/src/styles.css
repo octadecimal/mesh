@@ -11,11 +11,14 @@ body {
   margin: 0;
 }
 button,
-input {
+input,
+select {
   font: inherit;
 }
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible,
+[role='alert']:focus-visible {
   outline: 3px solid #7dd3fc;
   outline-offset: 2px;
 }
@@ -88,7 +91,8 @@ button:disabled {
 }
 .v2-selector input,
 .v2-selector button,
-.v2-shell button {
+.v2-shell button,
+.v2-shell select {
   border: 1px solid #475569;
   border-radius: 0.4rem;
   padding: 0.55rem 0.75rem;
@@ -142,6 +146,49 @@ button:disabled {
 .v2-execution details {
   border-top: 1px solid #334155;
   padding-top: 0.75rem;
+}
+.v2-developer-section {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 1rem;
+  border-top: 1px solid #334155;
+  padding-top: 1rem;
+}
+.v2-developer-start,
+.v2-developer-attempts,
+.v2-developer-attempt {
+  display: grid;
+  gap: 0.65rem;
+}
+.v2-developer-start select {
+  max-width: 24rem;
+}
+.v2-developer-attempt {
+  border: 1px solid #334155;
+  border-radius: 0.6rem;
+  padding: 0.85rem;
+  background: #0f172a;
+}
+.v2-developer-attempt > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.v2-developer-attempt [aria-label='Developer attempt state'] {
+  margin: 0;
+  color: #7dd3fc;
+  font-weight: 700;
+}
+.v2-developer-attention,
+.v2-developer-section [role='alert'] {
+  border-left: 3px solid #fbbf24;
+  padding: 0.75rem;
+  background: #422006;
+}
+.v2-developer-executions {
+  display: grid;
+  gap: 0.75rem;
+  padding-left: 1.25rem;
 }
 .v2-execution dt {
   color: #a5b4cc;
