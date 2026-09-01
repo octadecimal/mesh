@@ -34,10 +34,7 @@ type Dependencies = {
     observe(workspace: ManagedWorkspace): Promise<ManagedWorkspace>;
   };
   planning: {
-    taskExecutionAuthorityInTransaction(
-      projectId: string,
-      taskId: string,
-    ): { board: unknown } | undefined;
+    planningSnapshotInTransaction(projectId: string): { board: unknown };
   };
   events: Pick<V2EventStore, 'appendDomainInTransaction'>;
   barrier: Pick<AuditBarrier, 'assertHealthy' | 'trip'>;
@@ -192,15 +189,9 @@ export const reconcileDeveloperAttempts = async (
           }
           return;
         }
-        const authority =
-          dependencies.planning.taskExecutionAuthorityInTransaction(
-            current.projectId,
-            current.taskId,
-          );
-        if (!authority)
-          throw new Error(
-            'Task execution authority was not found during recovery',
-          );
+        const board = dependencies.planning.planningSnapshotInTransaction(
+          current.projectId,
+        ).board;
         const workspace = workspaceChanged
           ? dependencies.developers.recordWorkspaceObservationInTransaction(
               {
@@ -231,7 +222,7 @@ export const reconcileDeveloperAttempts = async (
             payload: {
               schemaVersion: 1,
               attempt: changed,
-              board: authority.board as never,
+              board: board as never,
             },
           }),
         );

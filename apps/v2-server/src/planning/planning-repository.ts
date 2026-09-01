@@ -587,9 +587,7 @@ export class PlanningRepository {
     };
   }
 
-  private planningSnapshotInTransaction(
-    projectId: string,
-  ): PlanningBoardSnapshot {
+  planningSnapshotInTransaction(projectId: string): PlanningBoardSnapshot {
     const rows = this.database
       .prepare(
         `SELECT * FROM planning_cycles

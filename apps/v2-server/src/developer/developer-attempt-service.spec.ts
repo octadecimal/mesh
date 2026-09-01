@@ -322,6 +322,9 @@ const setupPersistedAttempt = async ({
     ? new DeveloperAttemptService({
         ...dependencies,
         planning: {
+          planningSnapshot: planning.planningSnapshot.bind(planning),
+          planningSnapshotInTransaction:
+            planning.planningSnapshotInTransaction.bind(planning),
           taskExecutionAuthority:
             planning.taskExecutionAuthority.bind(planning),
           taskExecutionAuthorityInTransaction:
@@ -510,6 +513,7 @@ const setup = (
   const fixture = createV2TestDatabase();
   fixtures.push(fixture);
   let authority = options.authority ?? createAuthority(fixture);
+  const currentBoard = authority.board;
   let profile = options.profile ?? createProfile();
   const executionRecords = new Map<string, WorkerExecution>([
     [
@@ -549,6 +553,12 @@ const setup = (
   const dependencies = {
     database: fixture.database,
     planning: {
+      planningSnapshot: () => ({
+        board: authority?.board ?? currentBoard,
+      }),
+      planningSnapshotInTransaction: () => ({
+        board: authority?.board ?? currentBoard,
+      }),
       taskExecutionAuthority: () => authority,
       taskExecutionAuthorityInTransaction: () => authority,
       appendOperationalTaskLifecycleInTransaction: (input: {
@@ -916,6 +926,63 @@ describe('DeveloperAttemptService', () => {
     });
     expect(context.receipts).toHaveLength(1);
     expect(context.reports).toHaveLength(1);
+  });
+
+  it('settles frozen completion after the current plan omits its task', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = completionReport(attempt);
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+    context.setAuthority(undefined);
+
+    await context.service.acceptReport(
+      execution as never,
+      {
+        id: randomUUID(),
+        type: 'worker_execution.structured_output',
+        executionId: execution.id,
+        projectId: execution.projectId,
+        occurredAt: later,
+        payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+      } as never,
+      report,
+    );
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'completed',
+      reportIds: [expect.any(String)],
+    });
+    expect(context.reports).toHaveLength(1);
+    expect(context.trips).toEqual([]);
+  });
+
+  it('settles a terminal notification after the current plan omits its task', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const execution = {
+      ...context.executionRecords.get(attempt.controllingExecutionId!)!,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+      lifecycle: 'failed' as const,
+      updatedAt: later,
+      endedAt: later,
+    };
+    context.setAuthority(undefined);
+
+    context.service.terminal(execution);
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'interrupted',
+      attention: null,
+    });
+    expect(context.trips).toEqual([]);
   });
 
   it('rejects missing, duplicate, and failed completion evidence', async () => {
@@ -2360,6 +2427,34 @@ describe('DeveloperAttemptService', () => {
     });
   });
 
+  it('interrupts a frozen attempt after the current plan omits its task', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    context.setAuthority(undefined);
+
+    const result = await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.interrupt',
+      attempt: { lifecycle: 'interrupted' },
+    });
+    expect(
+      context.executionRecords.get(active.controllingExecutionId!)?.lifecycle,
+    ).toBe('interrupted');
+    expect(context.trips).toEqual([]);
+  });
+
   it('serializes concurrent interrupt replay through runtime settlement', async () => {
     const context = setup();
     await context.service.start(context.command);
@@ -2588,6 +2683,7 @@ describe('DeveloperAttemptService', () => {
     await expect(context.service.interrupt(envelope)).rejects.toThrow(
       'accepted publication failed',
     );
+    context.setAuthority(undefined);
 
     await expect(
       reconcileDeveloperAttempts({
@@ -2596,8 +2692,8 @@ describe('DeveloperAttemptService', () => {
         executions: context.dependencies.executions,
         workspace: { observe: context.dependencies.workspace.observe },
         planning: {
-          taskExecutionAuthorityInTransaction:
-            context.dependencies.planning.taskExecutionAuthorityInTransaction,
+          planningSnapshotInTransaction:
+            context.dependencies.planning.planningSnapshotInTransaction,
         },
         events: context.dependencies.events,
         barrier: context.dependencies.barrier,
@@ -2614,16 +2710,13 @@ describe('DeveloperAttemptService', () => {
       endedAt: null,
     });
 
-    await expect(context.service.interrupt(envelope)).resolves.toMatchObject({
-      ok: true,
-      commandType: 'developer_attempt.interrupt',
-      attempt: { lifecycle: 'interrupted' },
-    });
+    await context.service.drainPendingInterrupts([active.id]);
     expect(
       context.executionRecords.get(active.controllingExecutionId!)?.lifecycle,
     ).toBe('interrupted');
     expect(genericInterrupts).toBe(1);
     expect(publicationAttempts).toBe(1);
+    expect(context.trips).toEqual([]);
   });
 
   it('replays a durable interrupt after a dirty recovery observation', async () => {
@@ -2669,8 +2762,8 @@ describe('DeveloperAttemptService', () => {
         executions: context.dependencies.executions,
         workspace: { observe: context.dependencies.workspace.observe },
         planning: {
-          taskExecutionAuthorityInTransaction:
-            context.dependencies.planning.taskExecutionAuthorityInTransaction,
+          planningSnapshotInTransaction:
+            context.dependencies.planning.planningSnapshotInTransaction,
         },
         events: context.dependencies.events,
         barrier: context.dependencies.barrier,
@@ -2816,6 +2909,7 @@ describe('DeveloperAttemptService', () => {
         execution: controlling,
       };
     };
+    context.setAuthority(undefined);
 
     await context.service.interrupt({
       idempotencyKey: randomUUID(),
@@ -2832,6 +2926,7 @@ describe('DeveloperAttemptService', () => {
       lifecycle: 'attention_required',
       attention: { code: 'developer_interrupt_unproven' },
     });
+    expect(context.trips).toEqual([]);
   });
 
   it('replaces only an interrupted attempt with its frozen assignment', async () => {
@@ -2878,6 +2973,181 @@ describe('DeveloperAttemptService', () => {
       },
     });
     expect(context.attempts[0].executionIds).toHaveLength(2);
+  });
+
+  it('replays a concurrent identical replacement after final transaction serialization', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const interrupted = context.attempts[0];
+    const envelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.replace_execution' as const,
+        projectId: interrupted.projectId,
+        attemptId: interrupted.id,
+        expectedAttemptRevision: interrupted.revision,
+      },
+    };
+    const reserveReplacement =
+      context.dependencies.execution.reserveReplacement;
+    let cachedReservation:
+      | Awaited<ReturnType<typeof reserveReplacement>>
+      | undefined;
+    let reserveCalls = 0;
+    let reservationEntered!: () => void;
+    const reservationStarted = new Promise<void>((resolve) => {
+      reservationEntered = resolve;
+    });
+    let releaseReservation!: () => void;
+    const reservationReleased = new Promise<void>((resolve) => {
+      releaseReservation = resolve;
+    });
+    context.dependencies.execution.reserveReplacement = async (...args) => {
+      reserveCalls += 1;
+      cachedReservation ??= await reserveReplacement(...args);
+      if (reserveCalls === 1) {
+        reservationEntered();
+        await reservationReleased;
+      }
+      return cachedReservation;
+    };
+    const beforeActivations = context.executionCalls.length;
+    const beforeEvents = context.events.length;
+    const concurrent = new DeveloperAttemptService(context.dependencies);
+
+    const first = context.service.replaceExecution(envelope);
+    await reservationStarted;
+    const replay = concurrent.replaceExecution(envelope);
+    await expect(replay).resolves.toMatchObject({ ok: true });
+    releaseReservation();
+
+    const [firstResult, replayResult] = await Promise.all([first, replay]);
+    expect(firstResult).toEqual(replayResult);
+    expect(reserveCalls).toBe(2);
+    expect(context.attempts[0].executionIds).toHaveLength(2);
+    expect(context.executionCalls).toHaveLength(beforeActivations + 1);
+    expect(context.events).toHaveLength(beforeEvents + 2);
+    expect(context.trips).toEqual([]);
+    expect(() => context.dependencies.barrier.assertHealthy()).not.toThrow();
+  });
+
+  it('serializes divergent concurrent replacement key reuse as a healthy conflict', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const interrupted = context.attempts[0];
+    const envelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.replace_execution' as const,
+        projectId: interrupted.projectId,
+        attemptId: interrupted.id,
+        expectedAttemptRevision: interrupted.revision,
+      },
+    };
+    const reserveReplacement =
+      context.dependencies.execution.reserveReplacement;
+    let reserveCalls = 0;
+    let reservationEntered!: () => void;
+    const reservationStarted = new Promise<void>((resolve) => {
+      reservationEntered = resolve;
+    });
+    let releaseReservation!: () => void;
+    const reservationReleased = new Promise<void>((resolve) => {
+      releaseReservation = resolve;
+    });
+    context.dependencies.execution.reserveReplacement = async (...args) => {
+      reserveCalls += 1;
+      const reservation = await reserveReplacement(...args);
+      reservationEntered();
+      await reservationReleased;
+      return reservation;
+    };
+    const beforeActivations = context.executionCalls.length;
+    const beforeEvents = context.events.length;
+
+    const first = context.service.replaceExecution(envelope);
+    await reservationStarted;
+    const conflict = context.service.replaceExecution({
+      ...envelope,
+      command: {
+        ...envelope.command,
+        expectedAttemptRevision: envelope.command.expectedAttemptRevision + 1,
+      },
+    });
+    releaseReservation();
+
+    await expect(first).resolves.toMatchObject({ ok: true });
+    await expect(conflict).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'idempotency_conflict' },
+    });
+    expect(reserveCalls).toBe(1);
+    expect(context.attempts[0].executionIds).toHaveLength(2);
+    expect(context.executionCalls).toHaveLength(beforeActivations + 1);
+    expect(context.events).toHaveLength(beforeEvents + 2);
+    expect(context.trips).toEqual([]);
+    expect(() => context.dependencies.barrier.assertHealthy()).not.toThrow();
+  });
+
+  it('replaces a frozen attempt after the current plan omits its task', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const interrupted = context.attempts[0];
+    context.setAuthority(undefined);
+
+    const result = await context.service.replaceExecution({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.replace_execution',
+        projectId: interrupted.projectId,
+        attemptId: interrupted.id,
+        expectedAttemptRevision: interrupted.revision,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.replace_execution',
+      attempt: { lifecycle: 'active' },
+    });
+    expect(context.attempts[0].executionIds).toHaveLength(2);
+    expect(context.trips).toEqual([]);
   });
 
   it('does not overwrite a newer completion when replacement reservation fails', async () => {

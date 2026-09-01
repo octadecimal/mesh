@@ -89,12 +89,14 @@ const createRecoveryContext = (
   const executionRecords = new Map<string, WorkerExecution>();
   if (execution) executionRecords.set(execution.id, execution);
   const events: DomainEvent[] = [];
+  const trips: unknown[] = [];
   let onObserve: (() => ManagedWorkspace | undefined) | undefined;
 
   return {
     fixture,
     executionId,
     events,
+    trips,
     get attempt() {
       return attempt;
     },
@@ -133,7 +135,9 @@ const createRecoveryContext = (
           },
         },
         planning: {
-          taskExecutionAuthorityInTransaction: () => ({ board: {} }),
+          planningSnapshotInTransaction: () => ({
+            board: { projectId: fixture.project.id },
+          }),
         },
         events: {
           appendDomainInTransaction: (
@@ -144,7 +148,10 @@ const createRecoveryContext = (
             return draft;
           },
         },
-        barrier: { assertHealthy: () => undefined, trip: () => undefined },
+        barrier: {
+          assertHealthy: () => undefined,
+          trip: (error: unknown) => trips.push(error),
+        },
         now: () => now,
       }),
   };
@@ -164,6 +171,34 @@ const execution = (
   }) as WorkerExecution;
 
 describe('reconcileDeveloperAttempts', () => {
+  it('records recovery attention after the current plan omits the frozen task', async () => {
+    const context = createRecoveryContext({
+      attemptLifecycle: 'active',
+      execution: {} as WorkerExecution,
+    });
+    context.executionRecords.set(
+      context.executionId,
+      execution(context, 'running'),
+    );
+    context.setObserveHook(() => ({
+      ...context.attempt.workspace,
+      lifecycle: 'attention_required',
+      failure: {
+        code: 'developer_workspace_conflict',
+        message: 'Workspace ownership changed',
+      },
+    }));
+
+    const recovery = await context.reconcile();
+
+    expect(context.attempt).toMatchObject({
+      lifecycle: 'attention_required',
+      attention: { code: 'developer_workspace_conflict' },
+    });
+    expect(recovery.events).toHaveLength(1);
+    expect(context.trips).toEqual([]);
+  });
+
   it.each([
     {
       name: 'running execution preserves a durable interrupt pending replay',
