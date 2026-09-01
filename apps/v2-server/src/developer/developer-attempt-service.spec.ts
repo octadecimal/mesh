@@ -6,6 +6,7 @@ import {
   type DeveloperReport,
   type ManagedWorkspace,
   type ResolvedWorkerProfileSnapshot,
+  type WorkerExecution,
 } from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it } from 'vitest';
 
@@ -404,6 +405,16 @@ const setup = (
   fixtures.push(fixture);
   let authority = options.authority ?? createAuthority(fixture);
   let profile = options.profile ?? createProfile();
+  const executionRecords = new Map<string, WorkerExecution>([
+    [
+      fixture.execution.id,
+      {
+        ...fixture.execution,
+        lifecycle: 'running',
+        revision: 1,
+      },
+    ],
+  ]);
   const phases: string[] = [];
   const attempts: DeveloperAttempt[] = options.existingAttempt
     ? [options.existingAttempt]
@@ -465,7 +476,7 @@ const setup = (
           ...current,
           revision: current.revision + 1,
           controllingExecutionId: executionId,
-          executionIds: [executionId],
+          executionIds: [...current.executionIds, executionId],
         };
         attempts.splice(attempts.indexOf(current), 1, next);
         return next;
@@ -505,6 +516,7 @@ const setup = (
         return event;
       },
     },
+    executions: { get: (id: string) => executionRecords.get(id) },
     execution: {
       reserveStart: async () => {
         phases.push('workspace_observed_ready', 'execution_reserved');
@@ -537,6 +549,57 @@ const setup = (
         expect(attempts[0]).toMatchObject({ lifecycle: 'active' });
         executionCalls.push(executionId);
         phases.push('attempt_activated', 'execution_activated');
+      },
+      interrupt: async (envelope) => {
+        const current = executionRecords.get(envelope.command.executionId)!;
+        const interrupted = {
+          ...current,
+          lifecycle: 'interrupted' as const,
+          revision: current.revision + 1,
+          updatedAt: later,
+          endedAt: later,
+        };
+        executionRecords.set(interrupted.id, interrupted);
+        return {
+          ok: true,
+          commandType: 'worker_execution.interrupt' as const,
+          execution: interrupted,
+        };
+      },
+      reserveReplacement: async (envelope, replacementForExecutionId) => {
+        const replacement = {
+          ...fixture.execution,
+          id: randomUUID(),
+          projectId: envelope.command.projectId,
+          profileId: envelope.command.profileId,
+          profileRevision: envelope.command.profileRevision,
+          assignment: envelope.command.assignment,
+          profileSnapshot: {
+            ...fixture.execution.profileSnapshot,
+            profileId: envelope.command.profileId,
+            profileRevision: envelope.command.profileRevision,
+            document: profile.document,
+            digest: profile.digest,
+          },
+          lifecycle: 'starting' as const,
+          revision: 0,
+          nativeHandle: null,
+          replacementForExecutionId,
+          failure: null,
+          createdAt: later,
+          updatedAt: later,
+          endedAt: null,
+        };
+        executionRecords.set(replacement.id, replacement);
+        return {
+          execution: replacement,
+          result: {
+            ok: true,
+            commandType: 'worker_execution.start' as const,
+            execution: replacement,
+          },
+          activationRequired: true,
+        };
       },
     },
     workspace: {
@@ -588,6 +651,13 @@ const setup = (
         };
         return observation;
       },
+      observe: async (workspace: ManagedWorkspace) => ({
+        ...workspace,
+        lifecycle: 'ready' as const,
+        observedHead: fixture.project.headCommit,
+        observedDirty: workspace.observedDirty ?? false,
+        failure: null,
+      }),
     },
     barrier: {
       assertHealthy: () => {
@@ -609,6 +679,7 @@ const setup = (
     workspaceDerivations,
     inspectionCalls,
     executionCalls,
+    executionRecords,
     events,
     reports,
     receipts,
@@ -1236,5 +1307,199 @@ describe('DeveloperAttemptService', () => {
     expect(context.executionCalls).toEqual([
       context.getAuthority()!.project.id,
     ]);
+  });
+
+  it('settles a proven interrupt from the exact active attempt revision', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+
+    const result = await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.interrupt',
+      attempt: { lifecycle: 'interrupted' },
+    });
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'interrupted',
+      controllingExecutionId: active.controllingExecutionId,
+      executionIds: active.executionIds,
+      workspace: active.workspace,
+    });
+  });
+
+  it('rejects a stale Developer interrupt without changing the active attempt', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+
+    const result = await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision + 1,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(context.attempts).toEqual([active]);
+  });
+
+  it('preserves a report durably settled before an interrupt request', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    const execution = {
+      ...context.fixture.execution,
+      id: active.controllingExecutionId,
+      projectId: active.projectId,
+      assignment: active.assignment,
+    };
+    context.service.acceptReport(
+      execution as never,
+      {
+        id: randomUUID(),
+        type: 'worker_execution.structured_output',
+        executionId: execution.id,
+        projectId: execution.projectId,
+        occurredAt: later,
+        payload: {
+          schema: DEVELOPER_REPORT_SCHEMA,
+          value: completionReport(active),
+        },
+      } as never,
+      completionReport(active),
+    );
+
+    const result = await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(context.attempts[0]).toMatchObject({ lifecycle: 'completed' });
+    expect(context.reports).toHaveLength(1);
+  });
+
+  it('marks the attempt attention-required when interruption is not proven', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    const controlling = context.executionRecords.get(
+      active.controllingExecutionId!,
+    )!;
+    context.dependencies.execution.interrupt = async () => {
+      context.executionRecords.set(controlling.id, {
+        ...controlling,
+        lifecycle: 'attention_required',
+        revision: controlling.revision + 1,
+      });
+      return {
+        ok: true,
+        commandType: 'worker_execution.interrupt',
+        execution: controlling,
+      };
+    };
+
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'attention_required',
+      attention: { code: 'developer_interrupt_unproven' },
+    });
+  });
+
+  it('replaces only an interrupted attempt with its frozen assignment', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const interrupted = context.attempts[0];
+
+    const result = await context.service.replaceExecution({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.replace_execution',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: interrupted.revision,
+      },
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.replace_execution',
+      attempt: {
+        lifecycle: 'active',
+        assignment: active.assignment,
+        profileId: active.profileId,
+        profileRevision: active.profileRevision,
+        workspace: {
+          path: active.workspace.path,
+          branch: active.workspace.branch,
+          baseCommit: active.workspace.baseCommit,
+          lifecycle: 'ready',
+        },
+      },
+    });
+    expect(context.attempts[0].executionIds).toHaveLength(2);
+  });
+
+  it('rejects replacement while the attempt is still active', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+
+    const result = await context.service.replaceExecution({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.replace_execution',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(context.attempts).toEqual([active]);
   });
 });

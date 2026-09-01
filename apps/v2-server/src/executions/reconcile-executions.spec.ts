@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -8,6 +9,7 @@ import type {
   HarnessSession,
   WorkerExecution,
 } from '@mesh/v2-contracts';
+import { DEVELOPER_REPORT_SCHEMA } from '@mesh/v2-contracts';
 
 import {
   createV2TestDatabase,
@@ -429,6 +431,98 @@ describe('reconcileExecutions', () => {
       }
     },
   );
+
+  it('leaves an unactivated Developer replacement reservation for its owner', async () => {
+    const context = setup();
+    try {
+      const original = advance(
+        context.fixture,
+        context.executions,
+        'completed',
+      );
+      const developer = {
+        ...original,
+        id: randomUUID(),
+        lifecycle: 'starting' as const,
+        revision: 0,
+        nativeHandle: null,
+        lastAdapterCursor: 0,
+        lastRuntimeSequence: 0,
+        failure: null,
+        updatedAt: original.createdAt,
+        endedAt: null,
+        assignment: {
+          kind: 'developer_task' as const,
+          projectId: context.fixture.project.id,
+          attemptId: randomUUID(),
+          taskId: randomUUID(),
+          taskContractRevision: 1,
+          taskCurrentRevision: 1,
+          deliveryPlanId: randomUUID(),
+          deliveryPlanRevision: 1,
+          requirementRevisions: [],
+          baseCommit: context.fixture.project.headCommit,
+          workspacePath: 'C:/owned-workspace',
+          title: 'Persist Todo items',
+          outcome: 'Todo items survive reload.',
+          acceptanceCriteria: ['Todo items persist.'],
+          verification: [],
+          expectedArtifacts: [],
+          outputSchema: DEVELOPER_REPORT_SCHEMA,
+        },
+        profileSnapshot: {
+          ...original.profileSnapshot,
+          document: {
+            ...original.profileSnapshot.document,
+            spec: {
+              ...original.profileSnapshot.document.spec,
+              assignmentKinds: ['developer_task'],
+              outputSchema: DEVELOPER_REPORT_SCHEMA,
+            },
+          },
+        },
+      };
+      context.executions.transaction(() =>
+        context.executions.insertInTransaction(developer),
+      );
+      const operation = context.executions.transaction(() =>
+        context.operations.createPendingInTransaction({
+          executionId: developer.id,
+          kind: 'start',
+          request: { version: 'mesh.v2.execution-start/v1' },
+          createdAt: '2026-08-28T02:00:03.000Z',
+        }),
+      );
+      const adapter = new FakeHarnessAdapter();
+      const probe = vi.spyOn(adapter, 'probe');
+
+      const result = await reconcileExecutions({
+        executions: context.executions,
+        operations: context.operations,
+        adapter,
+        events: context.fixture.events,
+        barrier: context.barrier,
+        attach: () => undefined,
+      });
+
+      expect(context.executions.get(developer.id)).toMatchObject({
+        lifecycle: 'starting',
+        nativeHandle: null,
+      });
+      expect(context.operations.get(operation.id)).toMatchObject({
+        state: 'pending',
+      });
+      expect(result).toEqual({
+        resumed: [],
+        terminalized: [],
+        attentionRequired: [],
+      });
+      expect(probe).not.toHaveBeenCalled();
+      expect(diagnosticCount(context.fixture)).toBe(0);
+    } finally {
+      context.fixture.close();
+    }
+  });
 
   it('returns immutable audit barrier health snapshots as diagnostics accumulate', () => {
     const barrier = new AuditBarrier();

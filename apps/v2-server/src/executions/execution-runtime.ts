@@ -21,6 +21,7 @@ import {
   type WorkerExecution,
   type WorkerExecutionId,
   type WorkerExecutionStructuredOutputRuntimeEvent,
+  workerExecutionIdSchema,
 } from '@mesh/v2-contracts';
 
 import { inImmediateTransaction, type V2Database } from '../db/database.js';
@@ -289,6 +290,7 @@ export class ExecutionRuntime {
     envelope: StartExecutionEnvelope,
     requestHash: string,
     knownOperation?: ExecutionOperation,
+    replacementForExecutionId: WorkerExecutionId | null = null,
   ): ReservedExecutionStart {
     const operation =
       knownOperation ??
@@ -303,6 +305,7 @@ export class ExecutionRuntime {
         idempotencyKey: envelope.idempotencyKey,
         requestHash,
         request: envelope.command,
+        replacementForExecutionId,
       },
       operation,
       stored,
@@ -325,6 +328,7 @@ export class ExecutionRuntime {
       idempotencyKey: string;
       requestHash: string;
       request: StartExecutionEnvelope['command'];
+      replacementForExecutionId: WorkerExecutionId | null;
     },
     knownReverseLink?: ExecutionOperation,
     knownStored?: StoredCommandResult,
@@ -349,11 +353,29 @@ export class ExecutionRuntime {
       'request' in request
         ? startExecutionCommandSchema.safeParse(request.request)
         : undefined;
+    const hasReplacementForExecutionId =
+      typeof request === 'object' &&
+      request !== null &&
+      !Array.isArray(request) &&
+      'replacementForExecutionId' in request;
+    const replacementForExecutionId = hasReplacementForExecutionId
+      ? workerExecutionIdSchema.safeParse(
+          (request as { replacementForExecutionId: unknown })
+            .replacementForExecutionId,
+        )
+      : undefined;
+    const linkedReplacementForExecutionId =
+      replacementForExecutionId?.success === true
+        ? replacementForExecutionId.data
+        : null;
+    const expectedRequestKeys = hasReplacementForExecutionId
+      ? 'idempotencyKey,replacementForExecutionId,request,requestHash,version'
+      : 'idempotencyKey,request,requestHash,version';
     if (
       typeof request !== 'object' ||
       request === null ||
       Array.isArray(request) ||
-      requestKeys !== 'idempotencyKey,request,requestHash,version' ||
+      requestKeys !== expectedRequestKeys ||
       !('version' in request) ||
       request.version !== 'mesh.v2.execution-start/v1' ||
       !('idempotencyKey' in request) ||
@@ -362,11 +384,14 @@ export class ExecutionRuntime {
       typeof request.requestHash !== 'string' ||
       !('request' in request) ||
       !embeddedRequest?.success ||
+      (hasReplacementForExecutionId && !replacementForExecutionId?.success) ||
       (expected !== undefined &&
         (request.idempotencyKey !== expected.idempotencyKey ||
           request.requestHash !== expected.requestHash ||
           hashV2Command(expected.request) !== expected.requestHash ||
-          !sameDurableValue(embeddedRequest.data, expected.request)))
+          !sameDurableValue(embeddedRequest.data, expected.request) ||
+          linkedReplacementForExecutionId !==
+            expected.replacementForExecutionId))
     ) {
       throw new Error('Reserved start operation link is invalid');
     }
@@ -403,7 +428,11 @@ export class ExecutionRuntime {
       embeddedRequest.data.projectId !== execution.projectId ||
       embeddedRequest.data.profileId !== execution.profileId ||
       embeddedRequest.data.profileRevision !== execution.profileRevision ||
-      !sameDurableValue(embeddedRequest.data.assignment, execution.assignment)
+      !sameDurableValue(
+        embeddedRequest.data.assignment,
+        execution.assignment,
+      ) ||
+      execution.replacementForExecutionId !== linkedReplacementForExecutionId
     ) {
       throw new Error('Reserved start operation authority is inconsistent');
     }
@@ -441,7 +470,8 @@ export class ExecutionRuntime {
         successfulReceipt.revision !== 0 ||
         successfulReceipt.lastAdapterCursor !== 0 ||
         successfulReceipt.lastRuntimeSequence !== 0 ||
-        successfulReceipt.replacementForExecutionId !== null ||
+        successfulReceipt.replacementForExecutionId !==
+          execution.replacementForExecutionId ||
         successfulReceipt.failure !== null ||
         successfulReceipt.createdAt !== execution.createdAt ||
         successfulReceipt.updatedAt !== execution.createdAt ||
@@ -474,7 +504,8 @@ export class ExecutionRuntime {
         execution.nativeHandle === null &&
         execution.lastAdapterCursor === 0 &&
         execution.lastRuntimeSequence === 0 &&
-        execution.replacementForExecutionId === null &&
+        execution.replacementForExecutionId ===
+          linkedReplacementForExecutionId &&
         execution.createdAt === execution.updatedAt &&
         execution.endedAt === execution.createdAt &&
         operation.createdAt === execution.createdAt &&
@@ -511,7 +542,8 @@ export class ExecutionRuntime {
           execution.nativeHandle === null &&
           execution.lastAdapterCursor === 0 &&
           execution.lastRuntimeSequence === 0 &&
-          execution.replacementForExecutionId === null &&
+          execution.replacementForExecutionId ===
+            linkedReplacementForExecutionId &&
           execution.endedAt === execution.updatedAt &&
           operation.createdAt === execution.createdAt &&
           operation.updatedAt === execution.updatedAt &&
@@ -552,8 +584,32 @@ export class ExecutionRuntime {
     return operation;
   }
 
+  private requireTerminalReplacement(
+    projectId: string,
+    replacementForExecutionId: WorkerExecutionId,
+  ): void {
+    const prior = this.dependencies.executions.get(replacementForExecutionId);
+    if (
+      !prior ||
+      prior.projectId !== projectId ||
+      !['completed', 'failed', 'interrupted', 'attention_required'].includes(
+        prior.lifecycle,
+      )
+    ) {
+      throw new ExecutionReservationError({
+        ok: false,
+        commandType: 'worker_execution.start',
+        error: {
+          code: 'execution_lifecycle_conflict',
+          message: 'Replacement requires a terminal execution in this project',
+        },
+      });
+    }
+  }
+
   findReservedStart(
     envelope: StartExecutionEnvelope,
+    replacementForExecutionId: WorkerExecutionId | null = null,
   ): ReservedExecutionStart | undefined {
     this.dependencies.barrier.assertHealthy();
     const requestHash = hashV2Command(envelope.command);
@@ -563,7 +619,13 @@ export class ExecutionRuntime {
     );
     if (!stored) return undefined;
     try {
-      return this.reservedStartFromStored(stored, envelope, requestHash);
+      return this.reservedStartFromStored(
+        stored,
+        envelope,
+        requestHash,
+        undefined,
+        replacementForExecutionId,
+      );
     } catch (error) {
       this.dependencies.barrier.trip(error, this.dependencies.now());
       throw error;
@@ -573,15 +635,30 @@ export class ExecutionRuntime {
   async reserveStart(
     envelope: StartExecutionEnvelope,
   ): Promise<ReservedExecutionStart> {
-    return this.reserveStartAfterLookup(envelope, false);
+    return this.reserveStartAfterLookup(envelope, false, null);
+  }
+
+  async reserveReplacement(
+    envelope: StartExecutionEnvelope,
+    replacementForExecutionId: WorkerExecutionId,
+  ): Promise<ReservedExecutionStart> {
+    return this.reserveStartAfterLookup(
+      envelope,
+      false,
+      replacementForExecutionId,
+    );
   }
 
   private async reserveStartAfterLookup(
     envelope: StartExecutionEnvelope,
     commandLookupAlreadyMissed: boolean,
+    replacementForExecutionId: WorkerExecutionId | null,
   ): Promise<ReservedExecutionStart> {
     if (!commandLookupAlreadyMissed) {
-      const replay = this.findReservedStart(envelope);
+      const replay = this.findReservedStart(
+        envelope,
+        replacementForExecutionId,
+      );
       if (replay) return replay;
     }
 
@@ -596,6 +673,9 @@ export class ExecutionRuntime {
         commandType: 'worker_execution.start',
         error: { code: 'project_not_found', message: 'Project was not found' },
       });
+    }
+    if (replacementForExecutionId !== null) {
+      this.requireTerminalReplacement(project.id, replacementForExecutionId);
     }
     let profile: ResolvedWorkerProfileSnapshot;
     try {
@@ -700,7 +780,7 @@ export class ExecutionRuntime {
       revision: failed ? 1 : 0,
       lastAdapterCursor: 0,
       lastRuntimeSequence: 0,
-      replacementForExecutionId: null,
+      replacementForExecutionId,
       failure:
         missingCapabilities.length > 0
           ? {
@@ -736,10 +816,18 @@ export class ExecutionRuntime {
             stored,
             envelope,
             requestHash,
+            undefined,
+            replacementForExecutionId,
           );
           return;
         }
         this.dependencies.barrier.assertHealthy();
+        if (replacementForExecutionId !== null) {
+          this.requireTerminalReplacement(
+            project.id,
+            replacementForExecutionId,
+          );
+        }
         writesStarted = true;
         const execution =
           this.dependencies.executions.insertInTransaction(initial);
@@ -756,6 +844,9 @@ export class ExecutionRuntime {
               idempotencyKey: envelope.idempotencyKey,
               requestHash,
               request: envelope.command,
+              ...(replacementForExecutionId === null
+                ? {}
+                : { replacementForExecutionId }),
             },
             createdAt: occurredAt,
           });
@@ -938,7 +1029,11 @@ export class ExecutionRuntime {
       }
     }
     try {
-      const reservation = await this.reserveStartAfterLookup(envelope, true);
+      const reservation = await this.reserveStartAfterLookup(
+        envelope,
+        true,
+        null,
+      );
       if (reservation.activationRequired) {
         await this.activateReserved(reservation.execution.id);
       }

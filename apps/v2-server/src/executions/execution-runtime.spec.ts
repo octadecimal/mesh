@@ -872,6 +872,58 @@ describe('ExecutionRuntime', () => {
     });
   });
 
+  it('reserves an unactivated replacement linked to a terminal execution', async () => {
+    const context = createRuntime();
+    const first = await context.runtime.reserveStart(context.start);
+    await context.runtime.activateReserved(first.execution.id);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(first.execution.id),
+      'Expected a running execution',
+    );
+    await context.runtime.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.interrupt',
+        projectId: running.projectId,
+        executionId: running.id,
+        expectedRevision: running.revision,
+      },
+    });
+    const replacementEnvelope = {
+      ...context.start,
+      idempotencyKey: randomUUID(),
+    };
+
+    const replacement = await context.runtime.reserveReplacement(
+      replacementEnvelope,
+      first.execution.id,
+    );
+
+    expect(replacement.execution).toMatchObject({
+      lifecycle: 'starting',
+      replacementForExecutionId: first.execution.id,
+      assignment: first.execution.assignment,
+      profileSnapshot: first.execution.profileSnapshot,
+    });
+    expect(context.fake.startCount).toBe(1);
+    expect(
+      context.operations.listForExecution(replacement.execution.id),
+    ).toMatchObject([
+      {
+        kind: 'start',
+        request: { replacementForExecutionId: first.execution.id },
+      },
+    ]);
+    await expect(
+      context.runtime.reserveReplacement(
+        replacementEnvelope,
+        first.execution.id,
+      ),
+    ).resolves.toEqual(replacement);
+  });
+
   it('preserves public pre-migration replay but fails direct reservation closed', async () => {
     const fake = new FakeHarnessAdapter();
     fake.capabilitiesValue = { ...fake.capabilitiesValue, capabilities: [] };

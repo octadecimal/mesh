@@ -184,6 +184,15 @@ export const reconcileExecutions = async (
       summary.terminalized.push(execution.id);
       continue;
     }
+    if (
+      execution.assignment.kind === 'developer_task' &&
+      execution.lifecycle === 'starting' &&
+      execution.nativeHandle === null &&
+      executionPending.length === 1 &&
+      executionPending[0]?.kind === 'start'
+    ) {
+      continue;
+    }
     let probe: HarnessProbeResult;
     try {
       probe = execution.nativeHandle
