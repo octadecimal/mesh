@@ -33,6 +33,8 @@ const profileId = '22222222-2222-4222-8222-222222222222';
 const executionId = '33333333-3333-4333-8333-333333333333';
 const planningCycleId = '44444444-4444-4444-8444-444444444444';
 const proposalId = '55555555-5555-4555-8555-555555555555';
+const projectIntentId = '66666666-6666-4666-8666-666666666666';
+const ledgerId = '77777777-7777-4777-8777-777777777777';
 const timestamp = '2026-08-28T00:00:00.000Z';
 
 const systemSnapshot: V2SystemSnapshot = {
@@ -93,10 +95,17 @@ const createDependencies = (): V2RouteDependencies => ({
   planning: {
     submitTurn: async () =>
       failed('planning_cycle.submit_turn', 'submit turn route'),
+    submitPlanTurn: async () =>
+      failed('planning_cycle.submit_plan_turn', 'submit plan turn route'),
     approveProposal: () =>
       failed('planning_proposal.approve', 'approve proposal route'),
     rejectProposal: () =>
       failed('planning_proposal.reject', 'reject proposal route'),
+    approvePlanProposal: () =>
+      failed('plan_proposal.approve', 'approve plan proposal route'),
+    rejectPlanProposal: () =>
+      failed('plan_proposal.reject', 'reject plan proposal route'),
+    setBoardFilter: () => failed('board_filter.set', 'board filter route'),
     abandonCycle: async () =>
       failed('planning_cycle.abandon', 'abandon cycle route'),
   },
@@ -225,6 +234,66 @@ describe('V2 HTTP routes', () => {
         expectedProposalRevision: 1,
         expectedProjectIntentRevision: null,
         expectedLedgerRevision: null,
+      },
+    ],
+    [
+      'submit plan turn route',
+      {
+        type: 'planning_cycle.submit_plan_turn',
+        projectId,
+        expectedCycleRevision: null,
+        profileId,
+        profileRevision: 1,
+        expectedProjectIntentId: projectIntentId,
+        expectedProjectIntentRevision: 1,
+        expectedLedgerId: ledgerId,
+        expectedLedgerRevision: 1,
+        expectedDeliveryPlan: { id: null, revision: null },
+        message: 'Plan the Todo delivery milestones.',
+      },
+    ],
+    [
+      'approve plan proposal route',
+      {
+        type: 'plan_proposal.approve',
+        projectId,
+        planningCycleId,
+        proposalId,
+        expectedCycleRevision: 2,
+        expectedProposalRevision: 1,
+        expectedProjectIntentId: projectIntentId,
+        expectedProjectIntentRevision: 1,
+        expectedLedgerId: ledgerId,
+        expectedLedgerRevision: 1,
+        expectedDeliveryPlan: { id: null, revision: null },
+      },
+    ],
+    [
+      'reject plan proposal route',
+      {
+        type: 'plan_proposal.reject',
+        projectId,
+        planningCycleId,
+        proposalId,
+        expectedCycleRevision: 2,
+        expectedProposalRevision: 1,
+        feedback: 'Split the milestones.',
+      },
+    ],
+    [
+      'board filter route',
+      {
+        type: 'board_filter.set',
+        projectId,
+        expectedFilterRevision: 1,
+        filter: {
+          milestoneIds: [],
+          requirementRecordIds: [],
+          priorities: ['must'],
+          labels: [],
+          readiness: ['actionable'],
+          taskLifecycles: ['pending'],
+        },
       },
     ],
     [

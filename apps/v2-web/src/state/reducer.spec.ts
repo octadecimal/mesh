@@ -1,6 +1,10 @@
 import {
   V2_PROTOCOL_VERSION,
+  approvedDeliveryPlanSchema,
   approvedPlanningOutcomeSchema,
+  boardViewSchema,
+  normalizeIntentLedgerApprovedPayload,
+  persistedPlanningCommandSuccessSchema,
   planningCycleViewSchema,
   type DomainEvent,
   type RetainedRuntimeWindow,
@@ -22,6 +26,11 @@ const planningCycleId = '00000000-0000-4000-8000-000000000010';
 const planningTurnId = '00000000-0000-4000-8000-000000000011';
 
 const planningCycle = planningCycleViewSchema.parse({
+  purpose: {
+    kind: 'intent',
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+  },
   cycle: {
     id: planningCycleId,
     projectId,
@@ -52,6 +61,7 @@ const planningCycle = planningCycleViewSchema.parse({
   ],
   questions: [],
   proposals: [],
+  deliveryPlanProposals: [],
 });
 
 const approvedOutcome = approvedPlanningOutcomeSchema.parse({
@@ -158,9 +168,178 @@ const approvedOutcome = approvedPlanningOutcomeSchema.parse({
     relationships: [],
   },
 });
+const normalizedApprovedOutcome =
+  normalizeIntentLedgerApprovedPayload(approvedOutcome);
+
+const filteredBoard = boardViewSchema.parse({
+  projectId,
+  deliveryPlanRevision: 2,
+  stale: false,
+  emptyReason: 'filter_empty',
+  filter: {
+    projectId,
+    revision: 3,
+    milestoneIds: [],
+    taskLifecycles: [],
+    readiness: [],
+    priorities: [],
+    labels: ['web'],
+    requirementRecordIds: [],
+    updatedAt: '2026-08-28T00:00:04.000Z',
+  },
+  totalTaskCount: 1,
+  matchedTaskCount: 0,
+  facets: {
+    milestones: [],
+    taskLifecycles: [
+      {
+        value: 'pending',
+        label: 'Pending',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      {
+        value: 'completed',
+        label: 'Completed',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      {
+        value: 'retired',
+        label: 'Retired',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+    ],
+    readiness: [
+      {
+        value: 'actionable',
+        label: 'Actionable',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      {
+        value: 'blocked',
+        label: 'Blocked',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      {
+        value: 'inactive',
+        label: 'Inactive',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+    ],
+    priorities: [
+      { value: 'must', label: 'Must', selected: false, matchingTaskCount: 0 },
+      {
+        value: 'should',
+        label: 'Should',
+        selected: false,
+        matchingTaskCount: 0,
+      },
+      { value: 'could', label: 'Could', selected: false, matchingTaskCount: 0 },
+    ],
+    labels: [
+      {
+        value: 'web',
+        label: 'web',
+        selected: true,
+        matchingTaskCount: 0,
+        historical: false,
+      },
+    ],
+    requirements: [],
+  },
+  cards: [],
+});
+
+const approvedDeliveryPlan = approvedDeliveryPlanSchema.parse({
+  plan: {
+    id: '00000000-0000-4000-8000-000000000140',
+    projectId,
+    revision: 2,
+    projectIntentId: approvedOutcome.intentLedger.projectIntent.id,
+    projectIntentRevision: approvedOutcome.intentLedger.projectIntent.revision,
+    ledgerId: approvedOutcome.intentLedger.ledger.id,
+    ledgerRevision: approvedOutcome.intentLedger.ledger.revision,
+    baseDeliveryPlanRevision: 1,
+    proposalId: '00000000-0000-4000-8000-000000000141',
+    summary: 'Current filtered Todo plan.',
+    approvedBy: 'human',
+    approvedAt: '2026-08-28T00:00:04.000Z',
+  },
+  milestones: [
+    {
+      id: '00000000-0000-4000-8000-000000000142',
+      projectId,
+      revision: 1,
+      lifecycle: 'active',
+      title: 'Todo experience',
+      outcome: 'Todo work is visible.',
+      stopCondition: 'The Todo Board is visible.',
+      exclusions: [],
+      ordinal: 1,
+      proposalId: '00000000-0000-4000-8000-000000000141',
+      deliveryPlanRevision: 2,
+      approvedAt: '2026-08-28T00:00:04.000Z',
+    },
+  ],
+  taskContracts: [
+    {
+      id: '00000000-0000-4000-8000-000000000143',
+      projectId,
+      revision: 1,
+      contractRevision: 1,
+      revisionKind: 'plan_contract',
+      lifecycle: 'pending',
+      milestoneId: '00000000-0000-4000-8000-000000000142',
+      title: 'Show Todo Board',
+      outcome: 'Todo work is visible.',
+      acceptanceCriteria: ['The Board renders.'],
+      verificationCriteria: ['Render the Board.'],
+      priority: 'must',
+      labels: ['web'],
+      ownedSurfaces: ['Todo Board'],
+      prohibitedSurfaces: [],
+      expectedArtifacts: ['Board tests'],
+      ordinal: 1,
+      source: {
+        kind: 'plan',
+        proposalId: '00000000-0000-4000-8000-000000000141',
+        deliveryPlanRevision: 2,
+      },
+      createdAt: '2026-08-28T00:00:04.000Z',
+    },
+  ],
+  dependencies: [],
+  traces: [
+    {
+      kind: 'milestone_covers',
+      milestoneId: '00000000-0000-4000-8000-000000000142',
+      milestoneRevision: 1,
+      requirement: {
+        recordId: '00000000-0000-4000-8000-000000000144',
+        recordRevision: 1,
+      },
+    },
+    {
+      kind: 'task_satisfies',
+      taskId: '00000000-0000-4000-8000-000000000143',
+      taskContractRevision: 1,
+      requirement: {
+        recordId: '00000000-0000-4000-8000-000000000144',
+        recordRevision: 1,
+      },
+    },
+  ],
+  milestoneDependencies: [],
+});
 
 const terminalPlanningCycles = Array.from({ length: 20 }, (_, index) =>
   planningCycleViewSchema.parse({
+    purpose: planningCycle.purpose,
     cycle: {
       ...planningCycle.cycle,
       id: `00000000-0000-4000-8000-${String(100 + index).padStart(12, '0')}`,
@@ -174,6 +353,7 @@ const terminalPlanningCycles = Array.from({ length: 20 }, (_, index) =>
     turns: [],
     questions: [],
     proposals: [],
+    deliveryPlanProposals: [],
   }),
 );
 
@@ -268,6 +448,25 @@ const snapshot = {
   planningCycles: [],
   planningHistoryTruncated: false,
   intentLedger: null,
+  deliveryPlan: null,
+  board: {
+    projectId,
+    deliveryPlanRevision: null,
+    stale: false,
+    emptyReason: 'intent_required',
+    filter: null,
+    totalTaskCount: 0,
+    matchedTaskCount: 0,
+    facets: {
+      milestones: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [],
+  },
   cursors: { domain: 2, runtime: 5 },
 } satisfies V2ProjectSnapshot;
 
@@ -351,6 +550,281 @@ const independentProjectProfileApproved = {
 } satisfies DomainEvent;
 
 describe('reduceProjectProjection', () => {
+  it('preserves a newer planning event when an older command response resolves', () => {
+    const pmTurnId = '00000000-0000-4000-8000-000000000146';
+    const awaitingHuman = planningCycleViewSchema.parse({
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'awaiting_human',
+        revision: 3,
+        activeExecutionId: null,
+        updatedAt: '2026-08-28T00:00:02.000Z',
+      },
+      turns: [
+        ...planningCycle.turns,
+        {
+          id: pmTurnId,
+          projectId,
+          planningCycleId,
+          ordinal: 2,
+          actor: 'pm',
+          message: 'Which Todo workflow matters most?',
+          launchState: null,
+          executionId,
+          createdAt: '2026-08-28T00:00:02.000Z',
+        },
+      ],
+      questions: [
+        {
+          id: '00000000-0000-4000-8000-000000000147',
+          projectId,
+          planningCycleId,
+          turnId: pmTurnId,
+          key: 'workflow',
+          prompt: 'Which Todo workflow matters most?',
+          rationale: 'The answer determines the first milestone.',
+          choices: ['Personal', 'Team'],
+        },
+      ],
+    });
+    const launchPending = planningCycleViewSchema.parse({
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'launch_pending',
+        revision: 1,
+        activeExecutionId: null,
+        updatedAt: '2026-08-28T00:00:01.000Z',
+      },
+      turns: [
+        {
+          ...planningCycle.turns[0],
+          launchState: 'launch_pending',
+          executionId: null,
+        },
+      ],
+    });
+    const requestDomainCursor = ready().domainCursor;
+    const afterEvent = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000148',
+        projectId,
+        sequence: requestDomainCursor + 1,
+        occurredAt: '2026-08-28T00:00:02.000Z',
+        type: 'planning_cycle.changed',
+        payload: { schemaVersion: 2, planningCycle: awaitingHuman },
+      },
+    });
+
+    const afterResponse = reduceProjectProjection(afterEvent, {
+      type: 'planning.command_result',
+      requestDomainCursor,
+      result: {
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'planning_cycle.submit_turn',
+        planningCycle: launchPending,
+      },
+    });
+
+    expect(afterResponse).toBe(afterEvent);
+    expect(afterResponse.planningCycles).toEqual([awaitingHuman]);
+    expect(afterResponse.domainCursor).toBe(3);
+  });
+
+  it('applies complete versioned projections and ignores invalid authority pairs', () => {
+    const hydrated = ready();
+    const approved = persistedPlanningCommandSuccessSchema.parse({
+      ok: true,
+      schemaVersion: 2,
+      commandType: 'planning_proposal.approve',
+      planningCycle: normalizedApprovedOutcome.planningCycle,
+      intentLedger: normalizedApprovedOutcome.intentLedger,
+      board: normalizedApprovedOutcome.board,
+    });
+    const next = reduceProjectProjection(hydrated, {
+      type: 'planning.command_result',
+      requestDomainCursor: hydrated.domainCursor,
+      result: approved,
+    });
+
+    expect(next.planningCycles).toEqual([
+      normalizedApprovedOutcome.planningCycle,
+    ]);
+    expect(next.intentLedger).toEqual(normalizedApprovedOutcome.intentLedger);
+    expect(next.board).toEqual(normalizedApprovedOutcome.board);
+
+    const filtered = reduceProjectProjection(next, {
+      type: 'planning.command_result',
+      requestDomainCursor: next.domainCursor,
+      result: {
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'board_filter.set',
+        board: filteredBoard,
+      },
+    });
+    expect(filtered.board).toEqual(filteredBoard);
+
+    const invalid = reduceProjectProjection(filtered, {
+      type: 'planning.command_result',
+      requestDomainCursor: filtered.domainCursor,
+      result: {
+        ...approved,
+        board: snapshot.board,
+      } as unknown as typeof approved,
+    });
+    expect(invalid).toBe(filtered);
+  });
+
+  it('treats a legacy success as receipt-only when fresh and resyncs when freshness is unknown', () => {
+    const legacy = {
+      ok: true,
+      commandType: 'planning_proposal.approve',
+      ...approvedOutcome,
+    } as const;
+    const installed = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'snapshot.received',
+        snapshot: {
+          ...snapshot,
+          planningCycles: [normalizedApprovedOutcome.planningCycle],
+          planningHistoryTruncated: true,
+          intentLedger: normalizedApprovedOutcome.intentLedger,
+          deliveryPlan: approvedDeliveryPlan,
+          board: filteredBoard,
+          cursors: { domain: 9, runtime: 11 },
+        },
+      },
+    );
+    const current = reduceProjectProjection(installed, {
+      type: 'transport.subscribed',
+    });
+    const acknowledged = reduceProjectProjection(current, {
+      type: 'planning.command_result',
+      requestDomainCursor: current.domainCursor,
+      result: legacy,
+    });
+
+    expect(acknowledged).toBe(current);
+    expect(acknowledged.planningCycles).toBe(current.planningCycles);
+    expect(acknowledged.intentLedger).toBe(current.intentLedger);
+    expect(acknowledged.deliveryPlan).toBe(approvedDeliveryPlan);
+    expect(acknowledged.board).toBe(filteredBoard);
+    expect(acknowledged.domainCursor).toBe(9);
+    expect(acknowledged.runtimeCursor).toBe(11);
+    expect(acknowledged.planningHistoryTruncated).toBe(true);
+
+    const unknown = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'planning.command_result',
+        requestDomainCursor: 0,
+        result: legacy,
+      },
+    );
+    expect(unknown.resyncRequested).toBe(true);
+    expect(unknown.resyncReason).toBe('legacy_m2_freshness_unknown');
+    expect(unknown.planningCycles).toEqual([]);
+
+    const staleProjection = reduceProjectProjection(current, {
+      type: 'resync.required',
+      reason: 'manual_stale',
+    });
+    const gappedProjection = reduceProjectProjection(current, {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000145',
+        projectId,
+        sequence: 11,
+        occurredAt: '2026-08-28T00:01:05.000Z',
+        type: 'planning_cycle.changed',
+        payload: { schemaVersion: 2, planningCycle },
+      } as DomainEvent,
+    });
+    const mismatchedProjection = { ...current, projectId: otherProjectId };
+
+    for (const projection of [
+      staleProjection,
+      gappedProjection,
+      mismatchedProjection,
+    ]) {
+      const before = JSON.stringify({
+        planningCycles: projection.planningCycles,
+        intentLedger: projection.intentLedger,
+        deliveryPlan: projection.deliveryPlan,
+        board: projection.board,
+        domainCursor: projection.domainCursor,
+        runtimeCursor: projection.runtimeCursor,
+        planningHistoryTruncated: projection.planningHistoryTruncated,
+      });
+      const resync = reduceProjectProjection(projection, {
+        type: 'planning.command_result',
+        requestDomainCursor: projection.domainCursor,
+        result: legacy,
+      });
+      expect(resync.resyncRequested).toBe(true);
+      expect(resync.resyncReason).toBe('legacy_m2_freshness_unknown');
+      expect(
+        JSON.stringify({
+          planningCycles: resync.planningCycles,
+          intentLedger: resync.intentLedger,
+          deliveryPlan: resync.deliveryPlan,
+          board: resync.board,
+          domainCursor: resync.domainCursor,
+          runtimeCursor: resync.runtimeCursor,
+          planningHistoryTruncated: resync.planningHistoryTruncated,
+        }),
+      ).toBe(before);
+    }
+  });
+
+  it('replays legacy and current planning events in order without merging Board history', () => {
+    const legacyCycle = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000130',
+        projectId,
+        sequence: 3,
+        occurredAt: '2026-08-28T00:01:03.000Z',
+        type: 'planning_cycle.changed',
+        payload: { planningCycle: approvedOutcome.planningCycle },
+      } as DomainEvent,
+    });
+    const duplicate = reduceProjectProjection(legacyCycle, {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000130',
+        projectId,
+        sequence: 3,
+        occurredAt: '2026-08-28T00:01:03.000Z',
+        type: 'planning_cycle.changed',
+        payload: { planningCycle: approvedOutcome.planningCycle },
+      } as DomainEvent,
+    });
+    const currentBoard = reduceProjectProjection(duplicate, {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000131',
+        projectId,
+        sequence: 4,
+        occurredAt: '2026-08-28T00:01:04.000Z',
+        type: 'board.filter_changed',
+        payload: { board: filteredBoard },
+      } as DomainEvent,
+    });
+
+    expect(duplicate).toBe(legacyCycle);
+    expect(currentBoard.domainCursor).toBe(4);
+    expect(currentBoard.planningCycles).toEqual([
+      normalizedApprovedOutcome.planningCycle,
+    ]);
+    expect(currentBoard.board).toEqual(filteredBoard);
+  });
+
   it('hydrates planning truth, preserves the local draft, and applies a complete cycle event', () => {
     const withDraft = reduceProjectProjection(
       createInitialProjectProjection(projectId),
@@ -494,11 +968,12 @@ describe('reduceProjectProjection', () => {
         snapshot: {
           ...snapshot,
           planningCycles: [
-            approvedOutcome.planningCycle,
+            normalizedApprovedOutcome.planningCycle,
             ...terminalAuthority.slice(0, 19),
           ],
           planningHistoryTruncated: true,
           intentLedger: approvedOutcome.intentLedger,
+          board: normalizedApprovedOutcome.board,
           cursors: { ...snapshot.cursors, domain: 3 },
         },
       },
@@ -543,8 +1018,9 @@ describe('reduceProjectProjection', () => {
         type: 'snapshot.received',
         snapshot: {
           ...snapshot,
-          planningCycles: [approvedOutcome.planningCycle],
+          planningCycles: [normalizedApprovedOutcome.planningCycle],
           intentLedger: approvedOutcome.intentLedger,
+          board: normalizedApprovedOutcome.board,
           cursors: { ...snapshot.cursors, domain: 3 },
         },
       },
@@ -556,7 +1032,7 @@ describe('reduceProjectProjection', () => {
 
   it('converges append, proposal supersede, reject, and abandon events with a fresh snapshot', () => {
     const firstProposal = {
-      ...approvedOutcome.planningCycle.proposals[0]!,
+      ...normalizedApprovedOutcome.planningCycle.proposals[0]!,
       lifecycle: 'superseded' as const,
       decidedAt: '2026-08-28T00:00:03.000Z',
     };
@@ -568,9 +1044,9 @@ describe('reduceProjectProjection', () => {
       decidedAt: null,
     };
     const superseded = planningCycleViewSchema.parse({
-      ...approvedOutcome.planningCycle,
+      ...normalizedApprovedOutcome.planningCycle,
       cycle: {
-        ...approvedOutcome.planningCycle.cycle,
+        ...normalizedApprovedOutcome.planningCycle.cycle,
         lifecycle: 'awaiting_approval',
         revision: 5,
         latestProposalRevision: 2,

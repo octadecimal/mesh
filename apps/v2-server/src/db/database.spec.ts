@@ -3,6 +3,10 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import BetterSqlite3 from 'better-sqlite3';
+import {
+  legacyM2PlanningCommandSuccessSchema,
+  normalizePlanningCommandSuccess,
+} from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -12,7 +16,9 @@ import {
   type V2Database,
 } from './database.js';
 import { migrateV2Database } from './migrate.js';
+import { PlanningRepository } from '../planning/planning-repository.js';
 import { V2CommandRepository } from '../storage/command-repository.js';
+import { V2EventStore } from '../storage/event-store.js';
 import {
   createV2TestDatabase,
   insertV2TestProject,
@@ -45,6 +51,7 @@ const tableNames = (database: V2Database) =>
   ).map(({ name }) => name);
 
 const migrationPath = join(__dirname, 'migrations', '001_foundation.sql');
+const migration2Path = join(__dirname, 'migrations', '002_intent_ledger.sql');
 
 const createMigration1Database = (path: string) => {
   const database = new BetterSqlite3(path);
@@ -58,6 +65,16 @@ const createMigration1Database = (path: string) => {
     ${readFileSync(migrationPath, 'utf8')}
     INSERT INTO v2_schema_migrations (version, name, applied_at)
     VALUES (1, '001_foundation', '2026-08-28T00:00:00.000Z');
+  `);
+  return database;
+};
+
+const createMigration2Database = (path: string) => {
+  const database = createMigration1Database(path);
+  database.exec(`
+    ${readFileSync(migration2Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (2, '002_intent_ledger', '2026-08-29T00:00:00.000Z');
   `);
   return database;
 };
@@ -132,7 +149,7 @@ afterEach(async () => {
 });
 
 describe('V2 database identity and migration', () => {
-  it('claims a fresh database, applies both migrations, and configures every connection', () => {
+  it('claims a fresh database, applies all migrations, and configures every connection', () => {
     const path = join(temporaryDirectory(), 'fresh.sqlite');
 
     const database = openV2Database(path);
@@ -155,6 +172,7 @@ describe('V2 database identity and migration', () => {
     ).toEqual([
       { version: 1, name: '001_foundation' },
       { version: 2, name: '002_intent_ledger' },
+      { version: 3, name: '003_planning_board' },
     ]);
   });
 
@@ -191,7 +209,7 @@ describe('V2 database identity and migration', () => {
       reopened
         .prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations')
         .get(),
-    ).toEqual({ count: 2 });
+    ).toEqual({ count: 3 });
   });
 
   it('migrates an identified pre-foundation V2 database forward', () => {
@@ -213,7 +231,7 @@ describe('V2 database identity and migration', () => {
     expect(tableNames(migrated)).toContain('worker_executions');
     expect(
       migrated.prepare('SELECT version FROM v2_schema_migrations').all(),
-    ).toEqual([{ version: 1 }, { version: 2 }]);
+    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
   });
 
   it.each([
@@ -380,6 +398,29 @@ describe('V2 database identity and migration', () => {
         'ledger_revisions',
         'ledger_revision_members',
         'ledger_revision_relationships',
+        'planning_cycle_purposes',
+        'delivery_plan_proposals',
+        'delivery_plan_proposal_decisions',
+        'delivery_plan_proposal_milestone_reservations',
+        'delivery_plan_proposal_task_reservations',
+        'delivery_plan_proposal_dependency_reservations',
+        'delivery_plan_proposal_milestones',
+        'delivery_plan_proposal_tasks',
+        'delivery_plan_proposal_dependencies',
+        'delivery_plan_proposal_traces',
+        'delivery_plans',
+        'delivery_plan_revisions',
+        'milestones',
+        'milestone_revisions',
+        'tasks',
+        'task_revisions',
+        'task_dependencies',
+        'task_dependency_revisions',
+        'delivery_plan_revision_milestones',
+        'delivery_plan_revision_tasks',
+        'delivery_plan_revision_dependencies',
+        'delivery_plan_revision_traces',
+        'board_filters',
       ]),
     );
     expect(
@@ -615,6 +656,10 @@ describe('V2 database identity and migration', () => {
           !name.startsWith('pm_output_') &&
           !name.startsWith('project_intent_') &&
           !name.startsWith('ledger_') &&
+          !name.startsWith('delivery_plan') &&
+          !name.startsWith('milestone') &&
+          !name.startsWith('task') &&
+          name !== 'board_filters' &&
           name !== 'execution_operations_start_request' &&
           name !== 'runtime_events_project_execution_identity' &&
           name !== 'worker_executions_project_identity'
@@ -656,6 +701,643 @@ describe('V2 database identity and migration', () => {
       });
     }
     expect(database.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('upgrades a nonempty migration 2 database without changing audit bytes, checksums, or cursors', () => {
+    const path = join(temporaryDirectory(), 'upgrade-migration-2.sqlite');
+    const database = createMigration2Database(path);
+    const projectId = randomUUID();
+    const profileId = randomUUID();
+    const executionId = randomUUID();
+    const diagnosticId = randomUUID();
+    const cycleId = randomUUID();
+    const humanTurnId = randomUUID();
+    const pmTurnId = randomUUID();
+    const proposalId = randomUUID();
+    const recordId = randomUUID();
+    const intentId = randomUUID();
+    const ledgerId = randomUUID();
+    const runtimeEventId = randomUUID();
+    const at = '2026-08-29T01:02:03.004Z';
+    const diagnosticPayload = '{ "raw": "keep  two  spaces", "cursor": 17 }';
+    const runtimePayload = '{ "delta": "first\\nsecond", "final": false }';
+
+    database
+      .prepare(
+        `INSERT INTO projects VALUES (?, 'Todo', 'm2-upgrade', 'C:/todo',
+          'C:/todo/.git', ?, 1, ?, ?)`,
+      )
+      .run(projectId, 'a'.repeat(40), at, at);
+    database
+      .prepare(
+        `INSERT INTO worker_profiles VALUES (
+          ?, 'global', NULL, 'pm', 'PM', 1, ?, ?
+        )`,
+      )
+      .run(profileId, at, at);
+    database
+      .prepare(
+        `INSERT INTO worker_profile_revisions VALUES (
+          ?, 1, 'profile', '{}', NULL, NULL, '{"kind":"human"}', ?, ?
+        )`,
+      )
+      .run(profileId, at, 'b'.repeat(64));
+    database
+      .prepare(
+        `INSERT INTO worker_executions VALUES (
+          ?, ?, ?, 1, '{}', '{}', '{}', '[]', '{}', 'fake', 'deterministic',
+          NULL, 'running', 4, 17, 23, NULL, NULL, ?, ?, NULL
+        )`,
+      )
+      .run(executionId, projectId, profileId, at, at);
+    database
+      .prepare(
+        `INSERT INTO planning_cycles VALUES (
+          ?, ?, 'approved', 3, ?, 1, NULL, NULL, 1, NULL, ?, ?, ?
+        )`,
+      )
+      .run(cycleId, projectId, profileId, at, at, at);
+    database
+      .prepare(`INSERT INTO event_streams VALUES (?, 'domain', 11)`)
+      .run(projectId);
+    database
+      .prepare(`INSERT INTO event_streams VALUES (?, 'runtime', 23)`)
+      .run(projectId);
+    database
+      .prepare(`INSERT INTO raw_diagnostics VALUES (?, ?, ?, 'fake', 17, ?, ?)`)
+      .run(diagnosticId, projectId, executionId, at, diagnosticPayload);
+    database
+      .prepare(
+        `INSERT INTO runtime_events VALUES (
+          ?, ?, ?, ?, 23, 17, ?, 'worker_execution.output_delta', ?
+        )`,
+      )
+      .run(
+        runtimeEventId,
+        projectId,
+        executionId,
+        diagnosticId,
+        at,
+        runtimePayload,
+      );
+    const intentContent = {
+      goal: 'Ship Todo.',
+      targetUsers: ['Operators'],
+      desiredCapabilities: ['Manage tasks'],
+      constraints: [],
+      nonGoals: [],
+      successConditions: ['Tasks persist'],
+      rationale: 'Requested.',
+      provenance: [
+        {
+          kind: 'conversation_turn',
+          turnId: humanTurnId,
+          rationale: 'Request.',
+        },
+      ],
+    };
+    const proposedRecord = {
+      operation: 'create',
+      key: 'requirement',
+      recordId,
+      content: {
+        type: 'requirement',
+        kind: 'functional',
+        status: 'proposed',
+        priority: 'must',
+        statement: 'Tasks persist.',
+        rationale: 'Core.',
+      },
+      provenance: [
+        {
+          kind: 'conversation_turn',
+          turnId: humanTurnId,
+          rationale: 'Request.',
+        },
+      ],
+    };
+    database
+      .prepare(
+        `INSERT INTO planning_turns VALUES (?, ?, ?, 1, 'human', ?, 'execution_bound', ?, ?)`,
+      )
+      .run(humanTurnId, projectId, cycleId, 'Plan Todo.', executionId, at);
+    database
+      .prepare(
+        `INSERT INTO planning_turns VALUES (?, ?, ?, 2, 'pm', ?, NULL, ?, ?)`,
+      )
+      .run(pmTurnId, projectId, cycleId, 'Approved intent.', executionId, at);
+    database
+      .prepare(
+        `INSERT INTO planning_proposals VALUES (
+          ?, ?, ?, 1, 'approved', NULL, NULL, ?, ?, ?, '[]', ?, ?, ?, NULL, ?, ?
+        )`,
+      )
+      .run(
+        proposalId,
+        projectId,
+        cycleId,
+        'Todo intent',
+        JSON.stringify(intentContent),
+        JSON.stringify([proposedRecord]),
+        JSON.stringify({
+          intentChanges: [
+            'goal',
+            'targetUsers',
+            'desiredCapabilities',
+            'successConditions',
+            'rationale',
+            'provenance',
+          ],
+          recordChanges: { create: 1, revise: 0, reuse: 0 },
+          relationshipChanges: { added: [], removed: [] },
+        }),
+        pmTurnId,
+        executionId,
+        at,
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO planning_proposal_records VALUES (?, 'requirement', ?)`,
+      )
+      .run(proposalId, recordId);
+    database
+      .prepare(
+        `INSERT INTO pm_output_receipts VALUES (?, ?, ?, ?, ?, ?, 'accepted', NULL, ?)`,
+      )
+      .run(
+        executionId,
+        projectId,
+        cycleId,
+        humanTurnId,
+        runtimeEventId,
+        'e'.repeat(64),
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO project_intent_revisions VALUES (?, ?, 1, ?, ?, 'human', ?)`,
+      )
+      .run(
+        intentId,
+        projectId,
+        JSON.stringify({ ...intentContent, provenance: undefined }),
+        proposalId,
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO project_intent_provenance VALUES (?, 1, ?, ?, 1, 'Request.')`,
+      )
+      .run(intentId, projectId, humanTurnId);
+    database
+      .prepare(`INSERT INTO ledger_records VALUES (?, ?, 'requirement', ?, ?)`)
+      .run(recordId, projectId, proposalId, at);
+    database
+      .prepare(
+        `INSERT INTO ledger_record_revisions VALUES (?, ?, 1, ?, ?, 'human', ?)`,
+      )
+      .run(
+        recordId,
+        projectId,
+        JSON.stringify({ ...proposedRecord.content, status: 'approved' }),
+        proposalId,
+        at,
+      );
+    database
+      .prepare(
+        `INSERT INTO ledger_record_revision_provenance VALUES (?, 1, ?, ?, 1, 'Request.')`,
+      )
+      .run(recordId, projectId, humanTurnId);
+    database
+      .prepare(`INSERT INTO ledger_revisions VALUES (?, ?, 1, ?, 'human', ?)`)
+      .run(ledgerId, projectId, proposalId, at);
+    database
+      .prepare(`INSERT INTO ledger_revision_members VALUES (?, 1, ?, ?, 1, 1)`)
+      .run(ledgerId, projectId, recordId);
+
+    const legacyCycle = {
+      cycle: {
+        id: cycleId,
+        projectId,
+        lifecycle: 'approved' as const,
+        revision: 3,
+        profileId,
+        profileRevision: 1,
+        baseProjectIntentRevision: null,
+        baseLedgerRevision: null,
+        latestProposalRevision: 1,
+        activeExecutionId: null,
+        createdAt: at,
+        updatedAt: at,
+        endedAt: at,
+      },
+      turns: [
+        {
+          id: humanTurnId,
+          projectId,
+          planningCycleId: cycleId,
+          ordinal: 1,
+          actor: 'human' as const,
+          message: 'Plan Todo.',
+          launchState: 'execution_bound' as const,
+          executionId,
+          createdAt: at,
+        },
+        {
+          id: pmTurnId,
+          projectId,
+          planningCycleId: cycleId,
+          ordinal: 2,
+          actor: 'pm' as const,
+          message: 'Approved intent.',
+          launchState: null,
+          executionId,
+          createdAt: at,
+        },
+      ],
+      questions: [],
+      proposals: [
+        {
+          id: proposalId,
+          projectId,
+          planningCycleId: cycleId,
+          revision: 1,
+          lifecycle: 'approved' as const,
+          baseProjectIntentRevision: null,
+          baseLedgerRevision: null,
+          summary: 'Todo intent',
+          projectIntent: intentContent,
+          records: [proposedRecord],
+          relationships: [],
+          diff: {
+            intentChanges: [
+              'goal',
+              'targetUsers',
+              'desiredCapabilities',
+              'successConditions',
+              'rationale',
+              'provenance',
+            ],
+            recordChanges: { create: 1, revise: 0, reuse: 0 },
+            relationshipChanges: { added: [], removed: [] },
+          },
+          createdByTurnId: pmTurnId,
+          createdByExecutionId: executionId,
+          rejectionFeedback: null,
+          createdAt: at,
+          decidedAt: at,
+        },
+      ],
+    };
+    const legacyIntentLedger = {
+      projectIntent: {
+        id: intentId,
+        projectId,
+        revision: 1,
+        content: intentContent,
+        proposalId,
+        approvedBy: 'human' as const,
+        approvedAt: at,
+      },
+      ledger: {
+        id: ledgerId,
+        projectId,
+        revision: 1,
+        proposalId,
+        approvedBy: 'human' as const,
+        approvedAt: at,
+      },
+      records: [
+        {
+          recordId,
+          projectId,
+          revision: 1,
+          content: { ...proposedRecord.content, status: 'approved' as const },
+          provenance: proposedRecord.provenance,
+          proposalId,
+          approvedBy: 'human' as const,
+          approvedAt: at,
+        },
+      ],
+      relationships: [],
+    };
+    const legacyCommandResults = [
+      {
+        ok: true as const,
+        commandType: 'planning_cycle.submit_turn' as const,
+        planningCycle: {
+          ...legacyCycle,
+          cycle: {
+            ...legacyCycle.cycle,
+            lifecycle: 'launch_pending' as const,
+            revision: 1,
+            latestProposalRevision: 0,
+            endedAt: null,
+          },
+          turns: [
+            {
+              ...legacyCycle.turns[0],
+              launchState: 'launch_pending' as const,
+              executionId: null,
+            },
+          ],
+          proposals: [],
+        },
+      },
+      {
+        ok: true as const,
+        commandType: 'planning_proposal.approve' as const,
+        planningCycle: legacyCycle,
+        intentLedger: legacyIntentLedger,
+      },
+      {
+        ok: true as const,
+        commandType: 'planning_proposal.reject' as const,
+        planningCycle: {
+          ...legacyCycle,
+          cycle: {
+            ...legacyCycle.cycle,
+            lifecycle: 'proposal_rejected' as const,
+          },
+          proposals: legacyCycle.proposals.map((proposal) => ({
+            ...proposal,
+            lifecycle: 'rejected' as const,
+            rejectionFeedback: 'Revise the scope.',
+          })),
+        },
+      },
+      {
+        ok: true as const,
+        commandType: 'planning_cycle.abandon' as const,
+        planningCycle: {
+          ...legacyCycle,
+          cycle: {
+            ...legacyCycle.cycle,
+            lifecycle: 'abandoned' as const,
+            latestProposalRevision: 0,
+          },
+          proposals: [],
+        },
+      },
+    ].map((result) => legacyM2PlanningCommandSuccessSchema.parse(result));
+    const legacyCommandBytes = legacyCommandResults.map((result) =>
+      JSON.stringify(result),
+    );
+    for (const [index, result] of legacyCommandResults.entries()) {
+      database
+        .prepare(`INSERT INTO command_results VALUES (?, ?, ?, ?, ?)`)
+        .run(
+          `m2-command-${index}`,
+          result.commandType,
+          String(index + 3).repeat(64),
+          legacyCommandBytes[index],
+          at,
+        );
+    }
+    const legacyDomainEvents = [
+      {
+        id: randomUUID(),
+        sequence: 10,
+        type: 'planning_cycle.changed',
+        payload: { planningCycle: legacyCycle },
+      },
+      {
+        id: randomUUID(),
+        sequence: 11,
+        type: 'intent_ledger.approved',
+        payload: {
+          planningCycle: legacyCycle,
+          intentLedger: legacyIntentLedger,
+        },
+      },
+    ];
+    for (const event of legacyDomainEvents) {
+      database
+        .prepare(`INSERT INTO domain_events VALUES (?, ?, ?, ?, ?, ?)`)
+        .run(
+          event.id,
+          projectId,
+          event.sequence,
+          at,
+          event.type,
+          JSON.stringify(event.payload),
+        );
+    }
+
+    const preservedTables = [
+      'command_results',
+      'event_streams',
+      'domain_events',
+      'raw_diagnostics',
+      'runtime_events',
+      'worker_executions',
+      'planning_cycles',
+      'planning_turns',
+      'planning_proposals',
+      'planning_proposal_records',
+      'pm_output_receipts',
+      'project_intent_revisions',
+      'project_intent_provenance',
+      'ledger_records',
+      'ledger_record_revisions',
+      'ledger_record_revision_provenance',
+      'ledger_revisions',
+      'ledger_revision_members',
+    ] as const;
+    const snapshot = () =>
+      Object.fromEntries(
+        preservedTables.map((table) => [
+          table,
+          database.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+        ]),
+      );
+    const before = snapshot();
+
+    migrateV2Database(database);
+
+    expect(snapshot()).toEqual(before);
+    expect(
+      database
+        .prepare(
+          `SELECT planning_cycle_id, project_id, purpose,
+             base_delivery_plan_id, base_delivery_plan_revision
+           FROM planning_cycle_purposes`,
+        )
+        .all(),
+    ).toEqual([
+      {
+        planning_cycle_id: cycleId,
+        project_id: projectId,
+        purpose: 'intent',
+        base_delivery_plan_id: null,
+        base_delivery_plan_revision: null,
+      },
+    ]);
+    expect(
+      database
+        .prepare(
+          'SELECT version, name FROM v2_schema_migrations ORDER BY version',
+        )
+        .all(),
+    ).toEqual([
+      { version: 1, name: '001_foundation' },
+      { version: 2, name: '002_intent_ledger' },
+      { version: 3, name: '003_planning_board' },
+    ]);
+    database.close();
+
+    const reopened = openV2Database(path);
+    openDatabases.push(reopened);
+    for (const [table, rows] of Object.entries(before)) {
+      expect(
+        reopened.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all(),
+      ).toEqual(rows);
+    }
+    expect(reopened.pragma('quick_check')).toEqual([{ quick_check: 'ok' }]);
+    expect(reopened.pragma('foreign_key_check')).toEqual([]);
+    const reopenedCommands = new V2CommandRepository(reopened);
+    for (const [index, result] of legacyCommandResults.entries()) {
+      const replayed = reopenedCommands.find(`m2-command-${index}`);
+      expect(replayed).toMatchObject({
+        commandType: result.commandType,
+        requestHash: String(index + 3).repeat(64),
+        result,
+      });
+      expect(
+        reopened
+          .prepare(
+            'SELECT result_json FROM command_results WHERE idempotency_key = ?',
+          )
+          .get(`m2-command-${index}`),
+      ).toEqual({ result_json: legacyCommandBytes[index] });
+      expect(
+        legacyM2PlanningCommandSuccessSchema.parse(replayed?.result),
+      ).toEqual(result);
+      expect(normalizePlanningCommandSuccess(result)).toMatchObject({
+        source: 'legacy_m2',
+        projectionAuthority: 'receipt_only',
+        result: { commandType: result.commandType, schemaVersion: 2 },
+      });
+    }
+    const replay = new V2EventStore(reopened).domainAfter(projectId, 0);
+    expect(replay).toMatchObject({
+      lowWater: 10,
+      highWater: 11,
+      events: [
+        { sequence: 10, type: 'planning_cycle.changed' },
+        { sequence: 11, type: 'intent_ledger.approved' },
+      ],
+    });
+    expect(replay.events.map(({ payload }) => payload)).toEqual(
+      legacyDomainEvents.map(({ payload }) => payload),
+    );
+    expect(new V2EventStore(reopened).cursors(projectId)).toEqual({
+      domain: 11,
+      runtime: 23,
+    });
+    expect(
+      new PlanningRepository(reopened).planningSnapshot(projectId),
+    ).toMatchObject({
+      intentLedger: {
+        projectIntent: { id: intentId, revision: 1 },
+        ledger: { id: ledgerId, revision: 1 },
+        records: [{ recordId, revision: 1 }],
+      },
+      deliveryPlan: null,
+      board: { emptyReason: 'planning_required' },
+    });
+  });
+
+  it('binds planning bases and requirement trace subjects to exact same-project revisions', () => {
+    const fixture = createV2TestDatabase();
+    testDatabases.push(fixture);
+    const schema = (name: string) =>
+      (
+        fixture.database
+          .prepare(
+            "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?",
+          )
+          .get(name) as { sql: string }
+      ).sql.replace(/\s+/g, ' ');
+
+    for (const table of [
+      'planning_cycle_purposes',
+      'delivery_plan_proposals',
+    ]) {
+      expect(schema(table)).toMatch(
+        /FOREIGN KEY \(\s*base_delivery_plan_id, base_delivery_plan_revision, project_id\s*\) REFERENCES delivery_plan_revisions\(\s*delivery_plan_id, revision, project_id\s*\)/,
+      );
+    }
+    const traceSchema = schema('delivery_plan_revision_traces');
+    expect(traceSchema).toMatch(
+      /FOREIGN KEY \(milestone_id, milestone_revision, project_id\) REFERENCES milestone_revisions\(milestone_id, revision, project_id\)/,
+    );
+    expect(traceSchema).toMatch(
+      /FOREIGN KEY \(task_id, task_contract_revision, project_id\) REFERENCES task_revisions\(task_id, revision, project_id\)/,
+    );
+    expect(
+      (
+        fixture.database
+          .prepare(
+            "SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'delivery_plan_revision_traces' ORDER BY name",
+          )
+          .all() as { name: string }[]
+      ).map(({ name }) => name),
+    ).toEqual(
+      expect.arrayContaining([
+        'delivery_plan_revision_milestone_trace_unique',
+        'delivery_plan_revision_task_trace_unique',
+      ]),
+    );
+  });
+
+  it('rolls back the command-result rebuild when migration 3 fails', () => {
+    const path = join(temporaryDirectory(), 'broken-planning-board.sqlite');
+    const database = createMigration2Database(path);
+    database
+      .prepare(
+        `INSERT INTO command_results VALUES (
+          'preserved', 'planning_cycle.abandon', ?, ?, ?
+        )`,
+      )
+      .run(
+        'd'.repeat(64),
+        '{ "ok": false, "keep": "exact bytes" }',
+        '2026-08-29T00:00:00.000Z',
+      );
+    database.exec(
+      'CREATE TABLE planning_cycle_purposes (sentinel TEXT NOT NULL)',
+    );
+    const beforeSchema = schemaRows(database);
+    const beforeRows = database.prepare('SELECT * FROM command_results').all();
+
+    expect(() => migrateV2Database(database)).toThrow();
+
+    expect(schemaRows(database)).toEqual(beforeSchema);
+    expect(database.prepare('SELECT * FROM command_results').all()).toEqual(
+      beforeRows,
+    );
+    expect(
+      database
+        .prepare(
+          'SELECT version, name FROM v2_schema_migrations ORDER BY version',
+        )
+        .all(),
+    ).toEqual([
+      { version: 1, name: '001_foundation' },
+      { version: 2, name: '002_intent_ledger' },
+    ]);
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO command_results VALUES (
+            'm3-command', 'board_filter.set', ?, '{}', ?
+          )`,
+        )
+        .run('e'.repeat(64), '2026-08-29T00:00:00.000Z'),
+    ).toThrow();
+    openDatabases.push(database);
   });
 
   it('indexes valid start-operation links and rejects malformed or duplicate legacy links', () => {

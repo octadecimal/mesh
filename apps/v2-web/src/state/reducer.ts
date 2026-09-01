@@ -1,18 +1,23 @@
 import type {
   DomainEvent,
+  ApprovedDeliveryPlan,
   ApprovedIntentLedger,
+  BoardView,
   PlanningCycleView,
   Project,
   RetainedRuntimeWindow,
   ResolvedWorkerProfileSnapshot,
   RuntimeEvent,
+  V2CommandResult,
   V2AttentionItem,
   V2ProjectSnapshot,
   WorkerExecution,
 } from '@mesh/v2-contracts';
 import {
-  approvedPlanningOutcomeSchema,
-  planningCycleViewSchema,
+  normalizeIntentLedgerApprovedPayload,
+  normalizePlanningCommandSuccess,
+  normalizePlanningCycleChangedPayload,
+  persistedPlanningCommandSuccessSchema,
   resolvedWorkerProfileSnapshotSchema,
   v2AttentionItemSchema,
   workerProfileSpecSchema,
@@ -39,6 +44,8 @@ export type ProjectProjection = {
   planningCycles: readonly PlanningCycleView[];
   planningHistoryTruncated: boolean;
   intentLedger: ApprovedIntentLedger | null;
+  deliveryPlan: ApprovedDeliveryPlan | null;
+  board?: BoardView;
   activity: readonly RuntimeEvent[];
   domainCursor: number;
   runtimeCursor: number;
@@ -59,6 +66,11 @@ export type ProjectionAction =
     }
   | { type: 'domain.event'; event: DomainEvent }
   | { type: 'runtime.event'; event: RuntimeEvent }
+  | {
+      type: 'planning.command_result';
+      result: V2CommandResult;
+      requestDomainCursor: number;
+    }
   | { type: 'transport.subscribed' }
   | { type: 'transport.disconnected' }
   | { type: 'resync.required'; reason: string }
@@ -78,6 +90,8 @@ export const createInitialProjectProjection = (
   planningCycles: [],
   planningHistoryTruncated: false,
   intentLedger: null,
+  deliveryPlan: null,
+  board: undefined,
   activity: [],
   domainCursor: 0,
   runtimeCursor: 0,
@@ -241,35 +255,134 @@ const applyDomainEvent = (
         : undefined;
     }
     case 'planning_cycle.changed': {
-      const planningCycle = planningCycleViewSchema.safeParse(
-        event.payload.planningCycle,
-      );
-      return planningCycle.success
-        ? {
-            ...state,
-            ...replacePlanningCycle(
-              state.planningCycles,
-              planningCycle.data,
-              state.planningHistoryTruncated,
-            ),
-          }
-        : undefined;
+      try {
+        const { planningCycle } = normalizePlanningCycleChangedPayload(
+          event.payload,
+        );
+        return {
+          ...state,
+          ...replacePlanningCycle(
+            state.planningCycles,
+            planningCycle,
+            state.planningHistoryTruncated,
+          ),
+        };
+      } catch {
+        return undefined;
+      }
     }
     case 'intent_ledger.approved': {
-      const outcome = approvedPlanningOutcomeSchema.safeParse(event.payload);
-      return outcome.success
-        ? {
-            ...state,
-            ...replacePlanningCycle(
-              state.planningCycles,
-              outcome.data.planningCycle,
-              state.planningHistoryTruncated,
-            ),
-            intentLedger: outcome.data.intentLedger,
-          }
-        : undefined;
+      try {
+        const outcome = normalizeIntentLedgerApprovedPayload(event.payload);
+        return {
+          ...state,
+          ...replacePlanningCycle(
+            state.planningCycles,
+            outcome.planningCycle,
+            state.planningHistoryTruncated,
+          ),
+          intentLedger: outcome.intentLedger,
+          deliveryPlan:
+            'deliveryPlan' in outcome
+              ? outcome.deliveryPlan
+              : state.deliveryPlan,
+          board: outcome.board,
+        };
+      } catch {
+        return undefined;
+      }
     }
+    case 'delivery_plan.approved':
+      return {
+        ...state,
+        ...replacePlanningCycle(
+          state.planningCycles,
+          event.payload.planningCycle,
+          state.planningHistoryTruncated,
+        ),
+        deliveryPlan: event.payload.deliveryPlan,
+        board: event.payload.board,
+      };
+    case 'board.filter_changed':
+    case 'task.lifecycle_changed':
+      return { ...state, board: event.payload.board };
   }
+};
+
+export const classifyPlanningCommandResponse = (
+  state: ProjectProjection,
+  result: V2CommandResult,
+) => {
+  const parsed = persistedPlanningCommandSuccessSchema.safeParse(result);
+  if (!parsed.success) return undefined;
+  const normalized = normalizePlanningCommandSuccess(parsed.data);
+  if (normalized.projectionAuthority === 'command_response') {
+    return {
+      kind: 'apply_versioned' as const,
+      result: normalized.result,
+    };
+  }
+  const projectId =
+    normalized.result.commandType === 'board_filter.set'
+      ? normalized.result.board.projectId
+      : normalized.result.planningCycle.cycle.projectId;
+  return state.snapshotReady &&
+    state.projectId === projectId &&
+    state.connection.status === 'ready' &&
+    !state.resyncRequested
+    ? ({
+        kind: 'acknowledge_legacy' as const,
+        reason: 'legacy_m2_receipt' as const,
+      } as const)
+    : ({
+        kind: 'resync_required' as const,
+        reason: 'legacy_m2_freshness_unknown' as const,
+      } as const);
+};
+
+const applyPlanningCommandResult = (
+  state: ProjectProjection,
+  result: V2CommandResult,
+  requestDomainCursor: number,
+): ProjectProjection => {
+  if (state.domainCursor > requestDomainCursor) return state;
+  const disposition = classifyPlanningCommandResponse(state, result);
+  if (!disposition) return state;
+  if (disposition.kind === 'acknowledge_legacy') return state;
+  if (disposition.kind === 'resync_required') {
+    return stale(state, disposition.reason);
+  }
+  const value = disposition.result;
+  if (value.commandType === 'board_filter.set') {
+    return value.board.projectId === state.projectId
+      ? { ...state, board: value.board }
+      : stale(state, 'project_mismatch');
+  }
+  if (value.planningCycle.cycle.projectId !== state.projectId) {
+    return stale(state, 'project_mismatch');
+  }
+  const planning = replacePlanningCycle(
+    state.planningCycles,
+    value.planningCycle,
+    state.planningHistoryTruncated,
+  );
+  if (value.commandType === 'planning_proposal.approve') {
+    return {
+      ...state,
+      ...planning,
+      intentLedger: value.intentLedger,
+      board: value.board,
+    };
+  }
+  if (value.commandType === 'plan_proposal.approve') {
+    return {
+      ...state,
+      ...planning,
+      deliveryPlan: value.deliveryPlan,
+      board: value.board,
+    };
+  }
+  return { ...state, ...planning };
 };
 
 const reduceEvent = (
@@ -329,6 +442,8 @@ const replaceSnapshot = (
   planningCycles: snapshot.planningCycles,
   planningHistoryTruncated: snapshot.planningHistoryTruncated,
   intentLedger: snapshot.intentLedger,
+  deliveryPlan: snapshot.deliveryPlan,
+  board: snapshot.board,
   activity,
   domainCursor: snapshot.cursors.domain,
   runtimeCursor,
@@ -408,6 +523,12 @@ export const reduceProjectProjection = (
     case 'runtime.event':
       if (state.resyncRequested) return state;
       return reduceEvent(state, 'runtime', action.event);
+    case 'planning.command_result':
+      return applyPlanningCommandResult(
+        state,
+        action.result,
+        action.requestDomainCursor,
+      );
     case 'transport.subscribed':
       return {
         ...state,

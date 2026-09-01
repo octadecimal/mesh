@@ -11,7 +11,7 @@ session state and Claude driver processes. The browser sends validated commands
 over HTTP, receives snapshots over HTTP, and follows durable events plus
 transient streaming deltas over a WebSocket connection.
 
-This established session platform is V1. The implemented V2 Milestones 1 and 2
+This established session platform is V1. The implemented V2 Milestones 1–3
 run beside it with separate applications, contracts, settings, and storage;
 they do not replace or migrate V1. See
 [`v2-foundation.md`](v2-foundation.md) for operating instructions.
@@ -38,7 +38,7 @@ notifications, unread flags, and in-progress streaming text are intentionally
 local interaction state. A browser view is a projection, not the source of
 truth.
 
-### Parallel V2 foundation and intent ledger
+### Parallel V2 foundation, intent ledger, planning, and Board
 
 The V2 request and event flow is:
 
@@ -54,11 +54,12 @@ v2-web action
 ```
 
 V2 clients begin from project snapshots containing profiles, executions,
-planning cycles, and the approved intent ledger, then continue from durable
-event cursors. The M1 and M2 execution paths use the fake harness adapter. On
-backend restart, V2 reopens only its own database, reconciles nonterminal
-execution evidence, recovers planning output, publishes committed recovery
-events, and restores snapshots and replay before accepting new work.
+planning cycles, the approved intent ledger, the approved delivery plan, and
+the server-calculated Board and filter, then continue from durable event
+cursors. The M1–M3 execution paths use the fake harness adapter. On backend
+restart, V2 reopens only its own database, reconciles nonterminal execution
+evidence, recovers planning output, publishes committed recovery events, and
+restores snapshots and replay before accepting new work.
 
 M2 planning is project-owned durable truth. A planning cycle retains its human
 and project-manager turns, structured questions, proposal revisions, and
@@ -67,8 +68,17 @@ manager execution, which must finish with one bound structured questions or
 proposal receipt. Human approval atomically creates the next immutable project
 intent revision and matching ledger revision, including record provenance and
 relationships. The focused shell projects that approved revision in the
-Requirements pane. The Board remains the M1 placeholder; deriving or executing
-planning tasks belongs to M3.
+Requirements pane.
+
+M3 adds durable delivery-planning cycles and immutable proposal revisions.
+Project-manager output remains proposed until explicit human approval
+atomically creates the canonical delivery-plan revision, milestones, task
+contracts, dependencies, and requirement traces. The server calculates task
+readiness deterministically from canonical lifecycle and dependency state and
+projects the result through the cross-milestone Board and its durable filter.
+The browser displays that projection; it does not infer readiness. M3 does not
+allocate workspaces, create `DeveloperAttempt` records, or schedule
+`ExecutionRun` work. Those responsibilities belong to M4 and M5 respectively.
 
 ### Established V1 project workflow
 
@@ -455,17 +465,17 @@ apps/web/                        React/Vite client
   src/sessions/                  session interaction and transcript UI
   src/workspace/                 workspace composition and layout
 packages/contracts/              shared schemas, commands, events, protocols
-apps/v2-server/                  M1-M2 HTTP, persistence, fake execution, replay
+apps/v2-server/                  M1-M3 HTTP, persistence, fake execution, replay
   src/db/                        V2-only SQLite identity and migrations
   src/executions/                foundation and PM lifecycle and reconciliation
   src/http/                      /api/v2 routes and snapshots
-  src/planning/                  durable planning cycles and intent approval
+  src/planning/                  intent and delivery planning, readiness, Board
   src/profiles/                  V2 profile discovery and approval
   src/projects/                  V2 repository registration
   src/realtime/                  V2 durable event publication and replay
-apps/v2-web/                     M1-M2 shell, planning, requirements, projection
+apps/v2-web/                     M1-M3 planning, requirements, Board, projection
 packages/v2-contracts/           V2-only wire schemas and types
-e2e-v2/                         fake-only Todo execution and planning acceptance
+e2e-v2/                         fake-only thin vertical Todo acceptance
 docs/development/                current contributor and operational guidance
 docs/superpowers/specs/          approved historical/product designs
 docs/superpowers/plans/          implementation plans, not runtime truth

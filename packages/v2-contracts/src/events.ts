@@ -11,9 +11,19 @@ import {
 } from './ids';
 import { workerExecutionSchema } from './executions';
 import {
+  approvedIntentLedgerSchema,
   approvedPlanningOutcomeSchema,
-  planningCycleViewSchema,
+  legacyM2PlanningCycleViewSchema,
 } from './intent';
+import {
+  approvedDeliveryPlanPublicMaterializationSchema,
+  approvedDeliveryPlanSchema,
+  deliveryPlanPlanningCycleViewSchema,
+  planningCycleViewSchema,
+  taskRevisionSchema,
+  type PlanningCycleView,
+} from './delivery-plan';
+import { boardViewSchema, type BoardView } from './board';
 import { projectSchema } from './projects';
 import { workerProfileRevisionSchema } from './profiles';
 
@@ -37,15 +47,175 @@ const executionLifecycleDraftSchema = z.strictObject({
   type: z.literal('worker_execution.lifecycle_changed'),
   payload: z.strictObject({ execution: workerExecutionSchema }),
 });
+export const legacyM2PlanningCycleChangedPayloadSchema = z.strictObject({
+  planningCycle: legacyM2PlanningCycleViewSchema,
+});
+export const m3PlanningCycleChangedPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(2),
+  planningCycle: planningCycleViewSchema,
+});
+export const persistedPlanningCycleChangedPayloadSchema = z.union([
+  legacyM2PlanningCycleChangedPayloadSchema,
+  m3PlanningCycleChangedPayloadSchema,
+]);
+export type PersistedPlanningCycleChangedPayload = z.infer<
+  typeof persistedPlanningCycleChangedPayloadSchema
+>;
+
+export const legacyM2IntentLedgerApprovedPayloadSchema =
+  approvedPlanningOutcomeSchema;
+export const m3IntentLedgerApprovedPayloadSchema = z
+  .strictObject({
+    schemaVersion: z.literal(2),
+    planningCycle: planningCycleViewSchema,
+    intentLedger: approvedIntentLedgerSchema,
+    board: boardViewSchema,
+  })
+  .superRefine((value, context) => {
+    if (value.planningCycle.purpose.kind !== 'intent') {
+      context.addIssue({
+        code: 'custom',
+        path: ['planningCycle', 'purpose'],
+        message: 'Intent approval requires an intent planning cycle',
+      });
+      return;
+    }
+    const approved = approvedPlanningOutcomeSchema.safeParse({
+      planningCycle: {
+        cycle: value.planningCycle.cycle,
+        turns: value.planningCycle.turns,
+        questions: value.planningCycle.questions,
+        proposals: value.planningCycle.proposals,
+      },
+      intentLedger: value.intentLedger,
+    });
+    if (!approved.success) {
+      for (const issue of approved.error.issues) {
+        context.addIssue({
+          code: 'custom',
+          path: issue.path,
+          message: issue.message,
+        });
+      }
+    }
+    if (value.board.projectId !== value.planningCycle.cycle.projectId) {
+      context.addIssue({
+        code: 'custom',
+        path: ['board', 'projectId'],
+        message: 'Intent approval Board must match the cycle project',
+      });
+    }
+    if (
+      value.board.deliveryPlanRevision === null
+        ? value.board.emptyReason !== 'planning_required'
+        : !value.board.stale
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['board'],
+        message:
+          'Intent approval must require planning or preserve a stale approved plan',
+      });
+    }
+  });
+export const persistedIntentLedgerApprovedPayloadSchema = z.union([
+  legacyM2IntentLedgerApprovedPayloadSchema,
+  m3IntentLedgerApprovedPayloadSchema,
+]);
+export type PersistedIntentLedgerApprovedPayload = z.infer<
+  typeof persistedIntentLedgerApprovedPayloadSchema
+>;
+
+export const deliveryPlanApprovedPayloadSchema = z
+  .strictObject({
+    schemaVersion: z.literal(1),
+    planningCycle: deliveryPlanPlanningCycleViewSchema,
+    deliveryPlan: approvedDeliveryPlanSchema,
+    board: boardViewSchema,
+  })
+  .superRefine((value, context) => {
+    const latest = value.planningCycle.deliveryPlanProposals.at(-1);
+    const proposalBase = latest?.base;
+    if (
+      value.planningCycle.cycle.lifecycle !== 'approved' ||
+      latest?.lifecycle !== 'approved' ||
+      latest.id !== value.deliveryPlan.plan.proposalId ||
+      value.deliveryPlan.plan.projectId !==
+        value.planningCycle.cycle.projectId ||
+      value.deliveryPlan.plan.projectIntentId !==
+        proposalBase?.projectIntentId ||
+      value.deliveryPlan.plan.projectIntentRevision !==
+        proposalBase?.projectIntentRevision ||
+      value.deliveryPlan.plan.ledgerId !== proposalBase?.ledgerId ||
+      value.deliveryPlan.plan.ledgerRevision !== proposalBase?.ledgerRevision ||
+      value.deliveryPlan.plan.baseDeliveryPlanRevision !==
+        proposalBase?.deliveryPlan.revision ||
+      (proposalBase?.deliveryPlan.id !== null &&
+        value.deliveryPlan.plan.id !== proposalBase?.deliveryPlan.id) ||
+      value.deliveryPlan.plan.summary !== latest.proposedPlan.summary ||
+      value.board.projectId !== value.deliveryPlan.plan.projectId ||
+      value.board.deliveryPlanRevision !== value.deliveryPlan.plan.revision
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['deliveryPlan'],
+        message: 'Plan approval event cycle, plan, and Board must agree',
+      });
+    }
+    if (latest !== undefined) {
+      const materialized =
+        approvedDeliveryPlanPublicMaterializationSchema.safeParse({
+          proposal: latest,
+          deliveryPlan: value.deliveryPlan,
+        });
+      if (!materialized.success) {
+        context.addIssue({
+          code: 'custom',
+          path: ['deliveryPlan'],
+          message: 'Plan approval event must exactly materialize its proposal',
+        });
+      }
+    }
+  });
+export const boardFilterChangedPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  board: boardViewSchema,
+});
+export const taskLifecycleChangedPayloadSchema = z
+  .strictObject({
+    schemaVersion: z.literal(1),
+    task: taskRevisionSchema,
+    board: boardViewSchema,
+  })
+  .refine((value) => value.task.revisionKind === 'operational_lifecycle', {
+    path: ['task', 'revisionKind'],
+    message: 'Lifecycle events require operational task revisions',
+  });
+
 const planningCycleChangedDraftSchema = z.strictObject({
   ...domainEventBase,
   type: z.literal('planning_cycle.changed'),
-  payload: z.strictObject({ planningCycle: planningCycleViewSchema }),
+  payload: persistedPlanningCycleChangedPayloadSchema,
 });
 const intentLedgerApprovedDraftSchema = z.strictObject({
   ...domainEventBase,
   type: z.literal('intent_ledger.approved'),
-  payload: approvedPlanningOutcomeSchema,
+  payload: persistedIntentLedgerApprovedPayloadSchema,
+});
+const deliveryPlanApprovedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('delivery_plan.approved'),
+  payload: deliveryPlanApprovedPayloadSchema,
+});
+const boardFilterChangedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('board.filter_changed'),
+  payload: boardFilterChangedPayloadSchema,
+});
+const taskLifecycleChangedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('task.lifecycle_changed'),
+  payload: taskLifecycleChangedPayloadSchema,
 });
 
 const requireDomainEventProjectCoherence = (
@@ -54,7 +224,10 @@ const requireDomainEventProjectCoherence = (
     | z.infer<typeof profileApprovedDraftSchema>
     | z.infer<typeof executionLifecycleDraftSchema>
     | z.infer<typeof planningCycleChangedDraftSchema>
-    | z.infer<typeof intentLedgerApprovedDraftSchema>,
+    | z.infer<typeof intentLedgerApprovedDraftSchema>
+    | z.infer<typeof deliveryPlanApprovedDraftSchema>
+    | z.infer<typeof boardFilterChangedDraftSchema>
+    | z.infer<typeof taskLifecycleChangedDraftSchema>,
   context: z.RefinementCtx,
 ) => {
   const embeddedProjectId =
@@ -64,7 +237,13 @@ const requireDomainEventProjectCoherence = (
         ? value.payload.profileRevision.projectId
         : value.type === 'worker_execution.lifecycle_changed'
           ? value.payload.execution.projectId
-          : value.payload.planningCycle.cycle.projectId;
+          : value.type === 'planning_cycle.changed' ||
+              value.type === 'intent_ledger.approved' ||
+              value.type === 'delivery_plan.approved'
+            ? value.payload.planningCycle.cycle.projectId
+            : value.type === 'board.filter_changed'
+              ? value.payload.board.projectId
+              : value.payload.task.projectId;
   if (embeddedProjectId !== value.projectId) {
     context.addIssue({
       code: 'custom',
@@ -82,21 +261,36 @@ const requireDomainEventProjectCoherence = (
       message: 'Approved intent ledger must match the domain event project',
     });
   }
+  if (
+    (value.type === 'delivery_plan.approved' ||
+      value.type === 'board.filter_changed' ||
+      value.type === 'task.lifecycle_changed') &&
+    value.payload.board.projectId !== value.projectId
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['payload', 'board'],
+      message: 'Board must match the domain event project',
+    });
+  }
 };
 
 export const domainEventDraftSchema = z
-  .discriminatedUnion('type', [
+  .union([
     projectRegisteredDraftSchema,
     profileApprovedDraftSchema,
     executionLifecycleDraftSchema,
     planningCycleChangedDraftSchema,
     intentLedgerApprovedDraftSchema,
+    deliveryPlanApprovedDraftSchema,
+    boardFilterChangedDraftSchema,
+    taskLifecycleChangedDraftSchema,
   ])
   .superRefine(requireDomainEventProjectCoherence);
 export type DomainEventDraft = z.infer<typeof domainEventDraftSchema>;
 
 export const domainEventSchema = z
-  .discriminatedUnion('type', [
+  .union([
     projectRegisteredDraftSchema.extend({
       id: domainEventIdSchema,
       sequence: nonNegativeIntegerSchema,
@@ -117,9 +311,74 @@ export const domainEventSchema = z
       id: domainEventIdSchema,
       sequence: nonNegativeIntegerSchema,
     }),
+    deliveryPlanApprovedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    boardFilterChangedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    taskLifecycleChangedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
   ])
   .superRefine(requireDomainEventProjectCoherence);
 export type DomainEvent = z.infer<typeof domainEventSchema>;
+
+const planningRequiredBoard = (projectId: string): BoardView =>
+  boardViewSchema.parse({
+    projectId,
+    deliveryPlanRevision: null,
+    stale: false,
+    emptyReason: 'planning_required',
+    filter: null,
+    totalTaskCount: 0,
+    matchedTaskCount: 0,
+    facets: {
+      milestones: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [],
+  });
+
+export const normalizePlanningCycleChangedPayload = (
+  payload: PersistedPlanningCycleChangedPayload,
+): { schemaVersion: 2; planningCycle: PlanningCycleView } =>
+  'schemaVersion' in payload
+    ? payload
+    : {
+        schemaVersion: 2,
+        planningCycle: planningCycleViewSchema.parse({
+          ...payload.planningCycle,
+          purpose: {
+            kind: 'intent',
+            baseDeliveryPlanId: null,
+            baseDeliveryPlanRevision: null,
+          },
+          deliveryPlanProposals: [],
+        }),
+      };
+
+export const normalizeIntentLedgerApprovedPayload = (
+  payload: PersistedIntentLedgerApprovedPayload,
+) =>
+  'schemaVersion' in payload
+    ? payload
+    : {
+        schemaVersion: 2 as const,
+        planningCycle: normalizePlanningCycleChangedPayload({
+          planningCycle: payload.planningCycle,
+        }).planningCycle,
+        intentLedger: payload.intentLedger,
+        deliveryPlan: null,
+        board: planningRequiredBoard(payload.planningCycle.cycle.projectId),
+      };
 
 const runtimeEventBase = {
   projectId: projectIdSchema,

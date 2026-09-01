@@ -2,6 +2,11 @@ import { z } from 'zod';
 
 import type { HarnessEventEnvelope } from './events';
 import {
+  PM_PLAN_REPORT_SCHEMA,
+  pmPlanAssignmentSchema,
+  type PmPlanAssignment,
+} from './delivery-plan';
+import {
   isoTimestampSchema,
   nonNegativeIntegerSchema,
   projectIdSchema,
@@ -39,6 +44,8 @@ export const V2_ERROR_CODES = [
   'profile_revision_conflict',
   'profile_scope_invalid',
   'planning_canonical_base_conflict',
+  'planning_intent_required',
+  'planning_requirements_required',
   'planning_cycle_active_conflict',
   'planning_cycle_history_limit',
   'planning_cycle_not_found',
@@ -47,6 +54,13 @@ export const V2_ERROR_CODES = [
   'planning_proposal_invalid',
   'planning_proposal_not_found',
   'planning_proposal_revision_conflict',
+  'plan_proposal_not_found',
+  'plan_proposal_revision_conflict',
+  'plan_canonical_base_conflict',
+  'plan_proposal_invalid',
+  'board_filter_not_found',
+  'board_filter_revision_conflict',
+  'board_filter_invalid',
   'repository_head_ambiguous',
   'repository_head_failed',
   'repository_head_unborn',
@@ -79,6 +93,7 @@ export type FoundationCheckAssignment = z.infer<
 export const workerAssignmentSchema = z.discriminatedUnion('kind', [
   foundationCheckAssignmentSchema,
   pmDiscoveryAssignmentSchema,
+  pmPlanAssignmentSchema,
 ]);
 export type WorkerAssignment = z.infer<typeof workerAssignmentSchema>;
 
@@ -255,6 +270,18 @@ export const workerExecutionSchema = z
         message: 'PM execution output schemas must match the discovery schema',
       });
     }
+    if (
+      value.assignment.kind === 'pm_plan' &&
+      (value.assignment.outputSchema !== PM_PLAN_REPORT_SCHEMA ||
+        value.profileSnapshot.document.spec.outputSchema !==
+          PM_PLAN_REPORT_SCHEMA)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['profileSnapshot', 'document', 'spec', 'outputSchema'],
+        message: 'PM execution output schemas must match the plan schema',
+      });
+    }
     if (value.capabilitySnapshot.adapterId !== value.adapterId) {
       context.addIssue({
         code: 'custom',
@@ -276,7 +303,10 @@ const harnessStartRequestShape = {
 const requireHarnessProjectCoherence = (
   value: {
     project: Project;
-    assignment: FoundationCheckAssignment | PmDiscoveryAssignment;
+    assignment:
+      | FoundationCheckAssignment
+      | PmDiscoveryAssignment
+      | PmPlanAssignment;
     profile: ResolvedWorkerProfileSnapshot;
   },
   context: z.RefinementCtx,
@@ -316,6 +346,17 @@ const requireHarnessProjectCoherence = (
       code: 'custom',
       path: ['profile', 'document', 'spec', 'outputSchema'],
       message: 'PM harness output schemas must match the discovery schema',
+    });
+  }
+  if (
+    value.assignment.kind === 'pm_plan' &&
+    (value.assignment.outputSchema !== PM_PLAN_REPORT_SCHEMA ||
+      value.profile.document.spec.outputSchema !== PM_PLAN_REPORT_SCHEMA)
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['profile', 'document', 'spec', 'outputSchema'],
+      message: 'PM harness output schemas must match the plan schema',
     });
   }
 };

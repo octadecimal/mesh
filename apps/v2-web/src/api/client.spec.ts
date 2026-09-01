@@ -38,6 +38,25 @@ const projectSnapshot = {
   planningCycles: [],
   planningHistoryTruncated: false,
   intentLedger: null,
+  deliveryPlan: null,
+  board: {
+    projectId,
+    deliveryPlanRevision: null,
+    stale: false,
+    emptyReason: 'intent_required',
+    filter: null,
+    totalTaskCount: 0,
+    matchedTaskCount: 0,
+    facets: {
+      milestones: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [],
+  },
   cursors: { domain: 2, runtime: 5 },
 } satisfies V2ProjectSnapshot;
 

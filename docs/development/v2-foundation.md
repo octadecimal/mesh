@@ -1,6 +1,6 @@
 # V2 foundation development
 
-Mesh V2 Milestones 1 and 2 are implemented beside the existing session
+Mesh V2 Milestones 1–3 are implemented beside the existing session
 platform. V2 has separate Nx projects, wire contracts, settings, ports, and
 SQLite storage. It does not replace, upgrade, read, or migrate V1. For V1
 operation, see [Session platform development](session-platform.md).
@@ -25,7 +25,7 @@ Both hosts remain loopback-only.
 
 The parallel projects and defaults are:
 
-| Surface | V1 | V2 Milestones 1 and 2 |
+| Surface | V1 | V2 Milestones 1–3 |
 | --- | --- | --- |
 | Server | `server`, port `3737` | `v2-server`, port `3838` |
 | Web | `web`, port `4200` | `v2-web`, port `4300` |
@@ -65,7 +65,14 @@ top-level and common-directory paths and requires one committed 40- or
 manager conversation used by V2 acceptance. The server accepts it only when
 `NODE_ENV=test`; it is not a production setting or a real project-manager mode.
 
-## Foundation and intent-ledger flow
+The V2 process fixture also gives each built test process an absolute,
+fixture-owned `MESH_V2_DATA_DIR`, repository root, database path, web root,
+`HOME`, and `USERPROFILE`, and asks the server to select an ephemeral port. It
+uses only loopback traffic and removes the temporary repository, database, and
+processes it owns. These controls prevent acceptance from reading operator data
+or starting a real agent.
+
+## Foundation, intent-ledger, planning, and Board flow
 
 M1 supports V2 project registration, profile discovery and approval, and the
 `foundation-check` execution kind. A browser command is validated through
@@ -83,8 +90,20 @@ revisions, recovery state, and terminal history are durable across restart.
 Human approval is the atomic boundary that creates immutable project-intent and
 ledger revisions with record provenance and relationships. The Requirements
 pane renders the approved intent plus requirement, assumption, decision,
-question, and risk records. The Board remains a placeholder, and planning does
-not create or execute M3 tasks.
+question, and risk records.
+
+M3 adds a separate durable delivery-planning cycle. A project manager can
+propose and revise a multi-milestone plan, but its revisions remain immutable
+proposals until explicit human approval. Approval atomically creates the
+canonical delivery-plan revision, milestones, task contracts, dependencies,
+and requirement traces. The server derives actionable and blocked work from
+canonical lifecycle and dependency state, persists the cross-milestone Board
+filter, and returns the versioned Board projection. Refresh, replay, retained-
+gap resync, and restart rebuild the browser from durable server truth.
+
+M3 stops at planning and deterministic readiness. M4 owns workspace allocation
+and `DeveloperAttempt`; M5 owns `ExecutionRun` scheduling, concurrency, and
+dependency-wave orchestration.
 
 Run the deterministic Chromium acceptance scenario with:
 
@@ -102,9 +121,23 @@ turns and after approval, forces a retained-gap resynchronization, and proves
 that transcript, questions, intent revision 1, ledger revision 1, provenance,
 and relationships remain identical.
 
-V2 M1 and M2 execution currently uses only the fake harness adapter. The real
+Planning acceptance stays thin and vertical. Its primary
+`approved delivery plan becomes a deterministic Board` journey covers proposal,
+revision, explicit approval, traceable multi-milestone Board state,
+deterministic readiness, representative cross-milestone filtering, and refresh.
+The separate `approved planning state survives a built server restart` journey
+proves byte-equivalent planning history, proposal revisions, canonical plan,
+dependencies, traces, saved filter, readiness, and Board state after reopening
+the same fixture database. Repository and service integration tests own the
+exhaustive atomicity, idempotency, revision, corruption, rollback, readiness,
+and replay-boundary matrices; component tests own UI-state and filter matrices.
+The existing intent-ledger browser journey already proves retained-gap browser
+resynchronization, so M3 does not duplicate it with another reconnect journey.
+Tests wait for observable commands, snapshots, and UI state rather than sleeps
+or retries.
+
+V2 M1–M3 execution currently uses only the fake harness adapter. The real
 Claude smoke test documented for the established session platform is separate,
 opt-in, and consumes subscription capacity; it is never part of V2 acceptance
 or default verification. Do not supply `ANTHROPIC_API_KEY` or use API-billed
-traffic. Task boards, planning-derived tasks, runs, QA, integration, and
-worktree orchestration remain future workflow domains.
+traffic. V2 acceptance neither requires nor authorizes real-agent traffic.

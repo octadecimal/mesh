@@ -785,7 +785,7 @@ export const planningProposalSchema = z
   });
 export type PlanningProposal = z.infer<typeof planningProposalSchema>;
 
-export const planningCycleViewSchema = z
+export const legacyM2PlanningCycleViewSchema = z
   .strictObject({
     cycle: planningCycleSchema,
     turns: z.array(planningTurnSchema).max(64).readonly(),
@@ -1149,7 +1149,9 @@ export const planningCycleViewSchema = z
       });
     }
   });
-export type PlanningCycleView = z.infer<typeof planningCycleViewSchema>;
+export type LegacyM2PlanningCycleView = z.infer<
+  typeof legacyM2PlanningCycleViewSchema
+>;
 
 export const projectIntentRevisionSchema = z.strictObject({
   id: projectIntentIdSchema,
@@ -1286,7 +1288,7 @@ const approvedRecordContent = (
 
 export const approvedPlanningOutcomeSchema = z
   .strictObject({
-    planningCycle: planningCycleViewSchema,
+    planningCycle: legacyM2PlanningCycleViewSchema,
     intentLedger: approvedIntentLedgerSchema,
   })
   .superRefine((value, context) => {

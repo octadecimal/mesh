@@ -2,15 +2,23 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 
 import type {
   ApprovedIntentLedger,
+  ApprovedDeliveryPlan,
+  AbandonPlanningCycleCommand,
+  ApprovePlanProposalCommand,
+  DeliveryPlanPlanningCycleView,
+  DeliveryPlanProposal,
   LedgerRecordContent,
   PlanningCycleView,
   PlanningProposal,
   ProposedLedgerEndpoint,
+  RejectPlanProposalCommand,
+  SubmitPlanTurnCommand,
   WorkerExecution,
   WorkerProfileSummary,
 } from '@mesh/v2-contracts';
 
 import './intent-ledger.css';
+import './planning-board.css';
 
 export type PlanningConnection =
   | { status: 'ready' }
@@ -572,6 +580,764 @@ export function PlanningPane({
           type="button"
           disabled={commandDisabled}
           onClick={() => cycle && onAbandon(cycle.cycle.id)}
+        >
+          Abandon cycle
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+function proposalMemberName(
+  member:
+    | DeliveryPlanProposal['proposedPlan']['milestones'][number]
+    | DeliveryPlanProposal['proposedPlan']['tasks'][number],
+) {
+  if (member.operation === 'create') return member.key;
+  return 'milestoneId' in member ? member.milestoneId : member.taskId;
+}
+
+function DeliveryProposalCard({
+  proposal,
+  proposals,
+  deliveryPlan,
+  headingRef,
+}: {
+  proposal: DeliveryPlanProposal;
+  proposals: readonly DeliveryPlanProposal[];
+  deliveryPlan: ApprovedDeliveryPlan | null;
+  headingRef?: (node: HTMLHeadingElement | null) => void;
+}) {
+  const milestones = proposal.proposedPlan.milestones.map((member) => {
+    const approved =
+      member.operation === 'reuse'
+        ? deliveryPlan?.milestones.find(
+            ({ id, revision }) =>
+              id === member.milestoneId && revision === member.expectedRevision,
+          )
+        : undefined;
+    const content = member.operation === 'reuse' ? approved : member.content;
+    return {
+      member,
+      identity: proposalMemberName(member),
+      title:
+        content?.title ??
+        (member.operation === 'reuse' ? member.milestoneId : 'Milestone'),
+      content,
+    };
+  });
+  const tasks = proposal.proposedPlan.tasks.map((member) => {
+    const approved =
+      member.operation === 'reuse'
+        ? deliveryPlan?.taskContracts.find(
+            ({ id, contractRevision }) =>
+              id === member.taskId &&
+              contractRevision === member.expectedContractRevision,
+          )
+        : undefined;
+    const content = member.operation === 'reuse' ? approved : member.content;
+    const milestoneIdentity =
+      member.operation === 'reuse'
+        ? approved?.milestoneId
+        : member.content.milestone.kind === 'proposal'
+          ? member.content.milestone.key
+          : member.content.milestone.milestoneId;
+    return {
+      member,
+      identity: proposalMemberName(member),
+      milestoneIdentity,
+      title:
+        content?.title ??
+        (member.operation === 'reuse' ? member.taskId : 'Task'),
+      content,
+    };
+  });
+  const unplacedTasks = tasks.filter(
+    ({ milestoneIdentity }) => milestoneIdentity === undefined,
+  );
+  const renderTask = ({
+    member: task,
+    identity: taskIdentity,
+    title,
+    content,
+  }: (typeof tasks)[number]) => (
+    <li key={taskIdentity}>
+      <strong>{title}</strong> · {humanize(task.operation)}
+      {task.operation === 'reuse'
+        ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision}`
+        : task.operation === 'revise'
+          ? ` · contract revision ${task.expectedContractRevision} · current revision ${task.expectedCurrentRevision} · ${task.lifecycle}`
+          : null}
+      {content ? (
+        <>
+          <p>{content.outcome}</p>
+          <p>Acceptance: {list(content.acceptanceCriteria)}</p>
+          <p>Verification: {list(content.verificationCriteria)}</p>
+          <p>
+            Priority {content.priority} · labels {list(content.labels)}
+          </p>
+          <p>Owned surfaces: {list(content.ownedSurfaces)}</p>
+          <p>Prohibited surfaces: {list(content.prohibitedSurfaces)}</p>
+          <p>Expected artifacts: {list(content.expectedArtifacts)}</p>
+        </>
+      ) : (
+        <p>Approved task revision unavailable.</p>
+      )}
+    </li>
+  );
+  let superseded: string | undefined;
+  if (proposal.decision.kind === 'superseded') {
+    if (proposal.decision.reason === 'replacement_accepted') {
+      const replacementId = proposal.decision.supersededByProposalId;
+      superseded = `Superseded by proposal revision ${
+        proposals.find(({ id }) => id === replacementId)?.revision ?? 'unknown'
+      }.`;
+    } else {
+      superseded = 'Superseded because this planning cycle was abandoned.';
+    }
+  }
+  return (
+    <article
+      className="planning-board-card"
+      aria-labelledby={`delivery-proposal-${proposal.id}`}
+    >
+      <h3
+        id={`delivery-proposal-${proposal.id}`}
+        ref={headingRef}
+        tabIndex={-1}
+      >
+        Proposal revision {proposal.revision} · {humanize(proposal.lifecycle)}
+      </h3>
+      <p>{proposal.proposedPlan.summary}</p>
+      <p>
+        Intent {proposal.base.projectIntentId} · revision{' '}
+        {proposal.base.projectIntentRevision} · requirement ledger{' '}
+        {proposal.base.ledgerId} · revision {proposal.base.ledgerRevision} ·
+        delivery plan{' '}
+        {proposal.base.deliveryPlan.id === null
+          ? 'not yet approved'
+          : `${proposal.base.deliveryPlan.id} · revision ${proposal.base.deliveryPlan.revision}`}
+      </p>
+      <section
+        aria-label={`Milestones in proposal revision ${proposal.revision}`}
+      >
+        <h4>Milestones</h4>
+        <ol>
+          {milestones.map(({ member, identity, title, content }) => (
+            <li key={identity} aria-label={`${title} milestone`}>
+              <strong>{title}</strong> · {humanize(member.operation)}
+              {member.operation === 'reuse'
+                ? ` · expected revision ${member.expectedRevision}`
+                : member.operation === 'revise'
+                  ? ` · expected revision ${member.expectedRevision} · ${member.lifecycle}`
+                  : null}
+              {content ? (
+                <>
+                  <p>{content.outcome}</p>
+                  <p>Stop condition: {content.stopCondition}</p>
+                  <p>Exclusions: {list(content.exclusions)}</p>
+                </>
+              ) : (
+                <p>Approved milestone revision unavailable.</p>
+              )}
+              <h5>Tasks</h5>
+              <ol>
+                {tasks
+                  .filter((task) => task.milestoneIdentity === identity)
+                  .map(renderTask)}
+              </ol>
+            </li>
+          ))}
+        </ol>
+      </section>
+      {unplacedTasks.length > 0 ? (
+        <section
+          aria-label={`Tasks with unavailable milestone placement in proposal revision ${proposal.revision}`}
+        >
+          <h4>Tasks with unavailable milestone placement</h4>
+          <p>
+            Exact approved task revisions are unavailable, so their milestone
+            placement cannot be shown.
+          </p>
+          <ol>{unplacedTasks.map(renderTask)}</ol>
+        </section>
+      ) : null}
+      <section
+        aria-label={`Dependencies in proposal revision ${proposal.revision}`}
+      >
+        <h4>Dependencies</h4>
+        {proposal.proposedPlan.dependencies.length === 0 ? (
+          <p>No dependencies.</p>
+        ) : (
+          <ul>
+            {proposal.proposedPlan.dependencies.map((dependency) => {
+              const taskName = (taskId: string) =>
+                tasks.find(
+                  ({ identity, content }) =>
+                    identity === taskId && content !== undefined,
+                )?.title ?? taskId;
+              const refName = (
+                ref:
+                  | { kind: 'proposal'; key: string }
+                  | { kind: 'canonical'; taskId: string },
+              ) => {
+                if (ref.kind === 'canonical')
+                  return `${taskName(ref.taskId)} (${ref.taskId})`;
+                const task = tasks.find(({ identity }) => identity === ref.key);
+                return `${task?.title ?? ref.key} (${ref.key})`;
+              };
+              const approvedDependency =
+                dependency.operation === 'create'
+                  ? undefined
+                  : deliveryPlan?.dependencies.find(
+                      ({ id, revision }) =>
+                        id === dependency.dependencyId &&
+                        revision === dependency.expectedRevision,
+                    );
+              const endpoints = approvedDependency
+                ? `${taskName(approvedDependency.prerequisiteTaskId)} (${approvedDependency.prerequisiteTaskId}) → ${taskName(approvedDependency.dependentTaskId)} (${approvedDependency.dependentTaskId})`
+                : undefined;
+              return (
+                <li
+                  key={
+                    dependency.operation === 'create'
+                      ? dependency.key
+                      : dependency.dependencyId
+                  }
+                >
+                  {dependency.operation === 'create'
+                    ? `${dependency.key}: ${refName(dependency.prerequisite)} → ${refName(dependency.dependent)}`
+                    : `${humanize(dependency.operation)} ${dependency.dependencyId} · expected revision ${dependency.expectedRevision}${dependency.operation === 'revise' ? ` · ${dependency.lifecycle}` : ''}${endpoints ? ` · ${endpoints}` : ' · approved dependency revision unavailable'}`}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+      <section
+        aria-label={`Requirement traces in proposal revision ${proposal.revision}`}
+      >
+        <h4>Requirement traceability</h4>
+        <ul>
+          {proposal.proposedPlan.traces.map((trace, index) => (
+            <li key={`${trace.kind}-${trace.requirement.recordId}-${index}`}>
+              {humanize(trace.kind)} ·{' '}
+              {trace.kind === 'milestone_covers'
+                ? trace.milestone.kind === 'proposal'
+                  ? trace.milestone.key
+                  : trace.milestone.milestoneId
+                : trace.task.kind === 'proposal'
+                  ? trace.task.key
+                  : trace.task.taskId}{' '}
+              · requirement {trace.requirement.recordId}
+              {' · '}revision {trace.requirement.recordRevision}
+            </li>
+          ))}
+        </ul>
+      </section>
+      <dl>
+        {(['milestones', 'tasks', 'dependencies'] as const).map((kind) => (
+          <div key={kind}>
+            <dt>{humanize(kind)} diff</dt>
+            <dd>
+              Create {proposal.diff[kind].create} · reuse{' '}
+              {proposal.diff[kind].reuse} · revise {proposal.diff[kind].revise}{' '}
+              · retire {proposal.diff[kind].retire} · reactivate{' '}
+              {proposal.diff[kind].reactivate}
+            </dd>
+          </div>
+        ))}
+        <div>
+          <dt>Trace diff</dt>
+          <dd>
+            Create {proposal.diff.traceCreateCount} · remove{' '}
+            {proposal.diff.traceRemoveCount}
+          </dd>
+        </div>
+      </dl>
+      {proposal.decision.kind === 'rejected' ? (
+        <p>Rejection feedback: {proposal.decision.feedback}</p>
+      ) : null}
+      {superseded ? <p>{superseded}</p> : null}
+    </article>
+  );
+}
+
+export function DeliveryPlanningPane({
+  projectId,
+  cycle,
+  approvedIntentLedger,
+  deliveryPlan,
+  planStale,
+  connection,
+  profiles,
+  submitting,
+  error,
+  historyLimitReached = false,
+  recovery,
+  onSubmit,
+  onApprove,
+  onReject,
+  onAbandon,
+}: {
+  projectId: string;
+  cycle?: DeliveryPlanPlanningCycleView;
+  approvedIntentLedger: ApprovedIntentLedger | null;
+  deliveryPlan: ApprovedDeliveryPlan | null;
+  planStale: boolean;
+  connection: PlanningConnection;
+  profiles: readonly WorkerProfileSummary[];
+  submitting: boolean;
+  error?: string;
+  historyLimitReached?: boolean;
+  recovery?:
+    | { kind: 'ambiguous_start'; operation: string }
+    | { kind: 'retryable'; message: string };
+  onSubmit: (command: SubmitPlanTurnCommand) => void;
+  onApprove: (command: ApprovePlanProposalCommand) => void;
+  onReject: (command: RejectPlanProposalCommand) => void;
+  onAbandon: (command: AbandonPlanningCycleCommand) => void;
+}) {
+  const headingId = useId();
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const proposalHeadingRef = useRef<HTMLHeadingElement>(null);
+  const rejectionRef = useRef<HTMLTextAreaElement>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
+  const [startOpen, setStartOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [profileId, setProfileId] = useState(profiles[0]?.profileId ?? '');
+  const [requestingRevision, setRequestingRevision] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [feedback, setFeedback] = useState('');
+  const lifecycle = cycle?.cycle.lifecycle;
+  const terminal =
+    lifecycle !== undefined &&
+    ['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
+  const continuingCycle = cycle && !terminal ? cycle : undefined;
+  const proposal = cycle?.deliveryPlanProposals.at(-1);
+  const [selectedProposalRevision, setSelectedProposalRevision] = useState(
+    proposal?.revision ?? 0,
+  );
+  const selectedProposal =
+    cycle?.deliveryPlanProposals.find(
+      ({ revision }) => revision === selectedProposalRevision,
+    ) ?? proposal;
+  const selectedIsLatest =
+    selectedProposal !== undefined && selectedProposal.id === proposal?.id;
+  const connected = connection.status === 'ready';
+  const selectedProfile = profiles.find(
+    ({ profileId: id }) => id === profileId,
+  );
+  const continuingProfile = cycle
+    ? profiles.find(
+        ({ profileId, approvedRevision }) =>
+          profileId === cycle.cycle.profileId &&
+          approvedRevision === cycle.cycle.profileRevision,
+      )
+    : undefined;
+  const approvedRequirements =
+    approvedIntentLedger?.records.filter(
+      ({ content }) =>
+        content.type === 'requirement' && content.status === 'approved',
+    ) ?? [];
+  const canStart =
+    connected &&
+    !submitting &&
+    approvedIntentLedger !== null &&
+    approvedRequirements.length > 0 &&
+    selectedProfile !== undefined &&
+    !continuingCycle;
+  const commandDisabled = !connected || submitting;
+  const awaitingApproval =
+    lifecycle === 'awaiting_approval' &&
+    proposal?.lifecycle === 'awaiting_approval';
+  const decisionAllowed = awaitingApproval && !historyLimitReached;
+  const retryable =
+    lifecycle === 'attention_required' && recovery?.kind === 'retryable';
+  const canContinue =
+    !historyLimitReached &&
+    (lifecycle === 'discovering' ||
+      lifecycle === 'awaiting_human' ||
+      retryable ||
+      (awaitingApproval && requestingRevision));
+  const canSendMessage =
+    canContinue || (startOpen && continuingCycle === undefined);
+  const nonterminal =
+    lifecycle !== undefined &&
+    !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
+
+  useEffect(() => {
+    if (!error) return;
+    if (rejecting) rejectionRef.current?.focus();
+    else if (requestingRevision || startOpen || canContinue)
+      messageRef.current?.focus();
+    else proposalHeadingRef.current?.focus();
+  }, [canContinue, error, rejecting, requestingRevision, startOpen]);
+  useEffect(() => {
+    if (!profiles.some(({ profileId: id }) => id === profileId))
+      setProfileId(profiles[0]?.profileId ?? '');
+  }, [profileId, profiles]);
+  useEffect(() => {
+    setSelectedProposalRevision(proposal?.revision ?? 0);
+    setRequestingRevision(false);
+    setRejecting(false);
+    setFeedback('');
+  }, [cycle?.cycle.id, proposal?.id, proposal?.revision]);
+  useEffect(() => {
+    if (!cycle?.cycle.id) return;
+    setStartOpen(false);
+    setDraft('');
+  }, [cycle?.cycle.id]);
+
+  function openStart() {
+    const replacing = deliveryPlan !== null;
+    setDraft(
+      replacing
+        ? 'Revise the approved delivery plan against the current intent and requirement ledger.'
+        : 'Propose a delivery plan for the approved intent and requirement ledger.',
+    );
+    setStartOpen(true);
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const message = draft.trim();
+    if (!message || commandDisabled) return;
+    if (continuingCycle) {
+      if (!canContinue) return;
+      onSubmit({
+        type: 'planning_cycle.submit_plan_turn',
+        projectId,
+        planningCycleId: continuingCycle.cycle.id,
+        expectedCycleRevision: continuingCycle.cycle.revision,
+        message,
+      });
+      return;
+    }
+    if (!canStart || !selectedProfile || !approvedIntentLedger) return;
+    onSubmit({
+      type: 'planning_cycle.submit_plan_turn',
+      projectId,
+      expectedCycleRevision: null,
+      profileId: selectedProfile.profileId,
+      profileRevision: selectedProfile.approvedRevision,
+      expectedProjectIntentId: approvedIntentLedger.projectIntent.id,
+      expectedProjectIntentRevision:
+        approvedIntentLedger.projectIntent.revision,
+      expectedLedgerId: approvedIntentLedger.ledger.id,
+      expectedLedgerRevision: approvedIntentLedger.ledger.revision,
+      expectedDeliveryPlan: deliveryPlan
+        ? { id: deliveryPlan.plan.id, revision: deliveryPlan.plan.revision }
+        : { id: null, revision: null },
+      message,
+    });
+  }
+
+  function approveProposal() {
+    if (!cycle || !proposal || !selectedIsLatest || !decisionAllowed) return;
+    onApprove({
+      type: 'plan_proposal.approve',
+      projectId,
+      planningCycleId: cycle.cycle.id,
+      expectedCycleRevision: cycle.cycle.revision,
+      proposalId: proposal.id,
+      expectedProposalRevision: proposal.revision,
+      expectedProjectIntentId: proposal.base.projectIntentId,
+      expectedProjectIntentRevision: proposal.base.projectIntentRevision,
+      expectedLedgerId: proposal.base.ledgerId,
+      expectedLedgerRevision: proposal.base.ledgerRevision,
+      expectedDeliveryPlan: proposal.base.deliveryPlan,
+    });
+  }
+
+  function rejectProposal() {
+    const normalizedFeedback = feedback.trim();
+    if (
+      !cycle ||
+      !proposal ||
+      !selectedIsLatest ||
+      !decisionAllowed ||
+      normalizedFeedback.length < 1 ||
+      normalizedFeedback.length > 4096
+    )
+      return;
+    onReject({
+      type: 'plan_proposal.reject',
+      projectId,
+      planningCycleId: cycle.cycle.id,
+      expectedCycleRevision: cycle.cycle.revision,
+      proposalId: proposal.id,
+      expectedProposalRevision: proposal.revision,
+      feedback: normalizedFeedback,
+    });
+  }
+
+  const startLabel = deliveryPlan
+    ? planStale
+      ? 'Replan current requirements'
+      : 'Replace plan'
+    : 'Plan delivery';
+  const status =
+    lifecycle === 'launch_pending'
+      ? 'Starting project manager…'
+      : lifecycle === 'execution_active'
+        ? 'Project manager is working.'
+        : lifecycle === 'approved'
+          ? 'Delivery plan approved.'
+          : lifecycle === 'proposal_rejected'
+            ? 'Plan proposal rejected.'
+            : lifecycle === 'abandoned'
+              ? 'This planning cycle was abandoned.'
+              : undefined;
+
+  return (
+    <section className="planning-board-pane" aria-labelledby={headingId}>
+      <h2 id={headingId} ref={headingRef} tabIndex={-1}>
+        Planning
+      </h2>
+      {error ? (
+        <p role="alert" aria-live="assertive">
+          {error}
+        </p>
+      ) : null}
+      {connection.status === 'loading' ? (
+        <p role="status">Planning is loading.</p>
+      ) : null}
+      {connection.status === 'disconnected' || connection.status === 'stale' ? (
+        <p role="status">{connection.message}</p>
+      ) : null}
+      {status ? <p role="status">{status}</p> : null}
+      {deliveryPlan ? (
+        <p>
+          Approved delivery plan revision {deliveryPlan.plan.revision}
+          {planStale ? ' · stale' : ' · current'}
+        </p>
+      ) : (
+        <p>No delivery plan is approved.</p>
+      )}
+      {planStale ? <p role="status">Approved plan is stale.</p> : null}
+      {cycle ? (
+        <p>
+          {continuingProfile
+            ? `Project manager: ${continuingProfile.displayName} · profile ${cycle.cycle.profileId} · revision ${cycle.cycle.profileRevision}`
+            : `Project manager profile ${cycle.cycle.profileId} · revision ${cycle.cycle.profileRevision} (no longer available)`}
+        </p>
+      ) : null}
+      {historyLimitReached ? (
+        <p>
+          This cycle reached its history limit. Abandon it to begin a new cycle.
+        </p>
+      ) : null}
+      {lifecycle === 'attention_required' ? (
+        <section aria-label="Planning recovery">
+          {recovery?.kind === 'retryable' ? (
+            <p>{recovery.message}</p>
+          ) : (
+            <>
+              <p>
+                Mesh did not retry the delivery planning execution after
+                restart.
+              </p>
+              {recovery?.kind === 'ambiguous_start' ? (
+                <p>Operation {recovery.operation}</p>
+              ) : null}
+              <p>Abandon this cycle to start a new one.</p>
+            </>
+          )}
+        </section>
+      ) : null}
+      {!continuingCycle &&
+      (!approvedIntentLedger || approvedRequirements.length === 0) ? (
+        <p>
+          Approve at least one current requirement before planning delivery.
+        </p>
+      ) : null}
+      {!continuingCycle && profiles.length === 0 ? (
+        <p>No compatible PM profiles are available.</p>
+      ) : null}
+      {!continuingCycle ? (
+        <button type="button" disabled={!canStart} onClick={openStart}>
+          {startLabel}
+        </button>
+      ) : null}
+      {cycle ? (
+        <ol aria-label="Delivery planning conversation">
+          {cycle.turns.map((turn) => (
+            <li key={turn.id}>
+              <strong>
+                {turn.actor === 'pm' ? 'Project manager' : 'You'}:
+              </strong>{' '}
+              {turn.message}
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      {cycle?.questions.length ? (
+        <section aria-label="Delivery planning questions">
+          <h3>Questions</h3>
+          {cycle.questions.map((question) => (
+            <article key={question.id} className="planning-board-card">
+              <h4>{question.prompt}</h4>
+              <p>{question.rationale}</p>
+              {question.choices?.map((choice) => (
+                <button
+                  key={choice}
+                  type="button"
+                  disabled={commandDisabled || !canContinue}
+                  onClick={() => setDraft(choice)}
+                >
+                  {choice}
+                </button>
+              ))}
+            </article>
+          ))}
+        </section>
+      ) : null}
+      {cycle?.deliveryPlanProposals.length ? (
+        <section aria-label="Plan proposal revision history">
+          <label htmlFor="delivery-proposal-revision">Proposal revision</label>
+          <select
+            id="delivery-proposal-revision"
+            value={selectedProposal?.revision}
+            onChange={(event) => {
+              setSelectedProposalRevision(Number(event.target.value));
+              setRequestingRevision(false);
+              setRejecting(false);
+              setFeedback('');
+            }}
+          >
+            {cycle.deliveryPlanProposals.map((candidate) => (
+              <option key={candidate.id} value={candidate.revision}>
+                Revision {candidate.revision} · {humanize(candidate.lifecycle)}
+              </option>
+            ))}
+          </select>
+          {selectedProposal ? (
+            <DeliveryProposalCard
+              proposal={selectedProposal}
+              proposals={cycle.deliveryPlanProposals}
+              deliveryPlan={deliveryPlan}
+              headingRef={
+                selectedProposal.id === proposal?.id
+                  ? (node) => {
+                      proposalHeadingRef.current = node;
+                    }
+                  : undefined
+              }
+            />
+          ) : null}
+        </section>
+      ) : null}
+      {decisionAllowed && proposal && !selectedIsLatest ? (
+        <p role="status">
+          Viewing historical proposal revision {selectedProposal?.revision}.
+          Select proposal revision {proposal.revision} to make a decision.
+        </p>
+      ) : null}
+      {decisionAllowed && proposal && selectedIsLatest ? (
+        <section
+          className="planning-board-actions"
+          aria-label={`Decision controls for proposal revision ${proposal.revision}`}
+        >
+          <p role="status">
+            Decision controls apply to proposal revision {proposal.revision}.
+          </p>
+          <button
+            type="button"
+            disabled={commandDisabled}
+            onClick={approveProposal}
+          >
+            Approve full plan
+          </button>
+          <button
+            type="button"
+            disabled={commandDisabled}
+            onClick={() => {
+              setRequestingRevision(true);
+              setDraft('');
+            }}
+          >
+            Request revision
+          </button>
+          <button
+            type="button"
+            disabled={commandDisabled}
+            onClick={() => setRejecting(true)}
+          >
+            Reject proposal
+          </button>
+        </section>
+      ) : null}
+      {decisionAllowed && proposal && selectedIsLatest && rejecting ? (
+        <section aria-label="Reject plan proposal">
+          <label htmlFor="plan-rejection-feedback">Rejection feedback</label>
+          <textarea
+            id="plan-rejection-feedback"
+            ref={rejectionRef}
+            value={feedback}
+            maxLength={4096}
+            disabled={commandDisabled}
+            onChange={(event) => setFeedback(event.target.value)}
+          />
+          <button
+            type="button"
+            disabled={
+              commandDisabled ||
+              feedback.trim().length < 1 ||
+              feedback.trim().length > 4096
+            }
+            onClick={rejectProposal}
+          >
+            Confirm rejection
+          </button>
+        </section>
+      ) : null}
+      {canSendMessage ? (
+        <form aria-label="Send a message to project manager" onSubmit={submit}>
+          {!continuingCycle ? (
+            <fieldset disabled={commandDisabled}>
+              <legend>Project manager profile</legend>
+              <select
+                aria-label="Project manager profile"
+                value={profileId}
+                onChange={(event) => setProfileId(event.target.value)}
+              >
+                {profiles.map((profile) => (
+                  <option key={profile.profileId} value={profile.profileId}>
+                    {profile.displayName} · revision {profile.approvedRevision}
+                  </option>
+                ))}
+              </select>
+            </fieldset>
+          ) : null}
+          <label htmlFor="delivery-plan-message">
+            Message to project manager
+          </label>
+          <textarea
+            id="delivery-plan-message"
+            ref={messageRef}
+            value={draft}
+            disabled={commandDisabled}
+            onChange={(event) => setDraft(event.target.value)}
+          />
+          <button type="submit" disabled={commandDisabled || !draft.trim()}>
+            {requestingRevision ? 'Send revision request' : 'Send message'}
+          </button>
+        </form>
+      ) : null}
+      {nonterminal ? (
+        <button
+          type="button"
+          disabled={commandDisabled}
+          onClick={() =>
+            cycle &&
+            onAbandon({
+              type: 'planning_cycle.abandon',
+              projectId,
+              planningCycleId: cycle.cycle.id,
+              expectedCycleRevision: cycle.cycle.revision,
+            })
+          }
         >
           Abandon cycle
         </button>

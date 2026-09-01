@@ -2,7 +2,7 @@ import { access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { relative, resolve } from 'node:path';
 
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 import { V2ProcessFixture } from './fixtures/v2-process.js';
 
@@ -31,6 +31,253 @@ spec:
     Clarify intent and propose the complete approved ledger.
   outputSchema: mesh.dev/pm-discovery-report/v1
 `;
+
+const pmPlanProfileYaml = `apiVersion: mesh.dev/v1alpha1
+kind: WorkerProfile
+metadata:
+  name: todo-plan-manager
+  displayName: Todo plan manager
+  scope: project
+spec:
+  assignmentKinds:
+    - pm_plan
+  preferredRuntime:
+    harness: fake
+    model: deterministic
+  alternatives: []
+  requiredCapabilities:
+    - execution.stream
+  skills:
+    preferred: []
+    required: []
+  instructions: |
+    Propose the complete Todo delivery plan for explicit human approval.
+  outputSchema: mesh.dev/pm-plan-report/v1
+`;
+
+const sendCommand = (page: Page, command: unknown) =>
+  page.evaluate(async (commandBody) => {
+    const response = await fetch('/api/v2/commands', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        idempotencyKey: crypto.randomUUID(),
+        actor: { kind: 'human' },
+        command: commandBody,
+      }),
+    });
+    return { status: response.status, body: await response.json() };
+  }, command);
+
+const registerTodo = async (page: Page, fixture: V2ProcessFixture) => {
+  await fixture.start();
+  await page.goto(fixture.origin);
+  await page.getByLabel('Repository path').fill(fixture.todoRepository);
+  await page.getByRole('button', { name: 'Add and select project' }).click();
+  await fixture.waitForBrowserRegistration();
+};
+
+const approveTodoIntent = async (page: Page, fixture: V2ProcessFixture) => {
+  const profile = await sendCommand(page, {
+    type: 'worker_profile.approve_revision',
+    scope: 'global',
+    expectedLatestRevision: 0,
+    sourceYaml: pmProfileYaml,
+  });
+  expect(profile).toMatchObject({ status: 200, body: { ok: true } });
+  await page.reload();
+
+  await page
+    .getByRole('textbox', { name: 'Message to project manager' })
+    .fill('Build a Todo app where people can add and complete items.');
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect
+    .poll(
+      async () =>
+        (await fixture.projectSnapshot()).planningCycles.find(
+          ({ purpose }) => purpose.kind === 'intent',
+        )?.questions.length,
+    )
+    .toBe(2);
+  await page.reload();
+  await expect(
+    page.getByRole('heading', { name: 'How should Todo items persist?' }),
+  ).toBeVisible();
+  await page
+    .getByRole('textbox', { name: 'Message to project manager' })
+    .fill(
+      'Use local browser storage, and yes, every control must be keyboard operable.',
+    );
+  await page.getByRole('button', { name: 'Send message' }).click();
+  await expect
+    .poll(
+      async () =>
+        (await fixture.projectSnapshot()).planningCycles.find(
+          ({ purpose }) => purpose.kind === 'intent',
+        )?.proposals.length,
+    )
+    .toBe(1);
+  await page.reload();
+  await expect(
+    page.getByRole('heading', {
+      name: 'Proposal revision 1 · awaiting_approval',
+    }),
+  ).toBeVisible();
+  await page.getByRole('button', { name: 'Approve proposal' }).click();
+  await expect
+    .poll(
+      async () =>
+        (await fixture.projectSnapshot()).intentLedger?.ledger.revision,
+    )
+    .toBe(1);
+  return fixture.projectSnapshot();
+};
+
+const approveTodoDeliveryPlan = async (
+  page: Page,
+  fixture: V2ProcessFixture,
+) => {
+  const intent = await fixture.projectSnapshot();
+  const profile = await sendCommand(page, {
+    type: 'worker_profile.approve_revision',
+    scope: 'project',
+    projectId: fixture.projectId,
+    expectedLatestRevision: 0,
+    sourceYaml: pmPlanProfileYaml,
+  });
+  expect(profile).toMatchObject({
+    status: 200,
+    body: {
+      ok: true,
+      commandType: 'worker_profile.approve_revision',
+      profileRevision: { revision: 1, scope: 'project' },
+    },
+  });
+  await page.reload();
+
+  const planning = page.getByRole('complementary', { name: 'PM Chat' });
+  await planning.getByRole('button', { name: 'Plan delivery' }).click();
+  const profileSelector = planning.getByLabel('Project manager profile').last();
+  await expect(profileSelector).toContainText('Todo plan manager · revision 1');
+  await expect(profileSelector).not.toContainText(
+    'Project manager · revision 1',
+  );
+  await planning
+    .getByRole('textbox', { name: 'Message to project manager' })
+    .last()
+    .fill(
+      'Propose a delivery plan for the approved intent and requirement ledger.',
+    );
+  await planning.getByRole('button', { name: 'Send message' }).last().click();
+
+  await expect
+    .poll(
+      async () =>
+        (await fixture.projectSnapshot()).planningCycles.find(
+          ({ purpose }) => purpose.kind === 'delivery_plan',
+        )?.deliveryPlanProposals.length,
+    )
+    .toBe(1);
+  await page.reload();
+
+  await expect(
+    planning.getByRole('heading', {
+      name: 'Proposal revision 1 · awaiting approval',
+    }),
+  ).toBeVisible();
+  const proposed = await fixture.projectSnapshot();
+  const planCycle = proposed.planningCycles.find(
+    ({ purpose }) => purpose.kind === 'delivery_plan',
+  );
+  expect(planCycle?.purpose).toMatchObject({
+    kind: 'delivery_plan',
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+  });
+  expect(planCycle?.cycle).toMatchObject({
+    baseProjectIntentRevision: 1,
+    baseLedgerRevision: 1,
+  });
+  const planningExecution = proposed.executions.find(
+    ({ id }) => id === planCycle?.turns.at(-1)?.executionId,
+  );
+  expect(planningExecution?.assignment).toMatchObject({
+    kind: 'pm_plan',
+    baseProjectIntentId: intent.intentLedger?.projectIntent.id,
+    baseProjectIntentRevision: 1,
+    baseLedgerId: intent.intentLedger?.ledger.id,
+    baseLedgerRevision: 1,
+    baseDeliveryPlanId: null,
+    baseDeliveryPlanRevision: null,
+  });
+  expect(proposed.deliveryPlan).toBeNull();
+  expect(proposed.board.cards).toEqual([]);
+
+  await planning.getByRole('button', { name: 'Request revision' }).click();
+  await planning
+    .getByRole('textbox', { name: 'Message to project manager' })
+    .last()
+    .fill(
+      'Make keyboard acceptance explicit and persistence verification isolated.',
+    );
+  await planning.getByRole('button', { name: 'Send revision request' }).click();
+  await expect
+    .poll(
+      async () =>
+        (await fixture.projectSnapshot()).planningCycles.find(
+          ({ purpose }) => purpose.kind === 'delivery_plan',
+        )?.deliveryPlanProposals.length,
+    )
+    .toBe(2);
+  await page.reload();
+  await expect(
+    planning.getByRole('heading', {
+      name: 'Proposal revision 2 · awaiting approval',
+    }),
+  ).toBeVisible();
+  const proposalRevision = planning.getByLabel('Proposal revision', {
+    exact: true,
+  });
+  await proposalRevision.selectOption('1');
+  await expect(
+    planning.getByRole('heading', { name: 'Proposal revision 1 · superseded' }),
+  ).toBeVisible();
+  await expect(
+    planning.getByText(
+      'A keyboard user can add and complete a Todo item without a pointer.',
+    ),
+  ).toHaveCount(0);
+  await proposalRevision.selectOption('2');
+  await expect(
+    planning.getByText(
+      'A keyboard user can add and complete a Todo item without a pointer.',
+    ),
+  ).toBeVisible();
+
+  const beforeApproval = await fixture.projectSnapshot();
+  expect(beforeApproval.deliveryPlan).toBeNull();
+  expect(beforeApproval.board.cards).toEqual([]);
+  const approvalResponse = page.waitForResponse(
+    (response) =>
+      response.url().endsWith('/api/v2/commands') &&
+      response.request().postData()?.includes('plan_proposal.approve') === true,
+  );
+  await planning.getByRole('button', { name: 'Approve full plan' }).click();
+  const approval = await (await approvalResponse).json();
+  expect(approval).toMatchObject({
+    ok: true,
+    schemaVersion: 2,
+    commandType: 'plan_proposal.approve',
+    deliveryPlan: { plan: { revision: 1 } },
+    board: { totalTaskCount: 3, matchedTaskCount: 3 },
+  });
+  await expect
+    .poll(
+      async () => (await fixture.projectSnapshot()).deliveryPlan?.plan.revision,
+    )
+    .toBe(1);
+  return fixture.projectSnapshot();
+};
 
 type CleanupProbe = {
   pid: number;
@@ -547,6 +794,206 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
     expect(restartedApproval.intentLedger?.relationships).toEqual(
       approved.intentLedger?.relationships,
     );
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test('approved delivery plan becomes a deterministic Board', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const fixture = await V2ProcessFixture.createTodo({ fakePmScenario: 'todo' });
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    const approved = await approveTodoDeliveryPlan(page, fixture);
+    const deliveryPlan = approved.deliveryPlan;
+    if (!deliveryPlan) throw new Error('Delivery plan was not approved');
+
+    expect(deliveryPlan.plan).toMatchObject({ revision: 1 });
+    expect(deliveryPlan.milestones).toHaveLength(2);
+    expect(deliveryPlan.taskContracts).toHaveLength(3);
+    expect(deliveryPlan.dependencies).toHaveLength(2);
+    expect(deliveryPlan.traces).toHaveLength(6);
+    expect(
+      deliveryPlan.taskContracts.map(({ lifecycle }) => lifecycle),
+    ).toEqual(['pending', 'pending', 'pending']);
+    const latestCycle = approved.planningCycles.find(
+      ({ purpose }) => purpose.kind === 'delivery_plan',
+    );
+    expect(latestCycle?.cycle.lifecycle).toBe('approved');
+    expect(latestCycle?.deliveryPlanProposals).toHaveLength(2);
+    expect(
+      latestCycle?.deliveryPlanProposals.map(({ revision, lifecycle }) => ({
+        revision,
+        lifecycle,
+      })),
+    ).toEqual([
+      { revision: 1, lifecycle: 'superseded' },
+      { revision: 2, lifecycle: 'approved' },
+    ]);
+
+    expect(approved.board).toMatchObject({
+      deliveryPlanRevision: 1,
+      stale: false,
+      emptyReason: null,
+      totalTaskCount: 3,
+      matchedTaskCount: 3,
+      filter: {
+        revision: 1,
+        milestoneIds: [],
+        taskLifecycles: ['pending', 'completed'],
+        readiness: [],
+        priorities: [],
+        labels: [],
+        requirementRecordIds: [],
+      },
+    });
+    const cards = Object.fromEntries(
+      approved.board.cards.map((card) => [card.title, card]),
+    );
+    expect(cards['Build Todo controls']?.readiness).toEqual({
+      state: 'actionable',
+      blockers: [],
+    });
+    expect(cards['Persist Todo items']?.readiness).toEqual({
+      state: 'actionable',
+      blockers: [],
+    });
+    const integrated = cards['Integrate Todo workflow'];
+    expect(integrated?.readiness.state).toBe('blocked');
+    if (integrated?.readiness.state !== 'blocked')
+      throw new Error('Integrated Todo task was not blocked');
+    expect(
+      integrated.readiness.blockers
+        .map((blocker) =>
+          blocker.kind === 'dependency_incomplete'
+            ? blocker.prerequisiteTaskId
+            : blocker.kind,
+        )
+        .sort(),
+    ).toEqual(
+      deliveryPlan.taskContracts
+        .filter(({ title }) =>
+          ['Build Todo controls', 'Persist Todo items'].includes(title),
+        )
+        .map(({ id }) => id)
+        .sort(),
+    );
+    expect(
+      approved.executions.every(({ assignment }) =>
+        assignment.kind.startsWith('pm_'),
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(approved)).not.toMatch(
+      /DeveloperAttempt|ExecutionRun|workspaceId|workerAssignment/u,
+    );
+
+    const board = page.getByRole('tabpanel', { name: 'Board' });
+    await expect(
+      board.getByText('Showing 3 of 3 tasks · plan 1'),
+    ).toBeVisible();
+    await expect(
+      board.getByRole('heading', { name: 'Todo foundations' }),
+    ).toBeVisible();
+    await expect(
+      board.getByRole('heading', { name: 'Todo integration' }),
+    ).toBeVisible();
+    await expect(board.getByText('Actionable', { exact: true })).toHaveCount(2);
+    await expect(
+      board.getByRole('list', {
+        name: 'Readiness for Integrate Todo workflow',
+      }),
+    ).toContainText('Build Todo controls');
+    await expect(
+      board.getByRole('list', {
+        name: 'Readiness for Integrate Todo workflow',
+      }),
+    ).toContainText('Persist Todo items');
+
+    await board.getByLabel(/^actionable · 2 tasks$/u).check();
+    await board.getByRole('button', { name: 'Apply filters' }).click();
+    await expect(
+      board.getByText('Showing 2 of 3 tasks · plan 1'),
+    ).toBeVisible();
+    await board.getByLabel(/^blocked · 1 task$/u).check();
+    await board.getByRole('button', { name: 'Apply filters' }).click();
+    await expect(
+      board.getByText('Showing 3 of 3 tasks · plan 1'),
+    ).toBeVisible();
+    await page.reload();
+    await expect(board.getByLabel(/^actionable · 2 tasks$/u)).toBeChecked();
+    await expect(board.getByLabel(/^blocked · 1 task$/u)).toBeChecked();
+    const filtered = await fixture.projectSnapshot();
+    expect(filtered.board.filter?.readiness).toEqual(['actionable', 'blocked']);
+
+    await board
+      .getByRole('button', { name: 'View Integrate Todo workflow details' })
+      .click();
+    const details = board.getByRole('region', { name: 'Task details' });
+    await expect(
+      details.getByRole('heading', { name: 'Task details' }),
+    ).toBeFocused();
+    await expect(details).toContainText(
+      'Acceptance: Adding, reloading, and completing a Todo item works end to end.',
+    );
+    await expect(details).toContainText(
+      'Verification: Run the integrated Todo acceptance journey.',
+    );
+    await expect(details).toContainText('Owned surfaces: Todo integration');
+    await expect(details).toContainText(
+      'Milestone stop condition: The integrated Todo flow passes its acceptance and verification criteria.',
+    );
+    await expect(details).toContainText('revision 1');
+    await expect(
+      board.getByRole('list', {
+        name: 'Dependencies for Integrate Todo workflow',
+      }),
+    ).toContainText('prerequisite: Build Todo controls · pending');
+
+    const domain = await fixture.domainEventsAfter(0);
+    expect(domain.events).toContainEqual(
+      expect.objectContaining({
+        type: 'delivery_plan.approved',
+        payload: expect.objectContaining({ schemaVersion: 1 }),
+      }),
+    );
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test('approved planning state survives a built server restart', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const fixture = await V2ProcessFixture.createTodo({ fakePmScenario: 'todo' });
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture);
+    const board = page.getByRole('tabpanel', { name: 'Board' });
+    await board.getByLabel(/^actionable · 2 tasks$/u).check();
+    await board.getByRole('button', { name: 'Apply filters' }).click();
+    await expect(
+      board.getByText('Showing 2 of 3 tasks · plan 1'),
+    ).toBeVisible();
+    const before = await fixture.projectSnapshot();
+    const oldPid = fixture.serverPid;
+    const origin = await fixture.restartWithFreshFake();
+    expect(fixture.serverPid).not.toBe(oldPid);
+    await page.goto(`${origin}/projects/${fixture.projectId}`);
+    await expect(
+      page
+        .getByRole('tabpanel', { name: 'Board' })
+        .getByText('Showing 2 of 3 tasks · plan 1'),
+    ).toBeVisible();
+    await expect(board.getByLabel(/^actionable · 2 tasks$/u)).toBeChecked();
+    const after = await fixture.projectSnapshot();
+    expect(after.planningCycles).toEqual(before.planningCycles);
+    expect(after.deliveryPlan).toEqual(before.deliveryPlan);
+    expect(after.board).toEqual(before.board);
   } finally {
     await fixture.dispose();
   }

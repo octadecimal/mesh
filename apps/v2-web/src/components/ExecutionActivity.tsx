@@ -42,10 +42,16 @@ function runtimeActivityLabel(activity: RuntimeEvent) {
   }
 }
 
-const assignmentLabel = (execution: WorkerExecution) =>
-  execution.assignment.kind === 'pm_discovery'
-    ? 'Project manager discovery'
-    : execution.assignment.title;
+const assignmentLabel = (execution: WorkerExecution) => {
+  switch (execution.assignment.kind) {
+    case 'foundation-check':
+      return execution.assignment.title;
+    case 'pm_discovery':
+      return 'Project manager discovery';
+    case 'pm_plan':
+      return 'Project manager delivery planning';
+  }
+};
 
 function ChildActivityTree({
   activities,

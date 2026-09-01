@@ -173,7 +173,7 @@ describe('createV2Socket', () => {
     });
   });
 
-  it('preserves planning snapshot truth through runtime events and rejects incomplete planning events', () => {
+  it('preserves required delivery plan and Board snapshot fields', () => {
     const sockets: FakeSocket[] = [];
     const store = createV2Store(projectId);
     const execution = {
@@ -254,6 +254,25 @@ describe('createV2Socket', () => {
       planningCycles: [],
       planningHistoryTruncated: false,
       intentLedger: null,
+      deliveryPlan: null,
+      board: {
+        projectId,
+        deliveryPlanRevision: null,
+        stale: false,
+        emptyReason: 'planning_required' as const,
+        filter: null,
+        totalTaskCount: 0,
+        matchedTaskCount: 0,
+        facets: {
+          milestones: [],
+          taskLifecycles: [],
+          readiness: [],
+          priorities: [],
+          labels: [],
+          requirements: [],
+        },
+        cards: [],
+      },
       cursors: { domain: 2, runtime: 5 },
     } satisfies V2ProjectSnapshot;
     store.dispatch({ type: 'snapshot.received', snapshot });
@@ -297,6 +316,8 @@ describe('createV2Socket', () => {
       snapshot.planningHistoryTruncated,
     );
     expect(store.getState().intentLedger).toEqual(snapshot.intentLedger);
+    expect(store.getState().deliveryPlan).toEqual(snapshot.deliveryPlan);
+    expect(store.getState().board).toEqual(snapshot.board);
 
     sockets[0]?.message({
       type: 'v2.domain_event',

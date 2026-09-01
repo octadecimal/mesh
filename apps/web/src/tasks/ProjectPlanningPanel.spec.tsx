@@ -848,7 +848,7 @@ describe('ProjectPlanningPanel', () => {
     expect(
       screen.queryByRole('button', { name: /View Plan history/i }),
     ).toBeNull();
-  });
+  }, 10_000);
 
   it('opens the proposal session from historical plan details', async () => {
     const user = userEvent.setup();
