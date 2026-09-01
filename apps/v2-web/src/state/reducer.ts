@@ -66,7 +66,11 @@ export type ProjectionAction =
     }
   | { type: 'domain.event'; event: DomainEvent }
   | { type: 'runtime.event'; event: RuntimeEvent }
-  | { type: 'planning.command_result'; result: V2CommandResult }
+  | {
+      type: 'planning.command_result';
+      result: V2CommandResult;
+      requestDomainCursor: number;
+    }
   | { type: 'transport.subscribed' }
   | { type: 'transport.disconnected' }
   | { type: 'resync.required'; reason: string }
@@ -339,7 +343,9 @@ export const classifyPlanningCommandResponse = (
 const applyPlanningCommandResult = (
   state: ProjectProjection,
   result: V2CommandResult,
+  requestDomainCursor: number,
 ): ProjectProjection => {
+  if (state.domainCursor > requestDomainCursor) return state;
   const disposition = classifyPlanningCommandResponse(state, result);
   if (!disposition) return state;
   if (disposition.kind === 'acknowledge_legacy') return state;
@@ -518,7 +524,11 @@ export const reduceProjectProjection = (
       if (state.resyncRequested) return state;
       return reduceEvent(state, 'runtime', action.event);
     case 'planning.command_result':
-      return applyPlanningCommandResult(state, action.result);
+      return applyPlanningCommandResult(
+        state,
+        action.result,
+        action.requestDomainCursor,
+      );
     case 'transport.subscribed':
       return {
         ...state,

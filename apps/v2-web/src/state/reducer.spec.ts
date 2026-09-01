@@ -550,6 +550,90 @@ const independentProjectProfileApproved = {
 } satisfies DomainEvent;
 
 describe('reduceProjectProjection', () => {
+  it('preserves a newer planning event when an older command response resolves', () => {
+    const pmTurnId = '00000000-0000-4000-8000-000000000146';
+    const awaitingHuman = planningCycleViewSchema.parse({
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'awaiting_human',
+        revision: 3,
+        activeExecutionId: null,
+        updatedAt: '2026-08-28T00:00:02.000Z',
+      },
+      turns: [
+        ...planningCycle.turns,
+        {
+          id: pmTurnId,
+          projectId,
+          planningCycleId,
+          ordinal: 2,
+          actor: 'pm',
+          message: 'Which Todo workflow matters most?',
+          launchState: null,
+          executionId,
+          createdAt: '2026-08-28T00:00:02.000Z',
+        },
+      ],
+      questions: [
+        {
+          id: '00000000-0000-4000-8000-000000000147',
+          projectId,
+          planningCycleId,
+          turnId: pmTurnId,
+          key: 'workflow',
+          prompt: 'Which Todo workflow matters most?',
+          rationale: 'The answer determines the first milestone.',
+          choices: ['Personal', 'Team'],
+        },
+      ],
+    });
+    const launchPending = planningCycleViewSchema.parse({
+      ...planningCycle,
+      cycle: {
+        ...planningCycle.cycle,
+        lifecycle: 'launch_pending',
+        revision: 1,
+        activeExecutionId: null,
+        updatedAt: '2026-08-28T00:00:01.000Z',
+      },
+      turns: [
+        {
+          ...planningCycle.turns[0],
+          launchState: 'launch_pending',
+          executionId: null,
+        },
+      ],
+    });
+    const requestDomainCursor = ready().domainCursor;
+    const afterEvent = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000148',
+        projectId,
+        sequence: requestDomainCursor + 1,
+        occurredAt: '2026-08-28T00:00:02.000Z',
+        type: 'planning_cycle.changed',
+        payload: { schemaVersion: 2, planningCycle: awaitingHuman },
+      },
+    });
+
+    const afterResponse = reduceProjectProjection(afterEvent, {
+      type: 'planning.command_result',
+      requestDomainCursor,
+      result: {
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'planning_cycle.submit_turn',
+        planningCycle: launchPending,
+      },
+    });
+
+    expect(afterResponse).toBe(afterEvent);
+    expect(afterResponse.planningCycles).toEqual([awaitingHuman]);
+    expect(afterResponse.domainCursor).toBe(3);
+  });
+
   it('applies complete versioned projections and ignores invalid authority pairs', () => {
     const hydrated = ready();
     const approved = persistedPlanningCommandSuccessSchema.parse({
@@ -562,6 +646,7 @@ describe('reduceProjectProjection', () => {
     });
     const next = reduceProjectProjection(hydrated, {
       type: 'planning.command_result',
+      requestDomainCursor: hydrated.domainCursor,
       result: approved,
     });
 
@@ -573,6 +658,7 @@ describe('reduceProjectProjection', () => {
 
     const filtered = reduceProjectProjection(next, {
       type: 'planning.command_result',
+      requestDomainCursor: next.domainCursor,
       result: {
         ok: true,
         schemaVersion: 2,
@@ -584,6 +670,7 @@ describe('reduceProjectProjection', () => {
 
     const invalid = reduceProjectProjection(filtered, {
       type: 'planning.command_result',
+      requestDomainCursor: filtered.domainCursor,
       result: {
         ...approved,
         board: snapshot.board,
@@ -618,6 +705,7 @@ describe('reduceProjectProjection', () => {
     });
     const acknowledged = reduceProjectProjection(current, {
       type: 'planning.command_result',
+      requestDomainCursor: current.domainCursor,
       result: legacy,
     });
 
@@ -632,7 +720,11 @@ describe('reduceProjectProjection', () => {
 
     const unknown = reduceProjectProjection(
       createInitialProjectProjection(projectId),
-      { type: 'planning.command_result', result: legacy },
+      {
+        type: 'planning.command_result',
+        requestDomainCursor: 0,
+        result: legacy,
+      },
     );
     expect(unknown.resyncRequested).toBe(true);
     expect(unknown.resyncReason).toBe('legacy_m2_freshness_unknown');
@@ -671,6 +763,7 @@ describe('reduceProjectProjection', () => {
       });
       const resync = reduceProjectProjection(projection, {
         type: 'planning.command_result',
+        requestDomainCursor: projection.domainCursor,
         result: legacy,
       });
       expect(resync.resyncRequested).toBe(true);

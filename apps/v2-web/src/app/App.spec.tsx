@@ -288,6 +288,15 @@ const clearedFilteredBoard = boardViewSchema.parse({
   },
 });
 
+const newerFilteredBoard = boardViewSchema.parse({
+  ...filteredBoard,
+  filter: {
+    ...filteredBoard.filter!,
+    revision: 4,
+    updatedAt: '2026-08-28T00:00:05.000Z',
+  },
+});
+
 const terminalPlanningCycle = planningCycleViewSchema.parse({
   purpose: {
     kind: 'intent',
@@ -659,6 +668,62 @@ describe('App', () => {
       expect.any(AbortSignal),
     );
     await waitFor(() => expect(label).not.toBeChecked());
+  });
+
+  it('preserves a Board event that arrives before its delayed command response', async () => {
+    const user = userEvent.setup();
+    let resolveCommand!: (
+      result: Awaited<ReturnType<V2Api['command']>>,
+    ) => void;
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => ({
+      ...projectSnapshot,
+      board: filteredBoard,
+    }));
+    vi.mocked(api.command).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCommand = resolve;
+        }),
+    );
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+
+    const label = screen.getByRole('checkbox', { name: 'web · 0 tasks' });
+    await user.click(label);
+    await user.click(screen.getByRole('button', { name: 'Apply filters' }));
+    await waitFor(() => expect(api.command).toHaveBeenCalledOnce());
+
+    act(() =>
+      app.sockets[0]?.message({
+        type: 'v2.domain_event',
+        protocolVersion: V2_PROTOCOL_VERSION,
+        projectId,
+        event: {
+          id: '99999999-9999-4999-8999-999999999999',
+          projectId,
+          sequence: 4,
+          occurredAt: '2026-08-28T00:00:05.000Z',
+          type: 'board.filter_changed',
+          payload: { schemaVersion: 1, board: newerFilteredBoard },
+        },
+      }),
+    );
+
+    act(() =>
+      resolveCommand({
+        ok: true,
+        schemaVersion: 2,
+        commandType: 'board_filter.set',
+        board: clearedFilteredBoard,
+      }),
+    );
+
+    await waitFor(() => expect(label).toBeChecked());
   });
 
   it('shows typed filter conflicts and resyncs before allowing another mutation', async () => {

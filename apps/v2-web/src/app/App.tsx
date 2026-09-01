@@ -89,6 +89,17 @@ const freshnessConflictCodes = new Set([
   'board_filter_revision_conflict',
 ]);
 
+const planningCommandTypes = new Set<V2CommandEnvelope['command']['type']>([
+  'planning_cycle.submit_turn',
+  'planning_proposal.approve',
+  'planning_proposal.reject',
+  'planning_cycle.abandon',
+  'planning_cycle.submit_plan_turn',
+  'plan_proposal.approve',
+  'plan_proposal.reject',
+  'board_filter.set',
+]);
+
 const routeProjectId = (pathname: string) => {
   const match = /^\/projects\/([^/]+)$/.exec(pathname);
   if (!match) return undefined;
@@ -254,6 +265,7 @@ function ProjectConnection({
       setSubmitting(true);
       setCommandError(undefined);
       try {
+        const requestDomainCursor = projection.domainCursor;
         const result = await api.command(request, controller.signal);
         if (activeCommand.current?.token !== token) return;
         pending.current = undefined;
@@ -270,8 +282,12 @@ function ProjectConnection({
               reason: result.error.code,
             });
           }
-        } else {
-          dispatch({ type: 'planning.command_result', result });
+        } else if (planningCommandTypes.has(expectedType)) {
+          dispatch({
+            type: 'planning.command_result',
+            result,
+            requestDomainCursor,
+          });
         }
       } catch (cause) {
         if (activeCommand.current?.token !== token) return;
@@ -289,7 +305,7 @@ function ProjectConnection({
         }
       }
     },
-    [api, dispatch, onAuditBarrier],
+    [api, dispatch, onAuditBarrier, projection.domainCursor],
   );
 
   const interruptExecution = useCallback(
