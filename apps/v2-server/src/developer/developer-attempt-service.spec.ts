@@ -3113,6 +3113,132 @@ describe('DeveloperAttemptService', () => {
     expect(() => context.dependencies.barrier.assertHealthy()).not.toThrow();
   });
 
+  it('serializes divergent replacement key reuse across attempts before effects', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const firstAttempt = context.attempts[0];
+    const firstExecution = context.executionRecords.get(
+      firstAttempt.controllingExecutionId!,
+    )!;
+    const secondAttemptId = randomUUID() as DeveloperAttempt['id'];
+    const secondExecutionId = randomUUID() as WorkerExecution['id'];
+    const secondAttempt = {
+      ...firstAttempt,
+      id: secondAttemptId,
+      assignment: { ...firstAttempt.assignment, attemptId: secondAttemptId },
+      workspace: {
+        ...firstAttempt.workspace,
+        attemptId: secondAttemptId,
+        branch: `${firstAttempt.workspace.branch}-second`,
+        path: `${firstAttempt.workspace.path}-second`,
+        ownershipToken: `${firstAttempt.workspace.ownershipToken}-second`,
+      },
+      controllingExecutionId: secondExecutionId,
+      executionIds: [secondExecutionId],
+    } satisfies DeveloperAttempt;
+    context.attempts.push(secondAttempt);
+    context.executionRecords.set(secondExecutionId, {
+      ...firstExecution,
+      id: secondExecutionId,
+      assignment: secondAttempt.assignment,
+    });
+    const idempotencyKey = randomUUID();
+    const firstEnvelope = {
+      idempotencyKey,
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.replace_execution' as const,
+        projectId: firstAttempt.projectId,
+        attemptId: firstAttempt.id,
+        expectedAttemptRevision: firstAttempt.revision,
+      },
+    };
+    const secondEnvelope = {
+      ...firstEnvelope,
+      command: {
+        ...firstEnvelope.command,
+        attemptId: secondAttempt.id,
+        expectedAttemptRevision: secondAttempt.revision,
+      },
+    };
+    const reserveReplacement =
+      context.dependencies.execution.reserveReplacement;
+    let reserveCalls = 0;
+    let firstReservationEntered!: () => void;
+    const firstReservationStarted = new Promise<void>((resolve) => {
+      firstReservationEntered = resolve;
+    });
+    let secondReservationEntered!: () => void;
+    const secondReservationStarted = new Promise<void>((resolve) => {
+      secondReservationEntered = resolve;
+    });
+    let releaseFirstReservation!: () => void;
+    const firstReservationReleased = new Promise<void>((resolve) => {
+      releaseFirstReservation = resolve;
+    });
+    context.dependencies.execution.reserveReplacement = async (...args) => {
+      reserveCalls += 1;
+      const reservation = await reserveReplacement(...args);
+      if (reserveCalls === 1) {
+        firstReservationEntered();
+        await firstReservationReleased;
+      } else {
+        secondReservationEntered();
+      }
+      return reservation;
+    };
+    context.dependencies.execution.activateReserved = async (executionId) => {
+      context.executionCalls.push(executionId);
+    };
+    const beforeActivations = context.executionCalls.length;
+    const beforeEvents = context.events.length;
+
+    const first = context.service.replaceExecution(firstEnvelope);
+    await firstReservationStarted;
+    const conflict = context.service.replaceExecution(secondEnvelope);
+    await Promise.race([
+      secondReservationStarted,
+      new Promise<void>((resolve) => setImmediate(resolve)),
+    ]);
+    releaseFirstReservation();
+
+    await expect(first).resolves.toMatchObject({ ok: true });
+    await expect(conflict).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'idempotency_conflict' },
+    });
+    expect(reserveCalls).toBe(1);
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'active',
+      executionIds: [firstExecution.id, expect.any(String)],
+    });
+    expect(context.attempts[1]).toEqual(secondAttempt);
+    expect(context.executionCalls).toHaveLength(beforeActivations + 1);
+    expect(context.events).toHaveLength(beforeEvents + 2);
+    expect(context.events.at(-1)).toBe(context.events.at(-2));
+    const linkedExecutionIds = new Set(
+      context.attempts.flatMap(({ executionIds }) => executionIds),
+    );
+    const replacementExecutions = [...context.executionRecords.values()].filter(
+      ({ replacementForExecutionId }) => replacementForExecutionId !== null,
+    );
+    expect(replacementExecutions).toHaveLength(1);
+    expect(linkedExecutionIds.has(replacementExecutions[0].id)).toBe(true);
+    expect(context.trips).toEqual([]);
+    expect(() => context.dependencies.barrier.assertHealthy()).not.toThrow();
+  });
+
   it('replaces a frozen attempt after the current plan omits its task', async () => {
     const context = setup();
     await context.service.start(context.command);

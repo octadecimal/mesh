@@ -206,6 +206,7 @@ const outputDigest = (value: unknown) =>
 
 export class DeveloperAttemptService {
   private readonly attemptTails = new Map<string, Promise<void>>();
+  private readonly replacementTails = new Map<string, Promise<void>>();
   private readonly startTails = new Map<string, Promise<void>>();
   private readonly startFlights = new Map<string, StartFlight>();
 
@@ -1542,8 +1543,10 @@ export class DeveloperAttemptService {
       );
     const command = parsed.data;
     const requestHash = hashV2Command(command.command);
-    return this.inAttemptOrder(command.command.attemptId, () =>
-      this.replaceExecutionLocked(command, requestHash),
+    return this.inOrder(this.replacementTails, command.idempotencyKey, () =>
+      this.inAttemptOrder(command.command.attemptId, () =>
+        this.replaceExecutionLocked(command, requestHash),
+      ),
     );
   }
 
