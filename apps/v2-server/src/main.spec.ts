@@ -2054,7 +2054,7 @@ describe('startV2Server', () => {
     }
   }, 30_000);
 
-  it('serves the packaged canonical V1 guidance without weakening SPA or API routing', async () => {
+  it('serves packaged canonical guidance without weakening SPA or API routing', async () => {
     const root = temporaryDirectory();
     const canonicalGuidance = readFileSync(
       join(workspaceRoot, 'docs', 'development', 'session-platform.md'),
@@ -2071,7 +2071,23 @@ describe('startV2Server', () => {
       ),
       'utf8',
     ).replaceAll('\r\n', '\n');
+    const canonicalV2Guidance = readFileSync(
+      join(workspaceRoot, 'docs', 'development', 'v2-foundation.md'),
+      'utf8',
+    ).replaceAll('\r\n', '\n');
+    const publicV2Guidance = readFileSync(
+      join(
+        workspaceRoot,
+        'apps',
+        'v2-web',
+        'public',
+        'guidance',
+        'v2-foundation.md',
+      ),
+      'utf8',
+    ).replaceAll('\r\n', '\n');
     expect(publicGuidance).toBe(canonicalGuidance);
+    expect(publicV2Guidance).toBe(canonicalV2Guidance);
 
     const server = await startV2Server({
       environment: await environment(root, join(root, 'mesh-v2.sqlite')),
@@ -2082,25 +2098,38 @@ describe('startV2Server', () => {
     });
     servers.push(server);
 
-    const [guidanceResponse, rootResponse, directResponse, apiResponse] =
-      await Promise.all([
-        fetch(`${server.origin}/guidance/v1-session-platform.md`),
-        fetch(`${server.origin}/`),
-        fetch(`${server.origin}/projects/example`),
-        fetch(`${server.origin}/api`),
-      ]);
-    const [guidanceBody, rootBody, directBody, apiBody] = await Promise.all([
-      guidanceResponse.text(),
-      rootResponse.text(),
-      directResponse.text(),
-      apiResponse.text(),
+    const [
+      guidanceResponse,
+      v2GuidanceResponse,
+      rootResponse,
+      directResponse,
+      apiResponse,
+    ] = await Promise.all([
+      fetch(`${server.origin}/guidance/v1-session-platform.md`),
+      fetch(`${server.origin}/guidance/v2-foundation.md`),
+      fetch(`${server.origin}/`),
+      fetch(`${server.origin}/projects/example`),
+      fetch(`${server.origin}/api`),
     ]);
+    const [guidanceBody, v2GuidanceBody, rootBody, directBody, apiBody] =
+      await Promise.all([
+        guidanceResponse.text(),
+        v2GuidanceResponse.text(),
+        rootResponse.text(),
+        directResponse.text(),
+        apiResponse.text(),
+      ]);
 
     expect(guidanceResponse.status).toBe(200);
     expect(guidanceResponse.headers.get('content-type')).not.toContain(
       'text/html',
     );
     expect(guidanceBody.replaceAll('\r\n', '\n')).toBe(canonicalGuidance);
+    expect(v2GuidanceResponse.status).toBe(200);
+    expect(v2GuidanceResponse.headers.get('content-type')).not.toContain(
+      'text/html',
+    );
+    expect(v2GuidanceBody.replaceAll('\r\n', '\n')).toBe(canonicalV2Guidance);
     expect(rootResponse.status).toBe(200);
     expect(directResponse.status).toBe(200);
     expect(directBody).toBe(rootBody);

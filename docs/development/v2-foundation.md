@@ -25,27 +25,27 @@ Both hosts remain loopback-only.
 
 The parallel projects and defaults are:
 
-| Surface | V1 | V2 Milestones 1–3 |
-| --- | --- | --- |
-| Server | `server`, port `3737` | `v2-server`, port `3838` |
-| Web | `web`, port `4200` | `v2-web`, port `4300` |
-| Contracts | `contracts` | `v2-contracts` |
-| Acceptance | `e2e` | `v2-e2e` |
-| Settings | `MESH_*` | `MESH_V2_*` |
+| Surface          | V1                                                 | V2 Milestones 1–3           |
+| ---------------- | -------------------------------------------------- | --------------------------- |
+| Server           | `server`, port `3737`                              | `v2-server`, port `3838`    |
+| Web              | `web`, port `4200`                                 | `v2-web`, port `4300`       |
+| Contracts        | `contracts`                                        | `v2-contracts`              |
+| Acceptance       | `e2e`                                              | `v2-e2e`                    |
+| Settings         | `MESH_*`                                           | `MESH_V2_*`                 |
 | Default database | `~/.mesh-session-platform/session-platform.sqlite` | `~/.mesh/v2/mesh-v2.sqlite` |
 
 ## V2 settings and data
 
-| Setting | Default and constraint |
-| --- | --- |
-| `MESH_V2_HOST` | `127.0.0.1`; only `127.0.0.1` and `::1` are accepted |
-| `MESH_V2_PORT` | `3838` |
+| Setting                  | Default and constraint                                                                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `MESH_V2_HOST`           | `127.0.0.1`; only `127.0.0.1` and `::1` are accepted                                                                                |
+| `MESH_V2_PORT`           | `3838`                                                                                                                              |
 | `MESH_V2_WORKSPACE_ROOT` | the operator's home directory; overrides must be absolute; used only as the base for relative repository paths, not as an allowlist |
-| `MESH_V2_DATA_DIR` | `~/.mesh/v2`; overrides must be absolute |
-| `MESH_V2_DATABASE_PATH` | `mesh-v2.sqlite` inside the V2 data directory; overrides must be absolute |
-| `MESH_V2_DEV_ORIGIN` | exact loopback HTTP origin; the V2 server development command defaults it to `http://127.0.0.1:4300` |
-| `MESH_V2_GIT_EXECUTABLE` | optional absolute Git executable override |
-| `MESH_V2_WEB_ROOT` | optional absolute path to built V2 web assets |
+| `MESH_V2_DATA_DIR`       | `~/.mesh/v2`; overrides must be absolute                                                                                            |
+| `MESH_V2_DATABASE_PATH`  | `mesh-v2.sqlite` inside the V2 data directory; overrides must be absolute                                                           |
+| `MESH_V2_DEV_ORIGIN`     | exact loopback HTTP origin; the V2 server development command defaults it to `http://127.0.0.1:4300`                                |
+| `MESH_V2_GIT_EXECUTABLE` | optional absolute Git executable override                                                                                           |
+| `MESH_V2_WEB_ROOT`       | optional absolute path to built V2 web assets                                                                                       |
 
 V2 marks and migrates a fresh empty database with its own application identity.
 It refuses a nonempty unmarked database or a database with another application
