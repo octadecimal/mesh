@@ -55,6 +55,29 @@ spec:
   outputSchema: mesh.dev/pm-plan-report/v1
 `;
 
+const developerProfileYaml = `apiVersion: mesh.dev/v1alpha1
+kind: WorkerProfile
+metadata:
+  name: todo-developer
+  displayName: Todo developer
+  scope: project
+spec:
+  assignmentKinds:
+    - developer_task
+  preferredRuntime:
+    harness: fake
+    model: deterministic
+  alternatives: []
+  requiredCapabilities:
+    - execution.stream
+  skills:
+    preferred: []
+    required: []
+  instructions: |
+    Implement the exact frozen task and return structured evidence.
+  outputSchema: mesh.dev/developer-report/v1
+`;
+
 const sendCommand = (page: Page, command: unknown) =>
   page.evaluate(async (commandBody) => {
     const response = await fetch('/api/v2/commands', {
@@ -69,8 +92,12 @@ const sendCommand = (page: Page, command: unknown) =>
     return { status: response.status, body: await response.json() };
   }, command);
 
-const registerTodo = async (page: Page, fixture: V2ProcessFixture) => {
-  await fixture.start();
+const registerTodo = async (
+  page: Page,
+  fixture: V2ProcessFixture,
+  start: { holdAfterAdapterCursor?: number } = {},
+) => {
+  await fixture.start(start);
   await page.goto(fixture.origin);
   await page.getByLabel('Repository path').fill(fixture.todoRepository);
   await page.getByRole('button', { name: 'Add and select project' }).click();
@@ -277,6 +304,28 @@ const approveTodoDeliveryPlan = async (
     )
     .toBe(1);
   return fixture.projectSnapshot();
+};
+
+const approveDeveloperProfile = async (
+  page: Page,
+  fixture: V2ProcessFixture,
+) => {
+  const response = await sendCommand(page, {
+    type: 'worker_profile.approve_revision',
+    scope: 'project',
+    projectId: fixture.projectId,
+    expectedLatestRevision: 0,
+    sourceYaml: developerProfileYaml,
+  });
+  expect(response).toMatchObject({
+    status: 200,
+    body: {
+      ok: true,
+      commandType: 'worker_profile.approve_revision',
+      profileRevision: { revision: 1, scope: 'project' },
+    },
+  });
+  await page.reload();
 };
 
 type CleanupProbe = {
@@ -998,3 +1047,581 @@ test('approved planning state survives a built server restart', async ({
     await fixture.dispose();
   }
 });
+
+test('one Todo task completes with durable workspace evidence across restart', async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+    fakeDeveloperScenario: 'completed',
+  });
+  try {
+    await registerTodo(page, fixture, { holdAfterAdapterCursor: 2 });
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture);
+    await approveDeveloperProfile(page, fixture);
+
+    const beforeStart = await fixture.projectSnapshot();
+    expect(beforeStart.developerAttempts).toEqual([]);
+    expect(beforeStart.developerReports).toEqual([]);
+    const startingCard = beforeStart.board.cards.find(
+      ({ title }) => title === 'Persist Todo items',
+    );
+    const deliveryPlan = beforeStart.deliveryPlan;
+    const developerProfile = beforeStart.profiles.find(
+      (profile) =>
+        profile.document.spec.outputSchema === 'mesh.dev/developer-report/v1',
+    );
+    if (!startingCard || !deliveryPlan || !developerProfile) {
+      throw new Error('Frozen Developer authority was not available');
+    }
+    const board = page.getByRole('tabpanel', { name: 'Board' });
+    await board
+      .getByRole('button', { name: 'View Persist Todo items details' })
+      .click();
+    await board
+      .getByRole('button', { name: 'Start Developer attempt' })
+      .click();
+
+    await expect
+      .poll(
+        async () => {
+          const snapshot = await fixture.projectSnapshot();
+          const attempt = snapshot.developerAttempts[0];
+          const execution = snapshot.executions.find(
+            ({ id }) => id === attempt?.controllingExecutionId,
+          );
+          return attempt && execution
+            ? { snapshot, attempt, execution }
+            : undefined;
+        },
+        { timeout: 10_000 },
+      )
+      .toMatchObject({
+        attempt: { lifecycle: 'active' },
+        execution: { lifecycle: 'running', lastAdapterCursor: 2 },
+      });
+    const held = await fixture.projectSnapshot();
+    const attempt = held.developerAttempts[0];
+    if (!attempt) throw new Error('Developer attempt was not held');
+    const firstExecution = held.executions.find(
+      ({ id }) => id === attempt.controllingExecutionId,
+    );
+    if (!firstExecution) throw new Error('Developer execution was not held');
+    expect(attempt).toMatchObject({
+      projectId: fixture.projectId,
+      taskId: startingCard.taskId,
+      taskContractRevision: startingCard.taskContractRevision,
+      taskCurrentRevision: startingCard.taskCurrentRevision,
+      deliveryPlanId: deliveryPlan.plan.id,
+      deliveryPlanRevision: deliveryPlan.plan.revision,
+      profileId: developerProfile.profileId,
+      profileRevision: developerProfile.profileRevision,
+      assignment: {
+        projectId: fixture.projectId,
+        attemptId: attempt.id,
+        taskId: startingCard.taskId,
+        taskContractRevision: startingCard.taskContractRevision,
+        taskCurrentRevision: startingCard.taskCurrentRevision,
+        deliveryPlanId: deliveryPlan.plan.id,
+        deliveryPlanRevision: deliveryPlan.plan.revision,
+        requirementRevisions: startingCard.detail.requirementTraces.map(
+          ({ recordId, recordRevision }) => ({ recordId, recordRevision }),
+        ),
+        baseCommit: beforeStart.project.headCommit,
+        title: startingCard.title,
+        outcome: startingCard.outcome,
+        acceptanceCriteria: startingCard.detail.acceptanceCriteria,
+        verification: startingCard.detail.verificationCriteria,
+        expectedArtifacts: startingCard.detail.expectedArtifacts,
+        outputSchema: 'mesh.dev/developer-report/v1',
+      },
+    });
+
+    const startEvents = await fixture.domainEventsAfter(
+      beforeStart.cursors.domain,
+    );
+    const reservedIndex = startEvents.events.findIndex(
+      (event) =>
+        event.type === 'developer_attempt.changed' &&
+        event.payload.attempt.lifecycle === 'reserved',
+    );
+    const workspaceIndex = startEvents.events.findIndex(
+      (event) => event.type === 'developer_workspace.changed',
+    );
+    const activeIndex = startEvents.events.findIndex(
+      (event) =>
+        event.type === 'developer_attempt.changed' &&
+        event.payload.attempt.lifecycle === 'active',
+    );
+    expect(reservedIndex).toBeGreaterThanOrEqual(0);
+    expect(workspaceIndex).toBeGreaterThan(reservedIndex);
+    expect(activeIndex).toBeGreaterThan(workspaceIndex);
+    expect(startEvents.events[workspaceIndex]).toMatchObject({
+      payload: {
+        attempt: {
+          id: attempt.id,
+          workspace: { lifecycle: 'ready' },
+        },
+      },
+    });
+
+    const managedPath = resolve(attempt.workspace.path);
+    const managedRelation = relative(resolve(fixture.fixtureRoot), managedPath);
+    expect(attempt.workspace.path).toBe(managedPath);
+    expect(managedRelation).not.toBe('');
+    expect(managedRelation).not.toBe('..');
+    expect(
+      managedRelation.startsWith(
+        `..${process.platform === 'win32' ? '\\' : '/'}`,
+      ),
+    ).toBe(false);
+    expect(attempt.assignment.workspacePath).toBe(managedPath);
+    expect(await fixture.managedTodoArtifact(attempt.id)).toBe('persisted\n');
+    await expect(
+      page.getByText('Persisted deterministic Todo evidence.').first(),
+    ).toBeVisible();
+    await expect(page.getByText('Persist Todo evidence').first()).toBeVisible();
+    await expect(
+      page.getByText('A project command is in progress.'),
+    ).toHaveCount(0);
+
+    const firstPid = fixture.serverPid;
+    await fixture.crashServer();
+    await fixture.start({ holdAfterAdapterCursor: 3 });
+    expect(fixture.serverPid).not.toBe(firstPid);
+    await page.goto(`${fixture.origin}/projects/${fixture.projectId}`);
+    const recoveryReplay = await fixture.subscribe(page, held.cursors);
+    expect(recoveryReplay.at(-1)).toMatchObject({ type: 'v2.subscribed' });
+    const recoveryDomainIndex = recoveryReplay.findIndex(
+      (message) =>
+        message.type === 'v2.domain_event' &&
+        message.event.type === 'developer_attempt.changed' &&
+        message.event.payload.attempt.id === attempt.id &&
+        message.event.payload.attempt.workspace.observedDirty === true,
+    );
+    const recoveryRuntimeIndex = recoveryReplay.findIndex(
+      (message) =>
+        message.type === 'v2.runtime_event' &&
+        message.event.adapterCursor === 3,
+    );
+    expect(recoveryDomainIndex).toBeGreaterThanOrEqual(0);
+    expect(recoveryRuntimeIndex).toBeGreaterThan(recoveryDomainIndex);
+    expect(recoveryReplay.at(-1)?.type).toBe('v2.subscribed');
+    expect(
+      recoveryReplay
+        .filter(({ type }) => type === 'v2.runtime_event')
+        .map((message) =>
+          message.type === 'v2.runtime_event'
+            ? message.event.adapterCursor
+            : undefined,
+        ),
+    ).toEqual([3]);
+
+    await expect
+      .poll(async () => {
+        const snapshot = await fixture.projectSnapshot();
+        const recoveredAttempt = snapshot.developerAttempts.find(
+          ({ id }) => id === attempt.id,
+        );
+        const execution = snapshot.executions.find(
+          ({ id }) => id === firstExecution.id,
+        );
+        return {
+          attempt: recoveredAttempt?.lifecycle,
+          execution: execution?.lifecycle,
+          cursor: execution?.lastAdapterCursor,
+        };
+      })
+      .toEqual({ attempt: 'active', execution: 'running', cursor: 3 });
+
+    const recovered = await fixture.projectSnapshot();
+    const recoveredBoard = page.getByRole('tabpanel', { name: 'Board' });
+    await recoveredBoard
+      .getByRole('button', { name: 'View Persist Todo items details' })
+      .click();
+    await expect(
+      recoveredBoard.getByRole('button', { name: 'Start Developer attempt' }),
+    ).toBeDisabled();
+    const interrupt = recoveredBoard.getByRole('button', {
+      name: 'Interrupt attempt 1',
+    });
+    await expect(interrupt).toBeEnabled();
+    await interrupt.click();
+    await expect
+      .poll(
+        async () =>
+          (await fixture.projectSnapshot()).developerAttempts.find(
+            ({ id }) => id === attempt.id,
+          )?.lifecycle,
+      )
+      .toBe('interrupted');
+
+    const interrupted = await fixture.projectSnapshot();
+    const interruptEvents = await fixture.domainEventsAfter(
+      recovered.cursors.domain,
+    );
+    const executionInterruptedIndex = interruptEvents.events.findIndex(
+      (event) =>
+        event.type === 'worker_execution.lifecycle_changed' &&
+        event.payload.execution.id === firstExecution.id &&
+        event.payload.execution.lifecycle === 'interrupted',
+    );
+    const attemptInterruptedIndex = interruptEvents.events.findIndex(
+      (event) =>
+        event.type === 'developer_attempt.changed' &&
+        event.payload.attempt.id === attempt.id &&
+        event.payload.attempt.lifecycle === 'interrupted',
+    );
+    expect(attemptInterruptedIndex).toBeGreaterThanOrEqual(0);
+    expect(executionInterruptedIndex).toBeGreaterThanOrEqual(0);
+    expect(executionInterruptedIndex).toBeGreaterThan(attemptInterruptedIndex);
+
+    const replace = recoveredBoard.getByRole('button', {
+      name: 'Replace attempt 1 execution',
+    });
+    await expect(replace).toBeEnabled();
+    await replace.click();
+    await expect
+      .poll(async () => {
+        const current = (
+          await fixture.projectSnapshot()
+        ).developerAttempts.find(({ id }) => id === attempt.id);
+        return (
+          current && {
+            lifecycle: current.lifecycle,
+            executionCount: current.executionIds.length,
+            workspacePath: current.workspace.path,
+          }
+        );
+      })
+      .toEqual({
+        lifecycle: 'active',
+        executionCount: 2,
+        workspacePath: managedPath,
+      });
+
+    const replacementHeld = await fixture.projectSnapshot();
+    const replacementAttempt = replacementHeld.developerAttempts.find(
+      ({ id }) => id === attempt.id,
+    );
+    if (!replacementAttempt?.controllingExecutionId)
+      throw new Error('Replacement execution was not linked');
+    const replacementExecution = replacementHeld.executions.find(
+      ({ id }) => id === replacementAttempt.controllingExecutionId,
+    );
+    expect(replacementExecution).toMatchObject({
+      lifecycle: 'running',
+      lastAdapterCursor: 3,
+      replacementForExecutionId: firstExecution.id,
+      assignment: attempt.assignment,
+    });
+    if (!replacementExecution)
+      throw new Error('Replacement execution was not preserved');
+    const replacementEvents = await fixture.domainEventsAfter(
+      interrupted.cursors.domain,
+    );
+    const replacementReservedIndex = replacementEvents.events.findIndex(
+      (event) =>
+        event.type === 'worker_execution.lifecycle_changed' &&
+        event.payload.execution.id === replacementExecution.id &&
+        event.payload.execution.lifecycle === 'starting',
+    );
+    const replacementLinkedIndex = replacementEvents.events.findIndex(
+      (event) =>
+        event.type === 'developer_attempt.changed' &&
+        event.payload.attempt.id === attempt.id &&
+        event.payload.attempt.lifecycle === 'active' &&
+        event.payload.attempt.controllingExecutionId ===
+          replacementExecution.id,
+    );
+    expect(replacementReservedIndex).toBeGreaterThanOrEqual(0);
+    expect(replacementLinkedIndex).toBeGreaterThan(replacementReservedIndex);
+    expect(await fixture.managedTodoArtifact(attempt.id)).toBe('persisted\n');
+
+    const secondPid = fixture.serverPid;
+    await fixture.crashServer();
+    await fixture.start();
+    expect(fixture.serverPid).not.toBe(secondPid);
+    await page.goto(`${fixture.origin}/projects/${fixture.projectId}`);
+    await expect
+      .poll(
+        async () =>
+          (await fixture.projectSnapshot()).developerAttempts.find(
+            ({ id }) => id === attempt.id,
+          )?.lifecycle,
+      )
+      .toBe('completed');
+
+    const completed = await fixture.projectSnapshot();
+    const completedAttempt = completed.developerAttempts.find(
+      ({ id }) => id === attempt.id,
+    );
+    if (!completedAttempt)
+      throw new Error('Developer attempt did not complete');
+    const reportRecord = completed.developerReports.find(
+      ({ id }) => id === completedAttempt.reportIds[0],
+    );
+    if (!reportRecord || reportRecord.report.disposition !== 'completed')
+      throw new Error('Developer completion report was not recorded');
+    const report = reportRecord.report;
+    expect(completedAttempt).toMatchObject({
+      lifecycle: 'completed',
+      executionIds: [firstExecution.id, replacementExecution.id],
+      reportIds: [reportRecord.id],
+      workspace: {
+        path: managedPath,
+        lifecycle: 'ready',
+        observedHead: attempt.baseCommit,
+        observedDirty: true,
+      },
+    });
+    expect(report).toMatchObject({
+      attemptId: attempt.id,
+      executionId: replacementExecution.id,
+      taskId: attempt.taskId,
+      taskContractRevision: attempt.taskContractRevision,
+      changedArtifacts: [
+        { path: 'todo-m4.txt', summary: 'Persisted Todo evidence.' },
+      ],
+      unresolvedConcerns: [],
+      workspace: { headCommit: attempt.baseCommit, dirty: true },
+    });
+    expect(report.requirementCoverage).toEqual(
+      attempt.assignment.requirementRevisions.map((requirement) => ({
+        ...requirement,
+        passed: true,
+        evidence: [{ summary: 'Todo persistence requirement satisfied.' }],
+      })),
+    );
+    expect(report.criterionCoverage).toEqual(
+      attempt.assignment.acceptanceCriteria.map((text, index) => ({
+        index,
+        text,
+        passed: true,
+        evidence: [{ summary: 'Todo persistence acceptance passed.' }],
+      })),
+    );
+    expect(report.verification).toEqual(
+      attempt.assignment.verification.map((command) => ({
+        command,
+        passed: true,
+        evidence: [
+          { summary: 'todo-m4.txt contains persisted Todo evidence.' },
+        ],
+      })),
+    );
+    const persistedCard = completed.board.cards.find(
+      ({ taskId }) => taskId === attempt.taskId,
+    );
+    expect(persistedCard).toMatchObject({
+      lifecycle: 'completed',
+      taskCurrentRevision: attempt.taskCurrentRevision + 1,
+    });
+
+    const completionDomain = await fixture.domainEventsAfter(
+      replacementHeld.cursors.domain,
+    );
+    const completionTypes = completionDomain.events.map(({ type }) => type);
+    expect(
+      completionTypes.indexOf('developer_report.recorded'),
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      completionTypes.indexOf('developer_attempt.changed'),
+    ).toBeGreaterThan(completionTypes.indexOf('developer_report.recorded'));
+    expect(completionTypes.indexOf('task.lifecycle_changed')).toBeGreaterThan(
+      completionTypes.indexOf('developer_attempt.changed'),
+    );
+    const completionRuntime = await fixture.runtimeEventsAfter(
+      replacementHeld.cursors.runtime,
+    );
+    expect(
+      completionRuntime.events.map(({ adapterCursor, type }) => ({
+        adapterCursor,
+        type,
+      })),
+    ).toEqual([
+      { adapterCursor: 4, type: 'worker_execution.structured_output' },
+      { adapterCursor: 5, type: 'worker_execution.completed' },
+    ]);
+
+    const completedBoard = page.getByRole('tabpanel', { name: 'Board' });
+    await completedBoard
+      .getByRole('button', { name: 'View Persist Todo items details' })
+      .click();
+    await expect(
+      page.getByText('Todo persistence acceptance passed.').first(),
+    ).toBeVisible();
+    await expect(page.getByText('todo-m4.txt').first()).toBeVisible();
+
+    await completedBoard
+      .getByRole('button', { name: 'View Build Todo controls details' })
+      .click();
+    await completedBoard
+      .getByRole('button', { name: 'Start Developer attempt' })
+      .click();
+    await expect
+      .poll(
+        async () =>
+          (await fixture.projectSnapshot()).board.cards.find(
+            ({ title }) => title === 'Build Todo controls',
+          )?.lifecycle,
+      )
+      .toBe('completed');
+    await expect
+      .poll(
+        async () =>
+          (await fixture.projectSnapshot()).board.cards.find(
+            ({ title }) => title === 'Integrate Todo workflow',
+          )?.readiness.state,
+      )
+      .toBe('actionable');
+
+    const beforeResync = await fixture.projectSnapshot();
+    const resynced = await fixture.forceProjectResync(page);
+    expect(resynced.developerAttempts).toEqual(beforeResync.developerAttempts);
+    expect(resynced.developerReports).toEqual(beforeResync.developerReports);
+    expect(resynced.board).toEqual(beforeResync.board);
+    expect(resynced.developerAttempts).toHaveLength(2);
+    expect(resynced.developerReports).toHaveLength(2);
+    expect(new Set(resynced.developerAttempts.map(({ id }) => id)).size).toBe(
+      2,
+    );
+    expect(new Set(resynced.developerReports.map(({ id }) => id)).size).toBe(2);
+    const allDomain = await fixture.domainEventsAfter(0);
+    expect(allDomain.events.map(({ sequence }) => sequence)).toEqual(
+      contiguousAfter(0, allDomain.highWater),
+    );
+    expect(new Set(allDomain.events.map(({ id }) => id)).size).toBe(
+      allDomain.events.length,
+    );
+    const allRuntime = await fixture.runtimeEventsAfter(0);
+    expect(allRuntime.events.map(({ sequence }) => sequence)).toEqual(
+      contiguousAfter(0, allRuntime.highWater),
+    );
+    expect(new Set(allRuntime.events.map(({ id }) => id)).size).toBe(
+      allRuntime.events.length,
+    );
+    for (const ownedPath of [
+      fixture.databasePath,
+      fixture.todoRepository,
+      ...resynced.developerAttempts.map(({ workspace }) => workspace.path),
+    ]) {
+      const relation = relative(
+        resolve(fixture.fixtureRoot),
+        resolve(ownedPath),
+      );
+      expect(relation).not.toBe('');
+      expect(relation).not.toBe('..');
+      expect(
+        relation.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`),
+      ).toBe(false);
+    }
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+for (const scenario of ['blocked', 'malformed', 'duplicate'] as const) {
+  test(`isolates the ${scenario} Developer report outcome`, async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+    const fixture = await V2ProcessFixture.createTodo({
+      fakePmScenario: 'todo',
+      fakeDeveloperScenario: scenario,
+    });
+    try {
+      await registerTodo(page, fixture);
+      await approveTodoIntent(page, fixture);
+      await approveTodoDeliveryPlan(page, fixture);
+      await approveDeveloperProfile(page, fixture);
+
+      const beforeStart = await fixture.projectSnapshot();
+      const cardBefore = beforeStart.board.cards.find(
+        ({ title }) => title === 'Persist Todo items',
+      );
+      if (!cardBefore) throw new Error('Persist Todo task was not found');
+      const board = page.getByRole('tabpanel', { name: 'Board' });
+      await board
+        .getByRole('button', { name: 'View Persist Todo items details' })
+        .click();
+      await board
+        .getByRole('button', { name: 'Start Developer attempt' })
+        .click();
+
+      const expectedLifecycle =
+        scenario === 'blocked' ? 'blocked' : 'interrupted';
+      await expect
+        .poll(
+          async () =>
+            (await fixture.projectSnapshot()).developerAttempts[0]?.lifecycle,
+        )
+        .toBe(expectedLifecycle);
+
+      const settled = await fixture.projectSnapshot();
+      expect(settled.developerAttempts).toHaveLength(1);
+      const attempt = settled.developerAttempts[0];
+      if (!attempt) throw new Error('Developer attempt was not recorded');
+      expect(attempt).toMatchObject({
+        lifecycle: expectedLifecycle,
+        ordinal: 1,
+        taskId: cardBefore.taskId,
+        taskCurrentRevision: cardBefore.taskCurrentRevision,
+      });
+      expect(attempt.executionIds).toHaveLength(1);
+      expect(await fixture.managedTodoArtifact(attempt.id)).toBe('persisted\n');
+      expect(
+        settled.board.cards.find(({ taskId }) => taskId === cardBefore.taskId),
+      ).toMatchObject({
+        lifecycle: cardBefore.lifecycle,
+        taskCurrentRevision: cardBefore.taskCurrentRevision,
+        readiness: { state: 'actionable' },
+      });
+
+      const events = await fixture.domainEventsAfter(
+        beforeStart.cursors.domain,
+      );
+      const reports = events.events.filter(
+        ({ type }) => type === 'developer_report.recorded',
+      );
+      if (scenario === 'blocked') {
+        expect(settled.developerReports).toHaveLength(1);
+        expect(settled.developerReports[0]).toMatchObject({
+          report: {
+            disposition: 'blocked',
+            attemptId: attempt.id,
+            executionId: attempt.controllingExecutionId,
+            taskId: attempt.taskId,
+            taskContractRevision: attempt.taskContractRevision,
+            blocker: 'The deterministic fake Developer is blocked.',
+            evidence: [
+              { summary: 'todo-m4.txt was written before the blocker.' },
+            ],
+            suggestedNextAction:
+              'Resolve the deterministic blocker and replace the execution.',
+            preserveWorkspace: true,
+            workspace: { headCommit: attempt.baseCommit, dirty: true },
+          },
+        });
+        expect(reports).toHaveLength(1);
+        await expect(
+          page.getByRole('region', { name: 'Developer blocker report' }),
+        ).toContainText('The deterministic fake Developer is blocked.');
+        await expect(page.getByLabel('Developer attempt state')).toHaveText(
+          'Blocked',
+        );
+      } else {
+        expect(settled.developerReports).toEqual([]);
+        expect(attempt.reportIds).toEqual([]);
+        expect(reports).toEqual([]);
+        await expect(page.getByLabel('Developer attempt state')).toHaveText(
+          'Interrupted',
+        );
+      }
+    } finally {
+      await fixture.dispose();
+    }
+  });
+}

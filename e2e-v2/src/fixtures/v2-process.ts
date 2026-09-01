@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, copyFile, mkdtemp, rm } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 
@@ -62,6 +62,12 @@ type SpawnServerOptions = {
   onReadyObserved?: (ready: ReadyLine) => void;
   onSignal?: (signal: NodeJS.Signals) => void;
 };
+
+type FakeDeveloperScenario =
+  | 'completed'
+  | 'blocked'
+  | 'malformed'
+  | 'duplicate';
 
 const workspaceRoot = resolve(__dirname, '..', '..', '..');
 const serverMain = join(workspaceRoot, 'dist', 'apps', 'v2-server', 'main.js');
@@ -272,6 +278,7 @@ export class V2ProcessFixture {
     readonly fixtureRoot: string,
     todoRepository: string,
     private readonly fakePmScenario?: 'todo',
+    private readonly fakeDeveloperScenario?: FakeDeveloperScenario,
   ) {
     this.todoRepository = todoRepository;
     this.databasePath = assertContainedPath(
@@ -284,6 +291,7 @@ export class V2ProcessFixture {
     options: {
       onRoot?: (root: string) => void;
       fakePmScenario?: 'todo';
+      fakeDeveloperScenario?: FakeDeveloperScenario;
     } = {},
   ) {
     let root: string | undefined;
@@ -293,7 +301,12 @@ export class V2ProcessFixture {
       );
       options.onRoot?.(root);
       const repository = await createTodoRepository(root);
-      return new V2ProcessFixture(root, repository, options.fakePmScenario);
+      return new V2ProcessFixture(
+        root,
+        repository,
+        options.fakePmScenario,
+        options.fakeDeveloperScenario,
+      );
     } catch (error) {
       if (root) await rm(root, { recursive: true, force: true });
       throw error;
@@ -347,6 +360,10 @@ export class V2ProcessFixture {
     };
     if (this.fakePmScenario) {
       environment.MESH_V2_TEST_FAKE_PM_SCENARIO = this.fakePmScenario;
+    }
+    if (this.fakeDeveloperScenario) {
+      environment.MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO =
+        this.fakeDeveloperScenario;
     }
     if (options.holdAfterAdapterCursor !== undefined) {
       environment.MESH_V2_FAKE_HOLD_AFTER_CURSOR = String(
@@ -698,7 +715,27 @@ export class V2ProcessFixture {
       `${this.origin}/api/v2/projects/${this.projectId}/snapshot`,
     );
     expect(response.status).toBe(200);
-    return v2ProjectSnapshotSchema.parse(await response.json());
+    const snapshot = v2ProjectSnapshotSchema.parse(await response.json());
+    return {
+      ...snapshot,
+      developerAttempts: snapshot.developerAttempts ?? [],
+      developerReports: snapshot.developerReports ?? [],
+    };
+  }
+
+  async managedTodoArtifact(attemptId: string) {
+    const attempt = (await this.projectSnapshot()).developerAttempts.find(
+      ({ id }) => id === attemptId,
+    );
+    if (!attempt) throw new Error('Developer attempt was not found');
+    const workspace = assertContainedPath(
+      this.fixtureRoot,
+      attempt.workspace.path,
+    );
+    return readFile(
+      assertContainedPath(workspace, join(workspace, 'todo-m4.txt')),
+      'utf8',
+    );
   }
 
   async waitForBrowserRegistration() {
