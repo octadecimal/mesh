@@ -2619,7 +2619,7 @@ export class PlanningRepository {
     return filter;
   }
 
-  appendTaskLifecycleRevisionInTransaction(input: {
+  appendOperationalTaskLifecycleInTransaction(input: {
     projectId: string;
     expectedDeliveryPlanRevision: number;
     taskId: string;
@@ -2664,6 +2664,18 @@ export class PlanningRepository {
     });
     this.insertTaskRevision(next);
     return next;
+  }
+
+  appendTaskLifecycleRevisionInTransaction(input: {
+    projectId: string;
+    expectedDeliveryPlanRevision: number;
+    taskId: string;
+    expectedContractRevision: number;
+    expectedCurrentRevision: number;
+    lifecycle: 'pending' | 'completed';
+    createdAt: string;
+  }): TaskRevision {
+    return this.appendOperationalTaskLifecycleInTransaction(input);
   }
 
   currentTaskRevisions(plan: ApprovedDeliveryPlan): readonly TaskRevision[] {

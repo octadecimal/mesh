@@ -1090,6 +1090,39 @@ const replaceCurrentIntent = (
 };
 
 describe('PlanningRepository', () => {
+  it('appends a completion revision without changing the task contract', () => {
+    const { fixture, repository } = setup();
+    const { plan, taskId } = approveDeliveryProposal(fixture, repository);
+
+    const completed = inImmediateTransaction(fixture.database, () =>
+      repository.appendOperationalTaskLifecycleInTransaction({
+        projectId: fixture.project.id,
+        expectedDeliveryPlanRevision: plan.plan.revision,
+        taskId,
+        expectedContractRevision: 1,
+        expectedCurrentRevision: 1,
+        lifecycle: 'completed',
+        createdAt: at,
+      }),
+    );
+
+    expect(completed).toMatchObject({
+      id: taskId,
+      revision: 2,
+      contractRevision: 1,
+      revisionKind: 'operational_lifecycle',
+      lifecycle: 'completed',
+      source: { kind: 'lifecycle', priorRevision: 1 },
+    });
+    expect(
+      repository.taskExecutionAuthority(fixture.project.id, taskId)?.task,
+    ).toMatchObject({
+      revision: 2,
+      contractRevision: 1,
+      lifecycle: 'completed',
+    });
+  });
+
   it('returns one coherent execution authority for an actionable task', () => {
     const { fixture, repository } = setup();
     const { plan, taskId } = approveDeliveryProposal(fixture, repository);

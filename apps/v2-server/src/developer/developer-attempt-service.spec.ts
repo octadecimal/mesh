@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   DEVELOPER_REPORT_SCHEMA,
   type DeveloperAttempt,
+  type DeveloperReport,
   type ManagedWorkspace,
   type ResolvedWorkerProfileSnapshot,
 } from '@mesh/v2-contracts';
@@ -16,6 +17,7 @@ import {
 import { createV2TestDatabase } from '../test/create-v2-test-database.js';
 
 const now = '2026-09-01T12:00:00.000Z';
+const later = '2026-09-01T12:01:00.000Z';
 const fixtures: ReturnType<typeof createV2TestDatabase>[] = [];
 
 const createAuthority = (
@@ -47,7 +49,7 @@ const createAuthority = (
       lifecycle: 'pending',
       title: 'Persist Todo items',
       outcome: 'Todo items survive reload.',
-      acceptanceCriteria: ['Reload restores one Todo item.'],
+      acceptanceCriteria: ['Reload: restores one Todo item.'],
       verificationCriteria: ['Run the Todo persistence test.'],
       expectedArtifacts: ['src/todos.ts'],
     } as TaskExecutionAuthority['task'],
@@ -61,7 +63,7 @@ const createAuthority = (
       outcome: 'Todo items survive reload.',
       readiness: { state: 'actionable', blockers: [] },
       detail: {
-        acceptanceCriteria: ['Reload restores one Todo item.'],
+        acceptanceCriteria: ['Reload: restores one Todo item.'],
         verificationCriteria: ['Run the Todo persistence test.'],
         expectedArtifacts: ['src/todos.ts'],
       },
@@ -104,6 +106,36 @@ const createEnvelope = (
   },
 });
 
+const completionReport = (
+  attempt: DeveloperAttempt,
+): Extract<DeveloperReport, { disposition: 'completed' }> => ({
+  schema: DEVELOPER_REPORT_SCHEMA,
+  disposition: 'completed',
+  attemptId: attempt.id,
+  executionId: attempt.controllingExecutionId!,
+  taskId: attempt.taskId,
+  taskContractRevision: attempt.taskContractRevision,
+  requirementCoverage: attempt.requirementRevisions.map((requirement) => ({
+    ...requirement,
+    passed: true,
+    evidence: [],
+  })),
+  criterionCoverage: attempt.assignment.acceptanceCriteria.map(
+    (text, index) => ({
+      index,
+      text,
+      passed: true,
+      evidence: [],
+    }),
+  ),
+  changedArtifacts: [
+    { path: 'src/todos.ts', summary: 'Persisted Todo items.' },
+  ],
+  verification: [{ command: 'pnpm test todos', passed: true, evidence: [] }],
+  unresolvedConcerns: [],
+  workspace: { headCommit: attempt.baseCommit, dirty: false },
+});
+
 const setup = (
   options: {
     authority?: TaskExecutionAuthority | undefined;
@@ -131,10 +163,36 @@ const setup = (
   const inspectionCalls: unknown[] = [];
   const executionCalls: unknown[] = [];
   const events: unknown[] = [];
+  const reports: unknown[] = [];
+  const receipts: unknown[] = [];
+  const receiptsByRuntimeEvent = new Map<string, unknown>();
   let inspectionHook: (() => void) | undefined;
   const dependencies = {
     database: fixture.database,
-    planning: { taskExecutionAuthority: () => authority },
+    planning: {
+      taskExecutionAuthority: () => authority,
+      appendOperationalTaskLifecycleInTransaction: (input: {
+        taskId: string;
+        expectedCurrentRevision: number;
+        lifecycle: 'completed' | 'pending';
+      }) => {
+        if (
+          authority?.task.id !== input.taskId ||
+          authority.task.revision !== input.expectedCurrentRevision
+        ) {
+          throw new Error('Task lifecycle revision conflict');
+        }
+        authority = {
+          ...authority,
+          task: {
+            ...authority.task,
+            revision: authority.task.revision + 1,
+            lifecycle: input.lifecycle,
+          },
+        };
+        return authority.task;
+      },
+    },
     developers: {
       attempt: (id) => attempts.find((attempt) => attempt.id === id),
       attemptsForProject: () => attempts,
@@ -164,6 +222,17 @@ const setup = (
         const current = attempts.find(({ id }) => id === attempt.id)!;
         attempts.splice(attempts.indexOf(current), 1, attempt);
         return attempt;
+      },
+      insertReportInTransaction: (report) => {
+        reports.push(report);
+        return report;
+      },
+      outputReceipt: (runtimeEventId) =>
+        receiptsByRuntimeEvent.get(runtimeEventId) as never,
+      recordOutputReceiptInTransaction: (receipt) => {
+        receipts.push(receipt);
+        receiptsByRuntimeEvent.set(receipt.runtimeEventId, receipt);
+        return receipt;
       },
     },
     profiles: { resolveApproved: () => profile },
@@ -289,6 +358,9 @@ const setup = (
     inspectionCalls,
     executionCalls,
     events,
+    reports,
+    receipts,
+    fixture,
     getAuthority: () => authority,
     setAuthority: (value: TaskExecutionAuthority | undefined) => {
       authority = value;
@@ -308,6 +380,136 @@ afterEach(() => {
 });
 
 describe('DeveloperAttemptService', () => {
+  it('settles an exactly covered completion without mutating its contract', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = completionReport(attempt);
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+    const event = {
+      id: randomUUID(),
+      occurredAt: later,
+      payload: { value: report },
+    };
+
+    context.service.acceptReport(execution as never, event as never, report);
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'completed',
+      reportIds: [expect.any(String)],
+      taskContractRevision: 1,
+    });
+    expect(context.getAuthority()!.task).toMatchObject({
+      revision: 2,
+      contractRevision: 1,
+      lifecycle: 'completed',
+    });
+    expect(context.receipts).toHaveLength(1);
+    expect(context.reports).toHaveLength(1);
+  });
+
+  it('rejects missing, duplicate, and failed completion evidence', async () => {
+    for (const revise of [
+      (report: ReturnType<typeof completionReport>) => ({
+        ...report,
+        criterionCoverage: [],
+      }),
+      (report: ReturnType<typeof completionReport>) => ({
+        ...report,
+        requirementCoverage: [
+          ...report.requirementCoverage,
+          report.requirementCoverage[0],
+        ],
+      }),
+      (report: ReturnType<typeof completionReport>) => ({
+        ...report,
+        verification: [{ ...report.verification[0], passed: false }],
+      }),
+    ]) {
+      const context = setup();
+      await context.service.start(context.command);
+      const attempt = context.attempts[0];
+      const report = revise(completionReport(attempt));
+      const execution = {
+        ...context.fixture.execution,
+        id: attempt.controllingExecutionId,
+        projectId: attempt.projectId,
+        assignment: attempt.assignment,
+      };
+
+      context.service.acceptReport(
+        execution as never,
+        {
+          id: randomUUID(),
+          occurredAt: later,
+          payload: { value: report },
+        } as never,
+        report,
+      );
+
+      expect(context.attempts[0]).toMatchObject({
+        lifecycle: 'active',
+        reportIds: [],
+      });
+      expect(context.reports).toHaveLength(0);
+      expect(context.receipts).toEqual([
+        expect.objectContaining({
+          status: 'rejected',
+          rejectionReason: 'report_coverage_invalid',
+        }),
+      ]);
+    }
+  });
+
+  it('preserves the task when a valid blocker settles the attempt', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report: Extract<DeveloperReport, { disposition: 'blocked' }> = {
+      schema: DEVELOPER_REPORT_SCHEMA,
+      disposition: 'blocked',
+      attemptId: attempt.id,
+      executionId: attempt.controllingExecutionId!,
+      taskId: attempt.taskId,
+      taskContractRevision: attempt.taskContractRevision,
+      blocker: 'The repository has a conflicting lock.',
+      evidence: [],
+      suggestedNextAction: 'Release the lock and resume the attempt.',
+      preserveWorkspace: true,
+      workspace: { headCommit: attempt.baseCommit, dirty: false },
+    };
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+
+    context.service.acceptReport(
+      execution as never,
+      {
+        id: randomUUID(),
+        occurredAt: later,
+        payload: { value: report },
+      } as never,
+      report,
+    );
+
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'blocked',
+      reportIds: [expect.any(String)],
+    });
+    expect(context.getAuthority()!.task).toMatchObject({
+      revision: 1,
+      lifecycle: 'pending',
+    });
+  });
+
   it('durably reserves and then activates one actionable Developer attempt', async () => {
     const context = setup();
 

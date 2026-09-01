@@ -1,16 +1,21 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import {
   DEVELOPER_REPORT_SCHEMA,
   developerAttemptSchema,
+  developerReportIdSchema,
+  developerTaskAssignmentSchema,
   startDeveloperAttemptEnvelopeSchema,
   type DeveloperAttempt,
+  type DeveloperReport,
   type DomainEvent,
   type ManagedWorkspace,
   type ResolvedWorkerProfileSnapshot,
   type V2Command,
   type V2CommandEnvelope,
   type V2CommandResult,
+  type WorkerExecution,
+  type WorkerExecutionStructuredOutputRuntimeEvent,
 } from '@mesh/v2-contracts';
 
 import { inImmediateTransaction, type V2Database } from '../db/database.js';
@@ -22,6 +27,7 @@ import type {
 } from '../planning/planning-repository.js';
 import type { V2CommandRepository } from '../storage/command-repository.js';
 import { hashV2Command } from '../storage/command-repository.js';
+import { canonicalJson } from '../storage/canonical-json.js';
 import type { V2EventStore } from '../storage/event-store.js';
 import type { DeveloperRepository } from './developer-repository.js';
 import type { DeriveManagedWorkspaceInput } from './managed-workspace.js';
@@ -34,7 +40,10 @@ export type StartDeveloperAttemptEnvelope = V2CommandEnvelope & {
 
 type Dependencies = {
   database: V2Database;
-  planning: Pick<PlanningRepository, 'taskExecutionAuthority'>;
+  planning: Pick<
+    PlanningRepository,
+    'taskExecutionAuthority' | 'appendOperationalTaskLifecycleInTransaction'
+  >;
   developers: Pick<
     DeveloperRepository,
     | 'attempt'
@@ -44,6 +53,9 @@ type Dependencies = {
     | 'recordWorkspaceObservationInTransaction'
     | 'linkExecutionInTransaction'
     | 'transitionAttemptInTransaction'
+    | 'insertReportInTransaction'
+    | 'outputReceipt'
+    | 'recordOutputReceiptInTransaction'
   >;
   profiles: {
     resolveApproved(
@@ -87,8 +99,193 @@ const compatible = (profile: ResolvedWorkerProfileSnapshot) =>
   profile.document.spec.assignmentKinds[0] === 'developer_task' &&
   profile.document.spec.outputSchema === DEVELOPER_REPORT_SCHEMA;
 
+const outputDigest = (value: unknown) =>
+  createHash('sha256').update(canonicalJson(value)).digest('hex');
+
 export class DeveloperAttemptService {
   constructor(private readonly dependencies: Dependencies) {}
+
+  acceptReport(
+    execution: WorkerExecution,
+    event: WorkerExecutionStructuredOutputRuntimeEvent,
+    report: DeveloperReport | null,
+  ): void {
+    this.dependencies.barrier.assertHealthy();
+    const assignment = developerTaskAssignmentSchema.safeParse(
+      execution.assignment,
+    );
+    if (!assignment.success) return;
+    const digest = outputDigest(event.payload.value);
+    const committed: DomainEvent[] = [];
+    try {
+      inImmediateTransaction(this.dependencies.database, () => {
+        const prior = this.dependencies.developers.outputReceipt(event.id);
+        if (prior) {
+          if (prior.outputDigest !== digest) {
+            throw new Error(
+              'Developer output receipt conflicts with prior receipt',
+            );
+          }
+          return;
+        }
+        const attempt = this.dependencies.developers.attempt(
+          assignment.data.attemptId,
+        );
+        if (!attempt) throw new Error('Developer attempt was not found');
+        const reject = (reason: string) =>
+          this.dependencies.developers.recordOutputReceiptInTransaction({
+            runtimeEventId: event.id,
+            projectId: attempt.projectId,
+            attemptId: attempt.id,
+            executionId: execution.id,
+            outputDigest: digest,
+            status: 'rejected',
+            rejectionReason: reason,
+            createdAt: event.occurredAt,
+          });
+        if (
+          report === null ||
+          attempt.lifecycle !== 'active' ||
+          attempt.controllingExecutionId !== execution.id ||
+          execution.projectId !== attempt.projectId ||
+          assignment.data.attemptId !== attempt.id ||
+          assignment.data.taskId !== attempt.taskId ||
+          assignment.data.taskContractRevision !==
+            attempt.taskContractRevision ||
+          assignment.data.workspacePath !== attempt.workspace.path ||
+          report?.attemptId !== attempt.id ||
+          report?.executionId !== execution.id ||
+          report?.taskId !== attempt.taskId ||
+          report?.taskContractRevision !== attempt.taskContractRevision ||
+          attempt.reportIds.length > 0
+        ) {
+          reject('report_binding_mismatch');
+          return;
+        }
+        if (
+          report.workspace.headCommit !== attempt.workspace.observedHead ||
+          report.workspace.dirty !== attempt.workspace.observedDirty
+        ) {
+          reject('workspace_observation_mismatch');
+          return;
+        }
+        const authority = this.dependencies.planning.taskExecutionAuthority(
+          attempt.projectId,
+          attempt.taskId,
+        );
+        if (
+          !authority ||
+          authority.task.revision !== attempt.taskCurrentRevision ||
+          authority.task.contractRevision !== attempt.taskContractRevision ||
+          authority.deliveryPlan.plan.id !== attempt.deliveryPlanId ||
+          authority.deliveryPlan.plan.revision !== attempt.deliveryPlanRevision
+        ) {
+          reject('authoritative_binding_mismatch');
+          return;
+        }
+        if (
+          report.disposition === 'completed' &&
+          !this.hasExactCompletionCoverage(attempt, report)
+        ) {
+          reject('report_coverage_invalid');
+          return;
+        }
+
+        this.dependencies.developers.recordOutputReceiptInTransaction({
+          runtimeEventId: event.id,
+          projectId: attempt.projectId,
+          attemptId: attempt.id,
+          executionId: execution.id,
+          outputDigest: digest,
+          status: 'accepted',
+          rejectionReason: null,
+          createdAt: event.occurredAt,
+        });
+        const recorded = this.dependencies.developers.insertReportInTransaction(
+          {
+            id: developerReportIdSchema.parse(randomUUID()),
+            report,
+            recordedAt: event.occurredAt,
+          },
+        );
+        const task =
+          report.disposition === 'completed'
+            ? this.dependencies.planning.appendOperationalTaskLifecycleInTransaction(
+                {
+                  projectId: attempt.projectId,
+                  expectedDeliveryPlanRevision: attempt.deliveryPlanRevision,
+                  taskId: attempt.taskId,
+                  expectedContractRevision: attempt.taskContractRevision,
+                  expectedCurrentRevision: attempt.taskCurrentRevision,
+                  lifecycle: 'completed',
+                  createdAt: event.occurredAt,
+                },
+              )
+            : null;
+        const board = this.dependencies.planning.taskExecutionAuthority(
+          attempt.projectId,
+          attempt.taskId,
+        )?.board;
+        if (!board) throw new Error('Task execution authority was not found');
+        const settled =
+          this.dependencies.developers.transitionAttemptInTransaction(
+            {
+              ...attempt,
+              lifecycle:
+                report.disposition === 'completed' ? 'completed' : 'blocked',
+              revision: attempt.revision + 1,
+              reportIds: [...attempt.reportIds, recorded.id],
+              updatedAt: event.occurredAt,
+              endedAt: event.occurredAt,
+            },
+            attempt.revision,
+          );
+        committed.push(
+          this.dependencies.events.appendDomainInTransaction(
+            attempt.projectId,
+            {
+              projectId: attempt.projectId,
+              occurredAt: event.occurredAt,
+              type: 'developer_report.recorded',
+              payload: {
+                schemaVersion: 1,
+                attempt: settled,
+                report: recorded,
+                board,
+              },
+            },
+          ),
+          this.dependencies.events.appendDomainInTransaction(
+            attempt.projectId,
+            {
+              projectId: attempt.projectId,
+              occurredAt: event.occurredAt,
+              type: 'developer_attempt.changed',
+              payload: { schemaVersion: 1, attempt: settled, board },
+            },
+          ),
+        );
+        if (task) {
+          committed.push(
+            this.dependencies.events.appendDomainInTransaction(
+              attempt.projectId,
+              {
+                projectId: attempt.projectId,
+                occurredAt: event.occurredAt,
+                type: 'task.lifecycle_changed',
+                payload: { schemaVersion: 1, task, board },
+              },
+            ),
+          );
+        }
+      });
+    } catch (error) {
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      throw error;
+    }
+    for (const domainEvent of committed)
+      this.dependencies.publishDomain(domainEvent);
+  }
 
   async start(
     envelope: StartDeveloperAttemptEnvelope,
@@ -424,6 +621,45 @@ export class DeveloperAttemptService {
       this.markAttention(started.attempt.id, startedAuthority, error);
       return started.result;
     }
+  }
+
+  private hasExactCompletionCoverage(
+    attempt: DeveloperAttempt,
+    report: Extract<DeveloperReport, { disposition: 'completed' }>,
+  ): boolean {
+    const expectedCriteria = new Set(
+      attempt.assignment.acceptanceCriteria.map((text, index) =>
+        canonicalJson([index, text]),
+      ),
+    );
+    const actualCriteria = report.criterionCoverage.map(({ index, text }) =>
+      canonicalJson([index, text]),
+    );
+    const expectedRequirements = new Set(
+      attempt.requirementRevisions.map(({ recordId, recordRevision }) =>
+        canonicalJson([recordId, recordRevision]),
+      ),
+    );
+    const actualRequirements = report.requirementCoverage.map(
+      ({ recordId, recordRevision }) =>
+        canonicalJson([recordId, recordRevision]),
+    );
+    return (
+      actualCriteria.length === expectedCriteria.size &&
+      actualRequirements.length === expectedRequirements.size &&
+      actualCriteria.every(
+        (value, index) =>
+          report.criterionCoverage[index].passed && expectedCriteria.has(value),
+      ) &&
+      actualRequirements.every(
+        (value, index) =>
+          report.requirementCoverage[index].passed &&
+          expectedRequirements.has(value),
+      ) &&
+      new Set(actualCriteria).size === actualCriteria.length &&
+      new Set(actualRequirements).size === actualRequirements.length &&
+      report.verification.some(({ passed }) => passed)
+    );
   }
 
   async drainPendingActivations(): Promise<void> {
