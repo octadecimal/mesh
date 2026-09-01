@@ -22,6 +22,8 @@ import { DeveloperReportConsumer } from './developer-report-consumer.js';
 import { canonicalJson } from '../storage/canonical-json.js';
 import { V2EventStore } from '../storage/event-store.js';
 import { DeveloperRepository } from './developer-repository.js';
+import { ExecutionRepository } from '../executions/execution-repository.js';
+import { inImmediateTransaction } from '../db/database.js';
 
 const now = '2026-09-01T12:00:00.000Z';
 const later = '2026-09-01T12:01:00.000Z';
@@ -251,6 +253,13 @@ const setupPersistedAttempt = async ({
         observedHead: fixture.project.headCommit,
         observedDirty: false,
       }),
+      observe: async (workspace: ManagedWorkspace) => ({
+        ...workspace,
+        lifecycle: 'ready' as const,
+        observedHead: fixture.project.headCommit,
+        observedDirty: workspace.observedDirty ?? false,
+        failure: null,
+      }),
     },
     barrier: {
       assertHealthy: () => undefined,
@@ -385,6 +394,7 @@ const setupPersistedAttempt = async ({
     published,
     trips,
     insertRuntimeEvent,
+    dependencies,
   };
 };
 
@@ -1338,6 +1348,182 @@ describe('DeveloperAttemptService', () => {
     });
   });
 
+  it('persists the interrupted attempt before the generic interrupt', async () => {
+    const context = await setupPersistedAttempt();
+    const active = context.developers.attempt(context.attempt.id)!;
+    context.fixture.database
+      .prepare(
+        'UPDATE worker_executions SET profile_snapshot_json = ? WHERE id = ?',
+      )
+      .run(
+        JSON.stringify({
+          profileId: context.fixture.profileRevision.profileId,
+          projectId: context.fixture.profileRevision.projectId,
+          profileRevision: context.fixture.profileRevision.revision,
+          baseProfileId: context.fixture.profileRevision.baseProfileId,
+          baseRevision: context.fixture.profileRevision.baseRevision,
+          document: {
+            ...context.fixture.profileRevision.document,
+            spec: {
+              ...context.fixture.profileRevision.document.spec,
+              assignmentKinds: ['developer_task'],
+              outputSchema: DEVELOPER_REPORT_SCHEMA,
+            },
+          },
+          digest: context.fixture.profileRevision.digest,
+        }),
+        active.controllingExecutionId,
+      );
+    context.fixture.database
+      .prepare(
+        `UPDATE worker_executions
+         SET lifecycle = 'running', revision = ?, updated_at = ?, ended_at = NULL
+         WHERE id = ?`,
+      )
+      .run(1, later, active.controllingExecutionId);
+    const executions = new ExecutionRepository(context.fixture.database);
+    const service = new DeveloperAttemptService({
+      ...context.dependencies,
+      executions,
+      execution: {
+        reserveStart: context.dependencies.execution.reserveStart,
+        reserveReplacement: async () => {
+          throw new Error('not used');
+        },
+        activateReserved: context.dependencies.execution.activateReserved,
+        interrupt: async (envelope) => {
+          const current = executions.get(envelope.command.executionId)!;
+          context.fixture.database
+            .prepare(
+              `UPDATE worker_executions
+               SET lifecycle = 'interrupted', revision = ?, updated_at = ?, ended_at = ?
+               WHERE id = ? AND revision = ?`,
+            )
+            .run(
+              current.revision + 1,
+              later,
+              later,
+              current.id,
+              current.revision,
+            );
+          const execution = executions.get(current.id)!;
+          return {
+            ok: true as const,
+            commandType: 'worker_execution.interrupt' as const,
+            execution,
+          };
+        },
+      },
+    });
+
+    await expect(
+      service.interrupt({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'developer_attempt.interrupt',
+          projectId: active.projectId,
+          attemptId: active.id,
+          expectedAttemptRevision: active.revision,
+        },
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      attempt: { lifecycle: 'interrupted' },
+    });
+    expect(context.developers.attempt(active.id)).toMatchObject({
+      lifecycle: 'interrupted',
+      endedAt: null,
+    });
+    expect(executions.get(active.controllingExecutionId!)?.lifecycle).toBe(
+      'interrupted',
+    );
+  });
+
+  it('retries a persisted interrupt after accepted publication fails', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    const envelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.interrupt' as const,
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    };
+    const interrupt = context.dependencies.execution.interrupt;
+    let genericInterrupts = 0;
+    context.dependencies.execution.interrupt = async (input) => {
+      genericInterrupts += 1;
+      return interrupt(input);
+    };
+    let publicationAttempts = 0;
+    context.dependencies.publishDomain = () => {
+      publicationAttempts += 1;
+      throw new Error('accepted publication failed');
+    };
+
+    await expect(context.service.interrupt(envelope)).rejects.toThrow(
+      'accepted publication failed',
+    );
+    expect(context.attempts[0].lifecycle).toBe('interrupted');
+    expect(
+      context.executionRecords.get(active.controllingExecutionId!)?.lifecycle,
+    ).toBe('running');
+
+    await expect(context.service.interrupt(envelope)).resolves.toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.interrupt',
+      attempt: { lifecycle: 'interrupted' },
+    });
+    expect(
+      context.executionRecords.get(active.controllingExecutionId!)?.lifecycle,
+    ).toBe('interrupted');
+    expect(genericInterrupts).toBe(1);
+    expect(publicationAttempts).toBe(1);
+  });
+
+  it('passes the exact persisted execution revision to a rejected interrupt', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    const controlling = context.executionRecords.get(
+      active.controllingExecutionId!,
+    )!;
+    let receivedRevision: number | undefined;
+    context.dependencies.execution.interrupt = async (envelope) => {
+      receivedRevision = envelope.command.expectedRevision;
+      return {
+        ok: false,
+        commandType: 'worker_execution.interrupt' as const,
+        error: {
+          code: 'execution_lifecycle_conflict',
+          message: 'Execution revision changed',
+        },
+      };
+    };
+
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+
+    expect(receivedRevision).toBe(controlling.revision);
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'attention_required',
+      attention: { code: 'developer_interrupt_unproven' },
+    });
+  });
+
   it('rejects a stale Developer interrupt without changing the active attempt', async () => {
     const context = setup();
     await context.service.start(context.command);
@@ -1481,6 +1667,115 @@ describe('DeveloperAttemptService', () => {
       },
     });
     expect(context.attempts[0].executionIds).toHaveLength(2);
+  });
+
+  it('rolls back replacement linkage when its event cannot be written', async () => {
+    const context = await setupPersistedAttempt();
+    const executions = new ExecutionRepository(context.fixture.database);
+    const active = context.developers.attempt(context.attempt.id)!;
+    context.fixture.database
+      .prepare(
+        'UPDATE worker_executions SET profile_snapshot_json = ? WHERE id = ?',
+      )
+      .run(
+        JSON.stringify({
+          profileId: context.fixture.profileRevision.profileId,
+          projectId: context.fixture.profileRevision.projectId,
+          profileRevision: context.fixture.profileRevision.revision,
+          baseProfileId: context.fixture.profileRevision.baseProfileId,
+          baseRevision: context.fixture.profileRevision.baseRevision,
+          document: {
+            ...context.fixture.profileRevision.document,
+            spec: {
+              ...context.fixture.profileRevision.document.spec,
+              assignmentKinds: ['developer_task'],
+              outputSchema: DEVELOPER_REPORT_SCHEMA,
+            },
+          },
+          digest: context.fixture.profileRevision.digest,
+        }),
+        active.controllingExecutionId,
+      );
+    const prior = executions.get(active.controllingExecutionId!)!;
+    context.fixture.database
+      .prepare(
+        `UPDATE worker_executions
+         SET lifecycle = 'interrupted', revision = ?, updated_at = ?, ended_at = ?
+         WHERE id = ?`,
+      )
+      .run(prior.revision + 1, later, later, prior.id);
+    inImmediateTransaction(context.fixture.database, () =>
+      context.developers.transitionAttemptInTransaction(
+        {
+          ...active,
+          lifecycle: 'interrupted',
+          revision: active.revision + 1,
+          updatedAt: later,
+          endedAt: null,
+        },
+        active.revision,
+      ),
+    );
+    const interrupted = context.developers.attempt(active.id)!;
+    const before = context.developers.attempt(active.id);
+    const replacement = {
+      ...executions.get(prior.id)!,
+      id: randomUUID(),
+      lifecycle: 'starting' as const,
+      revision: 0,
+      nativeHandle: null,
+      replacementForExecutionId: prior.id,
+      failure: null,
+      createdAt: later,
+      updatedAt: later,
+      endedAt: null,
+    };
+    executions.transaction(() => executions.insertInTransaction(replacement));
+    let activations = 0;
+    const service = new DeveloperAttemptService({
+      ...context.dependencies,
+      executions,
+      execution: {
+        reserveStart: context.dependencies.execution.reserveStart,
+        interrupt: async () => {
+          throw new Error('not used');
+        },
+        reserveReplacement: async () => ({
+          execution: replacement,
+          result: {
+            ok: true as const,
+            commandType: 'worker_execution.start' as const,
+            execution: replacement,
+          },
+          activationRequired: true,
+        }),
+        activateReserved: async () => {
+          activations += 1;
+        },
+      },
+      events: {
+        appendDomainInTransaction: () => {
+          throw new Error('replacement event failed');
+        },
+      },
+    });
+
+    await expect(
+      service.replaceExecution({
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' },
+        command: {
+          type: 'developer_attempt.replace_execution',
+          projectId: interrupted.projectId,
+          attemptId: interrupted.id,
+          expectedAttemptRevision: interrupted.revision,
+        },
+      }),
+    ).rejects.toThrow('replacement event failed');
+
+    expect(context.developers.attempt(active.id)).toEqual(before);
+    expect(activations).toBe(0);
+    expect(context.trips).toHaveLength(1);
   });
 
   it('rejects replacement while the attempt is still active', async () => {

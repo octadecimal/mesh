@@ -607,6 +607,36 @@ export class ExecutionRuntime {
     }
   }
 
+  private requireExactReplacementAuthority(
+    projectId: string,
+    replacementForExecutionId: WorkerExecutionId,
+    command: StartExecutionEnvelope['command'],
+    profile: ResolvedWorkerProfileSnapshot,
+  ): void {
+    this.requireTerminalReplacement(projectId, replacementForExecutionId);
+    const prior = requireExecution(
+      this.dependencies.executions,
+      replacementForExecutionId,
+    );
+    const normalized = startExecutionCommandSchema.safeParse(command);
+    if (
+      !normalized.success ||
+      prior.profileId !== command.profileId ||
+      prior.profileRevision !== command.profileRevision ||
+      !sameDurableValue(prior.assignment, normalized.data.assignment) ||
+      !sameDurableValue(prior.profileSnapshot, profile)
+    ) {
+      throw new ExecutionReservationError({
+        ok: false,
+        commandType: 'worker_execution.start',
+        error: {
+          code: 'execution_lifecycle_conflict',
+          message: 'Replacement requires exact terminal execution authority',
+        },
+      });
+    }
+  }
+
   findReservedStart(
     envelope: StartExecutionEnvelope,
     replacementForExecutionId: WorkerExecutionId | null = null,
@@ -704,6 +734,14 @@ export class ExecutionRuntime {
             error instanceof Error ? error.message : 'Profile was not found',
         },
       });
+    }
+    if (replacementForExecutionId !== null) {
+      this.requireExactReplacementAuthority(
+        project.id,
+        replacementForExecutionId,
+        envelope.command,
+        profile,
+      );
     }
 
     let capabilities: HarnessCapabilities;
@@ -823,9 +861,11 @@ export class ExecutionRuntime {
         }
         this.dependencies.barrier.assertHealthy();
         if (replacementForExecutionId !== null) {
-          this.requireTerminalReplacement(
+          this.requireExactReplacementAuthority(
             project.id,
             replacementForExecutionId,
+            envelope.command,
+            profile,
           );
         }
         writesStarted = true;

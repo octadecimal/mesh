@@ -679,7 +679,7 @@ export class DeveloperAttemptService {
       command.idempotencyKey,
       requestHash,
     );
-    if (replay) return replay.result;
+    if (replay) return this.settleInterrupt(command, replay.result);
     this.dependencies.barrier.assertHealthy();
 
     let accepted: V2CommandResult = mutationFailure(
@@ -726,10 +726,11 @@ export class DeveloperAttemptService {
         );
         return;
       }
-      const authority = this.dependencies.planning.taskExecutionAuthority(
-        current.projectId,
-        current.taskId,
-      );
+      const authority =
+        this.dependencies.planning.taskExecutionAuthorityInTransaction(
+          current.projectId,
+          current.taskId,
+        );
       if (!authority) throw new Error('Task execution authority was not found');
       const updatedAt = this.dependencies.now();
       const interrupted =
@@ -740,7 +741,7 @@ export class DeveloperAttemptService {
             revision: current.revision + 1,
             attention: null,
             updatedAt,
-            endedAt: updatedAt,
+            endedAt: null,
           },
           current.revision,
         );
@@ -773,10 +774,25 @@ export class DeveloperAttemptService {
       );
     });
     if (acceptedEvent) this.dependencies.publishDomain(acceptedEvent);
+    return this.settleInterrupt(command, accepted);
+  }
+
+  private async settleInterrupt(
+    command: InterruptDeveloperAttemptEnvelope,
+    accepted: V2CommandResult,
+  ): Promise<V2CommandResult> {
     if (!accepted.ok || accepted.commandType !== 'developer_attempt.interrupt')
       return accepted;
 
     const attempt = accepted.attempt;
+    const current = this.dependencies.developers.attempt(attempt.id);
+    if (
+      !current ||
+      current.lifecycle !== 'interrupted' ||
+      current.controllingExecutionId !== attempt.controllingExecutionId
+    ) {
+      return accepted;
+    }
     const execution = this.dependencies.executions.get(
       attempt.controllingExecutionId!,
     );
@@ -785,6 +801,15 @@ export class DeveloperAttemptService {
         attempt.id,
         'developer_interrupt_unproven',
         'Controlling execution disappeared during interruption',
+      );
+      return accepted;
+    }
+    if (execution.lifecycle === 'interrupted') return accepted;
+    if (execution.lifecycle !== 'running') {
+      this.markAttemptAttention(
+        attempt.id,
+        'developer_interrupt_unproven',
+        'Controlling execution interruption was not proven',
       );
       return accepted;
     }
@@ -934,86 +959,95 @@ export class DeveloperAttemptService {
       'Developer replacement was not linked',
     );
     let event: DomainEvent | undefined;
-    inImmediateTransaction(this.dependencies.database, () => {
-      const current = this.requireAttempt(attempt.id);
-      if (
-        current.projectId !== command.command.projectId ||
-        current.revision !== command.command.expectedAttemptRevision ||
-        current.lifecycle !== 'interrupted' ||
-        current.controllingExecutionId !== prior.id
-      ) {
-        result = mutationFailure(
-          'developer_attempt.replace_execution',
-          'Developer attempt changed before replacement could be linked',
-        );
-        return;
-      }
-      const workspace =
-        this.dependencies.developers.recordWorkspaceObservationInTransaction(
+    try {
+      inImmediateTransaction(this.dependencies.database, () => {
+        const current = this.requireAttempt(attempt.id);
+        if (
+          current.projectId !== command.command.projectId ||
+          current.revision !== command.command.expectedAttemptRevision ||
+          current.lifecycle !== 'interrupted' ||
+          current.controllingExecutionId !== prior.id
+        ) {
+          result = mutationFailure(
+            'developer_attempt.replace_execution',
+            'Developer attempt changed before replacement could be linked',
+          );
+          return;
+        }
+        const workspace =
+          this.dependencies.developers.recordWorkspaceObservationInTransaction(
+            {
+              ...observation,
+              revision: current.workspace.revision + 1,
+              updatedAt: this.dependencies.now(),
+            },
+            current.workspace.revision,
+          );
+        const linked = this.dependencies.developers.linkExecutionInTransaction({
+          attemptId: current.id,
+          executionId: reservation.execution.id,
+          expectedRevision: current.revision,
+          updatedAt: this.dependencies.now(),
+        });
+        const authority =
+          this.dependencies.planning.taskExecutionAuthorityInTransaction(
+            current.projectId,
+            current.taskId,
+          );
+        if (!authority)
+          throw new Error('Task execution authority was not found');
+        const active =
+          this.dependencies.developers.transitionAttemptInTransaction(
+            {
+              ...linked,
+              lifecycle: reservation.result.ok
+                ? 'active'
+                : 'attention_required',
+              revision: linked.revision + 1,
+              workspace,
+              attention: reservation.result.ok
+                ? null
+                : {
+                    code: 'developer_replacement_unavailable',
+                    message: 'Replacement execution reservation failed',
+                  },
+              updatedAt: this.dependencies.now(),
+              endedAt: reservation.result.ok ? null : this.dependencies.now(),
+            },
+            linked.revision,
+          );
+        result = {
+          ok: true,
+          commandType: 'developer_attempt.replace_execution',
+          schemaVersion: 1,
+          attempt: active,
+          board: authority.board,
+        };
+        this.dependencies.commands.storeInTransaction({
+          idempotencyKey: command.idempotencyKey,
+          commandType: command.command.type,
+          requestHash,
+          result,
+          createdAt: active.updatedAt,
+        });
+        event = this.dependencies.events.appendDomainInTransaction(
+          current.projectId,
           {
-            ...observation,
-            revision: current.workspace.revision + 1,
-            updatedAt: this.dependencies.now(),
+            projectId: current.projectId,
+            occurredAt: active.updatedAt,
+            type: 'developer_attempt.changed',
+            payload: {
+              schemaVersion: 1,
+              attempt: active,
+              board: authority.board,
+            },
           },
-          current.workspace.revision,
         );
-      const linked = this.dependencies.developers.linkExecutionInTransaction({
-        attemptId: current.id,
-        executionId: reservation.execution.id,
-        expectedRevision: current.revision,
-        updatedAt: this.dependencies.now(),
       });
-      const authority = this.dependencies.planning.taskExecutionAuthority(
-        current.projectId,
-        current.taskId,
-      );
-      if (!authority) throw new Error('Task execution authority was not found');
-      const active =
-        this.dependencies.developers.transitionAttemptInTransaction(
-          {
-            ...linked,
-            lifecycle: reservation.result.ok ? 'active' : 'attention_required',
-            revision: linked.revision + 1,
-            workspace,
-            attention: reservation.result.ok
-              ? null
-              : {
-                  code: 'developer_replacement_unavailable',
-                  message: 'Replacement execution reservation failed',
-                },
-            updatedAt: this.dependencies.now(),
-            endedAt: reservation.result.ok ? null : this.dependencies.now(),
-          },
-          linked.revision,
-        );
-      result = {
-        ok: true,
-        commandType: 'developer_attempt.replace_execution',
-        schemaVersion: 1,
-        attempt: active,
-        board: authority.board,
-      };
-      this.dependencies.commands.storeInTransaction({
-        idempotencyKey: command.idempotencyKey,
-        commandType: command.command.type,
-        requestHash,
-        result,
-        createdAt: active.updatedAt,
-      });
-      event = this.dependencies.events.appendDomainInTransaction(
-        current.projectId,
-        {
-          projectId: current.projectId,
-          occurredAt: active.updatedAt,
-          type: 'developer_attempt.changed',
-          payload: {
-            schemaVersion: 1,
-            attempt: active,
-            board: authority.board,
-          },
-        },
-      );
-    });
+    } catch (error) {
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      throw error;
+    }
     if (event) this.dependencies.publishDomain(event);
     if (
       result.ok &&
@@ -1162,10 +1196,11 @@ export class DeveloperAttemptService {
     try {
       inImmediateTransaction(this.dependencies.database, () => {
         const current = this.requireAttempt(attemptId);
-        const authority = this.dependencies.planning.taskExecutionAuthority(
-          current.projectId,
-          current.taskId,
-        );
+        const authority =
+          this.dependencies.planning.taskExecutionAuthorityInTransaction(
+            current.projectId,
+            current.taskId,
+          );
         if (!authority)
           throw new Error('Task execution authority was not found');
         const workspace = observedWorkspace

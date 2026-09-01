@@ -31,7 +31,7 @@ type Dependencies = {
     observe(workspace: ManagedWorkspace): Promise<ManagedWorkspace>;
   };
   planning: {
-    taskExecutionAuthority(
+    taskExecutionAuthorityInTransaction(
       projectId: string,
       taskId: string,
     ): { board: unknown } | undefined;
@@ -135,33 +135,41 @@ export const reconcileDeveloperAttempts = async (
       dependencies.barrier.trip(error, dependencies.now());
       throw error;
     }
-    const execution = original.controllingExecutionId
-      ? dependencies.executions.get(original.controllingExecutionId)
-      : undefined;
-    const desired = desiredLifecycle(original, observed, execution);
-    const workspaceChanged = !sameWorkspaceObservation(
-      original.workspace,
-      observed,
-    );
-    if (
-      !workspaceChanged &&
-      desired.lifecycle === original.lifecycle &&
-      canonicalJson(desired.attention) === canonicalJson(original.attention)
-    ) {
-      if (execution?.lifecycle === 'starting')
-        pendingActivationIds.push(execution.id);
-      continue;
-    }
-
     try {
       inImmediateTransaction(dependencies.database, () => {
         const current = dependencies.developers.attempt(original.id);
-        if (!current)
-          throw new Error('Developer attempt disappeared during recovery');
-        const authority = dependencies.planning.taskExecutionAuthority(
-          current.projectId,
-          current.taskId,
+        if (
+          !current ||
+          current.revision !== original.revision ||
+          current.lifecycle !== original.lifecycle ||
+          current.controllingExecutionId !== original.controllingExecutionId ||
+          current.workspace.revision !== original.workspace.revision
+        ) {
+          return;
+        }
+        const execution = current.controllingExecutionId
+          ? dependencies.executions.get(current.controllingExecutionId)
+          : undefined;
+        const desired = desiredLifecycle(current, observed, execution);
+        const workspaceChanged = !sameWorkspaceObservation(
+          current.workspace,
+          observed,
         );
+        if (
+          !workspaceChanged &&
+          desired.lifecycle === current.lifecycle &&
+          canonicalJson(desired.attention) === canonicalJson(current.attention)
+        ) {
+          if (execution?.lifecycle === 'starting') {
+            pendingActivationIds.push(execution.id);
+          }
+          return;
+        }
+        const authority =
+          dependencies.planning.taskExecutionAuthorityInTransaction(
+            current.projectId,
+            current.taskId,
+          );
         if (!authority)
           throw new Error(
             'Task execution authority was not found during recovery',

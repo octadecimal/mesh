@@ -158,6 +158,12 @@ const schemaRows = (database: V2Database) =>
     )
     .all();
 
+const developerAttemptCommandTypes = [
+  'developer_attempt.start',
+  'developer_attempt.interrupt',
+  'developer_attempt.replace_execution',
+] as const;
+
 afterEach(async () => {
   for (const fixture of testDatabases.splice(0)) fixture.close();
   for (const database of openDatabases.splice(0)) database.close();
@@ -195,6 +201,40 @@ describe('V2 database identity and migration', () => {
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
     ]);
+  });
+
+  it('accepts every Developer attempt command on a fresh database', () => {
+    const database = openV2Database(
+      join(temporaryDirectory(), 'developer-commands.sqlite'),
+    );
+    openDatabases.push(database);
+    const commands = new V2CommandRepository(database);
+
+    inImmediateTransaction(database, () => {
+      for (const [
+        index,
+        commandType,
+      ] of developerAttemptCommandTypes.entries()) {
+        commands.storeInTransaction({
+          idempotencyKey: `developer-fresh-${index}`,
+          commandType,
+          requestHash: `${index}`.repeat(64),
+          result: {
+            ok: false,
+            commandType,
+            error: { code: 'invalid_request', message: commandType },
+          },
+          createdAt: '2026-09-01T12:00:00.000Z',
+        });
+      }
+    });
+
+    for (const [index, commandType] of developerAttemptCommandTypes.entries()) {
+      expect(commands.find(`developer-fresh-${index}`)?.result).toMatchObject({
+        ok: false,
+        commandType,
+      });
+    }
   });
 
   it('reopens an existing identified V2 database without replacing its data', () => {
@@ -784,10 +824,11 @@ describe('V2 database identity and migration', () => {
     expect(database.pragma('foreign_key_check')).toEqual([]);
   });
 
-  it('upgrades a migration 4 command result through migration 5 unchanged', () => {
+  it('preserves migration 4 command rows and accepts all three Developer types through migration 5', () => {
     const database = createMigration4Database(
       join(temporaryDirectory(), 'upgrade-migration-4.sqlite'),
     );
+    openDatabases.push(database);
     database
       .prepare(
         `INSERT INTO command_results (
@@ -809,13 +850,37 @@ describe('V2 database identity and migration', () => {
       .get('migration-4-command');
 
     migrateV2Database(database);
-    openDatabases.push(database);
 
     expect(
       database
         .prepare('SELECT * FROM command_results WHERE idempotency_key = ?')
         .get('migration-4-command'),
     ).toEqual(before);
+    const commands = new V2CommandRepository(database);
+    inImmediateTransaction(database, () => {
+      for (const [
+        index,
+        commandType,
+      ] of developerAttemptCommandTypes.entries()) {
+        commands.storeInTransaction({
+          idempotencyKey: `migration-5-${index}`,
+          commandType,
+          requestHash: `${index}`.repeat(64),
+          result: {
+            ok: false,
+            commandType,
+            error: { code: 'invalid_request', message: commandType },
+          },
+          createdAt: '2026-09-01T12:00:00.000Z',
+        });
+      }
+    });
+    for (const [index, commandType] of developerAttemptCommandTypes.entries()) {
+      expect(commands.find(`migration-5-${index}`)?.result).toMatchObject({
+        ok: false,
+        commandType,
+      });
+    }
     expect(
       database
         .prepare('SELECT version FROM v2_schema_migrations ORDER BY version')
