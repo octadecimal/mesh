@@ -160,7 +160,7 @@ const createAttempt = (fixture: V2TestDatabase, ordinal = 1) => {
       branch: `mesh/dev/${attemptId}`,
       path: assignment.workspacePath,
       baseCommit: fixture.project.headCommit,
-      lifecycle: 'reserved',
+      lifecycle: 'creating',
       ownershipToken: `owner-${attemptId}`,
       observedHead: null,
       observedDirty: null,

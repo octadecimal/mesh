@@ -630,7 +630,7 @@ export class DeveloperRepository {
     if (
       attempt.lifecycle !== 'reserved' ||
       attempt.revision !== 0 ||
-      attempt.workspace.lifecycle !== 'reserved' ||
+      attempt.workspace.lifecycle !== 'creating' ||
       attempt.workspace.revision !== 0 ||
       attempt.controllingExecutionId !== null ||
       attempt.executionIds.length !== 0 ||

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   DEVELOPER_REPORT_SCHEMA,
   type DeveloperAttempt,
+  type ManagedWorkspace,
   type ResolvedWorkerProfileSnapshot,
 } from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -68,9 +69,7 @@ const createAuthority = (
   };
 };
 
-const createProfile = (
-  compatible = true,
-): ResolvedWorkerProfileSnapshot =>
+const createProfile = (compatible = true): ResolvedWorkerProfileSnapshot =>
   ({
     profileId: randomUUID(),
     profileRevision: 1,
@@ -105,15 +104,19 @@ const createEnvelope = (
   },
 });
 
-const setup = (options: {
-  authority?: TaskExecutionAuthority | undefined;
-  profile?: ResolvedWorkerProfileSnapshot;
-  billingConflicts?: readonly { variable: string }[];
-  healthy?: boolean;
-  repositoryIdentity?: string;
-  headCommit?: string;
-  existingAttempt?: DeveloperAttempt;
-} = {}) => {
+const setup = (
+  options: {
+    authority?: TaskExecutionAuthority | undefined;
+    profile?: ResolvedWorkerProfileSnapshot;
+    billingConflicts?: readonly { variable: string }[];
+    healthy?: boolean;
+    repositoryIdentity?: string;
+    headCommit?: string;
+    existingAttempt?: DeveloperAttempt;
+    workspaceObservation?: (workspace: ManagedWorkspace) => ManagedWorkspace;
+    executionReservationFails?: boolean;
+  } = {},
+) => {
   const fixture = createV2TestDatabase();
   fixtures.push(fixture);
   let authority = options.authority ?? createAuthority(fixture);
@@ -123,10 +126,13 @@ const setup = (options: {
     ? [options.existingAttempt]
     : [];
   const commands = new Map<string, { requestHash: string; result: unknown }>();
-  const workspaceCalls: unknown[] = [];
+  const workspaceCalls: ManagedWorkspace[] = [];
+  const workspaceDerivations: unknown[] = [];
+  const inspectionCalls: unknown[] = [];
   const executionCalls: unknown[] = [];
   const events: unknown[] = [];
-  const service = new DeveloperAttemptService({
+  let inspectionHook: (() => void) | undefined;
+  const dependencies = {
     database: fixture.database,
     planning: { taskExecutionAuthority: () => authority },
     developers: {
@@ -164,7 +170,8 @@ const setup = (options: {
     commands: {
       find: (key, requestHash) => {
         const stored = commands.get(key);
-        if (stored && requestHash !== stored.requestHash) throw new Error('conflict');
+        if (stored && requestHash !== stored.requestHash)
+          throw new Error('conflict');
         return stored as never;
       },
       storeInTransaction: (stored) => {
@@ -181,6 +188,20 @@ const setup = (options: {
       reserveStart: async () => {
         phases.push('workspace_observed_ready', 'execution_reserved');
         executionCalls.push('reserve');
+        if (options.executionReservationFails) {
+          return {
+            execution: fixture.execution,
+            result: {
+              ok: false,
+              commandType: 'worker_execution.start',
+              error: {
+                code: 'invalid_request',
+                message: 'Worker execution reservation failed',
+              },
+            },
+            activationRequired: false,
+          };
+        }
         return {
           execution: fixture.execution,
           result: {
@@ -191,21 +212,60 @@ const setup = (options: {
           activationRequired: true,
         };
       },
-      activateReserved: async () => {
+      activateReserved: async (executionId: string) => {
         expect(attempts[0]).toMatchObject({ lifecycle: 'active' });
+        executionCalls.push(executionId);
         phases.push('attempt_activated', 'execution_activated');
       },
     },
     workspace: {
-      inspectProject: async () => ({
-        repositoryIdentity:
-          options.repositoryIdentity ?? fixture.project.repositoryIdentity,
-        headCommit: options.headCommit ?? fixture.project.headCommit,
-      }),
-      create: async () => {
+      inspectProject: async () => {
+        inspectionCalls.push('inspect');
+        inspectionHook?.();
+        return {
+          repositoryIdentity:
+            options.repositoryIdentity ?? fixture.project.repositoryIdentity,
+          headCommit: options.headCommit ?? fixture.project.headCommit,
+        };
+      },
+      derive: (input: {
+        managedRoot: string;
+        projectId: string;
+        taskId: string;
+        attemptId: string;
+        repositoryPath: string;
+        repositoryIdentity: string;
+        baseCommit: string;
+        createdAt: string;
+      }): ManagedWorkspace => {
+        workspaceDerivations.push(input);
+        return {
+          attemptId: input.attemptId as ManagedWorkspace['attemptId'],
+          repositoryPath: input.repositoryPath,
+          repositoryIdentity: input.repositoryIdentity,
+          branch: `mesh/dev/${input.projectId}/${input.taskId}/${input.attemptId}`,
+          path: `${input.managedRoot}/${input.projectId}/${input.taskId}/${input.attemptId}`,
+          baseCommit: input.baseCommit,
+          lifecycle: 'creating',
+          ownershipToken: `owner-${input.attemptId}`,
+          observedHead: null,
+          observedDirty: null,
+          failure: null,
+          revision: 0,
+          createdAt: input.createdAt,
+          updatedAt: input.createdAt,
+        };
+      },
+      create: async (workspace: ManagedWorkspace) => {
         phases.push('attempt_reserved', 'workspace_effect_started');
-        workspaceCalls.push('create');
-        return { headCommit: fixture.project.headCommit, dirty: false };
+        workspaceCalls.push(workspace);
+        const observation = options.workspaceObservation?.(workspace) ?? {
+          ...workspace,
+          lifecycle: 'ready' as const,
+          observedHead: fixture.project.headCommit,
+          observedDirty: false,
+        };
+        return observation;
       },
     },
     barrier: {
@@ -215,14 +275,18 @@ const setup = (options: {
       trip: () => undefined,
     },
     billingConflicts: options.billingConflicts ?? [],
+    managedWorkspaceRoot: 'C:/mesh-managed-workspaces',
     now: () => now,
     publishDomain: (event) => events.push(event),
-  });
+  };
+  const service = new DeveloperAttemptService(dependencies);
   return {
     service,
     phases,
     attempts,
     workspaceCalls,
+    workspaceDerivations,
+    inspectionCalls,
     executionCalls,
     events,
     getAuthority: () => authority,
@@ -231,6 +295,9 @@ const setup = (options: {
     },
     setProfile: (value: ResolvedWorkerProfileSnapshot) => {
       profile = value;
+    },
+    setInspectionHook: (hook: (() => void) | undefined) => {
+      inspectionHook = hook;
     },
     command: createEnvelope(authority),
   };
@@ -267,39 +334,79 @@ describe('DeveloperAttemptService', () => {
       'execution_activated',
     ]);
     expect(context.workspaceCalls).toHaveLength(1);
-    expect(context.executionCalls).toHaveLength(1);
+    expect(context.workspaceDerivations).toEqual([
+      expect.objectContaining({
+        managedRoot: 'C:/mesh-managed-workspaces',
+        projectId: context.getAuthority()!.project.id,
+        taskId: context.getAuthority()!.task.id,
+        repositoryPath: context.getAuthority()!.project.repositoryPath,
+        repositoryIdentity: context.getAuthority()!.project.repositoryIdentity,
+        baseCommit: context.getAuthority()!.project.headCommit,
+        createdAt: now,
+      }),
+    ]);
+    expect(context.workspaceCalls[0]).toMatchObject({
+      lifecycle: 'creating',
+      branch: expect.stringMatching(
+        new RegExp(
+          `^mesh/dev/${context.getAuthority()!.project.id}/${context.getAuthority()!.task.id}/`,
+        ),
+      ),
+    });
+    expect(context.executionCalls).toHaveLength(2);
   });
 
   it.each([
-    ['missing authority', (context: ReturnType<typeof setup>) => {
-      context.setAuthority(undefined);
-    }],
-    ['stale plan ID', (context: ReturnType<typeof setup>) => {
-      context.command.command.expectedDeliveryPlanId = randomUUID();
-    }],
-    ['stale plan revision', (context: ReturnType<typeof setup>) => {
-      context.command.command.expectedDeliveryPlanRevision = 2;
-    }],
-    ['stale task revision', (context: ReturnType<typeof setup>) => {
-      context.command.command.expectedTaskRevision = 2;
-    }],
-    ['non-actionable readiness', (context: ReturnType<typeof setup>) => {
-      context.setAuthority({
-        ...context.getAuthority()!,
-        card: {
-          ...context.getAuthority()!.card,
-          readiness: { state: 'blocked', blockers: [] },
-        },
-      });
-    }],
-    ['controlling attempt', (context: ReturnType<typeof setup>) => {
-      context.attempts.push({
-        taskId: context.getAuthority()!.task.id,
-      } as DeveloperAttempt);
-    }],
-    ['incompatible profile', (context: ReturnType<typeof setup>) => {
-      context.setProfile(createProfile(false));
-    }],
+    [
+      'missing authority',
+      (context: ReturnType<typeof setup>) => {
+        context.setAuthority(undefined);
+      },
+    ],
+    [
+      'stale plan ID',
+      (context: ReturnType<typeof setup>) => {
+        context.command.command.expectedDeliveryPlanId = randomUUID();
+      },
+    ],
+    [
+      'stale plan revision',
+      (context: ReturnType<typeof setup>) => {
+        context.command.command.expectedDeliveryPlanRevision = 2;
+      },
+    ],
+    [
+      'stale task revision',
+      (context: ReturnType<typeof setup>) => {
+        context.command.command.expectedTaskRevision = 2;
+      },
+    ],
+    [
+      'non-actionable readiness',
+      (context: ReturnType<typeof setup>) => {
+        context.setAuthority({
+          ...context.getAuthority()!,
+          card: {
+            ...context.getAuthority()!.card,
+            readiness: { state: 'blocked', blockers: [] },
+          },
+        });
+      },
+    ],
+    [
+      'controlling attempt',
+      (context: ReturnType<typeof setup>) => {
+        context.attempts.push({
+          taskId: context.getAuthority()!.task.id,
+        } as DeveloperAttempt);
+      },
+    ],
+    [
+      'incompatible profile',
+      (context: ReturnType<typeof setup>) => {
+        context.setProfile(createProfile(false));
+      },
+    ],
   ])('rejects %s before durable reservation', async (_name, change) => {
     const context = setup();
     change(context);
@@ -329,5 +436,105 @@ describe('DeveloperAttemptService', () => {
       expect(context.executionCalls).toHaveLength(0);
       expect(context.events).toHaveLength(0);
     }
+  });
+
+  it('rejects a project-scoped profile for another project before inspection', async () => {
+    const context = setup();
+    context.setProfile({ ...createProfile(), projectId: randomUUID() });
+
+    const result = await context.service.start(context.command);
+
+    expect(result).toMatchObject({ ok: false });
+    expect(context.inspectionCalls).toHaveLength(0);
+    expect(context.attempts).toHaveLength(0);
+    expect(context.workspaceCalls).toHaveLength(0);
+    expect(context.executionCalls).toHaveLength(0);
+    expect(context.events).toHaveLength(0);
+  });
+
+  it('revalidates authority after repository inspection before reserving', async () => {
+    const context = setup();
+    const authority = context.getAuthority()!;
+    context.setInspectionHook(() => {
+      context.setAuthority({
+        ...authority,
+        task: { ...authority.task, revision: authority.task.revision + 1 },
+      });
+    });
+
+    const result = await context.service.start(context.command);
+
+    expect(result).toMatchObject({ ok: false });
+    expect(context.inspectionCalls).toHaveLength(1);
+    expect(context.attempts).toHaveLength(0);
+    expect(context.workspaceCalls).toHaveLength(0);
+    expect(context.executionCalls).toHaveLength(0);
+    expect(context.events).toHaveLength(0);
+  });
+
+  it('persists Task 3 attention observations with their observed facts', async () => {
+    const context = setup({
+      workspaceObservation: (workspace) => ({
+        ...workspace,
+        lifecycle: 'attention_required',
+        observedHead: 'b'.repeat(40),
+        observedDirty: true,
+        failure: {
+          code: 'workspace_create_failed',
+          message: 'Git worktree creation failed',
+        },
+      }),
+    });
+
+    const result = await context.service.start(context.command);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(context.attempts).toHaveLength(1);
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'attention_required',
+      workspace: {
+        lifecycle: 'attention_required',
+        observedHead: 'b'.repeat(40),
+        observedDirty: true,
+        failure: {
+          code: 'workspace_create_failed',
+          message: 'Git worktree creation failed',
+        },
+      },
+    });
+    expect(context.executionCalls).toHaveLength(0);
+  });
+
+  it('links a durably rejected execution before marking the attempt attention-required', async () => {
+    const context = setup({ executionReservationFails: true });
+
+    const result = await context.service.start(context.command);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'attention_required',
+      controllingExecutionId: context.attempts[0].executionIds[0],
+    });
+    expect(context.attempts[0].executionIds).toHaveLength(1);
+  });
+
+  it('drains committed active reservations through ExecutionRuntime activation', async () => {
+    const context = setup();
+    const attemptId = randomUUID();
+    context.attempts.push({
+      id: attemptId,
+      lifecycle: 'active',
+      controllingExecutionId: context.getAuthority()!.project.id,
+    } as DeveloperAttempt);
+
+    await (
+      context.service as DeveloperAttemptService & {
+        drainPendingActivations(): Promise<void>;
+      }
+    ).drainPendingActivations();
+
+    expect(context.executionCalls).toEqual([
+      context.getAuthority()!.project.id,
+    ]);
   });
 });
