@@ -3239,6 +3239,113 @@ describe('DeveloperAttemptService', () => {
     expect(() => context.dependencies.barrier.assertHealthy()).not.toThrow();
   });
 
+  it('serializes replacement and start key reuse before either command reserves effects', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const interrupted = context.attempts[0];
+    const idempotencyKey = randomUUID();
+    const replacement = {
+      idempotencyKey,
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.replace_execution' as const,
+        projectId: interrupted.projectId,
+        attemptId: interrupted.id,
+        expectedAttemptRevision: interrupted.revision,
+      },
+    };
+    const nextAuthority = createAuthority(context.fixture);
+    context.setAuthority(nextAuthority);
+    const start = {
+      ...createEnvelope(nextAuthority),
+      idempotencyKey,
+    };
+    const reserveReplacement =
+      context.dependencies.execution.reserveReplacement;
+    let reservationEntered!: () => void;
+    const reservationStarted = new Promise<void>((resolve) => {
+      reservationEntered = resolve;
+    });
+    let releaseReservation!: () => void;
+    const reservationReleased = new Promise<void>((resolve) => {
+      releaseReservation = resolve;
+    });
+    context.dependencies.execution.reserveReplacement = async (...args) => {
+      const reservation = await reserveReplacement(...args);
+      reservationEntered();
+      await reservationReleased;
+      return reservation;
+    };
+    const reserveAttempt =
+      context.dependencies.developers.reserveAttemptInTransaction;
+    let startReservations = 0;
+    context.dependencies.developers.reserveAttemptInTransaction = (...args) => {
+      startReservations += 1;
+      return reserveAttempt(...args);
+    };
+    let startActivated!: () => void;
+    const startActivation = new Promise<void>((resolve) => {
+      startActivated = resolve;
+    });
+    const activations: string[] = [];
+    context.dependencies.execution.activateReserved = async (executionId) => {
+      activations.push(executionId);
+      context.executionCalls.push(executionId);
+      if (executionId === context.fixture.execution.id) startActivated();
+    };
+    const beforeWorkspaceEffects = context.workspaceCalls.length;
+    const beforeEvents = context.events.length;
+
+    const replacementResult = context.service.replaceExecution(replacement);
+    await reservationStarted;
+    const startResult = context.service.start(start);
+    const startActivatedBeforeRelease = await Promise.race([
+      startActivation.then(() => true),
+      new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+    ]);
+    releaseReservation();
+
+    await expect(replacementResult).resolves.toMatchObject({ ok: true });
+    await expect(startResult).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'idempotency_conflict' },
+    });
+    expect(startActivatedBeforeRelease).toBe(false);
+    expect(startReservations).toBe(0);
+    expect(context.workspaceCalls).toHaveLength(beforeWorkspaceEffects);
+    expect(context.attempts).toHaveLength(1);
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'active',
+      executionIds: [interrupted.controllingExecutionId, expect.any(String)],
+    });
+    expect(activations).toEqual([context.attempts[0].controllingExecutionId]);
+    expect(context.events).toHaveLength(beforeEvents + 2);
+    expect(context.events.at(-1)).toBe(context.events.at(-2));
+    expect(context.commands.get(idempotencyKey)?.result).toMatchObject({
+      commandType: 'developer_attempt.replace_execution',
+    });
+    expect(context.startReservations.size).toBe(0);
+    const linkedExecutionIds = new Set(context.attempts[0].executionIds);
+    const replacementExecutions = [...context.executionRecords.values()].filter(
+      ({ replacementForExecutionId }) => replacementForExecutionId !== null,
+    );
+    expect(replacementExecutions).toHaveLength(1);
+    expect(linkedExecutionIds.has(replacementExecutions[0].id)).toBe(true);
+    expect(context.trips).toEqual([]);
+    expect(() => context.dependencies.barrier.assertHealthy()).not.toThrow();
+  });
+
   it('replaces a frozen attempt after the current plan omits its task', async () => {
     const context = setup();
     await context.service.start(context.command);

@@ -206,8 +206,7 @@ const outputDigest = (value: unknown) =>
 
 export class DeveloperAttemptService {
   private readonly attemptTails = new Map<string, Promise<void>>();
-  private readonly replacementTails = new Map<string, Promise<void>>();
-  private readonly startTails = new Map<string, Promise<void>>();
+  private readonly commandTails = new Map<string, Promise<void>>();
   private readonly startFlights = new Map<string, StartFlight>();
 
   constructor(private readonly dependencies: Dependencies) {}
@@ -662,7 +661,7 @@ export class DeveloperAttemptService {
     const replay = this.replayCommand(command, requestHash);
     if (replay) return replay;
     return this.singleFlightStart(command, requestHash, () =>
-      this.inStartOrder(command.idempotencyKey, () =>
+      this.inCommandOrder(command.idempotencyKey, () =>
         this.startLocked(command, requestHash),
       ),
     );
@@ -1360,11 +1359,13 @@ export class DeveloperAttemptService {
       );
     const command = parsed.data;
     const requestHash = hashV2Command(command.command);
-    return this.inAttemptOrder(command.command.attemptId, async () => {
-      const reserved = this.reserveInterrupt(command, requestHash);
-      if (reserved.event) this.dependencies.publishDomain(reserved.event);
-      return this.settleInterrupt(command, reserved.result);
-    });
+    return this.inCommandOrder(command.idempotencyKey, () =>
+      this.inAttemptOrder(command.command.attemptId, async () => {
+        const reserved = this.reserveInterrupt(command, requestHash);
+        if (reserved.event) this.dependencies.publishDomain(reserved.event);
+        return this.settleInterrupt(command, reserved.result);
+      }),
+    );
   }
 
   private reserveInterrupt(
@@ -1543,7 +1544,7 @@ export class DeveloperAttemptService {
       );
     const command = parsed.data;
     const requestHash = hashV2Command(command.command);
-    return this.inOrder(this.replacementTails, command.idempotencyKey, () =>
+    return this.inCommandOrder(command.idempotencyKey, () =>
       this.inAttemptOrder(command.command.attemptId, () =>
         this.replaceExecutionLocked(command, requestHash),
       ),
@@ -1855,7 +1856,7 @@ export class DeveloperAttemptService {
         throw new Error(
           mismatch.ok ? 'Unexpected start result' : mismatch.error.message,
         );
-      await this.inStartOrder(reservation.idempotencyKey, () =>
+      await this.inCommandOrder(reservation.idempotencyKey, () =>
         this.resumeStart(command, requestHash, attempt, reservation),
       );
     }
@@ -2010,11 +2011,11 @@ export class DeveloperAttemptService {
     return this.inOrder(this.attemptTails, attemptId, operation);
   }
 
-  private async inStartOrder<T>(
+  private async inCommandOrder<T>(
     idempotencyKey: string,
     operation: () => Promise<T> | T,
   ): Promise<T> {
-    return this.inOrder(this.startTails, idempotencyKey, operation);
+    return this.inOrder(this.commandTails, idempotencyKey, operation);
   }
 
   private async inOrder<T>(
