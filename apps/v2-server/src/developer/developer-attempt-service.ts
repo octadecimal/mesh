@@ -788,8 +788,10 @@ export class DeveloperAttemptService {
     const current = this.dependencies.developers.attempt(attempt.id);
     if (
       !current ||
+      current.revision !== attempt.revision ||
       current.lifecycle !== 'interrupted' ||
-      current.controllingExecutionId !== attempt.controllingExecutionId
+      current.controllingExecutionId !== attempt.controllingExecutionId ||
+      current.workspace.revision !== attempt.workspace.revision
     ) {
       return accepted;
     }
@@ -798,7 +800,7 @@ export class DeveloperAttemptService {
     );
     if (!execution) {
       this.markAttemptAttention(
-        attempt.id,
+        attempt,
         'developer_interrupt_unproven',
         'Controlling execution disappeared during interruption',
       );
@@ -807,7 +809,7 @@ export class DeveloperAttemptService {
     if (execution.lifecycle === 'interrupted') return accepted;
     if (execution.lifecycle !== 'running') {
       this.markAttemptAttention(
-        attempt.id,
+        attempt,
         'developer_interrupt_unproven',
         'Controlling execution interruption was not proven',
       );
@@ -826,7 +828,7 @@ export class DeveloperAttemptService {
       });
     } catch (error) {
       this.markAttemptAttention(
-        attempt.id,
+        attempt,
         'developer_interrupt_unproven',
         error instanceof Error ? error.message : String(error),
       );
@@ -835,7 +837,7 @@ export class DeveloperAttemptService {
     const settled = this.dependencies.executions.get(execution.id);
     if (!settled || settled.lifecycle !== 'interrupted') {
       this.markAttemptAttention(
-        attempt.id,
+        attempt,
         'developer_interrupt_unproven',
         'Controlling execution interruption was not proven',
       );
@@ -896,7 +898,7 @@ export class DeveloperAttemptService {
     );
     if (observation.lifecycle !== 'ready') {
       this.markAttemptAttention(
-        attempt.id,
+        attempt,
         observation.failure?.code ?? 'developer_workspace_conflict',
         observation.failure?.message ??
           'Workspace ownership could not be proven',
@@ -926,7 +928,7 @@ export class DeveloperAttemptService {
       );
     } catch (error) {
       this.markAttemptAttention(
-        attempt.id,
+        attempt,
         'developer_replacement_unavailable',
         error instanceof Error ? error.message : String(error),
       );
@@ -944,7 +946,7 @@ export class DeveloperAttemptService {
         canonicalJson(attempt.assignment)
     ) {
       this.markAttemptAttention(
-        attempt.id,
+        attempt,
         'developer_replacement_unavailable',
         'Replacement execution did not preserve frozen authority',
       );
@@ -966,7 +968,8 @@ export class DeveloperAttemptService {
           current.projectId !== command.command.projectId ||
           current.revision !== command.command.expectedAttemptRevision ||
           current.lifecycle !== 'interrupted' ||
-          current.controllingExecutionId !== prior.id
+          current.controllingExecutionId !== prior.id ||
+          current.workspace.revision !== attempt.workspace.revision
         ) {
           result = mutationFailure(
             'developer_attempt.replace_execution',
@@ -1187,7 +1190,7 @@ export class DeveloperAttemptService {
   }
 
   private markAttemptAttention(
-    attemptId: string,
+    expected: DeveloperAttempt,
     code: string,
     message: string,
     observedWorkspace?: ManagedWorkspace,
@@ -1195,7 +1198,15 @@ export class DeveloperAttemptService {
     let event: DomainEvent | undefined;
     try {
       inImmediateTransaction(this.dependencies.database, () => {
-        const current = this.requireAttempt(attemptId);
+        const current = this.requireAttempt(expected.id);
+        if (
+          current.revision !== expected.revision ||
+          current.lifecycle !== expected.lifecycle ||
+          current.controllingExecutionId !== expected.controllingExecutionId ||
+          current.workspace.revision !== expected.workspace.revision
+        ) {
+          return;
+        }
         const authority =
           this.dependencies.planning.taskExecutionAuthorityInTransaction(
             current.projectId,

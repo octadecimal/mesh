@@ -15,6 +15,7 @@ import type { DeveloperRepository } from './developer-repository.js';
 export type DeveloperAttemptReconciliation = {
   events: readonly DomainEvent[];
   pendingActivationIds: readonly WorkerExecutionId[];
+  pendingInterruptAttemptIds: readonly string[];
 };
 
 type Dependencies = {
@@ -88,6 +89,12 @@ const desiredLifecycle = (
       },
     };
   }
+  if (
+    attempt.lifecycle === 'interrupted' &&
+    execution.lifecycle === 'running'
+  ) {
+    return { lifecycle: 'interrupted', attention: null };
+  }
   if (execution.lifecycle === 'running' || execution.lifecycle === 'starting') {
     return { lifecycle: 'active', attention: null };
   }
@@ -124,6 +131,7 @@ export const reconcileDeveloperAttempts = async (
   dependencies.barrier.assertHealthy();
   const events: DomainEvent[] = [];
   const pendingActivationIds: WorkerExecutionId[] = [];
+  const pendingInterruptAttemptIds: string[] = [];
 
   for (const original of dependencies.developers.nonterminalAttempts()) {
     dependencies.barrier.assertHealthy();
@@ -162,6 +170,12 @@ export const reconcileDeveloperAttempts = async (
         ) {
           if (execution?.lifecycle === 'starting') {
             pendingActivationIds.push(execution.id);
+          }
+          if (
+            current.lifecycle === 'interrupted' &&
+            execution?.lifecycle === 'running'
+          ) {
+            pendingInterruptAttemptIds.push(current.id);
           }
           return;
         }
@@ -220,5 +234,5 @@ export const reconcileDeveloperAttempts = async (
       throw error;
     }
   }
-  return { events, pendingActivationIds };
+  return { events, pendingActivationIds, pendingInterruptAttemptIds };
 };

@@ -161,13 +161,14 @@ const execution = (
 describe('reconcileDeveloperAttempts', () => {
   it.each([
     {
-      name: 'running execution resumes an interrupted attempt',
+      name: 'running execution preserves a durable interrupt pending replay',
       attemptLifecycle: 'interrupted' as const,
       executionLifecycle: 'running' as const,
       reportIds: [],
-      expectedLifecycle: 'active' as const,
-      events: 1,
+      expectedLifecycle: 'interrupted' as const,
+      events: 0,
       pending: false,
+      pendingInterrupt: true,
     },
     {
       name: 'terminal execution without a report interrupts an active attempt',
@@ -177,6 +178,7 @@ describe('reconcileDeveloperAttempts', () => {
       expectedLifecycle: 'interrupted' as const,
       events: 1,
       pending: false,
+      pendingInterrupt: false,
     },
     {
       name: 'terminal execution retains an attempt with a report',
@@ -186,6 +188,7 @@ describe('reconcileDeveloperAttempts', () => {
       expectedLifecycle: 'blocked' as const,
       events: 0,
       pending: false,
+      pendingInterrupt: false,
     },
     {
       name: 'reserved attempt requires attention after recovery',
@@ -195,6 +198,7 @@ describe('reconcileDeveloperAttempts', () => {
       expectedLifecycle: 'attention_required' as const,
       events: 1,
       pending: false,
+      pendingInterrupt: false,
     },
     {
       name: 'provisioning attempt requires attention after recovery',
@@ -204,6 +208,7 @@ describe('reconcileDeveloperAttempts', () => {
       expectedLifecycle: 'attention_required' as const,
       events: 1,
       pending: false,
+      pendingInterrupt: false,
     },
     {
       name: 'starting execution remains a pending activation when unchanged',
@@ -213,6 +218,7 @@ describe('reconcileDeveloperAttempts', () => {
       expectedLifecycle: 'active' as const,
       events: 0,
       pending: true,
+      pendingInterrupt: false,
     },
   ])('$name', async (testCase) => {
     const context = createRecoveryContext({
@@ -231,6 +237,9 @@ describe('reconcileDeveloperAttempts', () => {
       expect(recovery.events).toHaveLength(testCase.events);
       expect(recovery.pendingActivationIds).toEqual(
         testCase.pending ? [context.executionId] : [],
+      );
+      expect(recovery.pendingInterruptAttemptIds).toEqual(
+        testCase.pendingInterrupt ? [context.attempt.id] : [],
       );
     } finally {
       context.fixture.close();
@@ -284,6 +293,7 @@ describe('reconcileDeveloperAttempts', () => {
       });
       expect(recovery.events).toHaveLength(1);
       expect(recovery.pendingActivationIds).toEqual([]);
+      expect(recovery.pendingInterruptAttemptIds).toEqual([]);
     } finally {
       context.fixture.close();
     }
@@ -316,6 +326,7 @@ describe('reconcileDeveloperAttempts', () => {
           expect.objectContaining({ type: 'developer_attempt.changed' }),
         ],
         pendingActivationIds: [context.executionId],
+        pendingInterruptAttemptIds: [],
       });
       expect(context.attempt).toMatchObject({
         lifecycle: 'active',
@@ -350,7 +361,11 @@ describe('reconcileDeveloperAttempts', () => {
         lifecycle: 'completed',
         reportIds: expect.any(Array),
       });
-      expect(recovery).toEqual({ events: [], pendingActivationIds: [] });
+      expect(recovery).toEqual({
+        events: [],
+        pendingActivationIds: [],
+        pendingInterruptAttemptIds: [],
+      });
     } finally {
       context.fixture.close();
     }
@@ -381,7 +396,11 @@ describe('reconcileDeveloperAttempts', () => {
         lifecycle: 'active',
         controllingExecutionId: replacementId,
       });
-      expect(recovery).toEqual({ events: [], pendingActivationIds: [] });
+      expect(recovery).toEqual({
+        events: [],
+        pendingActivationIds: [],
+        pendingInterruptAttemptIds: [],
+      });
     } finally {
       context.fixture.close();
     }

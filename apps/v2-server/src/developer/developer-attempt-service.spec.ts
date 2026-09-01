@@ -15,6 +15,7 @@ import {
   type StartDeveloperAttemptEnvelope,
   type TaskExecutionAuthority,
 } from './developer-attempt-service.js';
+import { reconcileDeveloperAttempts } from './reconcile-developer-attempts.js';
 import { createV2TestDatabase } from '../test/create-v2-test-database.js';
 import { PlanningRepository } from '../planning/planning-repository.js';
 import { approveTestDeliveryPlan } from '../test/approved-delivery-plan.js';
@@ -1392,6 +1393,10 @@ describe('DeveloperAttemptService', () => {
         },
         activateReserved: context.dependencies.execution.activateReserved,
         interrupt: async (envelope) => {
+          expect(context.developers.attempt(active.id)).toMatchObject({
+            lifecycle: 'interrupted',
+            endedAt: null,
+          });
           const current = executions.get(envelope.command.executionId)!;
           context.fixture.database
             .prepare(
@@ -1473,6 +1478,72 @@ describe('DeveloperAttemptService', () => {
     expect(
       context.executionRecords.get(active.controllingExecutionId!)?.lifecycle,
     ).toBe('running');
+
+    await expect(context.service.interrupt(envelope)).resolves.toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.interrupt',
+      attempt: { lifecycle: 'interrupted' },
+    });
+    expect(
+      context.executionRecords.get(active.controllingExecutionId!)?.lifecycle,
+    ).toBe('interrupted');
+    expect(genericInterrupts).toBe(1);
+    expect(publicationAttempts).toBe(1);
+  });
+
+  it('replays a durable interrupt after recovery preserves its pending receipt', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    const envelope = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'developer_attempt.interrupt' as const,
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    };
+    const interrupt = context.dependencies.execution.interrupt;
+    let genericInterrupts = 0;
+    context.dependencies.execution.interrupt = async (input) => {
+      genericInterrupts += 1;
+      return interrupt(input);
+    };
+    let publicationAttempts = 0;
+    context.dependencies.publishDomain = () => {
+      publicationAttempts += 1;
+      throw new Error('accepted publication failed');
+    };
+
+    await expect(context.service.interrupt(envelope)).rejects.toThrow(
+      'accepted publication failed',
+    );
+
+    await expect(
+      reconcileDeveloperAttempts({
+        database: context.dependencies.database,
+        developers: context.dependencies.developers,
+        executions: context.dependencies.executions,
+        workspace: { observe: context.dependencies.workspace.observe },
+        planning: {
+          taskExecutionAuthorityInTransaction:
+            context.dependencies.planning.taskExecutionAuthorityInTransaction,
+        },
+        events: context.dependencies.events,
+        barrier: context.dependencies.barrier,
+        now: context.dependencies.now,
+      } as never),
+    ).resolves.toEqual({
+      events: [],
+      pendingActivationIds: [],
+      pendingInterruptAttemptIds: [active.id],
+    });
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'interrupted',
+      endedAt: null,
+    });
 
     await expect(context.service.interrupt(envelope)).resolves.toMatchObject({
       ok: true,
@@ -1669,6 +1740,193 @@ describe('DeveloperAttemptService', () => {
     expect(context.attempts[0].executionIds).toHaveLength(2);
   });
 
+  it('does not overwrite a newer completion when replacement reservation fails', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const interrupted = context.attempts[0];
+    let releaseReservation: (() => void) | undefined;
+    const reservationReleased = new Promise<void>((resolve) => {
+      releaseReservation = resolve;
+    });
+    let reservationEntered: (() => void) | undefined;
+    const reservationStarted = new Promise<void>((resolve) => {
+      reservationEntered = resolve;
+    });
+    context.dependencies.execution.reserveReplacement = async () => {
+      reservationEntered!();
+      await reservationReleased;
+      throw new Error('replacement unavailable');
+    };
+    const beforeEvents = context.events.length;
+    const replacing = context.service.replaceExecution({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.replace_execution',
+        projectId: interrupted.projectId,
+        attemptId: interrupted.id,
+        expectedAttemptRevision: interrupted.revision,
+      },
+    });
+    await reservationStarted;
+    context.attempts.splice(0, 1, {
+      ...context.attempts[0],
+      lifecycle: 'completed',
+      revision: context.attempts[0].revision + 1,
+      reportIds: [randomUUID()],
+      endedAt: later,
+    });
+    releaseReservation!();
+
+    await expect(replacing).resolves.toMatchObject({ ok: false });
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'completed',
+      reportIds: [expect.any(String)],
+    });
+    expect(context.events).toHaveLength(beforeEvents);
+  });
+
+  it('does not overwrite a newer replacement when replacement reservation fails', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const interrupted = context.attempts[0];
+    let releaseReservation: (() => void) | undefined;
+    const reservationReleased = new Promise<void>((resolve) => {
+      releaseReservation = resolve;
+    });
+    let reservationEntered: (() => void) | undefined;
+    const reservationStarted = new Promise<void>((resolve) => {
+      reservationEntered = resolve;
+    });
+    context.dependencies.execution.reserveReplacement = async () => {
+      reservationEntered!();
+      await reservationReleased;
+      throw new Error('replacement unavailable');
+    };
+    const beforeEvents = context.events.length;
+    const replacing = context.service.replaceExecution({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.replace_execution',
+        projectId: interrupted.projectId,
+        attemptId: interrupted.id,
+        expectedAttemptRevision: interrupted.revision,
+      },
+    });
+    await reservationStarted;
+    const successor = {
+      ...context.executionRecords.get(interrupted.controllingExecutionId!)!,
+      id: randomUUID(),
+      lifecycle: 'starting' as const,
+      revision: 0,
+      replacementForExecutionId: interrupted.controllingExecutionId,
+      endedAt: null,
+    };
+    context.executionRecords.set(successor.id, successor);
+    context.attempts.splice(0, 1, {
+      ...context.attempts[0],
+      lifecycle: 'active',
+      revision: context.attempts[0].revision + 1,
+      controllingExecutionId: successor.id,
+      executionIds: [...context.attempts[0].executionIds, successor.id],
+      endedAt: null,
+    });
+    releaseReservation!();
+
+    await expect(replacing).resolves.toMatchObject({ ok: false });
+    expect(context.attempts[0]).toMatchObject({
+      lifecycle: 'active',
+      controllingExecutionId: successor.id,
+    });
+    expect(context.events).toHaveLength(beforeEvents);
+  });
+
+  it('refuses a replacement link after the attempt controller changes', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const active = context.attempts[0];
+    await context.service.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.interrupt',
+        projectId: active.projectId,
+        attemptId: active.id,
+        expectedAttemptRevision: active.revision,
+      },
+    });
+    const interrupted = context.attempts[0];
+    const reserveReplacement =
+      context.dependencies.execution.reserveReplacement;
+    context.dependencies.execution.reserveReplacement = async (
+      envelope,
+      replacementForExecutionId,
+    ) => {
+      const reservation = await reserveReplacement(
+        envelope,
+        replacementForExecutionId,
+      );
+      const successor = {
+        ...reservation.execution,
+        id: randomUUID(),
+        revision: 0,
+      };
+      context.executionRecords.set(successor.id, successor);
+      context.attempts.splice(0, 1, {
+        ...context.attempts[0],
+        lifecycle: 'active',
+        revision: context.attempts[0].revision + 1,
+        controllingExecutionId: successor.id,
+        executionIds: [...context.attempts[0].executionIds, successor.id],
+        endedAt: null,
+      });
+      return reservation;
+    };
+    const beforeEvents = context.events.length;
+    const beforeActivations = context.executionCalls.length;
+
+    const result = await context.service.replaceExecution({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'developer_attempt.replace_execution',
+        projectId: interrupted.projectId,
+        attemptId: interrupted.id,
+        expectedAttemptRevision: interrupted.revision,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false });
+    expect(context.attempts[0].controllingExecutionId).not.toBe(
+      interrupted.controllingExecutionId,
+    );
+    expect(context.events).toHaveLength(beforeEvents);
+    expect(context.executionCalls).toHaveLength(beforeActivations);
+  });
+
   it('rolls back replacement linkage when its event cannot be written', async () => {
     const context = await setupPersistedAttempt();
     const executions = new ExecutionRepository(context.fixture.database);
@@ -1731,6 +1989,15 @@ describe('DeveloperAttemptService', () => {
       endedAt: null,
     };
     executions.transaction(() => executions.insertInTransaction(replacement));
+    const beforeLinks = context.fixture.database
+      .prepare(
+        'SELECT attempt_id, execution_id FROM developer_attempt_executions WHERE attempt_id = ?',
+      )
+      .all(active.id);
+    const beforeEvents = context.events.domainAfter(
+      context.fixture.project.id,
+      0,
+    ).events;
     let activations = 0;
     const service = new DeveloperAttemptService({
       ...context.dependencies,
@@ -1775,6 +2042,17 @@ describe('DeveloperAttemptService', () => {
 
     expect(context.developers.attempt(active.id)).toEqual(before);
     expect(activations).toBe(0);
+    expect(
+      context.fixture.database
+        .prepare(
+          'SELECT attempt_id, execution_id FROM developer_attempt_executions WHERE attempt_id = ?',
+        )
+        .all(active.id),
+    ).toEqual(beforeLinks);
+    expect(
+      context.events.domainAfter(context.fixture.project.id, 0).events,
+    ).toEqual(beforeEvents);
+    expect(context.published).toEqual([]);
     expect(context.trips).toHaveLength(1);
   });
 
