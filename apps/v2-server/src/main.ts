@@ -18,6 +18,7 @@ import {
   createManagedWorkspace,
   deriveManagedWorkspace,
   observeManagedWorkspace,
+  recoverManagedWorkspace,
 } from './developer/managed-workspace.js';
 import { reconcileDeveloperAttempts } from './developer/reconcile-developer-attempts.js';
 import { AuditBarrier } from './executions/audit-barrier.js';
@@ -68,6 +69,7 @@ export type StartV2ServerOptions = {
     webRoot?: string;
     onPublished?: (message: ServerRealtimeMessage) => void;
     onStartupPhase?: (phase: V2StartupPhase) => void;
+    onGitCall?: (args: readonly string[]) => void;
   };
 };
 
@@ -189,7 +191,15 @@ export const startV2Server = async (
     const events = new V2EventStore(database);
     const publisher = new V2EventPublisher(options.test?.onPublished);
     const barrier = new AuditBarrier();
-    const processRunner = createV2GitProcessRunner(trustedGit);
+    const trustedProcessRunner = createV2GitProcessRunner(trustedGit);
+    const processRunner = options.test?.onGitCall
+      ? {
+          run: (call: Parameters<typeof trustedProcessRunner.run>[0]) => {
+            options.test!.onGitCall!(call.args);
+            return trustedProcessRunner.run(call);
+          },
+        }
+      : trustedProcessRunner;
     const resolveRepositoryIdentity = auditAwareRepositoryIdentityResolver(
       createRepositoryIdentityResolver({
         workspaceRoot: config.workspaceRoot,
@@ -296,6 +306,21 @@ export const startV2Server = async (
             }
           },
         }),
+      recover: (
+        workspace: Parameters<typeof recoverManagedWorkspace>[0],
+        options: Parameters<typeof recoverManagedWorkspace>[2],
+      ) =>
+        recoverManagedWorkspace(
+          workspace,
+          {
+            managedRoot: managedWorkspaceRoot,
+            gitExecutable: trustedGit.path,
+            processRunner,
+            resolveRepositoryIdentity,
+            assertCreateReserved: () => undefined,
+          },
+          options,
+        ),
       observe: (workspace: Parameters<typeof observeManagedWorkspace>[0]) =>
         observeManagedWorkspace(
           workspace,

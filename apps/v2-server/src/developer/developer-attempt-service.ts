@@ -105,6 +105,10 @@ type Dependencies = {
     }>;
     derive(input: DeriveManagedWorkspaceInput): ManagedWorkspace;
     create(workspace: ManagedWorkspace): Promise<ManagedWorkspace>;
+    recover(
+      workspace: ManagedWorkspace,
+      options: { allowAbsent: boolean },
+    ): Promise<ManagedWorkspace | undefined>;
     observe(workspace: ManagedWorkspace): Promise<ManagedWorkspace>;
   };
   barrier: Pick<AuditBarrier, 'assertHealthy' | 'trip'>;
@@ -133,6 +137,11 @@ type StartFlight = {
   promise: Promise<V2CommandResult>;
 };
 
+type DeveloperCommandEnvelope =
+  | StartDeveloperAttemptEnvelope
+  | InterruptDeveloperAttemptEnvelope
+  | ReplaceDeveloperAttemptExecutionEnvelope;
+
 const failure = (
   message: string,
   code: V2ErrorCode = 'invalid_request',
@@ -152,6 +161,19 @@ const mutationFailure = (
   ok: false,
   commandType,
   error: { code, message },
+});
+
+const replayFailure = (
+  commandType: DeveloperCommandEnvelope['command']['type'],
+  error: unknown,
+  code: Extract<V2ErrorCode, 'idempotency_conflict' | 'audit_barrier_tripped'>,
+): V2CommandResult => ({
+  ok: false,
+  commandType,
+  error: {
+    code,
+    message: error instanceof Error ? error.message : String(error),
+  },
 });
 
 const failureFrom = (
@@ -187,20 +209,56 @@ export class DeveloperAttemptService {
 
   constructor(private readonly dependencies: Dependencies) {}
 
-  private replayStart(
-    command: StartDeveloperAttemptEnvelope,
+  private replayCommand(
+    command: DeveloperCommandEnvelope,
     requestHash: string,
   ): V2CommandResult | undefined {
     try {
-      return this.dependencies.commands.find(
+      const stored = this.dependencies.commands.find(
         command.idempotencyKey,
         requestHash,
-      )?.result;
+      );
+      if (!stored) return undefined;
+      const result = stored.result;
+      const resultIdentityMatches =
+        !result.ok ||
+        (command.command.type === 'developer_attempt.start'
+          ? result.commandType === 'developer_attempt.start' &&
+            result.attempt.projectId === command.command.projectId &&
+            result.attempt.taskId === command.command.taskId &&
+            result.board.projectId === command.command.projectId
+          : command.command.type === 'developer_attempt.interrupt'
+            ? result.commandType === 'developer_attempt.interrupt' &&
+              result.attempt.projectId === command.command.projectId &&
+              result.attempt.id === command.command.attemptId &&
+              result.board.projectId === command.command.projectId
+            : result.commandType === 'developer_attempt.replace_execution' &&
+              result.attempt.projectId === command.command.projectId &&
+              result.attempt.id === command.command.attemptId &&
+              result.board.projectId === command.command.projectId);
+      if (
+        stored.idempotencyKey !== command.idempotencyKey ||
+        stored.commandType !== command.command.type ||
+        stored.requestHash !== requestHash ||
+        result.commandType !== command.command.type ||
+        !resultIdentityMatches
+      ) {
+        throw new Error('Stored Developer command result identity is corrupt');
+      }
+      return result;
     } catch (error) {
       if (error instanceof V2IdempotencyConflictError)
-        return failureFrom(error, 'idempotency_conflict');
+        return replayFailure(
+          command.command.type,
+          error,
+          'idempotency_conflict',
+        );
       this.dependencies.barrier.trip(error, this.dependencies.now());
-      return failureFrom(error, 'audit_barrier_tripped');
+      return replayFailure(
+        command.command.type,
+        error,
+        'audit_barrier_tripped',
+      );
     }
   }
 
@@ -262,7 +320,14 @@ export class DeveloperAttemptService {
     );
     if (!assignment.success) return;
     const digest = outputDigest(event.payload.value);
-    if (this.receiptMatches(event.id, digest)) return;
+    const expectedReceipt = {
+      runtimeEventId: event.id,
+      projectId: execution.projectId,
+      attemptId: assignment.data.attemptId,
+      executionId: execution.id,
+      outputDigest: digest,
+    };
+    if (this.receiptMatches(expectedReceipt)) return;
     this.dependencies.barrier.assertHealthy();
     await this.inAttemptOrder(assignment.data.attemptId, () =>
       this.acceptReportLocked(execution, event, report),
@@ -279,7 +344,14 @@ export class DeveloperAttemptService {
     );
     if (!assignment.success) return;
     const digest = outputDigest(event.payload.value);
-    if (this.receiptMatches(event.id, digest)) return;
+    const expectedReceipt = {
+      runtimeEventId: event.id,
+      projectId: execution.projectId,
+      attemptId: assignment.data.attemptId,
+      executionId: execution.id,
+      outputDigest: digest,
+    };
+    if (this.receiptMatches(expectedReceipt)) return;
     this.dependencies.barrier.assertHealthy();
     const candidate = this.dependencies.developers.attempt(
       assignment.data.attemptId,
@@ -299,15 +371,7 @@ export class DeveloperAttemptService {
     const committed: DomainEvent[] = [];
     try {
       inImmediateTransaction(this.dependencies.database, () => {
-        const prior = this.dependencies.developers.outputReceipt(event.id);
-        if (prior) {
-          if (prior.outputDigest !== digest) {
-            throw new Error(
-              'Developer output receipt conflicts with prior receipt',
-            );
-          }
-          return;
-        }
+        if (this.receiptMatches(expectedReceipt)) return;
         const persistedAttempt = this.dependencies.developers.attempt(
           assignment.data.attemptId,
         );
@@ -588,7 +652,7 @@ export class DeveloperAttemptService {
     }
 
     const requestHash = hashV2Command(command.command);
-    const replay = this.replayStart(command, requestHash);
+    const replay = this.replayCommand(command, requestHash);
     if (replay) return replay;
     return this.singleFlightStart(command, requestHash, () =>
       this.inStartOrder(command.idempotencyKey, () =>
@@ -601,7 +665,7 @@ export class DeveloperAttemptService {
     command: StartDeveloperAttemptEnvelope,
     requestHash: string,
   ): Promise<V2CommandResult> {
-    const repeated = this.replayStart(command, requestHash);
+    const repeated = this.replayCommand(command, requestHash);
     if (repeated) return repeated;
     const reservation = this.dependencies.developers.startReservation(
       command.idempotencyKey,
@@ -989,10 +1053,22 @@ export class DeveloperAttemptService {
     try {
       let provisioned = current;
       let workspaceFailure: V2CommandResult | undefined;
-      if (current.lifecycle === 'reserved') {
-        const observation = await this.dependencies.workspace.create(
+      let observation = await this.dependencies.workspace.recover(
+        current.workspace,
+        { allowAbsent: current.lifecycle === 'reserved' },
+      );
+      if (!observation && current.lifecycle === 'reserved') {
+        observation = await this.dependencies.workspace.create(
           current.workspace,
         );
+      }
+      if (!observation) {
+        throw new Error('Provisioned workspace observation was not returned');
+      }
+      if (
+        current.lifecycle === 'reserved' ||
+        observation.lifecycle !== 'ready'
+      ) {
         let workspaceEvent: DomainEvent;
         ({ provisioned, workspaceEvent, workspaceFailure } =
           inImmediateTransaction(this.dependencies.database, () => {
@@ -1293,16 +1369,8 @@ export class DeveloperAttemptService {
     command: InterruptDeveloperAttemptEnvelope,
     requestHash: string,
   ): { result: V2CommandResult; event?: DomainEvent } {
-    let replay;
-    try {
-      replay = this.dependencies.commands.find(
-        command.idempotencyKey,
-        requestHash,
-      );
-    } catch (error) {
-      throw error;
-    }
-    if (replay) return { result: replay.result };
+    const replay = this.replayCommand(command, requestHash);
+    if (replay) return { result: replay };
     this.dependencies.barrier.assertHealthy();
 
     let accepted: V2CommandResult = mutationFailure(
@@ -1311,12 +1379,9 @@ export class DeveloperAttemptService {
     );
     let acceptedEvent: DomainEvent | undefined;
     inImmediateTransaction(this.dependencies.database, () => {
-      const stored = this.dependencies.commands.find(
-        command.idempotencyKey,
-        requestHash,
-      );
+      const stored = this.replayCommand(command, requestHash);
       if (stored) {
-        accepted = stored.result;
+        accepted = stored;
         return;
       }
       const current = this.dependencies.developers.attempt(
@@ -1479,16 +1544,8 @@ export class DeveloperAttemptService {
       );
     const command = parsed.data;
     const requestHash = hashV2Command(command.command);
-    let replay;
-    try {
-      replay = this.dependencies.commands.find(
-        command.idempotencyKey,
-        requestHash,
-      );
-    } catch (error) {
-      throw error;
-    }
-    if (replay) return replay.result;
+    const replay = this.replayCommand(command, requestHash);
+    if (replay) return replay;
     this.dependencies.barrier.assertHealthy();
 
     const attempt = this.dependencies.developers.attempt(
@@ -1899,9 +1956,30 @@ export class DeveloperAttemptService {
     return attempt;
   }
 
-  private receiptMatches(runtimeEventId: string, digest: string): boolean {
-    const prior = this.dependencies.developers.outputReceipt(runtimeEventId);
-    if (prior && prior.outputDigest !== digest) {
+  private receiptMatches(expected: {
+    runtimeEventId: string;
+    projectId: string;
+    attemptId: string;
+    executionId: string;
+    outputDigest: string;
+  }): boolean {
+    let prior;
+    try {
+      prior = this.dependencies.developers.outputReceipt(
+        expected.runtimeEventId,
+      );
+    } catch (error) {
+      this.dependencies.barrier.trip(error, this.dependencies.now());
+      throw error;
+    }
+    if (
+      prior &&
+      (prior.runtimeEventId !== expected.runtimeEventId ||
+        prior.projectId !== expected.projectId ||
+        prior.attemptId !== expected.attemptId ||
+        prior.executionId !== expected.executionId ||
+        prior.outputDigest !== expected.outputDigest)
+    ) {
       const error = new Error(
         'Developer output receipt conflicts with prior receipt',
       );

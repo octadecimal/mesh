@@ -393,6 +393,40 @@ describe('planning observer', () => {
       'terminal',
     ]);
   });
+
+  it('contains an observer audit failure without recording an adapter failure', async () => {
+    let context!: ReturnType<typeof createPmRuntime>;
+    const observer: ExecutionRuntimeObserver = {
+      structuredOutput: () => {
+        const error = new Error('Developer receipt audit failed');
+        context.barrier.trip(error);
+        throw error;
+      },
+      terminal: vi.fn(),
+    };
+    context = createPmRuntime('todo', {}, undefined, observer);
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+    expect(context.barrier.status).toBe('tripped');
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'running',
+      failure: null,
+    });
+    expect(
+      context.published.domain.filter((event) => {
+        const domain = event as DomainEvent;
+        return (
+          domain.type === 'worker_execution.lifecycle_changed' &&
+          domain.payload.execution.lifecycle === 'failed'
+        );
+      }),
+    ).toHaveLength(0);
+    expect(observer.terminal).not.toHaveBeenCalled();
+  });
 });
 
 const durableReservationState = (fixture: V2TestDatabase) => ({

@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, relative, resolve, win32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -291,6 +291,110 @@ export const createManagedWorkspace = async (
       workspace,
       'workspace_ownership_write_failed',
       error instanceof Error ? error.message : String(error),
+    );
+  }
+  return observeManagedWorkspace(workspace, dependencies, {
+    requireClean: true,
+  });
+};
+
+export const recoverManagedWorkspace = async (
+  workspace: ManagedWorkspace,
+  dependencies: ManagedWorkspaceDependencies,
+  options: { allowAbsent: boolean },
+): Promise<ManagedWorkspace | undefined> => {
+  const platform = dependencies.platform ?? process.platform;
+  const paths = pathApi(platform);
+  const managedRoot = paths.resolve(dependencies.managedRoot);
+  const workspacePath = paths.resolve(workspace.path);
+  if (!isContained(managedRoot, workspacePath, platform)) {
+    return attention(
+      workspace,
+      'workspace_path_escape',
+      'Workspace path escapes the managed root',
+    );
+  }
+  let repository;
+  try {
+    repository = await dependencies.resolveRepositoryIdentity(
+      workspace.repositoryPath,
+    );
+  } catch (error) {
+    return attention(
+      workspace,
+      'workspace_repository_unreadable',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+  if (
+    pathKey(repository.repositoryIdentity, platform) !==
+    pathKey(
+      normalizeRepositoryIdentityPath(workspace.repositoryIdentity, platform),
+      platform,
+    )
+  ) {
+    return attention(
+      workspace,
+      'workspace_repository_identity_mismatch',
+      'Workspace repository identity does not match the reservation',
+    );
+  }
+  const registered = await git(
+    workspace,
+    dependencies,
+    repository.canonicalPath,
+    ['worktree', 'list', '--porcelain'],
+  );
+  if (!completed(registered) || registered.exitCode !== 0) {
+    return attention(
+      workspace,
+      'workspace_not_registered',
+      resultError(registered),
+    );
+  }
+  const isRegistered = registered.stdout
+    .split(/\r?\n/u)
+    .some(
+      (line) =>
+        line.startsWith('worktree ') &&
+        pathKey(line.slice(9), platform) === pathKey(workspacePath, platform),
+    );
+  let exists = true;
+  try {
+    await lstat(workspacePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') exists = false;
+    else {
+      return attention(
+        workspace,
+        'workspace_identity_unreadable',
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+  if (!exists) {
+    if (options.allowAbsent && !isRegistered) {
+      const branch = await git(
+        workspace,
+        dependencies,
+        repository.canonicalPath,
+        ['show-ref', '--verify', '--quiet', `refs/heads/${workspace.branch}`],
+      );
+      if (completed(branch) && branch.exitCode === 1) return undefined;
+      return attention(
+        workspace,
+        'workspace_create_failed',
+        completed(branch) && branch.exitCode === 0
+          ? 'Reserved workspace branch already exists'
+          : resultError(branch),
+      );
+    }
+    return attention(
+      workspace,
+      'workspace_identity_unreadable',
+      isRegistered
+        ? 'Registered workspace path is missing'
+        : 'Workspace path is not readable',
     );
   }
   return observeManagedWorkspace(workspace, dependencies, {

@@ -6,6 +6,7 @@ import {
   type DeveloperReport,
   type ManagedWorkspace,
   type ResolvedWorkerProfileSnapshot,
+  type V2CommandResult,
   type WorkerExecution,
 } from '@mesh/v2-contracts';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -28,6 +29,7 @@ import {
 import { V2EventStore } from '../storage/event-store.js';
 import { DeveloperRepository } from './developer-repository.js';
 import { ExecutionRepository } from '../executions/execution-repository.js';
+import { AuditBarrier } from '../executions/audit-barrier.js';
 import { inImmediateTransaction } from '../db/database.js';
 
 const now = '2026-09-01T12:00:00.000Z';
@@ -264,6 +266,8 @@ const setupPersistedAttempt = async ({
           observedDirty: false,
         };
       },
+      recover: async (workspace: ManagedWorkspace) =>
+        workspace.lifecycle === 'ready' ? workspace : undefined,
       observe: async (workspace: ManagedWorkspace) => ({
         ...workspace,
         lifecycle: 'ready' as const,
@@ -639,7 +643,14 @@ const setup = (
         const stored = commands.get(key);
         if (stored && requestHash !== stored.requestHash)
           throw new V2IdempotencyConflictError(key);
-        return stored as never;
+        return stored
+          ? ({
+              idempotencyKey: key,
+              commandType: (stored.result as V2CommandResult).commandType,
+              createdAt: now,
+              ...stored,
+            } as never)
+          : undefined;
       },
       storeInTransaction: (stored) => {
         const existing = commands.get(stored.idempotencyKey);
@@ -799,6 +810,16 @@ const setup = (
         };
         return observation;
       },
+      recover: async (workspace: ManagedWorkspace) =>
+        workspace.lifecycle === 'ready'
+          ? {
+              ...workspace,
+              lifecycle: 'ready' as const,
+              observedHead: fixture.project.headCommit,
+              observedDirty: false,
+              failure: null,
+            }
+          : undefined,
       observe: async (workspace: ManagedWorkspace) => ({
         ...(options.settlementWorkspaceObservation?.(workspace) ?? {
           ...workspace,
@@ -1182,6 +1203,162 @@ describe('DeveloperAttemptService', () => {
     ).rejects.toThrow('conflicts with prior receipt');
     expect(context.reports).toHaveLength(1);
     expect(context.trips).toHaveLength(1);
+  });
+
+  it.each(['projectId', 'attemptId', 'executionId'] as const)(
+    'trips the barrier when a runtime-event receipt has the wrong %s',
+    async (field) => {
+      const context = setup();
+      await context.service.start(context.command);
+      const attempt = context.attempts[0];
+      const report = completionReport(attempt);
+      const execution = {
+        ...context.fixture.execution,
+        id: attempt.controllingExecutionId,
+        projectId: attempt.projectId,
+        assignment: attempt.assignment,
+      };
+      const event = {
+        id: randomUUID(),
+        type: 'worker_execution.structured_output',
+        executionId: execution.id,
+        projectId: execution.projectId,
+        occurredAt: later,
+        payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+      };
+      await context.service.acceptReport(
+        execution as never,
+        event as never,
+        report,
+      );
+      const prior = context.receipts[0] as Record<string, unknown>;
+      context.dependencies.developers.outputReceipt = () =>
+        ({ ...prior, [field]: randomUUID() }) as never;
+      let observations = 0;
+      context.dependencies.workspace.observe = async () => {
+        observations += 1;
+        throw new Error('workspace should not be observed for corrupt replay');
+      };
+
+      await expect(
+        context.service.acceptReport(
+          execution as never,
+          event as never,
+          report,
+        ),
+      ).rejects.toThrow('conflicts with prior receipt');
+      expect(observations).toBe(0);
+      expect(context.trips).toHaveLength(1);
+    },
+  );
+
+  it('trips the barrier when a durable receipt cannot be read', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = completionReport(attempt);
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+    const event = {
+      id: randomUUID(),
+      type: 'worker_execution.structured_output',
+      executionId: execution.id,
+      projectId: execution.projectId,
+      occurredAt: later,
+      payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+    };
+    context.dependencies.developers.outputReceipt = () => {
+      throw new Error('stored receipt is corrupt');
+    };
+
+    await expect(
+      context.service.acceptReport(execution as never, event as never, report),
+    ).rejects.toThrow('stored receipt is corrupt');
+    expect(context.trips).toHaveLength(1);
+  });
+
+  it('rechecks the full receipt identity after workspace observation', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = completionReport(attempt);
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+    const event = {
+      id: randomUUID(),
+      type: 'worker_execution.structured_output',
+      executionId: execution.id,
+      projectId: execution.projectId,
+      occurredAt: later,
+      payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+    };
+    context.dependencies.workspace.observe = async (workspace) => {
+      context.dependencies.developers.recordOutputReceiptInTransaction({
+        runtimeEventId: event.id,
+        projectId: execution.projectId,
+        attemptId: attempt.id,
+        executionId: execution.id,
+        outputDigest: 'a'.repeat(64),
+        status: 'accepted',
+        rejectionReason: null,
+        createdAt: later,
+      });
+      return { ...workspace, lifecycle: 'ready', failure: null };
+    };
+
+    await expect(
+      context.service.acceptReport(execution as never, event as never, report),
+    ).rejects.toThrow('conflicts with prior receipt');
+    expect(context.reports).toHaveLength(0);
+    expect(context.trips.length).toBeGreaterThan(0);
+  });
+
+  it('fails closed on a digest-corrupt receipt from the real repository', async () => {
+    const context = await setupPersistedAttempt();
+    const runtimeEventId = randomUUID();
+    const event = context.insertRuntimeEvent(runtimeEventId, context.report);
+    inImmediateTransaction(context.fixture.database, () => {
+      context.developers.recordOutputReceiptInTransaction({
+        runtimeEventId,
+        projectId: context.attempt.projectId,
+        attemptId: context.attempt.id,
+        executionId: context.execution.id,
+        outputDigest: 'a'.repeat(64),
+        status: 'accepted',
+        rejectionReason: null,
+        createdAt: later,
+      });
+    });
+    const barrier = new AuditBarrier();
+    const service = new DeveloperAttemptService({
+      ...context.dependencies,
+      barrier,
+    } as never);
+    const published = context.published.length;
+    const observed = context.workspaceCalls.length;
+
+    await expect(
+      service.acceptReport(context.execution, event, context.report),
+    ).rejects.toThrow('conflicts with prior receipt');
+    expect(barrier.health()).toMatchObject({
+      status: 'tripped',
+      diagnostics: [
+        {
+          message: 'Durable audit persistence failed',
+          cause: 'Developer output receipt conflicts with prior receipt',
+        },
+      ],
+    });
+    expect(context.workspaceCalls).toHaveLength(observed);
+    expect(context.published).toHaveLength(published);
   });
 
   it('settles a durably emitted report before a concurrent interrupt', async () => {
@@ -1905,24 +2082,84 @@ describe('DeveloperAttemptService', () => {
       ok: false,
       error: { code: 'idempotency_conflict' },
     });
-    await expect(context.service.interrupt(interrupt)).rejects.toMatchObject({
-      code: 'idempotency_conflict',
+    await expect(context.service.interrupt(interrupt)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'idempotency_conflict' },
     });
     await expect(
       context.service.replaceExecution(replacement),
-    ).rejects.toMatchObject({ code: 'idempotency_conflict' });
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'idempotency_conflict' },
+    });
     expect(context.trips).toEqual([]);
   });
 
-  it('trips the barrier when durable start replay is unreadable', async () => {
+  it.each([
+    'developer_attempt.start',
+    'developer_attempt.interrupt',
+    'developer_attempt.replace_execution',
+  ] as const)(
+    'trips the barrier when durable %s replay is unreadable',
+    async (commandType) => {
+      const context = setup();
+      context.dependencies.commands.find = () => {
+        throw new Error('stored command result is corrupt');
+      };
+      const mutation = {
+        idempotencyKey: randomUUID(),
+        actor: { kind: 'human' as const },
+        command: {
+          type: commandType,
+          projectId: context.command.command.projectId,
+          ...(commandType === 'developer_attempt.start'
+            ? context.command.command
+            : {
+                attemptId: randomUUID(),
+                expectedAttemptRevision: 1,
+              }),
+        },
+      } as never;
+      const result =
+        commandType === 'developer_attempt.start'
+          ? context.service.start(mutation)
+          : commandType === 'developer_attempt.interrupt'
+            ? context.service.interrupt(mutation)
+            : context.service.replaceExecution(mutation);
+
+      await expect(result).resolves.toMatchObject({
+        ok: false,
+        commandType,
+        error: { code: 'audit_barrier_tripped' },
+      });
+      expect(context.trips).toHaveLength(1);
+    },
+  );
+
+  it('trips the barrier when a durable Developer replay has corrupt identity', async () => {
     const context = setup();
-    context.dependencies.commands.find = () => {
-      throw new Error('stored command result is corrupt');
-    };
+    await expect(context.service.start(context.command)).resolves.toMatchObject(
+      {
+        ok: true,
+      },
+    );
+    const stored = context.commands.get(context.command.idempotencyKey)!;
+    const result = stored.result as Extract<
+      V2CommandResult,
+      { ok: true; commandType: 'developer_attempt.start' }
+    >;
+    context.commands.set(context.command.idempotencyKey, {
+      ...stored,
+      result: {
+        ...result,
+        attempt: { ...result.attempt, projectId: randomUUID() },
+      },
+    });
 
     await expect(context.service.start(context.command)).resolves.toMatchObject(
       {
         ok: false,
+        commandType: 'developer_attempt.start',
         error: { code: 'audit_barrier_tripped' },
       },
     );

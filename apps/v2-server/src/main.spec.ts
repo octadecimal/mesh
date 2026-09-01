@@ -241,7 +241,15 @@ const seedPlanningRecoveryCase = async (kind: PlanningRecoveryCase) => {
   };
 };
 
-type DeveloperStartRecoveryCase = 'reserved' | 'provisioning' | 'unclaimed';
+type DeveloperStartRecoveryCase =
+  | 'reserved_before_git'
+  | 'reserved_after_git'
+  | 'reserved_branch_collision'
+  | 'provisioning'
+  | 'provisioning_missing'
+  | 'provisioning_dirty'
+  | 'provisioning_wrong_ownership'
+  | 'unclaimed';
 
 const seedDeveloperStartRecoveryCase = async (
   kind: DeveloperStartRecoveryCase,
@@ -427,7 +435,21 @@ const seedDeveloperStartRecoveryCase = async (
           },
     );
   });
-  if (kind === 'provisioning') {
+  if (kind === 'reserved_branch_collision') {
+    execFileSync(
+      git.path,
+      ['-C', repositoryPath, 'branch', workspace.branch, workspace.baseCommit],
+      { shell: false },
+    );
+  }
+  const hasWorkspace = [
+    'reserved_after_git',
+    'provisioning',
+    'provisioning_dirty',
+    'provisioning_wrong_ownership',
+  ].includes(kind);
+  let ownershipPath: string | undefined;
+  if (hasWorkspace) {
     mkdirSync(dirname(workspace.path), { recursive: true });
     execFileSync(
       git.path,
@@ -448,8 +470,9 @@ const seedDeveloperStartRecoveryCase = async (
       ['-C', workspace.path, 'rev-parse', '--git-dir'],
       { encoding: 'utf8', shell: false },
     ).trim();
+    ownershipPath = resolve(workspace.path, gitDirectory, 'mesh-owner.json');
     writeFileSync(
-      resolve(workspace.path, gitDirectory, 'mesh-owner.json'),
+      ownershipPath,
       `${JSON.stringify({
         schema: 'mesh.v2/developer-workspace-owner/v1',
         attemptId,
@@ -459,6 +482,8 @@ const seedDeveloperStartRecoveryCase = async (
         baseCommit: workspace.baseCommit,
       })}\n`,
     );
+  }
+  if (kind.startsWith('provisioning')) {
     const ready = {
       ...workspace,
       lifecycle: 'ready' as const,
@@ -479,6 +504,18 @@ const seedDeveloperStartRecoveryCase = async (
         0,
       );
     });
+  }
+  if (kind === 'provisioning_dirty') {
+    writeFileSync(join(workspace.path, 'dirty.txt'), 'preserve\n');
+  }
+  if (kind === 'provisioning_wrong_ownership') {
+    const ownership = JSON.parse(readFileSync(ownershipPath!, 'utf8')) as {
+      ownershipToken: string;
+    };
+    writeFileSync(
+      ownershipPath!,
+      `${JSON.stringify({ ...ownership, ownershipToken: randomUUID() })}\n`,
+    );
   }
   return {
     fixture,
@@ -1261,18 +1298,25 @@ describe('startV2Server', () => {
   }, 30_000);
 
   it.each([
-    ['reserved', 'active', 1],
-    ['provisioning', 'active', 1],
-    ['unclaimed', 'attention_required', 0],
+    ['reserved_before_git', 'active', 1, 1],
+    ['reserved_after_git', 'active', 1, 0],
+    ['reserved_branch_collision', 'attention_required', 0, 0],
+    ['provisioning', 'active', 1, 0],
+    ['provisioning_missing', 'attention_required', 0, 0],
+    ['provisioning_dirty', 'attention_required', 0, 0],
+    ['provisioning_wrong_ownership', 'attention_required', 0, 0],
+    ['unclaimed', 'attention_required', 0, 0],
   ] as const)(
     'drains a %s Developer start reservation before accepting commands',
-    async (kind, expectedLifecycle, expectedStarts) => {
+    async (kind, expectedLifecycle, expectedStarts, expectedGitAdds) => {
       const seeded = await seedDeveloperStartRecoveryCase(kind);
       const fake = new FakeHarnessAdapter({
         developerScenario: 'missing_output',
         holdAfterAdapterCursor: 1,
       });
       const phases: string[] = [];
+      const gitAdds: readonly string[][] = [];
+      const publications: ServerRealtimeMessage[] = [];
       let server: RunningV2Server | undefined;
       seeded.fixture.database.close();
       try {
@@ -1284,6 +1328,12 @@ describe('startV2Server', () => {
           test: {
             adapter: fake,
             onStartupPhase: (phase) => phases.push(phase),
+            onPublished: (message) => publications.push(message),
+            onGitCall: (args) => {
+              if (args.includes('add') && args.includes('worktree')) {
+                (gitAdds as string[][]).push([...args]);
+              }
+            },
           },
         });
         const snapshot = v2ProjectSnapshotSchema.parse(
@@ -1295,21 +1345,50 @@ describe('startV2Server', () => {
           snapshot.developerAttempts?.find(({ id }) => id === seeded.attemptId),
         ).toMatchObject({ lifecycle: expectedLifecycle });
         expect(fake.startCount).toBe(expectedStarts);
+        expect(gitAdds).toHaveLength(expectedGitAdds);
+        const attemptEventTypes = publications.flatMap((message) => {
+          if (message.type !== 'v2.domain_event') return [];
+          const payload = message.event.payload as {
+            attempt?: { id?: string };
+          };
+          return payload.attempt?.id === seeded.attemptId
+            ? [message.event.type]
+            : [];
+        });
+        expect(attemptEventTypes).toEqual(
+          kind === 'unclaimed'
+            ? ['developer_attempt.changed']
+            : expectedLifecycle === 'attention_required'
+              ? ['developer_workspace.changed']
+              : kind === 'provisioning'
+                ? ['developer_attempt.changed']
+                : ['developer_workspace.changed', 'developer_attempt.changed'],
+        );
         if (kind !== 'unclaimed') {
           const replay = await fetch(`${server.origin}/api/v2/commands`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(seeded.envelope),
           });
-          expect(replay.status).toBe(200);
+          expect(replay.status).toBe(
+            expectedLifecycle === 'active' ? 200 : 409,
+          );
           expect(
             v2CommandResultSchema.parse(await replay.json()),
-          ).toMatchObject({
-            ok: true,
-            commandType: 'developer_attempt.start',
-            attempt: { id: seeded.attemptId, lifecycle: 'active' },
-          });
-          expect(fake.startCount).toBe(1);
+          ).toMatchObject(
+            expectedLifecycle === 'active'
+              ? {
+                  ok: true,
+                  commandType: 'developer_attempt.start',
+                  attempt: { id: seeded.attemptId, lifecycle: 'active' },
+                }
+              : {
+                  ok: false,
+                  commandType: 'developer_attempt.start',
+                  error: { code: 'developer_workspace_conflict' },
+                },
+          );
+          expect(fake.startCount).toBe(expectedStarts);
         }
         const verification = openV2Database(seeded.fixture.path);
         try {
@@ -1323,6 +1402,15 @@ describe('startV2Server', () => {
           );
           if (kind === 'unclaimed') expect(stored).toBeUndefined();
           else expect(stored).toBeDefined();
+          expect(
+            new ExecutionRepository(verification)
+              .list(seeded.fixture.project.id)
+              .filter(
+                (execution) =>
+                  execution.assignment.kind === 'developer_task' &&
+                  execution.assignment.attemptId === seeded.attemptId,
+              ),
+          ).toHaveLength(expectedStarts);
         } finally {
           verification.close();
         }
@@ -1356,6 +1444,151 @@ describe('startV2Server', () => {
       }
     },
     30_000,
+  );
+
+  it.each([
+    'developer_attempt.start',
+    'developer_attempt.interrupt',
+    'developer_attempt.replace_execution',
+  ] as const)(
+    'fails closed on a corrupt durable %s replay',
+    async (commandType) => {
+      const fixture = createV2TestDatabase();
+      const root = temporaryDirectory();
+      const idempotencyKey = randomUUID();
+      const command =
+        commandType === 'developer_attempt.start'
+          ? {
+              type: commandType,
+              projectId: fixture.project.id,
+              taskId: randomUUID(),
+              expectedTaskRevision: 1,
+              expectedDeliveryPlanId: randomUUID(),
+              expectedDeliveryPlanRevision: 1,
+              profileId: fixture.profileRevision.profileId,
+              profileRevision: fixture.profileRevision.revision,
+            }
+          : {
+              type: commandType,
+              projectId: fixture.project.id,
+              attemptId: randomUUID(),
+              expectedAttemptRevision: 1,
+            };
+      fixture.database
+        .prepare(
+          `INSERT INTO command_results (
+             idempotency_key, command_type, request_hash, result_json, created_at
+           ) VALUES (?, ?, ?, '{}', ?)`,
+        )
+        .run(
+          idempotencyKey,
+          commandType,
+          hashV2Command(command),
+          '2026-09-01T00:00:00.000Z',
+        );
+      fixture.database.close();
+      const server = await startV2Server({
+        environment: await environment(root, fixture.path),
+        test: { adapter: new FakeHarnessAdapter() },
+      });
+      servers.push(server);
+
+      const response = await fetch(`${server.origin}/api/v2/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey,
+          actor: { kind: 'human' },
+          command,
+        }),
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        commandType,
+        error: { code: 'audit_barrier_tripped' },
+      });
+      expect(
+        await fetch(`${server.origin}/api/v2/health`).then((health) =>
+          health.json(),
+        ),
+      ).toMatchObject({ status: 'audit_barrier_tripped' });
+    },
+  );
+
+  it.each([
+    'developer_attempt.start',
+    'developer_attempt.interrupt',
+    'developer_attempt.replace_execution',
+  ] as const)(
+    'keeps the barrier healthy for a durable %s idempotency conflict',
+    async (commandType) => {
+      const fixture = createV2TestDatabase();
+      const root = temporaryDirectory();
+      const idempotencyKey = randomUUID();
+      const command =
+        commandType === 'developer_attempt.start'
+          ? {
+              type: commandType,
+              projectId: fixture.project.id,
+              taskId: randomUUID(),
+              expectedTaskRevision: 1,
+              expectedDeliveryPlanId: randomUUID(),
+              expectedDeliveryPlanRevision: 1,
+              profileId: fixture.profileRevision.profileId,
+              profileRevision: fixture.profileRevision.revision,
+            }
+          : {
+              type: commandType,
+              projectId: fixture.project.id,
+              attemptId: randomUUID(),
+              expectedAttemptRevision: 1,
+            };
+      fixture.database
+        .prepare(
+          `INSERT INTO command_results (
+             idempotency_key, command_type, request_hash, result_json, created_at
+           ) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(
+          idempotencyKey,
+          commandType,
+          'a'.repeat(64),
+          canonicalJson({
+            ok: false,
+            commandType,
+            error: { code: 'invalid_request', message: 'prior result' },
+          }),
+          '2026-09-01T00:00:00.000Z',
+        );
+      fixture.database.close();
+      const server = await startV2Server({
+        environment: await environment(root, fixture.path),
+        test: { adapter: new FakeHarnessAdapter() },
+      });
+      servers.push(server);
+
+      const response = await fetch(`${server.origin}/api/v2/commands`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          idempotencyKey,
+          actor: { kind: 'human' },
+          command,
+        }),
+      });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        commandType,
+        error: { code: 'idempotency_conflict' },
+      });
+      expect(
+        await fetch(`${server.origin}/api/v2/health`).then((health) =>
+          health.json(),
+        ),
+      ).toEqual({ status: 'ok' });
+    },
   );
 
   it('replays an unreceipted Developer report after forced process loss before accepting commands', async () => {
