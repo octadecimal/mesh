@@ -18,6 +18,11 @@ import {
   pmDiscoveryAssignmentSchema,
   type PmDiscoveryAssignment,
 } from './intent';
+import {
+  DEVELOPER_REPORT_SCHEMA,
+  developerTaskAssignmentSchema,
+  type DeveloperTaskAssignment,
+} from './developer-attempts';
 import { projectSchema, type Project } from './projects';
 import {
   logicalSkillIdSchema,
@@ -70,6 +75,19 @@ export const V2_ERROR_CODES = [
   'required_capability_unavailable',
   'required_skill_unavailable',
   'startup_interrupted_before_start',
+  'developer_task_stale',
+  'developer_plan_stale',
+  'developer_profile_stale',
+  'developer_profile_incompatible',
+  'developer_task_not_actionable',
+  'developer_attempt_conflict',
+  'developer_attempt_transition_conflict',
+  'developer_workspace_conflict',
+  'developer_workspace_identity_mismatch',
+  'developer_workspace_operation_failed',
+  'developer_report_binding_invalid',
+  'developer_report_coverage_invalid',
+  'developer_replacement_unavailable',
 ] as const;
 
 export const v2ErrorCodeSchema = z.enum(V2_ERROR_CODES);
@@ -94,6 +112,7 @@ export const workerAssignmentSchema = z.discriminatedUnion('kind', [
   foundationCheckAssignmentSchema,
   pmDiscoveryAssignmentSchema,
   pmPlanAssignmentSchema,
+  developerTaskAssignmentSchema,
 ]);
 export type WorkerAssignment = z.infer<typeof workerAssignmentSchema>;
 
@@ -306,7 +325,8 @@ const requireHarnessProjectCoherence = (
     assignment:
       | FoundationCheckAssignment
       | PmDiscoveryAssignment
-      | PmPlanAssignment;
+      | PmPlanAssignment
+      | DeveloperTaskAssignment;
     profile: ResolvedWorkerProfileSnapshot;
   },
   context: z.RefinementCtx,
@@ -357,6 +377,17 @@ const requireHarnessProjectCoherence = (
       code: 'custom',
       path: ['profile', 'document', 'spec', 'outputSchema'],
       message: 'PM harness output schemas must match the plan schema',
+    });
+  }
+  if (
+    value.assignment.kind === 'developer_task' &&
+    (value.assignment.outputSchema !== DEVELOPER_REPORT_SCHEMA ||
+      value.profile.document.spec.outputSchema !== DEVELOPER_REPORT_SCHEMA)
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['profile', 'document', 'spec', 'outputSchema'],
+      message: 'Developer harness output schemas must match the Developer schema',
     });
   }
 };

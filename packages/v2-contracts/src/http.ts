@@ -9,6 +9,10 @@ import {
   workerProfileIdSchema,
 } from './ids';
 import {
+  developerAttemptSchema,
+  developerReportRecordSchema,
+} from './developer-attempts';
+import {
   approvedIntentLedgerSchema,
   approvedPlanningOutcomeSchema,
   legacyM2PlanningCycleViewSchema,
@@ -100,6 +104,8 @@ export const v2ProjectSnapshotSchema = z
     project: projectSchema,
     profiles: z.array(resolvedWorkerProfileSnapshotSchema).readonly(),
     executions: z.array(workerExecutionSchema).readonly(),
+    developerAttempts: z.array(developerAttemptSchema).readonly().optional(),
+    developerReports: z.array(developerReportRecordSchema).readonly().optional(),
     attentionItems: z.array(v2AttentionItemSchema).readonly(),
     planningCycles: z.array(planningCycleViewSchema).max(20).readonly(),
     planningHistoryTruncated: z.boolean(),
@@ -799,6 +805,27 @@ export const v2CommandResultSchema = z.union([
     ok: z.literal(true),
     commandType: z.literal('worker_execution.interrupt'),
     execution: workerExecutionSchema,
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('developer_attempt.start'),
+    schemaVersion: z.literal(1),
+    attempt: developerAttemptSchema,
+    board: boardViewSchema,
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('developer_attempt.interrupt'),
+    schemaVersion: z.literal(1),
+    attempt: developerAttemptSchema,
+    board: boardViewSchema,
+  }),
+  z.strictObject({
+    ok: z.literal(true),
+    commandType: z.literal('developer_attempt.replace_execution'),
+    schemaVersion: z.literal(1),
+    attempt: developerAttemptSchema,
+    board: boardViewSchema,
   }),
   persistedPlanningCommandSuccessSchema,
   commandFailureSchema,

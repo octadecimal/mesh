@@ -26,6 +26,10 @@ import {
 import { boardViewSchema, type BoardView } from './board';
 import { projectSchema } from './projects';
 import { workerProfileRevisionSchema } from './profiles';
+import {
+  developerAttemptSchema,
+  developerReportRecordSchema,
+} from './developer-attempts';
 
 const domainEventBase = {
   projectId: projectIdSchema,
@@ -217,6 +221,43 @@ const taskLifecycleChangedDraftSchema = z.strictObject({
   type: z.literal('task.lifecycle_changed'),
   payload: taskLifecycleChangedPayloadSchema,
 });
+export const developerAttemptChangedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('developer_attempt.changed'),
+  payload: z.strictObject({
+    schemaVersion: z.literal(1),
+    attempt: developerAttemptSchema,
+    board: boardViewSchema,
+  }),
+});
+export type DeveloperAttemptChangedDomainEventDraft = z.infer<
+  typeof developerAttemptChangedDraftSchema
+>;
+export const developerWorkspaceChangedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('developer_workspace.changed'),
+  payload: z.strictObject({
+    schemaVersion: z.literal(1),
+    attempt: developerAttemptSchema,
+    board: boardViewSchema,
+  }),
+});
+export type DeveloperWorkspaceChangedDomainEventDraft = z.infer<
+  typeof developerWorkspaceChangedDraftSchema
+>;
+export const developerReportRecordedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('developer_report.recorded'),
+  payload: z.strictObject({
+    schemaVersion: z.literal(1),
+    attempt: developerAttemptSchema,
+    report: developerReportRecordSchema,
+    board: boardViewSchema,
+  }),
+});
+export type DeveloperReportRecordedDomainEventDraft = z.infer<
+  typeof developerReportRecordedDraftSchema
+>;
 
 const requireDomainEventProjectCoherence = (
   value:
@@ -227,7 +268,10 @@ const requireDomainEventProjectCoherence = (
     | z.infer<typeof intentLedgerApprovedDraftSchema>
     | z.infer<typeof deliveryPlanApprovedDraftSchema>
     | z.infer<typeof boardFilterChangedDraftSchema>
-    | z.infer<typeof taskLifecycleChangedDraftSchema>,
+    | z.infer<typeof taskLifecycleChangedDraftSchema>
+    | z.infer<typeof developerAttemptChangedDraftSchema>
+    | z.infer<typeof developerWorkspaceChangedDraftSchema>
+    | z.infer<typeof developerReportRecordedDraftSchema>,
   context: z.RefinementCtx,
 ) => {
   const embeddedProjectId =
@@ -243,7 +287,11 @@ const requireDomainEventProjectCoherence = (
             ? value.payload.planningCycle.cycle.projectId
             : value.type === 'board.filter_changed'
               ? value.payload.board.projectId
-              : value.payload.task.projectId;
+              : value.type === 'developer_attempt.changed' ||
+                  value.type === 'developer_workspace.changed' ||
+                  value.type === 'developer_report.recorded'
+                ? value.payload.attempt.projectId
+                : value.payload.task.projectId;
   if (embeddedProjectId !== value.projectId) {
     context.addIssue({
       code: 'custom',
@@ -264,7 +312,10 @@ const requireDomainEventProjectCoherence = (
   if (
     (value.type === 'delivery_plan.approved' ||
       value.type === 'board.filter_changed' ||
-      value.type === 'task.lifecycle_changed') &&
+      value.type === 'task.lifecycle_changed' ||
+      value.type === 'developer_attempt.changed' ||
+      value.type === 'developer_workspace.changed' ||
+      value.type === 'developer_report.recorded') &&
     value.payload.board.projectId !== value.projectId
   ) {
     context.addIssue({
@@ -285,6 +336,9 @@ export const domainEventDraftSchema = z
     deliveryPlanApprovedDraftSchema,
     boardFilterChangedDraftSchema,
     taskLifecycleChangedDraftSchema,
+    developerAttemptChangedDraftSchema,
+    developerWorkspaceChangedDraftSchema,
+    developerReportRecordedDraftSchema,
   ])
   .superRefine(requireDomainEventProjectCoherence);
 export type DomainEventDraft = z.infer<typeof domainEventDraftSchema>;
@@ -320,6 +374,18 @@ export const domainEventSchema = z
       sequence: nonNegativeIntegerSchema,
     }),
     taskLifecycleChangedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    developerAttemptChangedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    developerWorkspaceChangedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    developerReportRecordedDraftSchema.extend({
       id: domainEventIdSchema,
       sequence: nonNegativeIntegerSchema,
     }),

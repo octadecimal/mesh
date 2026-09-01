@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   PM_DISCOVERY_REPORT_SCHEMA,
+  DEVELOPER_REPORT_SCHEMA,
   V2_PROTOCOL_VERSION,
   WORKER_PROFILE_API_VERSION,
   abandonPlanningCycleEnvelopeSchema,
@@ -12,6 +13,15 @@ import {
   decisionRecordContentSchema,
   domainEventDraftSchema,
   domainEventSchema,
+  developerAttemptSchema,
+  developerBlockerReportSchema,
+  developerCompletionReportSchema,
+  developerReportSchema,
+  developerTaskAssignmentSchema,
+  interruptDeveloperAttemptEnvelopeSchema,
+  managedWorkspaceSchema,
+  replaceDeveloperAttemptExecutionEnvelopeSchema,
+  startDeveloperAttemptEnvelopeSchema,
   executionFailureSchema,
   foundationCheckAssignmentSchema,
   harnessCapabilitiesSchema,
@@ -76,6 +86,8 @@ const otherProjectId = randomUUID();
 const profileId = randomUUID();
 const projectProfileId = randomUUID();
 const executionId = randomUUID();
+const attemptId = randomUUID();
+const requirementId = randomUUID();
 
 const project = {
   id: projectId,
@@ -108,6 +120,216 @@ const boardWithoutPlan = (
     requirements: [],
   },
   cards: [],
+});
+
+describe('V2 Developer attempt contracts', () => {
+  const assignment = {
+    kind: 'developer_task' as const,
+    projectId,
+    attemptId,
+    taskId: randomUUID(),
+    taskContractRevision: 1,
+    taskCurrentRevision: 1,
+    deliveryPlanId: randomUUID(),
+    deliveryPlanRevision: 1,
+    requirementRevisions: [{ recordId: requirementId, recordRevision: 1 }],
+    baseCommit: 'a'.repeat(40),
+    workspacePath: 'C:\\mesh-data\\worktrees\\attempt',
+    title: 'Persist Todo items',
+    outcome: 'Todo items survive reload.',
+    acceptanceCriteria: ['Reload restores one Todo item.'],
+    verification: ['Run the Todo persistence test.'],
+    expectedArtifacts: ['src/todos.ts'],
+    outputSchema: DEVELOPER_REPORT_SCHEMA,
+  };
+  const workspace = {
+    attemptId,
+    repositoryPath: 'C:\\code\\todo',
+    repositoryIdentity: 'C:/code/todo/.git',
+    branch: 'mesh/developer/attempt',
+    path: assignment.workspacePath,
+    baseCommit: assignment.baseCommit,
+    lifecycle: 'ready' as const,
+    ownershipToken: 'mesh-owned-attempt',
+    observedHead: assignment.baseCommit,
+    observedDirty: false,
+    failure: null,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const completion = {
+    schema: DEVELOPER_REPORT_SCHEMA,
+    disposition: 'completed' as const,
+    attemptId,
+    executionId,
+    taskId: assignment.taskId,
+    taskContractRevision: assignment.taskContractRevision,
+    requirementCoverage: [
+      {
+        recordId: requirementId,
+        recordRevision: 1,
+        passed: true,
+        evidence: [],
+      },
+    ],
+    criterionCoverage: [
+      {
+        index: 0,
+        text: assignment.acceptanceCriteria[0],
+        passed: true,
+        evidence: [],
+      },
+    ],
+    changedArtifacts: [{ path: 'src/todos.ts', summary: 'Persisted Todo items.' }],
+    verification: [
+      { command: 'pnpm test todos', passed: true, evidence: [] },
+    ],
+    unresolvedConcerns: [],
+    workspace: { headCommit: assignment.baseCommit, dirty: false },
+  };
+
+  it('parses strict Developer assignments, workspace, reports, and commands', () => {
+    expect(DEVELOPER_REPORT_SCHEMA).toBe('mesh.dev/developer-report/v1');
+    expect(developerTaskAssignmentSchema.parse(assignment)).toEqual(assignment);
+    expect(managedWorkspaceSchema.parse(workspace)).toEqual(workspace);
+    expect(developerCompletionReportSchema.parse(completion)).toEqual(completion);
+    expect(
+      developerBlockerReportSchema.parse({
+        schema: DEVELOPER_REPORT_SCHEMA,
+        disposition: 'blocked',
+        attemptId,
+        executionId,
+        taskId: assignment.taskId,
+        taskContractRevision: 1,
+        blocker: 'The test database is unavailable.',
+        evidence: [],
+        suggestedNextAction: 'Restore the test database.',
+        preserveWorkspace: true,
+        workspace: { headCommit: assignment.baseCommit, dirty: false },
+      }),
+    ).toMatchObject({ disposition: 'blocked' });
+    expect(
+      [
+        startDeveloperAttemptEnvelopeSchema.parse({
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'developer_attempt.start',
+            projectId,
+            taskId: assignment.taskId,
+            expectedTaskRevision: 1,
+            expectedDeliveryPlanId: assignment.deliveryPlanId,
+            expectedDeliveryPlanRevision: 1,
+            profileId,
+            profileRevision: 1,
+          },
+        }),
+        interruptDeveloperAttemptEnvelopeSchema.parse({
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'developer_attempt.interrupt',
+            projectId,
+            attemptId,
+            expectedAttemptRevision: 1,
+          },
+        }),
+        replaceDeveloperAttemptExecutionEnvelopeSchema.parse({
+          idempotencyKey: randomUUID(),
+          actor: { kind: 'human' },
+          command: {
+            type: 'developer_attempt.replace_execution',
+            projectId,
+            attemptId,
+            expectedAttemptRevision: 1,
+          },
+        }),
+      ].map(({ command }) => command.type),
+    ).toEqual([
+      'developer_attempt.start',
+      'developer_attempt.interrupt',
+      'developer_attempt.replace_execution',
+    ]);
+  });
+
+  it.each([
+    ['unknown report key', { ...completion, unexpected: true }],
+    [
+      'mismatched report disposition',
+      {
+        ...completion,
+        disposition: 'blocked',
+      },
+    ],
+    [
+      'duplicate criterion indexes',
+      {
+        ...completion,
+        criterionCoverage: [...completion.criterionCoverage, completion.criterionCoverage[0]],
+      },
+    ],
+    [
+      'duplicate requirement IDs',
+      {
+        ...completion,
+        requirementCoverage: [...completion.requirementCoverage, completion.requirementCoverage[0]],
+      },
+    ],
+  ])('rejects Developer report with %s', (_reason, report) => {
+    expect(developerReportSchema.safeParse(report).success).toBe(false);
+  });
+
+  it('rejects a profile that pairs developer output with another assignment', () => {
+    expect(
+      workerProfileDocumentSchema.safeParse({
+        apiVersion: WORKER_PROFILE_API_VERSION,
+        kind: 'WorkerProfile',
+        metadata: { name: 'wrong-developer', displayName: 'Wrong Developer', scope: 'global' },
+        spec: {
+          assignmentKinds: ['pm_discovery'],
+          preferredRuntime: { harness: 'fake', model: 'fake' },
+          alternatives: [],
+          requiredCapabilities: [],
+          skills: { preferred: [], required: [] },
+          instructions: 'Do one task.',
+          outputSchema: DEVELOPER_REPORT_SCHEMA,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('parses a Developer attempt with immutable assignment and workspace snapshots', () => {
+    expect(
+      developerAttemptSchema.parse({
+        id: attemptId,
+        projectId,
+        taskId: assignment.taskId,
+        ordinal: 1,
+        lifecycle: 'active',
+        revision: 1,
+        deliveryPlanId: assignment.deliveryPlanId,
+        deliveryPlanRevision: 1,
+        intentRevision: 1,
+        ledgerRevision: 1,
+        taskContractRevision: 1,
+        taskCurrentRevision: 1,
+        requirementRevisions: assignment.requirementRevisions,
+        baseCommit: assignment.baseCommit,
+        profileId,
+        profileRevision: 1,
+        assignment,
+        workspace,
+        controllingExecutionId: executionId,
+        executionIds: [executionId],
+        reportIds: [],
+        attention: null,
+        createdAt: now,
+        updatedAt: now,
+        endedAt: null,
+      }),
+    ).toMatchObject({ id: attemptId, workspace });
+  });
 });
 
 const asIntentCycleView = <T extends object>(view: T) => ({
