@@ -1105,6 +1105,36 @@ describe('PlanningRepository', () => {
     expect(authority?.card.readiness.state).toBe('actionable');
   });
 
+  it('makes a dependent task actionable after its prerequisite completes', () => {
+    const { fixture, repository } = setup();
+    const { plan, taskId, secondTaskId } = approveDeliveryProposal(
+      fixture,
+      repository,
+      true,
+    );
+
+    expect(
+      repository.taskExecutionAuthority(fixture.project.id, secondTaskId)?.card
+        .readiness.state,
+    ).toBe('blocked');
+    inImmediateTransaction(fixture.database, () =>
+      repository.appendOperationalTaskLifecycleInTransaction({
+        projectId: fixture.project.id,
+        expectedDeliveryPlanRevision: plan.plan.revision,
+        taskId,
+        expectedContractRevision: 1,
+        expectedCurrentRevision: 1,
+        lifecycle: 'completed',
+        createdAt: at,
+      }),
+    );
+
+    expect(
+      repository.taskExecutionAuthority(fixture.project.id, secondTaskId)?.card
+        .readiness.state,
+    ).toBe('actionable');
+  });
+
   it('appends a completion revision without changing the task contract', () => {
     const { fixture, repository } = setup();
     const { plan, taskId } = approveDeliveryProposal(fixture, repository);
