@@ -451,6 +451,35 @@ describe('V2 database identity and migration', () => {
       ]),
     );
 
+    database.pragma('foreign_keys = OFF');
+    const immutableReportId = randomUUID();
+    const immutableAttemptId = randomUUID();
+    const immutableExecutionId = randomUUID();
+    database
+      .prepare(
+        `INSERT INTO developer_reports (
+          id, attempt_id, execution_id, ordinal, report_json, recorded_at
+        ) VALUES (?, ?, ?, 1, '{}', '2026-09-01T12:00:00.000Z')`,
+      )
+      .run(immutableReportId, immutableAttemptId, immutableExecutionId);
+    const immutableReport = database
+      .prepare('SELECT * FROM developer_reports WHERE id = ?')
+      .get(immutableReportId);
+    expect(() =>
+      database
+        .prepare(
+          `INSERT OR REPLACE INTO developer_reports (
+            id, attempt_id, execution_id, ordinal, report_json, recorded_at
+          ) VALUES (?, ?, ?, 1, '{"replaced":true}', '2026-09-01T12:01:00.000Z')`,
+        )
+        .run(immutableReportId, immutableAttemptId, immutableExecutionId),
+    ).toThrow(/immutable/i);
+    expect(
+      database
+        .prepare('SELECT * FROM developer_reports WHERE id = ?')
+        .get(immutableReportId),
+    ).toEqual(immutableReport);
+
     expect(() =>
       database
         .prepare(

@@ -363,6 +363,84 @@ describe('DeveloperRepository', () => {
     ).toEqual({ count: 1 });
   });
 
+  it('rejects a transition that smuggles child projections', () => {
+    const { fixture, repository } = createRepository();
+    const attempt = createAttempt(fixture);
+    const smuggled = developerAttemptSchema.parse({
+      ...attempt,
+      lifecycle: 'provisioning',
+      revision: 1,
+      updatedAt: later,
+      workspace: {
+        ...attempt.workspace,
+        lifecycle: 'creating',
+        revision: 1,
+        updatedAt: later,
+      },
+      executionIds: [randomUUID()],
+      reportIds: [randomUUID()],
+    });
+
+    inImmediateTransaction(fixture.database, () =>
+      repository.reserveAttemptInTransaction(attempt),
+    );
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        repository.transitionAttemptInTransaction(smuggled, 0),
+      ),
+    ).toThrow(/child projection/i);
+  });
+
+  it('rejects an unlinked controlling execution during transition', () => {
+    const { fixture, repository } = createRepository();
+    const attempt = createAttempt(fixture);
+    const next = developerAttemptSchema.parse({
+      ...attempt,
+      lifecycle: 'provisioning',
+      revision: 1,
+      controllingExecutionId: fixture.execution.id,
+      updatedAt: later,
+    });
+
+    inImmediateTransaction(fixture.database, () =>
+      repository.reserveAttemptInTransaction(attempt),
+    );
+    expect(() =>
+      inImmediateTransaction(fixture.database, () =>
+        repository.transitionAttemptInTransaction(next, 0),
+      ),
+    ).toThrow(/controlling execution.*linked/i);
+  });
+
+  it('returns the persisted attempt after a transition', () => {
+    const { fixture, repository } = createRepository();
+    const attempt = createAttempt(fixture);
+    const persistedAt = '2026-09-01T12:02:00.000Z';
+    const next = developerAttemptSchema.parse({
+      ...attempt,
+      lifecycle: 'provisioning',
+      revision: 1,
+      updatedAt: later,
+    });
+
+    inImmediateTransaction(fixture.database, () =>
+      repository.reserveAttemptInTransaction(attempt),
+    );
+    fixture.database.exec(`
+      CREATE TRIGGER developer_attempts_persisted_return
+      AFTER UPDATE ON developer_attempts
+      BEGIN
+        UPDATE developer_attempts SET updated_at = '${persistedAt}' WHERE id = NEW.id;
+      END;
+    `);
+    const transitioned = inImmediateTransaction(fixture.database, () =>
+      repository.transitionAttemptInTransaction(next, 0),
+    );
+
+    expect(transitioned).toEqual(repository.attempt(attempt.id));
+    expect(transitioned.updatedAt).toBe(persistedAt);
+  });
+
   it('rolls back an attempt, task revision, event, and receipt when report insertion fails', () => {
     const { fixture, repository } = createRepository();
     const attempt = createAttempt(fixture);

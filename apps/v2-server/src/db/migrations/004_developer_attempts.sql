@@ -136,6 +136,18 @@ CREATE TABLE developer_reports (
     REFERENCES developer_attempt_executions(attempt_id, execution_id)
 );
 
+CREATE TRIGGER developer_reports_immutable_insert
+BEFORE INSERT ON developer_reports
+WHEN EXISTS (
+  SELECT 1 FROM developer_reports
+  WHERE id = NEW.id
+    OR execution_id = NEW.execution_id
+    OR (attempt_id = NEW.attempt_id AND ordinal = NEW.ordinal)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'Developer reports are immutable');
+END;
+
 CREATE TRIGGER developer_reports_immutable_update
 BEFORE UPDATE ON developer_reports
 BEGIN

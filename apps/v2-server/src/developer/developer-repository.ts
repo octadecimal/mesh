@@ -251,15 +251,25 @@ export class DeveloperRepository {
     ) {
       throw new Error('Developer attempt revision conflict');
     }
+    if (
+      canonicalJson(next.workspace) !== canonicalJson(current.workspace) ||
+      canonicalJson(next.executionIds) !==
+        canonicalJson(current.executionIds) ||
+      canonicalJson(next.reportIds) !== canonicalJson(current.reportIds)
+    ) {
+      throw new Error('Developer attempt transition changes child projection');
+    }
+    if (
+      next.controllingExecutionId !== null &&
+      !current.executionIds.includes(next.controllingExecutionId)
+    ) {
+      throw new Error('Developer attempt controlling execution must be linked');
+    }
     const unchanged = developerAttemptSchema.parse({
       ...next,
       lifecycle: current.lifecycle,
       revision: current.revision,
-      controllingExecutionId: current.controllingExecutionId,
-      executionIds: current.executionIds,
-      reportIds: current.reportIds,
       attention: current.attention,
-      workspace: current.workspace,
       updatedAt: current.updatedAt,
       endedAt: current.endedAt,
     });
@@ -281,7 +291,7 @@ export class DeveloperRepository {
       });
     if (changed.changes !== 1)
       throw new Error('Developer attempt revision conflict');
-    return next;
+    return this.requireAttempt(next.id);
   }
 
   recordWorkspaceObservationInTransaction(
