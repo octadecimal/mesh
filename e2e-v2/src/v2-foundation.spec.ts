@@ -1649,7 +1649,9 @@ test('one Todo task completes with durable workspace evidence across restart', a
     ).toBeVisible();
     page.off('framenavigated', countNavigation);
     expect(navigations).toBe(0);
+    await expect(buildCard).toHaveCount(1);
     await expect(buildCard.getByText(/^completed ·/u)).toBeVisible();
+    await expect(buildCard.getByText(/^pending ·/u)).toHaveCount(0);
     await expect(
       buildCard.getByText('Inactive because the task is completed.'),
     ).toBeVisible();
@@ -1662,6 +1664,10 @@ test('one Todo task completes with durable workspace evidence across restart', a
     const buildDeveloper = staleBoard.getByRole('region', {
       name: 'Developer for Build Todo controls',
     });
+    await expect(buildDeveloper).toHaveCount(1);
+    await expect(
+      buildDeveloper.getByText('No Developer attempts yet.'),
+    ).toHaveCount(0);
     await expect(
       buildDeveloper.getByRole('heading', { name: 'Attempt 1', exact: true }),
     ).toHaveCount(1);
@@ -1692,6 +1698,56 @@ test('one Todo task completes with durable workspace evidence across restart', a
         name: 'Runtime activity for Build Todo controls',
       }),
     ).toHaveCount(1);
+
+    const persistCard = staleBoard
+      .locator('article.planning-board-card')
+      .filter({
+        has: page.getByRole('heading', {
+          name: 'Persist Todo items',
+          exact: true,
+        }),
+      });
+    await expect(persistCard).toHaveCount(1);
+    await persistCard
+      .getByRole('button', { name: 'View Persist Todo items details' })
+      .click();
+    const persistDeveloper = persistCard.getByRole('region', {
+      name: 'Developer for Persist Todo items',
+    });
+    await expect(persistDeveloper).toHaveCount(1);
+    await expect(
+      persistDeveloper.getByRole('heading', {
+        name: 'Attempt 1',
+        exact: true,
+      }),
+    ).toHaveCount(1);
+    await expect(
+      persistDeveloper.getByRole('region', {
+        name: 'Developer completion report',
+      }),
+    ).toHaveCount(1);
+    await expect(
+      persistDeveloper.getByRole('heading', {
+        name: 'Persist Todo items',
+        exact: true,
+      }),
+    ).toHaveCount(2);
+    await expect(
+      persistDeveloper.getByRole('region', {
+        name: 'Runtime activity for Persist Todo items',
+      }),
+    ).toHaveCount(2);
+    await expect(
+      workerActivity.getByRole('heading', {
+        name: 'Persist Todo items',
+        exact: true,
+      }),
+    ).toHaveCount(2);
+    await expect(
+      workerActivity.getByRole('region', {
+        name: 'Runtime activity for Persist Todo items',
+      }),
+    ).toHaveCount(2);
 
     expect(retainedWindows.domain.lowWater).toBeGreaterThan(
       staleSnapshot.cursors.domain + 1,
