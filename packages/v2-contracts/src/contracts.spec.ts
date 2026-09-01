@@ -297,6 +297,26 @@ describe('V2 Developer attempt contracts', () => {
         },
       }).success,
     ).toBe(false);
+    expect(
+      workerProfileDocumentSchema.safeParse({
+        apiVersion: WORKER_PROFILE_API_VERSION,
+        kind: 'WorkerProfile',
+        metadata: {
+          name: 'foundation-developer-output',
+          displayName: 'Foundation Developer Output',
+          scope: 'global',
+        },
+        spec: {
+          assignmentKinds: ['foundation-check'],
+          preferredRuntime: { harness: 'fake', model: 'fake' },
+          alternatives: [],
+          requiredCapabilities: [],
+          skills: { preferred: [], required: [] },
+          instructions: 'Run the foundation check.',
+          outputSchema: DEVELOPER_REPORT_SCHEMA,
+        },
+      }).success,
+    ).toBe(false);
   });
 
   it('parses a Developer attempt with immutable assignment and workspace snapshots', () => {

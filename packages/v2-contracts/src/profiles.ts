@@ -89,6 +89,16 @@ const requirePmOutputSchema = (
   context: z.RefinementCtx,
 ) => {
   if (
+    value.outputSchema === DEVELOPER_REPORT_SCHEMA &&
+    value.assignmentKinds?.[0] !== 'developer_task'
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['outputSchema'],
+      message: `${DEVELOPER_REPORT_SCHEMA} requires developer_task`,
+    });
+  }
+  if (
     value.assignmentKinds?.[0] === 'pm_discovery' &&
     value.outputSchema !== PM_DISCOVERY_REPORT_SCHEMA
   ) {
