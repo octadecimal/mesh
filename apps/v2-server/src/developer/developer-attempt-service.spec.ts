@@ -450,6 +450,13 @@ describe('DeveloperAttemptService', () => {
       (report: ReturnType<typeof completionReport>) => ({
         ...report,
         requirementCoverage: [
+          ...report.requirementCoverage,
+          { ...report.requirementCoverage[0], recordId: randomUUID() },
+        ],
+      }),
+      (report: ReturnType<typeof completionReport>) => ({
+        ...report,
+        requirementCoverage: [
           { ...report.requirementCoverage[0], recordRevision: 2 },
         ],
       }),
@@ -539,6 +546,49 @@ describe('DeveloperAttemptService', () => {
     ]);
   });
 
+  it('makes a matching runtime-event replay idempotent and rejects a digest conflict', async () => {
+    const context = setup();
+    await context.service.start(context.command);
+    const attempt = context.attempts[0];
+    const report = completionReport(attempt);
+    const execution = {
+      ...context.fixture.execution,
+      id: attempt.controllingExecutionId,
+      projectId: attempt.projectId,
+      assignment: attempt.assignment,
+    };
+    const runtimeEventId = randomUUID();
+    const event = {
+      id: runtimeEventId,
+      type: 'worker_execution.structured_output',
+      executionId: execution.id,
+      projectId: execution.projectId,
+      occurredAt: later,
+      payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+    };
+
+    context.service.acceptReport(execution as never, event as never, report);
+    const published = context.events.length;
+    context.service.acceptReport(execution as never, event as never, report);
+    expect(context.receipts).toHaveLength(1);
+    expect(context.reports).toHaveLength(1);
+    expect(context.events).toHaveLength(published);
+    expect(() =>
+      context.service.acceptReport(
+        execution as never,
+        {
+          ...event,
+          payload: {
+            ...event.payload,
+            value: { ...report, changedArtifacts: [] },
+          },
+        } as never,
+        report,
+      ),
+    ).toThrow('conflicts with prior receipt');
+    expect(context.reports).toHaveLength(1);
+  });
+
   it.each(['receipt', 'report', 'attempt', 'event', 'task'] as const)(
     'rolls back durable settlement and publication when %s persistence fails',
     async (failure) => {
@@ -584,6 +634,7 @@ describe('DeveloperAttemptService', () => {
       });
       const attempt = developers.attempt(original.id)!;
       const report = completionReport(attempt);
+      const runtimeEventId = randomUUID();
       const published: unknown[] = [];
       const trips: unknown[] = [];
       const failing = new DeveloperAttemptService({
@@ -643,7 +694,7 @@ describe('DeveloperAttemptService', () => {
             assignment: attempt.assignment,
           } as never,
           {
-            id: randomUUID(),
+            id: runtimeEventId,
             type: 'worker_execution.structured_output',
             executionId: attempt.controllingExecutionId,
             projectId: attempt.projectId,
@@ -659,7 +710,7 @@ describe('DeveloperAttemptService', () => {
         reportIds: [],
       });
       expect(developers.reportsForProject(attempt.projectId)).toEqual([]);
-      expect(developers.outputReceipt as never).toBeDefined();
+      expect(developers.outputReceipt(runtimeEventId)).toBeUndefined();
       expect(events.domainAfter(attempt.projectId, 0).events).toEqual([]);
       expect(published).toEqual([]);
     },
