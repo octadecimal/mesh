@@ -15,6 +15,9 @@ import {
   type TaskExecutionAuthority,
 } from './developer-attempt-service.js';
 import { createV2TestDatabase } from '../test/create-v2-test-database.js';
+import { inImmediateTransaction } from '../db/database.js';
+import { V2EventStore } from '../storage/event-store.js';
+import { DeveloperRepository } from './developer-repository.js';
 
 const now = '2026-09-01T12:00:00.000Z';
 const later = '2026-09-01T12:01:00.000Z';
@@ -362,6 +365,7 @@ const setup = (
     reports,
     receipts,
     fixture,
+    dependencies,
     getAuthority: () => authority,
     setAuthority: (value: TaskExecutionAuthority | undefined) => {
       authority = value;
@@ -534,6 +538,132 @@ describe('DeveloperAttemptService', () => {
       }),
     ]);
   });
+
+  it.each(['receipt', 'report', 'attempt', 'event', 'task'] as const)(
+    'rolls back durable settlement and publication when %s persistence fails',
+    async (failure) => {
+      const context = setup();
+      await context.service.start(context.command);
+      const original = context.attempts[0];
+      const developers = new DeveloperRepository(context.fixture.database);
+      const events = new V2EventStore(context.fixture.database);
+      context.fixture.database.exec('PRAGMA foreign_keys = OFF');
+      const reserved = {
+        ...original,
+        lifecycle: 'reserved' as const,
+        revision: 0,
+        controllingExecutionId: null,
+        executionIds: [],
+        reportIds: [],
+        endedAt: null,
+        workspace: {
+          ...original.workspace,
+          lifecycle: 'creating' as const,
+          revision: 0,
+          observedHead: null,
+          observedDirty: null,
+          failure: null,
+        },
+      };
+      inImmediateTransaction(context.fixture.database, () => {
+        developers.reserveAttemptInTransaction(reserved);
+        developers.recordWorkspaceObservationInTransaction(
+          { ...original.workspace, revision: 1 },
+          0,
+        );
+        const linked = developers.linkExecutionInTransaction({
+          attemptId: original.id,
+          executionId: original.controllingExecutionId!,
+          expectedRevision: 0,
+          updatedAt: later,
+        });
+        developers.transitionAttemptInTransaction(
+          { ...linked, lifecycle: 'active', revision: 2 },
+          1,
+        );
+      });
+      const attempt = developers.attempt(original.id)!;
+      const report = completionReport(attempt);
+      const published: unknown[] = [];
+      const trips: unknown[] = [];
+      const failing = new DeveloperAttemptService({
+        ...context.dependencies,
+        developers: {
+          attempt: developers.attempt.bind(developers),
+          attemptsForProject: developers.attemptsForProject.bind(developers),
+          nonterminalAttempts: developers.nonterminalAttempts.bind(developers),
+          reserveAttemptInTransaction:
+            developers.reserveAttemptInTransaction.bind(developers),
+          recordWorkspaceObservationInTransaction:
+            developers.recordWorkspaceObservationInTransaction.bind(developers),
+          linkExecutionInTransaction:
+            developers.linkExecutionInTransaction.bind(developers),
+          outputReceipt: developers.outputReceipt.bind(developers),
+          recordOutputReceiptInTransaction: (input) => {
+            if (failure === 'receipt') throw new Error('receipt failure');
+            return developers.recordOutputReceiptInTransaction(input);
+          },
+          insertReportInTransaction: (input) => {
+            if (failure === 'report') throw new Error('report failure');
+            return developers.insertReportInTransaction(input);
+          },
+          transitionAttemptInTransaction: (input, expected) => {
+            if (failure === 'attempt') throw new Error('attempt failure');
+            return developers.transitionAttemptInTransaction(input, expected);
+          },
+        },
+        planning: {
+          ...context.dependencies.planning,
+          appendOperationalTaskLifecycleInTransaction: (input) => {
+            if (failure === 'task') throw new Error('task failure');
+            return context.dependencies.planning.appendOperationalTaskLifecycleInTransaction(
+              input,
+            );
+          },
+        },
+        events: {
+          appendDomainInTransaction: (projectId, draft) => {
+            if (failure === 'event') throw new Error('event failure');
+            return events.appendDomainInTransaction(projectId, draft);
+          },
+        },
+        barrier: {
+          assertHealthy: () => undefined,
+          trip: (error) => trips.push(error),
+        },
+        publishDomain: (event) => published.push(event),
+      } as never);
+
+      expect(() =>
+        failing.acceptReport(
+          {
+            ...context.fixture.execution,
+            id: attempt.controllingExecutionId,
+            projectId: attempt.projectId,
+            assignment: attempt.assignment,
+          } as never,
+          {
+            id: randomUUID(),
+            type: 'worker_execution.structured_output',
+            executionId: attempt.controllingExecutionId,
+            projectId: attempt.projectId,
+            occurredAt: later,
+            payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
+          } as never,
+          report,
+        ),
+      ).toThrow(`${failure} failure`);
+      expect(trips).toHaveLength(1);
+      expect(developers.attempt(attempt.id)).toMatchObject({
+        lifecycle: 'active',
+        reportIds: [],
+      });
+      expect(developers.reportsForProject(attempt.projectId)).toEqual([]);
+      expect(developers.outputReceipt as never).toBeDefined();
+      expect(events.domainAfter(attempt.projectId, 0).events).toEqual([]);
+      expect(published).toEqual([]);
+    },
+  );
 
   it.each([
     ['a foreign event execution id', 'eventExecutionId'],
