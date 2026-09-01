@@ -1,5 +1,5 @@
 import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
-import { isAbsolute, relative, resolve, win32 } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, win32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import type { DeveloperAttemptId, ManagedWorkspace } from '@mesh/v2-contracts';
@@ -57,6 +57,28 @@ const isContained = (
     !fromParent.startsWith('..') &&
     !paths.isAbsolute(fromParent)
   );
+};
+
+const isContainedOrSame = (
+  parent: string,
+  candidate: string,
+  platform: NodeJS.Platform,
+): boolean =>
+  pathKey(parent, platform) === pathKey(candidate, platform) ||
+  isContained(parent, candidate, platform);
+
+const nearestExistingAncestor = async (path: string): Promise<string> => {
+  let candidate = path;
+  while (true) {
+    try {
+      return await realpath(candidate);
+    } catch {
+      const parent = dirname(candidate);
+      if (parent === candidate)
+        throw new Error('Workspace ancestor is unreadable');
+      candidate = parent;
+    }
+  }
 };
 
 const attention = (
@@ -195,7 +217,17 @@ export const createManagedWorkspace = async (
   }
   try {
     await mkdir(managedRoot, { recursive: true });
-    await realpath(managedRoot);
+    const [canonicalRoot, canonicalAncestor] = await Promise.all([
+      realpath(managedRoot),
+      nearestExistingAncestor(workspacePath),
+    ]);
+    if (!isContainedOrSame(canonicalRoot, canonicalAncestor, platform)) {
+      return attention(
+        workspace,
+        'workspace_path_escape',
+        'Workspace path escapes the canonical managed root',
+      );
+    }
   } catch (error) {
     return attention(
       workspace,

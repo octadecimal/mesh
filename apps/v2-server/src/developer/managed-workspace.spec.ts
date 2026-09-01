@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -219,6 +220,33 @@ describe('managed workspaces', () => {
     ).toBe(false);
   });
 
+  it('refuses a symlinked managed-root ancestor before Git creates outside it', async () => {
+    const candidate = workspace();
+    const runner = new RecordingRunner();
+    const redirected = join(directory, 'redirected');
+    mkdirSync(managedRoot);
+    mkdirSync(redirected);
+    symlinkSync(
+      redirected,
+      join(managedRoot, ids.projectId),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const result = await createManagedWorkspace(
+      candidate,
+      dependencies(runner),
+    );
+
+    expect(result).toMatchObject({
+      lifecycle: 'attention_required',
+      failure: { code: 'workspace_path_escape' },
+    });
+    expect(runner.calls.some((call) => call.args.includes('worktree'))).toBe(
+      false,
+    );
+    expect(existsSync(join(redirected, ids.taskId, ids.attemptId))).toBe(false);
+  });
+
   it('returns attention for wrong repository identity, branch, HEAD, or ownership metadata', async () => {
     const created = await createManagedWorkspace(workspace(), dependencies());
     const cases = [
@@ -267,6 +295,91 @@ describe('managed workspaces', () => {
     });
 
     expect(first.path).toBe('C:\\Mesh\\Managed\\PROJECT\\TASK\\ATTEMPT');
+  });
+
+  it('uses Windows-normalized identity, registration, and top-level comparisons', async () => {
+    const workspace = deriveManagedWorkspace({
+      managedRoot: 'C:\\Mesh\\Managed',
+      projectId: ids.projectId,
+      taskId: ids.taskId,
+      attemptId: ids.attemptId,
+      repositoryPath: 'C:\\Mesh\\Repository',
+      repositoryIdentity: 'C:\\Mesh\\Repository\\.git',
+      baseCommit: 'a'.repeat(40),
+      createdAt: '2026-09-01T00:00:00.000Z',
+      platform: 'win32',
+    });
+    const calls: GitProcessCall[] = [];
+    const runner: GitProcessRunner = {
+      async run(call) {
+        calls.push(call);
+        if (call.args.includes('worktree')) {
+          return {
+            outcome: 'completed',
+            exitCode: 0,
+            stdout: `worktree c:/mesh/managed/${ids.projectId}/${ids.taskId}/${ids.attemptId}\n`,
+            stderr: '',
+          };
+        }
+        if (call.args.includes('--show-toplevel')) {
+          return {
+            outcome: 'completed',
+            exitCode: 0,
+            stdout: `C:/MESH/MANAGED/${ids.projectId}/${ids.taskId}/${ids.attemptId}\n`,
+            stderr: '',
+          };
+        }
+        if (call.args.includes('HEAD^{commit}')) {
+          return {
+            outcome: 'completed',
+            exitCode: 0,
+            stdout: `${workspace.baseCommit}\n`,
+            stderr: '',
+          };
+        }
+        if (call.args.includes('symbolic-ref')) {
+          return {
+            outcome: 'completed',
+            exitCode: 0,
+            stdout: `${workspace.branch}\n`,
+            stderr: '',
+          };
+        }
+        if (call.args.includes('status')) {
+          return { outcome: 'completed', exitCode: 0, stdout: '', stderr: '' };
+        }
+        return {
+          outcome: 'completed',
+          exitCode: 0,
+          stdout: 'C:\\Mesh\\Git\\worktrees\\attempt\n',
+          stderr: '',
+        };
+      },
+    };
+
+    const result = await observeManagedWorkspace(
+      workspace,
+      {
+        managedRoot: 'c:/mesh/managed',
+        gitExecutable: 'git.exe',
+        processRunner: runner,
+        resolveRepositoryIdentity: async () => ({
+          canonicalPath: workspace.path.replaceAll('\\', '/').toUpperCase(),
+          commonDirectory: 'c:/mesh/repository/.git',
+          repositoryIdentity: 'c:/mesh/repository/.git',
+          headCommit: workspace.baseCommit,
+        }),
+        assertCreateReserved: () => undefined,
+        platform: 'win32',
+      },
+      { requireClean: false },
+    );
+
+    expect(result).toMatchObject({
+      lifecycle: 'attention_required',
+      failure: { code: 'workspace_ownership_missing' },
+    });
+    expect(calls.some((call) => call.args.includes('status'))).toBe(true);
   });
 
   it('does not create an ownership marker when worktree creation fails', async () => {
