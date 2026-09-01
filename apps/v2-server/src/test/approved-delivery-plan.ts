@@ -3,8 +3,12 @@ import { randomUUID } from 'node:crypto';
 import {
   approvedDeliveryPlanSchema,
   deliveryPlanProposalSchema,
+  type LedgerRecordId,
+  type PlanningCycleId,
   type PlanningCycle,
+  type PlanningProposalId,
   type PlanningProposal,
+  type PlanningTurnId,
   type PlanningTurn,
 } from '@mesh/v2-contracts';
 
@@ -17,7 +21,7 @@ const at = '2026-08-29T00:00:00.000Z';
 const cycle = (
   fixture: ReturnType<typeof createV2TestDatabase>,
 ): PlanningCycle => ({
-  id: randomUUID(),
+  id: randomUUID() as PlanningCycleId,
   projectId: fixture.project.id,
   lifecycle: 'launch_pending',
   revision: 1,
@@ -33,7 +37,7 @@ const cycle = (
 });
 
 const humanTurn = (value: PlanningCycle): PlanningTurn => ({
-  id: randomUUID(),
+  id: randomUUID() as PlanningTurnId,
   projectId: value.projectId,
   planningCycleId: value.id,
   ordinal: 1,
@@ -51,7 +55,7 @@ const seedApprovedRequirement = (
   const value = cycle(fixture);
   const human = humanTurn(value);
   const pm: PlanningTurn = {
-    id: randomUUID(),
+    id: randomUUID() as PlanningTurnId,
     projectId: value.projectId,
     planningCycleId: value.id,
     ordinal: 2,
@@ -61,9 +65,9 @@ const seedApprovedRequirement = (
     executionId: fixture.execution.id,
     createdAt: at,
   };
-  const recordId = randomUUID();
+  const recordId = randomUUID() as LedgerRecordId;
   const proposal: PlanningProposal = {
-    id: randomUUID(),
+    id: randomUUID() as PlanningProposalId,
     projectId: value.projectId,
     planningCycleId: value.id,
     revision: 1,
@@ -173,7 +177,7 @@ const deliveryProposal = (
   const { approved, recordId } = seedApprovedRequirement(fixture, repository);
   const value: PlanningCycle = {
     ...cycle(fixture),
-    id: randomUUID(),
+    id: randomUUID() as PlanningCycleId,
     profileId: fixture.pmProfileRevision.profileId,
     profileRevision: fixture.pmProfileRevision.revision,
     baseProjectIntentRevision: approved.projectIntent.revision,
@@ -189,7 +193,7 @@ const deliveryProposal = (
     executionId: fixture.execution.id,
   };
   const pm: PlanningTurn = {
-    id: randomUUID(),
+    id: randomUUID() as PlanningTurnId,
     projectId: value.projectId,
     planningCycleId: value.id,
     ordinal: 2,

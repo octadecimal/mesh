@@ -15,7 +15,10 @@ import {
   type TaskExecutionAuthority,
 } from './developer-attempt-service.js';
 import { createV2TestDatabase } from '../test/create-v2-test-database.js';
-import { inImmediateTransaction } from '../db/database.js';
+import { PlanningRepository } from '../planning/planning-repository.js';
+import { approveTestDeliveryPlan } from '../test/approved-delivery-plan.js';
+import { DeveloperReportConsumer } from './developer-report-consumer.js';
+import { canonicalJson } from '../storage/canonical-json.js';
 import { V2EventStore } from '../storage/event-store.js';
 import { DeveloperRepository } from './developer-repository.js';
 
@@ -138,6 +141,251 @@ const completionReport = (
   unresolvedConcerns: [],
   workspace: { headCommit: attempt.baseCommit, dirty: false },
 });
+
+const setupPersistedAttempt = async ({
+  failure,
+}: { failure?: 'receipt' | 'report' | 'attempt' | 'event' | 'task' } = {}) => {
+  const fixture = createV2TestDatabase();
+  fixtures.push(fixture);
+  const planning = new PlanningRepository(fixture.database);
+  const developers = new DeveloperRepository(fixture.database);
+  const events = new V2EventStore(fixture.database);
+  const profile = {
+    ...createProfile(),
+    profileId: fixture.profileRevision.profileId,
+    profileRevision: fixture.profileRevision.revision,
+  };
+  const published: unknown[] = [];
+  const trips: unknown[] = [];
+  let execution = fixture.execution;
+  const dependencies = {
+    database: fixture.database,
+    planning,
+    developers,
+    profiles: { resolveApproved: () => profile },
+    commands: fixture.commands,
+    events,
+    execution: {
+      reserveStart: async (input: {
+        command: {
+          profileId: string;
+          profileRevision: number;
+          assignment: unknown;
+        };
+      }) => {
+        execution = {
+          ...fixture.execution,
+          profileId: input.command.profileId,
+          profileRevision: input.command.profileRevision,
+          assignment: input.command.assignment as never,
+          profileSnapshot: {
+            ...fixture.execution.profileSnapshot,
+            profileId: input.command.profileId,
+            profileRevision: input.command.profileRevision,
+            document: profile.document,
+            digest: profile.digest,
+          },
+          updatedAt: later,
+        };
+        fixture.database
+          .prepare(
+            `UPDATE worker_executions SET
+              profile_id = ?, profile_revision = ?, assignment_json = ?,
+              profile_snapshot_json = ?, updated_at = ?
+             WHERE id = ?`,
+          )
+          .run(
+            execution.profileId,
+            execution.profileRevision,
+            canonicalJson(execution.assignment),
+            canonicalJson(execution.profileSnapshot),
+            execution.updatedAt,
+            execution.id,
+          );
+        return {
+          execution,
+          result: {
+            ok: true,
+            commandType: 'worker_execution.start' as const,
+            execution,
+          },
+          activationRequired: true,
+        };
+      },
+      activateReserved: async () => undefined,
+    },
+    workspace: {
+      inspectProject: async () => ({
+        repositoryIdentity: fixture.project.repositoryIdentity,
+        headCommit: fixture.project.headCommit,
+      }),
+      derive: (input: {
+        managedRoot: string;
+        projectId: string;
+        taskId: string;
+        attemptId: string;
+        repositoryPath: string;
+        repositoryIdentity: string;
+        baseCommit: string;
+        createdAt: string;
+      }): ManagedWorkspace => ({
+        attemptId: input.attemptId as ManagedWorkspace['attemptId'],
+        repositoryPath: input.repositoryPath,
+        repositoryIdentity: input.repositoryIdentity,
+        branch: `mesh/dev/${input.projectId}/${input.taskId}/${input.attemptId}`,
+        path: `${input.managedRoot}/${input.projectId}/${input.taskId}/${input.attemptId}`,
+        baseCommit: input.baseCommit,
+        lifecycle: 'creating',
+        ownershipToken: `owner-${input.attemptId}`,
+        observedHead: null,
+        observedDirty: null,
+        failure: null,
+        revision: 0,
+        createdAt: input.createdAt,
+        updatedAt: input.createdAt,
+      }),
+      create: async (workspace: ManagedWorkspace) => ({
+        ...workspace,
+        lifecycle: 'ready' as const,
+        observedHead: fixture.project.headCommit,
+        observedDirty: false,
+      }),
+    },
+    barrier: {
+      assertHealthy: () => undefined,
+      trip: (error: unknown) => trips.push(error),
+    },
+    billingConflicts: [],
+    managedWorkspaceRoot: 'C:/mesh-managed-workspaces',
+    now: () => now,
+    publishDomain: (event: unknown) => published.push(event),
+  };
+  const seeded = approveTestDeliveryPlan(fixture, planning);
+  const authority = planning.taskExecutionAuthority(
+    fixture.project.id,
+    seeded.taskId,
+  );
+  if (!authority) throw new Error('Test authority was not created');
+  const start = new DeveloperAttemptService(dependencies as never);
+  const result = await start.start({
+    idempotencyKey: 'persisted-developer-attempt-start',
+    actor: { kind: 'human' },
+    command: {
+      type: 'developer_attempt.start',
+      projectId: fixture.project.id,
+      taskId: authority.task.id,
+      expectedTaskRevision: authority.task.revision,
+      expectedDeliveryPlanId: authority.deliveryPlan.plan.id,
+      expectedDeliveryPlanRevision: authority.deliveryPlan.plan.revision,
+      profileId: profile.profileId,
+      profileRevision: profile.profileRevision,
+    },
+  });
+  if (!result.ok) throw new Error(result.error.message);
+  const attempt = developers.attempt(result.attempt.id);
+  if (!attempt || attempt.lifecycle !== 'active')
+    throw new Error('Test attempt was not activated');
+  const activeAuthority = planning.taskExecutionAuthority(
+    fixture.project.id,
+    attempt.taskId,
+  );
+  if (!activeAuthority) throw new Error('Test authority was not retained');
+  const domainEvents = events.domainAfter(fixture.project.id, 0).events;
+  published.splice(0);
+  const service = failure
+    ? new DeveloperAttemptService({
+        ...dependencies,
+        planning: {
+          taskExecutionAuthority:
+            planning.taskExecutionAuthority.bind(planning),
+          taskExecutionAuthorityInTransaction:
+            planning.taskExecutionAuthorityInTransaction.bind(planning),
+          appendOperationalTaskLifecycleInTransaction: (input) => {
+            if (failure === 'task') throw new Error('task failure');
+            return planning.appendOperationalTaskLifecycleInTransaction(input);
+          },
+        },
+        developers: {
+          attempt: developers.attempt.bind(developers),
+          attemptsForProject: developers.attemptsForProject.bind(developers),
+          nonterminalAttempts: developers.nonterminalAttempts.bind(developers),
+          reserveAttemptInTransaction:
+            developers.reserveAttemptInTransaction.bind(developers),
+          recordWorkspaceObservationInTransaction:
+            developers.recordWorkspaceObservationInTransaction.bind(developers),
+          linkExecutionInTransaction:
+            developers.linkExecutionInTransaction.bind(developers),
+          transitionAttemptInTransaction: (input, expected) => {
+            if (failure === 'attempt') throw new Error('attempt failure');
+            return developers.transitionAttemptInTransaction(input, expected);
+          },
+          insertReportInTransaction: (input) => {
+            if (failure === 'report') throw new Error('report failure');
+            return developers.insertReportInTransaction(input);
+          },
+          outputReceipt: developers.outputReceipt.bind(developers),
+          recordOutputReceiptInTransaction: (input) => {
+            if (failure === 'receipt') throw new Error('receipt failure');
+            return developers.recordOutputReceiptInTransaction(input);
+          },
+        },
+        events: {
+          appendDomainInTransaction: (projectId, draft) => {
+            if (failure === 'event') throw new Error('event failure');
+            return events.appendDomainInTransaction(projectId, draft);
+          },
+        },
+      } as never)
+    : start;
+  const report = completionReport(attempt);
+  const insertRuntimeEvent = (runtimeEventId: string, value: unknown) => {
+    const diagnosticId = randomUUID();
+    fixture.database
+      .prepare(
+        `INSERT INTO raw_diagnostics (
+          id, project_id, execution_id, adapter_id, adapter_cursor, received_at, payload_json
+        ) VALUES (?, ?, ?, 'fake', 1, ?, '{}')`,
+      )
+      .run(diagnosticId, fixture.project.id, execution.id, now);
+    fixture.database
+      .prepare(
+        `INSERT INTO runtime_events (
+          id, project_id, execution_id, diagnostic_id, sequence, adapter_cursor,
+          occurred_at, type, payload_json
+        ) VALUES (?, ?, ?, ?, 1, 1, ?, 'worker_execution.structured_output', '{}')`,
+      )
+      .run(
+        runtimeEventId,
+        fixture.project.id,
+        execution.id,
+        diagnosticId,
+        later,
+      );
+    return {
+      id: runtimeEventId,
+      type: 'worker_execution.structured_output',
+      executionId: execution.id,
+      projectId: fixture.project.id,
+      occurredAt: later,
+      payload: { schema: DEVELOPER_REPORT_SCHEMA, value },
+    } as never;
+  };
+  return {
+    fixture,
+    planning,
+    developers,
+    events,
+    service,
+    attempt,
+    authority: activeAuthority,
+    report,
+    execution,
+    domainEvents,
+    published,
+    trips,
+    insertRuntimeEvent,
+  };
+};
 
 const setup = (
   options: {
@@ -590,131 +838,71 @@ describe('DeveloperAttemptService', () => {
   });
 
   it.each(['receipt', 'report', 'attempt', 'event', 'task'] as const)(
-    'rolls back durable settlement and publication when %s persistence fails',
+    'rolls back the real persisted settlement graph when %s persistence fails',
     async (failure) => {
-      const context = setup();
-      await context.service.start(context.command);
-      const original = context.attempts[0];
-      const developers = new DeveloperRepository(context.fixture.database);
-      const events = new V2EventStore(context.fixture.database);
-      context.fixture.database.exec('PRAGMA foreign_keys = OFF');
-      const reserved = {
-        ...original,
-        lifecycle: 'reserved' as const,
-        revision: 0,
-        controllingExecutionId: null,
-        executionIds: [],
-        reportIds: [],
-        endedAt: null,
-        workspace: {
-          ...original.workspace,
-          lifecycle: 'creating' as const,
-          revision: 0,
-          observedHead: null,
-          observedDirty: null,
-          failure: null,
-        },
-      };
-      inImmediateTransaction(context.fixture.database, () => {
-        developers.reserveAttemptInTransaction(reserved);
-        developers.recordWorkspaceObservationInTransaction(
-          { ...original.workspace, revision: 1 },
-          0,
-        );
-        const linked = developers.linkExecutionInTransaction({
-          attemptId: original.id,
-          executionId: original.controllingExecutionId!,
-          expectedRevision: 0,
-          updatedAt: later,
-        });
-        developers.transitionAttemptInTransaction(
-          { ...linked, lifecycle: 'active', revision: 2 },
-          1,
-        );
-      });
-      const attempt = developers.attempt(original.id)!;
-      const report = completionReport(attempt);
+      const context = await setupPersistedAttempt({ failure });
       const runtimeEventId = randomUUID();
-      const published: unknown[] = [];
-      const trips: unknown[] = [];
-      const failing = new DeveloperAttemptService({
-        ...context.dependencies,
-        developers: {
-          attempt: developers.attempt.bind(developers),
-          attemptsForProject: developers.attemptsForProject.bind(developers),
-          nonterminalAttempts: developers.nonterminalAttempts.bind(developers),
-          reserveAttemptInTransaction:
-            developers.reserveAttemptInTransaction.bind(developers),
-          recordWorkspaceObservationInTransaction:
-            developers.recordWorkspaceObservationInTransaction.bind(developers),
-          linkExecutionInTransaction:
-            developers.linkExecutionInTransaction.bind(developers),
-          outputReceipt: developers.outputReceipt.bind(developers),
-          recordOutputReceiptInTransaction: (input) => {
-            if (failure === 'receipt') throw new Error('receipt failure');
-            return developers.recordOutputReceiptInTransaction(input);
-          },
-          insertReportInTransaction: (input) => {
-            if (failure === 'report') throw new Error('report failure');
-            return developers.insertReportInTransaction(input);
-          },
-          transitionAttemptInTransaction: (input, expected) => {
-            if (failure === 'attempt') throw new Error('attempt failure');
-            return developers.transitionAttemptInTransaction(input, expected);
-          },
-        },
-        planning: {
-          ...context.dependencies.planning,
-          appendOperationalTaskLifecycleInTransaction: (input) => {
-            if (failure === 'task') throw new Error('task failure');
-            return context.dependencies.planning.appendOperationalTaskLifecycleInTransaction(
-              input,
-            );
-          },
-        },
-        events: {
-          appendDomainInTransaction: (projectId, draft) => {
-            if (failure === 'event') throw new Error('event failure');
-            return events.appendDomainInTransaction(projectId, draft);
-          },
-        },
-        barrier: {
-          assertHealthy: () => undefined,
-          trip: (error) => trips.push(error),
-        },
-        publishDomain: (event) => published.push(event),
-      } as never);
+      const event = context.insertRuntimeEvent(runtimeEventId, context.report);
 
       expect(() =>
-        failing.acceptReport(
-          {
-            ...context.fixture.execution,
-            id: attempt.controllingExecutionId,
-            projectId: attempt.projectId,
-            assignment: attempt.assignment,
-          } as never,
-          {
-            id: runtimeEventId,
-            type: 'worker_execution.structured_output',
-            executionId: attempt.controllingExecutionId,
-            projectId: attempt.projectId,
-            occurredAt: later,
-            payload: { schema: DEVELOPER_REPORT_SCHEMA, value: report },
-          } as never,
-          report,
-        ),
+        context.service.acceptReport(context.execution, event, context.report),
       ).toThrow(`${failure} failure`);
-      expect(trips).toHaveLength(1);
-      expect(developers.attempt(attempt.id)).toMatchObject({
-        lifecycle: 'active',
-        reportIds: [],
-      });
-      expect(developers.reportsForProject(attempt.projectId)).toEqual([]);
-      expect(developers.outputReceipt(runtimeEventId)).toBeUndefined();
-      expect(events.domainAfter(attempt.projectId, 0).events).toEqual([]);
-      expect(published).toEqual([]);
+      expect(context.trips).toHaveLength(1);
+      expect(context.developers.outputReceipt(runtimeEventId)).toBeUndefined();
+      expect(
+        context.developers.reportsForProject(context.fixture.project.id),
+      ).toEqual([]);
+      expect(context.developers.attempt(context.attempt.id)).toEqual(
+        context.attempt,
+      );
+      const authority = context.planning.taskExecutionAuthority(
+        context.fixture.project.id,
+        context.attempt.taskId,
+      )!;
+      expect(authority.task).toEqual(context.authority.task);
+      expect(authority.card).toEqual(context.authority.card);
+      expect(authority.card.readiness).toEqual(
+        context.authority.card.readiness,
+      );
+      expect(
+        context.events.domainAfter(context.fixture.project.id, 0).events,
+      ).toEqual(context.domainEvents);
+      expect(context.published).toEqual([]);
     },
   );
+
+  it('persists a malformed Developer output receipt through the real consumer', async () => {
+    const context = await setupPersistedAttempt();
+    const runtimeEventId = randomUUID();
+    const event = context.insertRuntimeEvent(runtimeEventId, {
+      schema: DEVELOPER_REPORT_SCHEMA,
+    });
+    const consumer = new DeveloperReportConsumer({ attempts: context.service });
+
+    consumer.structuredOutput(context.execution, event);
+
+    expect(context.developers.outputReceipt(runtimeEventId)).toMatchObject({
+      status: 'rejected',
+      rejectionReason: 'report_binding_mismatch',
+    });
+    expect(
+      context.developers.reportsForProject(context.fixture.project.id),
+    ).toEqual([]);
+    expect(context.developers.attempt(context.attempt.id)).toEqual(
+      context.attempt,
+    );
+    const authority = context.planning.taskExecutionAuthority(
+      context.fixture.project.id,
+      context.attempt.taskId,
+    )!;
+    expect(authority.task).toEqual(context.authority.task);
+    expect(authority.card).toEqual(context.authority.card);
+    expect(authority.card.readiness).toEqual(context.authority.card.readiness);
+    expect(
+      context.events.domainAfter(context.fixture.project.id, 0).events,
+    ).toEqual(context.domainEvents);
+    expect(context.published).toEqual([]);
+  });
 
   it.each([
     ['a foreign event execution id', 'eventExecutionId'],

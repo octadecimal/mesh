@@ -408,7 +408,7 @@ export class DeveloperAttemptService {
           throw new Error('Billing override is configured');
         }
         const reservedAuthority =
-          this.dependencies.planning.taskExecutionAuthority(
+          this.dependencies.planning.taskExecutionAuthorityInTransaction(
             command.command.projectId,
             command.command.taskId,
           );

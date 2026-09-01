@@ -49,11 +49,21 @@ const developerAttemptsMigration = {
   ),
 };
 
+const developerAttemptCommandsMigration = {
+  version: 5,
+  name: '005_developer_attempt_commands',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '005_developer_attempt_commands.sql'),
+    'utf8',
+  ),
+};
+
 const migrations = [
   foundationMigration,
   intentLedgerMigration,
   planningBoardMigration,
   developerAttemptsMigration,
+  developerAttemptCommandsMigration,
 ] as const;
 
 type MigrationLedgerRow = { version: number; name: string };

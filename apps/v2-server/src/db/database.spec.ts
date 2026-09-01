@@ -52,6 +52,12 @@ const tableNames = (database: V2Database) =>
 
 const migrationPath = join(__dirname, 'migrations', '001_foundation.sql');
 const migration2Path = join(__dirname, 'migrations', '002_intent_ledger.sql');
+const migration3Path = join(__dirname, 'migrations', '003_planning_board.sql');
+const migration4Path = join(
+  __dirname,
+  'migrations',
+  '004_developer_attempts.sql',
+);
 
 const createMigration1Database = (path: string) => {
   const database = new BetterSqlite3(path);
@@ -75,6 +81,19 @@ const createMigration2Database = (path: string) => {
     ${readFileSync(migration2Path, 'utf8')}
     INSERT INTO v2_schema_migrations (version, name, applied_at)
     VALUES (2, '002_intent_ledger', '2026-08-29T00:00:00.000Z');
+  `);
+  return database;
+};
+
+const createMigration4Database = (path: string) => {
+  const database = createMigration2Database(path);
+  database.exec(`
+    ${readFileSync(migration3Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (3, '003_planning_board', '2026-08-30T00:00:00.000Z');
+    ${readFileSync(migration4Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (4, '004_developer_attempts', '2026-08-31T00:00:00.000Z');
   `);
   return database;
 };
@@ -174,6 +193,7 @@ describe('V2 database identity and migration', () => {
       { version: 2, name: '002_intent_ledger' },
       { version: 3, name: '003_planning_board' },
       { version: 4, name: '004_developer_attempts' },
+      { version: 5, name: '005_developer_attempt_commands' },
     ]);
   });
 
@@ -210,7 +230,7 @@ describe('V2 database identity and migration', () => {
       reopened
         .prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations')
         .get(),
-    ).toEqual({ count: 4 });
+    ).toEqual({ count: 5 });
   });
 
   it('migrates an identified pre-foundation V2 database forward', () => {
@@ -232,7 +252,13 @@ describe('V2 database identity and migration', () => {
     expect(tableNames(migrated)).toContain('worker_executions');
     expect(
       migrated.prepare('SELECT version FROM v2_schema_migrations').all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+    ).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+    ]);
   });
 
   it.each([
@@ -625,7 +651,7 @@ describe('V2 database identity and migration', () => {
     expect(database.pragma('foreign_key_check')).toEqual([]);
   });
 
-  it('upgrades migration 1 without changing its source or M1 rows and replays all eight command types', () => {
+  it('upgrades migration 1 without changing its source or M1 rows and replays all nine command types', () => {
     const path = join(temporaryDirectory(), 'upgrade.sqlite');
     const migrationHash = fileHash(migrationPath);
     const database = createMigration1Database(path);
@@ -738,7 +764,69 @@ describe('V2 database identity and migration', () => {
         commandType,
       });
     }
+    inImmediateTransaction(database, () => {
+      commands.storeInTransaction({
+        idempotencyKey: 'developer-attempt-start',
+        commandType: 'developer_attempt.start',
+        requestHash: 'd'.repeat(64),
+        result: {
+          ok: false,
+          commandType: 'developer_attempt.start',
+          error: { code: 'invalid_request', message: 'developer start' },
+        },
+        createdAt: '2026-09-01T12:00:00.000Z',
+      });
+    });
+    expect(commands.find('developer-attempt-start')?.result).toMatchObject({
+      ok: false,
+      commandType: 'developer_attempt.start',
+    });
     expect(database.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('upgrades a migration 4 command result through migration 5 unchanged', () => {
+    const database = createMigration4Database(
+      join(temporaryDirectory(), 'upgrade-migration-4.sqlite'),
+    );
+    database
+      .prepare(
+        `INSERT INTO command_results (
+          idempotency_key, command_type, request_hash, result_json, created_at
+        ) VALUES (?, 'worker_execution.start', ?, ?, ?)`,
+      )
+      .run(
+        'migration-4-command',
+        'a'.repeat(64),
+        JSON.stringify({
+          ok: false,
+          commandType: 'worker_execution.start',
+          error: { code: 'invalid_request', message: 'before migration 5' },
+        }),
+        '2026-08-31T00:00:00.000Z',
+      );
+    const before = database
+      .prepare('SELECT * FROM command_results WHERE idempotency_key = ?')
+      .get('migration-4-command');
+
+    migrateV2Database(database);
+    openDatabases.push(database);
+
+    expect(
+      database
+        .prepare('SELECT * FROM command_results WHERE idempotency_key = ?')
+        .get('migration-4-command'),
+    ).toEqual(before);
+    expect(
+      database
+        .prepare('SELECT version FROM v2_schema_migrations ORDER BY version')
+        .all(),
+    ).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+    ]);
   });
 
   it('upgrades a nonempty migration 2 database without changing audit bytes, checksums, or cursors', () => {
@@ -1223,6 +1311,7 @@ describe('V2 database identity and migration', () => {
       { version: 2, name: '002_intent_ledger' },
       { version: 3, name: '003_planning_board' },
       { version: 4, name: '004_developer_attempts' },
+      { version: 5, name: '005_developer_attempt_commands' },
     ]);
     database.close();
 
