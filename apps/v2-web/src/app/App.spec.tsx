@@ -1220,6 +1220,51 @@ describe('App', () => {
     });
   });
 
+  it('sends an exact finite-run start command from the Board', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => developerSnapshot);
+    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Run Persist Todo' }),
+    );
+    await user.selectOptions(
+      screen.getByLabelText('Profile for Persist Todo'),
+      developerProfile.profileId,
+    );
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: 'I confirmed subscription capacity for this run',
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Start run' }));
+
+    await waitFor(() => expect(api.command).toHaveBeenCalledOnce());
+    expect(vi.mocked(api.command).mock.calls[0][0].command).toEqual({
+      type: 'execution_run.start',
+      projectId,
+      expectedDeliveryPlanId: developerPlanId,
+      expectedDeliveryPlanRevision: 7,
+      expectedBoardFilterRevision: 5,
+      selections: [
+        {
+          taskId: developerTaskId,
+          expectedTaskRevision: 4,
+          profileId: developerProfile.profileId,
+          profileRevision: developerProfile.profileRevision,
+        },
+      ],
+      concurrencyLimit: 2,
+      subscriptionCapacityConfirmed: true,
+    });
+  });
+
   it('gives repeated Developer execution activity unique accessible labels', async () => {
     const user = userEvent.setup();
     const api = createApi();

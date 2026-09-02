@@ -250,6 +250,34 @@ const board = boardViewSchema.parse({
 });
 
 describe('BoardPane', () => {
+  it('shows the current execution-run item state on its task card', () => {
+    render(
+      <BoardPane
+        board={{
+          ...board,
+          cards: [
+            {
+              ...board.cards[0]!,
+              executionRunItem: {
+                runId: '99999999-9999-4999-8999-999999999999',
+                itemId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                lifecycle: 'launch_pending',
+                developerAttemptId: null,
+                attention: null,
+              },
+            },
+            board.cards[1]!,
+          ],
+        }}
+        connection={{ status: 'ready' }}
+        submitting={false}
+        onApplyFilter={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('Run item · launch pending')).toBeVisible();
+  });
+
   it('groups the caller-ordered multi-milestone board and exposes durable reasons and details', async () => {
     const user = userEvent.setup();
     render(

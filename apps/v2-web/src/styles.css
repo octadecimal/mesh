@@ -92,6 +92,7 @@ button:disabled {
 .v2-selector input,
 .v2-selector button,
 .v2-shell button,
+.v2-shell input,
 .v2-shell select {
   border: 1px solid #475569;
   border-radius: 0.4rem;
@@ -189,6 +190,29 @@ button:disabled {
   display: grid;
   gap: 0.75rem;
   padding-left: 1.25rem;
+}
+.execution-run-section,
+.execution-run-section form,
+.execution-run-section fieldset {
+  display: grid;
+  gap: 0.65rem;
+}
+.execution-run-section {
+  margin: 1rem 0;
+  border: 1px solid #334155;
+  border-radius: 0.6rem;
+  padding: 0.85rem;
+  background: #0f172a;
+}
+.execution-run-section label {
+  display: grid;
+  gap: 0.35rem;
+  width: fit-content;
+}
+.execution-run-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 .v2-execution dt {
   color: #a5b4cc;
