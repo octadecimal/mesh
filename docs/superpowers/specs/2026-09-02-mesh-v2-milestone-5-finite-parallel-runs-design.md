@@ -1,6 +1,6 @@
 # Mesh V2 Milestone 5: Finite Parallel Runs Design
 
-**Status:** Approved in conversation; pending written review
+**Status:** Approved
 
 **Date:** 2026-09-02
 
