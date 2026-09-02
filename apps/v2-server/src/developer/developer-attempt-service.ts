@@ -54,6 +54,16 @@ export type StartDeveloperAttemptEnvelope = V2CommandEnvelope & {
   command: Extract<V2Command, { type: 'developer_attempt.start' }>;
 };
 
+export type InternalDeveloperStart = Pick<
+  StartDeveloperAttemptEnvelope,
+  'idempotencyKey' | 'command'
+>;
+
+const internalDeveloperStartSchema = startDeveloperAttemptEnvelopeSchema.pick({
+  idempotencyKey: true,
+  command: true,
+});
+
 export type InterruptDeveloperAttemptEnvelope = V2CommandEnvelope & {
   command: Extract<V2Command, { type: 'developer_attempt.interrupt' }>;
 };
@@ -140,7 +150,7 @@ type StartFlight = {
 };
 
 type DeveloperCommandEnvelope =
-  | StartDeveloperAttemptEnvelope
+  | InternalDeveloperStart
   | InterruptDeveloperAttemptEnvelope
   | ReplaceDeveloperAttemptExecutionEnvelope;
 
@@ -283,7 +293,7 @@ export class DeveloperAttemptService {
 
   private startReservationMismatch(
     reservation: DeveloperStartReservation,
-    command: StartDeveloperAttemptEnvelope,
+    command: InternalDeveloperStart,
     requestHash: string,
   ): V2CommandResult | undefined {
     if (
@@ -296,7 +306,7 @@ export class DeveloperAttemptService {
   }
 
   private async singleFlightStart(
-    command: StartDeveloperAttemptEnvelope,
+    command: InternalDeveloperStart,
     requestHash: string,
     operation: () => Promise<V2CommandResult>,
   ): Promise<V2CommandResult> {
@@ -648,15 +658,33 @@ export class DeveloperAttemptService {
   async start(
     envelope: StartDeveloperAttemptEnvelope,
   ): Promise<V2CommandResult> {
-    let command: StartDeveloperAttemptEnvelope;
+    let parsed: StartDeveloperAttemptEnvelope;
     try {
-      command = startDeveloperAttemptEnvelopeSchema.parse(envelope);
+      parsed = startDeveloperAttemptEnvelopeSchema.parse(envelope);
     } catch (error) {
       return failure(
         error instanceof Error ? error.message : 'Invalid request',
       );
     }
+    return this.startValidated({
+      idempotencyKey: parsed.idempotencyKey,
+      command: parsed.command,
+    });
+  }
 
+  async startFromRun(input: InternalDeveloperStart): Promise<V2CommandResult> {
+    let command: InternalDeveloperStart;
+    try {
+      command = internalDeveloperStartSchema.parse(input);
+    } catch (error) {
+      return failure(
+        error instanceof Error ? error.message : 'Invalid request',
+      );
+    }
+    return this.startValidated(command);
+  }
+
+  private startValidated(command: InternalDeveloperStart) {
     const requestHash = hashV2Command(command.command);
     const replay = this.replayCommand(command, requestHash);
     if (replay) return replay;
@@ -668,7 +696,7 @@ export class DeveloperAttemptService {
   }
 
   private async startLocked(
-    command: StartDeveloperAttemptEnvelope,
+    command: InternalDeveloperStart,
     requestHash: string,
   ): Promise<V2CommandResult> {
     const repeated = this.replayCommand(command, requestHash);
@@ -982,7 +1010,7 @@ export class DeveloperAttemptService {
   }
 
   private async resumeStart(
-    command: StartDeveloperAttemptEnvelope,
+    command: InternalDeveloperStart,
     requestHash: string,
     attempt: DeveloperAttempt,
     reservation: DeveloperStartReservation,
@@ -1039,7 +1067,7 @@ export class DeveloperAttemptService {
   }
 
   private async launchStart(
-    command: StartDeveloperAttemptEnvelope,
+    command: InternalDeveloperStart,
     requestHash: string,
     profile: Pick<
       ResolvedWorkerProfileSnapshot,
@@ -1173,7 +1201,7 @@ export class DeveloperAttemptService {
 
       const execution = await this.dependencies.execution.reserveStart({
         idempotencyKey: `developer-attempt:${provisioned.id}:execution:1`,
-        actor: command.actor,
+        actor: { kind: 'human' },
         command: {
           type: 'worker_execution.start',
           projectId: launch.projectId,
@@ -1832,9 +1860,8 @@ export class DeveloperAttemptService {
         this.dependencies.developers.startReservationForAttempt(attemptId);
       const attempt = this.dependencies.developers.attempt(attemptId);
       if (!reservation || !attempt) continue;
-      const command: StartDeveloperAttemptEnvelope = {
+      const command: InternalDeveloperStart = {
         idempotencyKey: reservation.idempotencyKey,
-        actor: { kind: 'human' },
         command: {
           type: 'developer_attempt.start',
           projectId: attempt.projectId,
@@ -1898,7 +1925,7 @@ export class DeveloperAttemptService {
 
   private newAttempt(
     authority: TaskExecutionAuthority,
-    envelope: StartDeveloperAttemptEnvelope,
+    envelope: InternalDeveloperStart,
     profile: ResolvedWorkerProfileSnapshot,
   ): DeveloperAttempt {
     const id = developerAttemptSchema.shape.id.parse(randomUUID());
@@ -2109,7 +2136,7 @@ export class DeveloperAttemptService {
     launch: StartLaunchProjection,
     error: unknown,
     result: V2CommandResult,
-    command: StartDeveloperAttemptEnvelope,
+    command: InternalDeveloperStart,
     requestHash: string,
   ): V2CommandResult {
     const message = error instanceof Error ? error.message : 'Launch failed';
