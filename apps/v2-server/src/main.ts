@@ -238,6 +238,7 @@ export const startV2Server = async (
         new FakeHarnessAdapter({
           pmScenario: config.testFakePmScenario,
           developerScenario: config.testFakeDeveloperScenario,
+          developerHoldDirectory: config.testFakeDeveloperHoldDirectory,
         }),
       config.testFakeHoldAfterAdapterCursor,
     );
