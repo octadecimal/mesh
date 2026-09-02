@@ -2342,12 +2342,15 @@ describe('migrate', () => {
   it('loads the built migration registry and applies every migration from a fresh production output', () => {
     const workspaceRoot = join(__dirname, '..', '..', '..', '..');
     const directory = mkdtempSync(
-      join(workspaceRoot, '.mesh-session-platform-build-'),
+      join(workspaceRoot, 'node_modules', '.mesh-session-platform-build-'),
     );
     const outputPath = join(directory, 'server');
     let database: Database | undefined;
 
     try {
+      expect(
+        relative(join(workspaceRoot, 'node_modules'), directory),
+      ).not.toMatch(/^\.\.(?:[\\/]|$)/);
       runProductionBuild(workspaceRoot, outputPath);
       const builtModule = createRequire(__filename)(
         join(outputPath, 'apps', 'server', 'src', 'db', 'migrate.js'),
