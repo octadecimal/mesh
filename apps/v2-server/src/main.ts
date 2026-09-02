@@ -45,6 +45,8 @@ import { V2EventPublisher } from './realtime/event-publisher.js';
 import { registerV2SocketHub, V2SocketHub } from './realtime/socket-hub.js';
 import { V2CommandRepository } from './storage/command-repository.js';
 import { V2EventStore } from './storage/event-store.js';
+import { ExecutionRunRepository } from './runs/execution-run-repository.js';
+import { ExecutionRunService } from './runs/execution-run-service.js';
 
 export type RunningV2Server = {
   origin: string;
@@ -57,6 +59,7 @@ type V2StartupPhase =
   | 'developer_attempts_reconciled'
   | 'planning_bound_cycles_reconciled'
   | 'planning_pending_reservations_reconciled'
+  | 'execution_runs_reconciled'
   | 'recovery_window_published'
   | 'recovered_sessions_attached'
   | 'pending_launches_drained'
@@ -183,6 +186,7 @@ export const startV2Server = async (
   let runtime: ExecutionRuntime | undefined;
   let hub: V2SocketHub | undefined;
   let app: ReturnType<typeof createV2HttpApp> | undefined;
+  let executionRuns: ExecutionRunService | undefined;
   let accepting = false;
   try {
     database = openV2Database(config.databasePath);
@@ -280,6 +284,13 @@ export const startV2Server = async (
     });
     const planningObserver = planning.observer;
     const developers = new DeveloperRepository(database);
+    const runRepository = new ExecutionRunRepository(database);
+    const runObserver: { current?: ExecutionRunService } = {};
+    const billingConflicts =
+      environment.ANTHROPIC_API_KEY === undefined ||
+      environment.ANTHROPIC_API_KEY.length === 0
+        ? []
+        : [{ variable: 'ANTHROPIC_API_KEY' }];
     const managedWorkspaceRoot = join(
       dirname(config.databasePath),
       'developer-worktrees',
@@ -345,17 +356,45 @@ export const startV2Server = async (
       execution: runtime,
       workspace: managedWorkspace,
       barrier,
-      billingConflicts:
-        environment.ANTHROPIC_API_KEY === undefined ||
-        environment.ANTHROPIC_API_KEY.length === 0
-          ? []
-          : [{ variable: 'ANTHROPIC_API_KEY' }],
+      billingConflicts,
       managedWorkspaceRoot,
+      now: () => new Date().toISOString(),
+      publishDomain: (event) => {
+        if (!recovering) {
+          publisher.domain(event);
+          if (
+            event.type === 'developer_attempt.changed' ||
+            event.type === 'developer_workspace.changed' ||
+            event.type === 'developer_report.recorded'
+          ) {
+            void runObserver.current
+              ?.developerAttemptChanged(event.payload.attempt.id)
+              .catch((error) => barrier.trip(error, new Date().toISOString()));
+          }
+        }
+      },
+    });
+    executionRuns = new ExecutionRunService({
+      database,
+      runs: runRepository,
+      commands,
+      events,
+      projects: projectsRepository,
+      planning: planning.repository,
+      profiles,
+      developer: {
+        startFromRun: (input) => developerAttempts.startFromRun(input),
+        attempt: (attemptId) => developers.attempt(attemptId),
+      },
+      inspectProject: managedWorkspace.inspectProject,
+      barrier,
+      billingConflicts,
       now: () => new Date().toISOString(),
       publishDomain: (event) => {
         if (!recovering) publisher.domain(event);
       },
     });
+    runObserver.current = executionRuns;
     developerObserver.current = new DeveloperReportConsumer({
       attempts: developerAttempts,
     });
@@ -401,6 +440,8 @@ export const startV2Server = async (
     options.test?.onStartupPhase?.('planning_bound_cycles_reconciled');
     planning.service.reconcilePendingReservations();
     options.test?.onStartupPhase?.('planning_pending_reservations_reconciled');
+    await executionRuns.reconcile();
+    options.test?.onStartupPhase?.('execution_runs_reconciled');
     publishCommittedSince(
       projectsRepository,
       events,
@@ -430,6 +471,7 @@ export const startV2Server = async (
       profiles,
       executions,
       developers,
+      runs: runRepository,
       planning: planning.repository,
       events,
       barrier,
@@ -443,6 +485,7 @@ export const startV2Server = async (
         profiles,
         runtime,
         developer: developerAttempts,
+        runs: executionRuns,
         planning: planning.service,
         snapshots,
         events,
@@ -473,6 +516,7 @@ export const startV2Server = async (
           hub?.close();
           await app?.close();
           fakeHold.release();
+          await executionRuns?.drain();
           await runtime?.drain();
           await runtime?.close();
           database?.close();
@@ -485,6 +529,7 @@ export const startV2Server = async (
     accepting = false;
     hub?.close();
     await app?.close().catch(() => undefined);
+    await executionRuns?.drain().catch(() => undefined);
     await runtime?.close().catch(() => undefined);
     database?.close();
     throw error;

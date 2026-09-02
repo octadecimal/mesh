@@ -320,6 +320,10 @@ export class ExecutionRunService {
     }
   }
 
+  async drain(): Promise<void> {
+    await Promise.all(this.projectTails.values());
+  }
+
   private async validateStart(input: StartExecutionRunEnvelope): Promise<
     | {
         project: Project;

@@ -5,17 +5,21 @@ import {
   approvePlanningProposalEnvelopeSchema,
   interruptExecutionEnvelopeSchema,
   interruptDeveloperAttemptEnvelopeSchema,
+  pauseExecutionRunEnvelopeSchema,
   projectIdSchema,
   projectRegisterEnvelopeSchema,
   profileApprovalEnvelopeSchema,
   rejectPlanProposalEnvelopeSchema,
   rejectPlanningProposalEnvelopeSchema,
+  resumeExecutionRunEnvelopeSchema,
   setBoardFilterEnvelopeSchema,
   replaceDeveloperAttemptExecutionEnvelopeSchema,
   startDeveloperAttemptEnvelopeSchema,
+  startExecutionRunEnvelopeSchema,
   startExecutionEnvelopeSchema,
   submitPlanTurnEnvelopeSchema,
   submitPlanningTurnEnvelopeSchema,
+  stopExecutionRunEnvelopeSchema,
   v2CommandEnvelopeSchema,
   v2ErrorCodeSchema,
   type RetainedDomainWindow,
@@ -29,6 +33,7 @@ import { z } from 'zod';
 
 import type { ExecutionRuntime } from '../executions/execution-runtime.js';
 import type { DeveloperAttemptService } from '../developer/developer-attempt-service.js';
+import type { ExecutionRunService } from '../runs/execution-run-service.js';
 import type { PlanningService } from '../planning/planning-service.js';
 import type { ProjectService } from '../projects/project-service.js';
 import type { WorkerProfileService } from '../profiles/profile-service.js';
@@ -49,6 +54,7 @@ export type V2RouteDependencies = {
     DeveloperAttemptService,
     'start' | 'interrupt' | 'replaceExecution'
   >;
+  runs: Pick<ExecutionRunService, 'start' | 'pause' | 'resume' | 'stop'>;
   planning: Pick<
     PlanningService,
     | 'submitTurn'
@@ -179,7 +185,8 @@ export const registerV2Routes = (
     const replayCandidate = v2CommandEnvelopeSchema.safeParse(request.body);
     if (
       replayCandidate.success &&
-      replayCandidate.data.command.type.startsWith('developer_attempt.')
+      (replayCandidate.data.command.type.startsWith('developer_attempt.') ||
+        replayCandidate.data.command.type.startsWith('execution_run.'))
     ) {
       if (!localOrigin(request, dependencies)) {
         return reply
@@ -208,6 +215,38 @@ export const registerV2Routes = (
             replaceDeveloperAttemptExecutionEnvelopeSchema.parse(
               replayCandidate.data,
             ),
+          );
+          return result.ok
+            ? reply.send(result)
+            : reply.status(statusFor(result.error.code)).send(result);
+        }
+        case 'execution_run.start': {
+          const result = await dependencies.runs.start(
+            startExecutionRunEnvelopeSchema.parse(replayCandidate.data),
+          );
+          return result.ok
+            ? reply.send(result)
+            : reply.status(statusFor(result.error.code)).send(result);
+        }
+        case 'execution_run.pause': {
+          const result = await dependencies.runs.pause(
+            pauseExecutionRunEnvelopeSchema.parse(replayCandidate.data),
+          );
+          return result.ok
+            ? reply.send(result)
+            : reply.status(statusFor(result.error.code)).send(result);
+        }
+        case 'execution_run.resume': {
+          const result = await dependencies.runs.resume(
+            resumeExecutionRunEnvelopeSchema.parse(replayCandidate.data),
+          );
+          return result.ok
+            ? reply.send(result)
+            : reply.status(statusFor(result.error.code)).send(result);
+        }
+        case 'execution_run.stop': {
+          const result = await dependencies.runs.stop(
+            stopExecutionRunEnvelopeSchema.parse(replayCandidate.data),
           );
           return result.ok
             ? reply.send(result)
