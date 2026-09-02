@@ -15,7 +15,10 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import type { V2Database } from './database.js';
 
 const workspaceRoot = resolve(__dirname, '..', '..', '..', '..');
-const temporaryRoot = mkdtempSync(join(workspaceRoot, '.mesh-v2-build-test-'));
+const testBuildParent = join(workspaceRoot, 'node_modules');
+const temporaryRoot = mkdtempSync(
+  join(testBuildParent, '.mesh-v2-build-test-'),
+);
 const builtRoot = join(temporaryRoot, 'server');
 
 const runProductionV2Build = () => {
@@ -96,7 +99,7 @@ const runProductionV2Build = () => {
 beforeAll(runProductionV2Build, 180_000);
 
 afterAll(() => {
-  const relativeTemporary = relative(workspaceRoot, temporaryRoot);
+  const relativeTemporary = relative(testBuildParent, temporaryRoot);
   if (
     relativeTemporary.startsWith('..') ||
     relativeTemporary === '' ||
