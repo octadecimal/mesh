@@ -38,7 +38,7 @@ notifications, unread flags, and in-progress streaming text are intentionally
 local interaction state. A browser view is a projection, not the source of
 truth.
 
-### Parallel V2 foundation, intent ledger, planning, and Board
+### Parallel V2 foundation, planning, Board, and finite runs
 
 The V2 request and event flow is:
 
@@ -46,7 +46,7 @@ The V2 request and event flow is:
 v2-web action
   -> v2-contracts request schema
   -> v2-server /api/v2 route
-  -> project, profile, execution, or planning service
+  -> project, profile, execution, planning, or execution-run service
   -> V2 SQLite repository transaction
   -> persisted V2 event
   -> WebSocket publication
@@ -97,12 +97,32 @@ attempt, execution, runtime event, digest, and frozen task identity. Their
 acceptance and the resulting attempt, task, Board, command-result, and audit
 events settle atomically.
 
+M5 adds one finite `ExecutionRun` over an explicit dependency-closed task set.
+The run freezes the approved plan, task and requirement revisions, exact
+Developer profile per task, repository base, and a confirmed concurrency limit
+from one through four. `ExecutionRunService` is the sole scheduling authority:
+it uses the M3 readiness projection, persists `launch_pending` before effects,
+and starts work only through M4's private Developer boundary. Both
+`launch_pending` and active items occupy capacity. Every run transition and its
+complete `execution_run.changed` audit event commit before publication or the
+next launch.
+
+Pause prevents new launches and remains reversible. Resume revalidates the
+frozen project, plan, task, profile, and repository authority before scheduling.
+Stop is irreversible: waiting work becomes `not_started`, while already-active
+Developer attempts drain without interruption. Task-local failures release
+their slot so independent work can continue; ambiguous project or recovery
+evidence pauses the run for attention. The Board displays server-projected run
+items and sends controls, but never schedules or completes work.
+
 V2 startup first reconciles generic executions, then unreceipted Developer
-output and claimed Developer workspaces and attempts, planning state, recovery
-publication, and recovered-session attachment. It drains claimed starts,
-pending activations, and pending interruptions before accepting commands. M4
-uses deterministic fake Developer scenarios for acceptance; project scheduling
-and concurrency remain M5 work, and M6 is not implemented by this milestone.
+output and claimed Developer workspaces and attempts, planning state, and finite
+runs before publishing the recovery window. It then attaches recovered sessions
+and drains claimed starts, activations, interruptions, and runnable run items
+before accepting commands. Deterministic fake acceptance proves parallel waves,
+pause across restart, exact-once dependent launch, and Stop/drain. M5 does not
+perform QA, integrate or merge workspaces, complete milestones, or clean up
+worktrees; those release decisions remain M6 work.
 
 ### Established V1 project workflow
 
