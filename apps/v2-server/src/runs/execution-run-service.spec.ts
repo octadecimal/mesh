@@ -416,6 +416,9 @@ describe('ExecutionRunService', () => {
   it('does not persist Start when the audit barrier trips during inspection', async () => {
     const context = setup();
     const idempotencyKey = randomUUID();
+    const domainCursor = context.fixture.events.cursors(
+      context.fixture.project.id,
+    ).domain;
     const inspection = context.deferInspection();
     const pending = context.start(context.taskIds, idempotencyKey);
     await inspection.started;
@@ -428,6 +431,9 @@ describe('ExecutionRunService', () => {
     });
     expect(context.fixture.commands.find(idempotencyKey)).toBeUndefined();
     expect(context.runs.nonterminal()).toEqual([]);
+    expect(
+      context.fixture.events.cursors(context.fixture.project.id).domain,
+    ).toBe(domainCursor);
     expect(context.published).toEqual([]);
   });
 
@@ -447,6 +453,9 @@ describe('ExecutionRunService', () => {
     });
     view = context.runs.nonterminal()[0];
     const publishedCount = context.published.length;
+    const domainCursor = context.fixture.events.cursors(
+      context.fixture.project.id,
+    ).domain;
     const idempotencyKey = randomUUID();
     const inspection = context.deferInspection();
     const pending = context.service.resume({
@@ -469,6 +478,9 @@ describe('ExecutionRunService', () => {
     });
     expect(context.fixture.commands.find(idempotencyKey)).toBeUndefined();
     expect(context.runs.nonterminal()[0]).toEqual(view);
+    expect(
+      context.fixture.events.cursors(context.fixture.project.id).domain,
+    ).toBe(domainCursor);
     expect(context.published).toHaveLength(publishedCount);
   });
 
