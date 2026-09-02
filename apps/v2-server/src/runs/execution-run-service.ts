@@ -157,6 +157,8 @@ export class ExecutionRunService {
       const auditFailure = this.auditFailure(input.command.type);
       if (auditFailure) return auditFailure;
       const validated = await this.validateStart(input);
+      const postValidationAuditFailure = this.auditFailure(input.command.type);
+      if (postValidationAuditFailure) return postValidationAuditFailure;
       if ('failure' in validated) {
         return this.storeFailure(input, requestHash, validated.failure);
       }
@@ -220,6 +222,7 @@ export class ExecutionRunService {
       const result = commandSuccess(input.command.type, view);
       let event: DomainEvent;
       try {
+        this.dependencies.barrier.assertHealthy();
         event = inImmediateTransaction(this.dependencies.database, () => {
           this.dependencies.runs.createInTransaction(view);
           this.dependencies.commands.storeInTransaction({
@@ -546,6 +549,10 @@ export class ExecutionRunService {
       }
       if (target === 'running') {
         const failure = await this.validateResume(current);
+        const postValidationAuditFailure = this.auditFailure(
+          input.command.type,
+        );
+        if (postValidationAuditFailure) return postValidationAuditFailure;
         if (failure) return this.storeFailure(input, requestHash, failure);
       }
       const timestamp = this.dependencies.now();
@@ -582,6 +589,8 @@ export class ExecutionRunService {
         items,
       });
       const result = commandSuccess(input.command.type, next);
+      const persistenceAuditFailure = this.auditFailure(input.command.type);
+      if (persistenceAuditFailure) return persistenceAuditFailure;
       const event = this.storeTransition(
         current,
         next,
@@ -951,6 +960,7 @@ export class ExecutionRunService {
     result?: V2CommandResult,
   ): DomainEvent {
     try {
+      this.dependencies.barrier.assertHealthy();
       return inImmediateTransaction(this.dependencies.database, () => {
         this.dependencies.runs.replaceInTransaction(next, current.run.revision);
         if (command && requestHash && result) {
@@ -975,6 +985,8 @@ export class ExecutionRunService {
     requestHash: string,
     result: V2CommandResult,
   ): V2CommandResult {
+    const auditFailure = this.auditFailure(input.command.type);
+    if (auditFailure) return auditFailure;
     try {
       inImmediateTransaction(this.dependencies.database, () => {
         this.dependencies.commands.storeInTransaction({

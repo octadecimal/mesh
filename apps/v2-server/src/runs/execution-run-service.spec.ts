@@ -121,6 +121,7 @@ const setup = () => {
   const views: ExecutionRunView[] = [];
   let boardHidesTasks = false;
   let barrierHealthy = true;
+  let inspection: { started(): void; wait: Promise<void> } | undefined;
   const runs = {
     view: (runId: string) => views.find(({ run }) => run.id === runId),
     listForProject: (projectId: string) =>
@@ -189,10 +190,14 @@ const setup = () => {
       },
       attempt: (attemptId) => attempts.get(attemptId),
     },
-    inspectProject: async () => ({
-      repositoryIdentity: fixture.project.repositoryIdentity,
-      headCommit: fixture.project.headCommit,
-    }),
+    inspectProject: async () => {
+      inspection?.started();
+      await inspection?.wait;
+      return {
+        repositoryIdentity: fixture.project.repositoryIdentity,
+        headCommit: fixture.project.headCommit,
+      };
+    },
     barrier: {
       assertHealthy: () => {
         if (!barrierHealthy) throw new Error('Audit barrier tripped');
@@ -244,6 +249,20 @@ const setup = () => {
     },
     tripBarrier: () => {
       barrierHealthy = false;
+    },
+    deferInspection: () => {
+      let release!: () => void;
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      inspection = {
+        started: markStarted,
+        wait: new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      };
+      return { started, release };
     },
     start,
     complete,
@@ -392,6 +411,65 @@ describe('ExecutionRunService', () => {
       error: { code: 'audit_barrier_tripped' },
     });
     expect(context.fixture.commands.find(idempotencyKey)).toBeUndefined();
+  });
+
+  it('does not persist Start when the audit barrier trips during inspection', async () => {
+    const context = setup();
+    const idempotencyKey = randomUUID();
+    const inspection = context.deferInspection();
+    const pending = context.start(context.taskIds, idempotencyKey);
+    await inspection.started;
+    context.tripBarrier();
+    inspection.release();
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'audit_barrier_tripped' },
+    });
+    expect(context.fixture.commands.find(idempotencyKey)).toBeUndefined();
+    expect(context.runs.nonterminal()).toEqual([]);
+    expect(context.published).toEqual([]);
+  });
+
+  it('does not persist Resume when the audit barrier trips during inspection', async () => {
+    const context = setup();
+    await context.start();
+    let view = context.runs.nonterminal()[0];
+    await context.service.pause({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'execution_run.pause',
+        projectId: context.fixture.project.id,
+        runId: view.run.id,
+        expectedRunRevision: view.run.revision,
+      },
+    });
+    view = context.runs.nonterminal()[0];
+    const publishedCount = context.published.length;
+    const idempotencyKey = randomUUID();
+    const inspection = context.deferInspection();
+    const pending = context.service.resume({
+      idempotencyKey,
+      actor: { kind: 'human' },
+      command: {
+        type: 'execution_run.resume',
+        projectId: context.fixture.project.id,
+        runId: view.run.id,
+        expectedRunRevision: view.run.revision,
+      },
+    });
+    await inspection.started;
+    context.tripBarrier();
+    inspection.release();
+
+    await expect(pending).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'audit_barrier_tripped' },
+    });
+    expect(context.fixture.commands.find(idempotencyKey)).toBeUndefined();
+    expect(context.runs.nonterminal()[0]).toEqual(view);
+    expect(context.published).toHaveLength(publishedCount);
   });
 
   it('settles active work without launching another wave after quiescing', async () => {
