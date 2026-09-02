@@ -4,6 +4,7 @@ import {
   deliveryPlanIdSchema,
   deliveryPlanProposalIdSchema,
   developerAttemptIdSchema,
+  executionRunIdSchema,
   ledgerIdSchema,
   nonNegativeIntegerSchema,
   planningCycleIdSchema,
@@ -35,6 +36,10 @@ export const v2CommandTypeSchema = z.enum([
   'developer_attempt.start',
   'developer_attempt.interrupt',
   'developer_attempt.replace_execution',
+  'execution_run.start',
+  'execution_run.pause',
+  'execution_run.resume',
+  'execution_run.stop',
 ]);
 export type V2CommandType = z.infer<typeof v2CommandTypeSchema>;
 
@@ -281,6 +286,69 @@ export type StartDeveloperAttemptCommand = z.infer<
   typeof startDeveloperAttemptCommandSchema
 >;
 
+export const executionRunSelectionSchema = z.strictObject({
+  taskId: taskIdSchema,
+  expectedTaskRevision: positiveIntegerSchema,
+  profileId: workerProfileIdSchema,
+  profileRevision: positiveIntegerSchema,
+});
+export type ExecutionRunSelection = z.infer<typeof executionRunSelectionSchema>;
+
+export const startExecutionRunCommandSchema = z
+  .strictObject({
+    type: z.literal('execution_run.start'),
+    projectId: projectIdSchema,
+    expectedDeliveryPlanId: deliveryPlanIdSchema,
+    expectedDeliveryPlanRevision: positiveIntegerSchema,
+    expectedBoardFilterRevision: positiveIntegerSchema,
+    selections: z.array(executionRunSelectionSchema).min(1).max(300).readonly(),
+    concurrencyLimit: positiveIntegerSchema.max(4),
+    subscriptionCapacityConfirmed: z.literal(true),
+  })
+  .superRefine((value, context) => {
+    const taskIds = value.selections.map(({ taskId }) => taskId);
+    if (new Set(taskIds).size !== taskIds.length) {
+      context.addIssue({
+        code: 'custom',
+        path: ['selections'],
+        message: 'Execution run task selections must be unique',
+      });
+    }
+  });
+export type StartExecutionRunCommand = z.infer<
+  typeof startExecutionRunCommandSchema
+>;
+
+const executionRunControlShape = {
+  projectId: projectIdSchema,
+  runId: executionRunIdSchema,
+  expectedRunRevision: positiveIntegerSchema,
+};
+
+export const pauseExecutionRunCommandSchema = z.strictObject({
+  type: z.literal('execution_run.pause'),
+  ...executionRunControlShape,
+});
+export type PauseExecutionRunCommand = z.infer<
+  typeof pauseExecutionRunCommandSchema
+>;
+
+export const resumeExecutionRunCommandSchema = z.strictObject({
+  type: z.literal('execution_run.resume'),
+  ...executionRunControlShape,
+});
+export type ResumeExecutionRunCommand = z.infer<
+  typeof resumeExecutionRunCommandSchema
+>;
+
+export const stopExecutionRunCommandSchema = z.strictObject({
+  type: z.literal('execution_run.stop'),
+  ...executionRunControlShape,
+});
+export type StopExecutionRunCommand = z.infer<
+  typeof stopExecutionRunCommandSchema
+>;
+
 const developerAttemptMutationShape = {
   projectId: projectIdSchema,
   attemptId: developerAttemptIdSchema,
@@ -319,6 +387,10 @@ export const v2CommandSchema = z.union([
   startDeveloperAttemptCommandSchema,
   interruptDeveloperAttemptCommandSchema,
   replaceDeveloperAttemptExecutionCommandSchema,
+  startExecutionRunCommandSchema,
+  pauseExecutionRunCommandSchema,
+  resumeExecutionRunCommandSchema,
+  stopExecutionRunCommandSchema,
 ]);
 export type V2Command = z.infer<typeof v2CommandSchema>;
 
@@ -387,6 +459,22 @@ export const setBoardFilterEnvelopeSchema = z.strictObject({
   ...v2CommandEnvelopeBase,
   command: setBoardFilterCommandSchema,
 });
+export const startExecutionRunEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: startExecutionRunCommandSchema,
+});
+export const pauseExecutionRunEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: pauseExecutionRunCommandSchema,
+});
+export const resumeExecutionRunEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: resumeExecutionRunCommandSchema,
+});
+export const stopExecutionRunEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: stopExecutionRunCommandSchema,
+});
 
 export const v2CommandEnvelopeSchema = z.union([
   projectRegisterEnvelopeSchema,
@@ -404,6 +492,10 @@ export const v2CommandEnvelopeSchema = z.union([
   approvePlanProposalEnvelopeSchema,
   rejectPlanProposalEnvelopeSchema,
   setBoardFilterEnvelopeSchema,
+  startExecutionRunEnvelopeSchema,
+  pauseExecutionRunEnvelopeSchema,
+  resumeExecutionRunEnvelopeSchema,
+  stopExecutionRunEnvelopeSchema,
 ]);
 export type V2CommandEnvelope = z.infer<typeof v2CommandEnvelopeSchema>;
 
@@ -442,4 +534,16 @@ export type RejectPlanProposalEnvelope = V2CommandEnvelope & {
 };
 export type SetBoardFilterEnvelope = V2CommandEnvelope & {
   command: Extract<V2Command, { type: 'board_filter.set' }>;
+};
+export type StartExecutionRunEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'execution_run.start' }>;
+};
+export type PauseExecutionRunEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'execution_run.pause' }>;
+};
+export type ResumeExecutionRunEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'execution_run.resume' }>;
+};
+export type StopExecutionRunEnvelope = V2CommandEnvelope & {
+  command: Extract<V2Command, { type: 'execution_run.stop' }>;
 };

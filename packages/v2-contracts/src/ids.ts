@@ -66,6 +66,12 @@ export type DeveloperAttemptId = z.infer<typeof developerAttemptIdSchema>;
 export const developerReportIdSchema = brandedUuid<'DeveloperReportId'>();
 export type DeveloperReportId = z.infer<typeof developerReportIdSchema>;
 
+export const executionRunIdSchema = brandedUuid<'ExecutionRunId'>();
+export type ExecutionRunId = z.infer<typeof executionRunIdSchema>;
+
+export const executionRunItemIdSchema = brandedUuid<'ExecutionRunItemId'>();
+export type ExecutionRunItemId = z.infer<typeof executionRunItemIdSchema>;
+
 export const isoTimestampSchema = z.string().datetime({ offset: true });
 export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;
 

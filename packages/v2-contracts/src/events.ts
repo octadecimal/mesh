@@ -30,6 +30,11 @@ import {
   developerAttemptSchema,
   developerReportRecordSchema,
 } from './developer-attempts';
+import {
+  executionRunItemSchema,
+  executionRunSchema,
+  executionRunViewSchema,
+} from './execution-runs';
 
 const domainEventBase = {
   projectId: projectIdSchema,
@@ -258,6 +263,18 @@ export const developerReportRecordedDraftSchema = z.strictObject({
 export type DeveloperReportRecordedDomainEventDraft = z.infer<
   typeof developerReportRecordedDraftSchema
 >;
+export const executionRunChangedDraftSchema = z.strictObject({
+  ...domainEventBase,
+  type: z.literal('execution_run.changed'),
+  payload: z.strictObject({
+    schemaVersion: z.literal(1),
+    run: executionRunSchema,
+    items: z.array(executionRunItemSchema).min(1).max(300).readonly(),
+  }),
+});
+export type ExecutionRunChangedDomainEventDraft = z.infer<
+  typeof executionRunChangedDraftSchema
+>;
 
 const requireDomainEventProjectCoherence = (
   value:
@@ -271,7 +288,8 @@ const requireDomainEventProjectCoherence = (
     | z.infer<typeof taskLifecycleChangedDraftSchema>
     | z.infer<typeof developerAttemptChangedDraftSchema>
     | z.infer<typeof developerWorkspaceChangedDraftSchema>
-    | z.infer<typeof developerReportRecordedDraftSchema>,
+    | z.infer<typeof developerReportRecordedDraftSchema>
+    | z.infer<typeof executionRunChangedDraftSchema>,
   context: z.RefinementCtx,
 ) => {
   const embeddedProjectId =
@@ -287,11 +305,13 @@ const requireDomainEventProjectCoherence = (
             ? value.payload.planningCycle.cycle.projectId
             : value.type === 'board.filter_changed'
               ? value.payload.board.projectId
-              : value.type === 'developer_attempt.changed' ||
-                  value.type === 'developer_workspace.changed' ||
-                  value.type === 'developer_report.recorded'
-                ? value.payload.attempt.projectId
-                : value.payload.task.projectId;
+              : value.type === 'execution_run.changed'
+                ? value.payload.run.projectId
+                : value.type === 'developer_attempt.changed' ||
+                    value.type === 'developer_workspace.changed' ||
+                    value.type === 'developer_report.recorded'
+                  ? value.payload.attempt.projectId
+                  : value.payload.task.projectId;
   if (embeddedProjectId !== value.projectId) {
     context.addIssue({
       code: 'custom',
@@ -324,6 +344,19 @@ const requireDomainEventProjectCoherence = (
       message: 'Board must match the domain event project',
     });
   }
+  if (value.type === 'execution_run.changed') {
+    const parsed = executionRunViewSchema.safeParse({
+      run: value.payload.run,
+      items: value.payload.items,
+    });
+    if (!parsed.success) {
+      context.addIssue({
+        code: 'custom',
+        path: ['payload'],
+        message: 'Execution run event must contain one coherent aggregate',
+      });
+    }
+  }
 };
 
 export const domainEventDraftSchema = z
@@ -339,6 +372,7 @@ export const domainEventDraftSchema = z
     developerAttemptChangedDraftSchema,
     developerWorkspaceChangedDraftSchema,
     developerReportRecordedDraftSchema,
+    executionRunChangedDraftSchema,
   ])
   .superRefine(requireDomainEventProjectCoherence);
 export type DomainEventDraft = z.infer<typeof domainEventDraftSchema>;
@@ -386,6 +420,10 @@ export const domainEventSchema = z
       sequence: nonNegativeIntegerSchema,
     }),
     developerReportRecordedDraftSchema.extend({
+      id: domainEventIdSchema,
+      sequence: nonNegativeIntegerSchema,
+    }),
+    executionRunChangedDraftSchema.extend({
       id: domainEventIdSchema,
       sequence: nonNegativeIntegerSchema,
     }),

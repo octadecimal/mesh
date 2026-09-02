@@ -4,6 +4,7 @@ export * from './delivery-plan';
 export * from './developer-attempts';
 export * from './events';
 export * from './executions';
+export * from './execution-runs';
 export * from './http';
 export * from './ids';
 export * from './intent';
