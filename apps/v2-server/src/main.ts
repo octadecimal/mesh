@@ -287,6 +287,21 @@ export const startV2Server = async (
     const developers = new DeveloperRepository(database);
     const runRepository = new ExecutionRunRepository(database);
     const runObserver: { current?: ExecutionRunService } = {};
+    const runNotifications = new Set<Promise<void>>();
+    const notifyRun = (attemptId: string) => {
+      const service = runObserver.current;
+      if (!service) return;
+      const notification = service
+        .developerAttemptChanged(attemptId)
+        .catch((error) => barrier.trip(error, new Date().toISOString()));
+      runNotifications.add(notification);
+      void notification.finally(() => runNotifications.delete(notification));
+    };
+    const drainRunNotifications = async () => {
+      while (runNotifications.size > 0) {
+        await Promise.all([...runNotifications]);
+      }
+    };
     const billingConflicts =
       environment.ANTHROPIC_API_KEY === undefined ||
       environment.ANTHROPIC_API_KEY.length === 0
@@ -368,9 +383,7 @@ export const startV2Server = async (
             event.type === 'developer_workspace.changed' ||
             event.type === 'developer_report.recorded'
           ) {
-            void runObserver.current
-              ?.developerAttemptChanged(event.payload.attempt.id)
-              .catch((error) => barrier.trip(error, new Date().toISOString()));
+            notifyRun(event.payload.attempt.id);
           }
         }
       },
@@ -516,10 +529,14 @@ export const startV2Server = async (
           accepting = false;
           hub?.close();
           await app?.close();
+          await executionRuns?.quiesce();
           fakeHold.release();
-          await executionRuns?.drain();
           await runtime?.drain();
+          await drainRunNotifications();
+          await executionRuns?.drain();
           await runtime?.close();
+          await drainRunNotifications();
+          await executionRuns?.drain();
           database?.close();
         })();
         return closePromise;

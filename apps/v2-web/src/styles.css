@@ -214,6 +214,18 @@ button:disabled {
   flex-wrap: wrap;
   gap: 0.5rem;
 }
+.execution-run-items,
+.execution-run-history {
+  display: grid;
+  gap: 0.5rem;
+}
+.execution-run-items > li {
+  border-left: 2px solid #334155;
+  padding-left: 0.75rem;
+}
+.execution-run-items p {
+  margin: 0;
+}
 .v2-execution dt {
   color: #a5b4cc;
   font-size: 0.8rem;

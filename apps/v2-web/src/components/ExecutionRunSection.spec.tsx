@@ -51,6 +51,10 @@ const deliveryPlan = {
     id: '55555555-5555-4555-8555-555555555555',
     revision: 2,
   },
+  taskContracts: [
+    { id: firstTaskId, title: 'Build API' },
+    { id: secondTaskId, title: 'Connect UI' },
+  ],
 } as ApprovedDeliveryPlan;
 
 const profile = {
@@ -74,12 +78,29 @@ const run = {
       launchPending: 0,
       active: 1,
       completed: 0,
-      attentionRequired: 1,
+      attentionRequired: 0,
       notStarted: 0,
     },
     attention: { code: 'task_failed', message: 'API task needs attention.' },
   },
-  items: [],
+  items: [
+    {
+      id: '77777777-7777-4777-8777-777777777777',
+      taskId: firstTaskId,
+      lifecycle: 'active',
+      prerequisiteTaskIds: [],
+      developerAttemptId: '88888888-8888-4888-8888-888888888888',
+      attention: null,
+    },
+    {
+      id: '99999999-9999-4999-8999-999999999999',
+      taskId: secondTaskId,
+      lifecycle: 'waiting',
+      prerequisiteTaskIds: [firstTaskId],
+      developerAttemptId: null,
+      attention: null,
+    },
+  ],
 } as unknown as ExecutionRunView;
 
 describe('ExecutionRunSection', () => {
@@ -132,7 +153,7 @@ describe('ExecutionRunSection', () => {
     });
   });
 
-  it('shows lifecycle counts and confirms Stop before sending it', async () => {
+  it('shows capacity, ordered item evidence, and confirms Stop before sending it', async () => {
     const user = userEvent.setup();
     const onCommand = vi.fn();
     render(
@@ -148,8 +169,25 @@ describe('ExecutionRunSection', () => {
     );
 
     expect(
-      screen.getByText(/1 active · 1 waiting · 1 attention required/),
+      screen.getByText(/1 active · 1 waiting · 0 attention required/),
     ).toBeVisible();
+    expect(screen.getByText('1 of 2 workers occupied')).toBeVisible();
+    expect(screen.getByText('0 launch pending · 0 not started')).toBeVisible();
+    const items = screen.getAllByRole('listitem');
+    expect(items[0]).toHaveTextContent('Build API · active');
+    expect(items[0]).toHaveTextContent('Developer attempt');
+    expect(items[1]).toHaveTextContent('Connect UI · waiting');
+    expect(items[1]).toHaveTextContent('Waiting for Build API');
+    expect(screen.getByRole('link', { name: 'Build API' })).toHaveAttribute(
+      'href',
+      `#board-task-${firstTaskId}`,
+    );
+    expect(
+      screen.getByRole('link', { name: 'Developer attempt' }),
+    ).toHaveAttribute(
+      'href',
+      '#developer-attempt-88888888-8888-4888-8888-888888888888',
+    );
     expect(screen.getByRole('alert')).toHaveTextContent(
       'API task needs attention.',
     );
@@ -168,6 +206,55 @@ describe('ExecutionRunSection', () => {
         type: 'execution_run.stop',
         expectedRunRevision: 5,
       }),
+    );
+  });
+
+  it('retains completed run history with terminal item outcomes', () => {
+    const completed = {
+      ...run,
+      run: {
+        ...run.run,
+        lifecycle: 'completed',
+        completionReason: 'stopped',
+        counts: {
+          waiting: 0,
+          launchPending: 0,
+          active: 0,
+          completed: 1,
+          attentionRequired: 0,
+          notStarted: 1,
+        },
+      },
+      items: [
+        { ...run.items[0], lifecycle: 'completed' },
+        {
+          ...run.items[1],
+          lifecycle: 'not_started',
+          prerequisiteTaskIds: [],
+        },
+      ],
+    } as ExecutionRunView;
+
+    render(
+      <ExecutionRunSection
+        board={board}
+        deliveryPlan={deliveryPlan}
+        profiles={[profile]}
+        runs={[completed]}
+        connectionReady
+        submitting={false}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole('heading', { name: 'Completed runs' }),
+    ).toBeVisible();
+    expect(
+      screen.getByText(/stopped · 1 completed · 1 not started/),
+    ).toBeVisible();
+    expect(screen.getAllByRole('listitem')[1]).toHaveTextContent(
+      'Connect UI · not started',
     );
   });
 });

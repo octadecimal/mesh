@@ -702,6 +702,31 @@ describe('PlanningRepository', () => {
     ]);
   });
 
+  it('returns execution authority independently of the Board filter', () => {
+    const { fixture, repository } = setup();
+    const { taskId } = approveTestDeliveryPlan(fixture, repository);
+    const filter = repository.boardFilter(fixture.project.id)!;
+    inImmediateTransaction(fixture.database, () =>
+      repository.replaceBoardFilterInTransaction(
+        {
+          ...filter,
+          revision: 2,
+          readiness: ['blocked'],
+          updatedAt: '2026-08-29T00:00:01.000Z',
+        },
+        1,
+      ),
+    );
+
+    expect(
+      repository.taskExecutionAuthority(fixture.project.id, taskId),
+    ).toBeUndefined();
+    expect(
+      repository.taskExecutionAuthorityUnfiltered(fixture.project.id, taskId)
+        ?.card.readiness,
+    ).toEqual({ state: 'actionable', blockers: [] });
+  });
+
   it('persists purpose-aware delivery proposals and reservations without canonical state', () => {
     const { fixture, repository } = setup();
     const { proposal, value, milestoneId, taskId } =

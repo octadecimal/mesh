@@ -36,6 +36,7 @@ export function ExecutionRunSection({
   onCommand(command: ExecutionRunCommand): void;
 }) {
   const activeRun = runs.find(({ run }) => run.lifecycle !== 'completed');
+  const completedRuns = runs.filter(({ run }) => run.lifecycle === 'completed');
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [profileByTask, setProfileByTask] = useState<
     Readonly<Record<string, string>>
@@ -98,6 +99,46 @@ export function ExecutionRunSection({
       expectedRunRevision: activeRun.run.revision,
     });
   };
+  const taskTitle = (taskId: string) =>
+    deliveryPlan?.taskContracts.find(({ id }) => id === taskId)?.title ??
+    board.cards.find(({ taskId: id }) => id === taskId)?.title ??
+    taskId;
+  const runItems = (view: ExecutionRunView, label: string) => (
+    <ol aria-label={label} className="execution-run-items">
+      {view.items.map((item) => {
+        const cardVisible = board.cards.some(
+          ({ taskId }) => taskId === item.taskId,
+        );
+        return (
+          <li key={item.id}>
+            <p>
+              {cardVisible ? (
+                <a href={`#board-task-${item.taskId}`}>
+                  {taskTitle(item.taskId)}
+                </a>
+              ) : (
+                taskTitle(item.taskId)
+              )}{' '}
+              · {item.lifecycle.replace(/_/g, ' ')}
+            </p>
+            {item.lifecycle === 'waiting' ? (
+              <p>
+                Waiting for{' '}
+                {item.prerequisiteTaskIds.map(taskTitle).join(', ') ||
+                  'prerequisites'}
+              </p>
+            ) : null}
+            {item.developerAttemptId ? (
+              <a href={`#developer-attempt-${item.developerAttemptId}`}>
+                Developer attempt
+              </a>
+            ) : null}
+            {item.attention ? <p>{item.attention.message}</p> : null}
+          </li>
+        );
+      })}
+    </ol>
+  );
 
   return (
     <section
@@ -115,6 +156,15 @@ export function ExecutionRunSection({
             {activeRun.run.counts.attentionRequired} attention required ·{' '}
             {activeRun.run.counts.completed} completed
           </p>
+          <p>
+            {activeRun.run.counts.launchPending + activeRun.run.counts.active}{' '}
+            of {activeRun.run.concurrencyLimit} workers occupied
+          </p>
+          <p>
+            {activeRun.run.counts.launchPending} launch pending ·{' '}
+            {activeRun.run.counts.notStarted} not started
+          </p>
+          {runItems(activeRun, 'Run items')}
           {activeRun.run.attention ? (
             <p role="alert">{activeRun.run.attention.message}</p>
           ) : null}
@@ -277,6 +327,20 @@ export function ExecutionRunSection({
       ) : (
         <p>A current approved delivery plan is required.</p>
       )}
+      {completedRuns.length > 0 ? (
+        <section aria-labelledby="completed-runs-heading">
+          <h4 id="completed-runs-heading">Completed runs</h4>
+          {completedRuns.map((view) => (
+            <article key={view.run.id} className="execution-run-history">
+              <p>
+                {view.run.completionReason} · {view.run.counts.completed}{' '}
+                completed · {view.run.counts.notStarted} not started
+              </p>
+              {runItems(view, `Items for completed run ${view.run.id}`)}
+            </article>
+          ))}
+        </section>
+      ) : null}
     </section>
   );
 }

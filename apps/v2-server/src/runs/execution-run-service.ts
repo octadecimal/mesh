@@ -64,6 +64,10 @@ type Dependencies = {
       projectId: string,
       taskId: string,
     ): TaskExecutionAuthority | undefined;
+    taskExecutionAuthorityUnfiltered(
+      projectId: string,
+      taskId: string,
+    ): TaskExecutionAuthority | undefined;
   };
   profiles: {
     resolveApproved(
@@ -131,6 +135,7 @@ const terminalAttempt = (attempt: DeveloperAttempt) => {
 
 export class ExecutionRunService {
   private readonly projectTails = new Map<string, Promise<void>>();
+  private launchesEnabled = true;
 
   constructor(private readonly dependencies: Dependencies) {}
 
@@ -149,6 +154,8 @@ export class ExecutionRunService {
       const requestHash = hashV2Command(input.command);
       const replay = this.replay(input, requestHash);
       if (replay) return replay;
+      const auditFailure = this.auditFailure(input.command.type);
+      if (auditFailure) return auditFailure;
       const validated = await this.validateStart(input);
       if ('failure' in validated) {
         return this.storeFailure(input, requestHash, validated.failure);
@@ -281,7 +288,7 @@ export class ExecutionRunService {
     await this.inProjectOrder(match.run.projectId, async () => {
       await this.settleAttemptLocked(match.run.id, attemptId);
       const current = this.dependencies.runs.view(match.run.id);
-      if (current?.run.lifecycle === 'running') {
+      if (this.launchesEnabled && current?.run.lifecycle === 'running') {
         await this.drainLocked(match.run.id);
       }
     });
@@ -324,6 +331,11 @@ export class ExecutionRunService {
     await Promise.all(this.projectTails.values());
   }
 
+  async quiesce(): Promise<void> {
+    this.launchesEnabled = false;
+    await this.drain();
+  }
+
   private async validateStart(input: StartExecutionRunEnvelope): Promise<
     | {
         project: Project;
@@ -334,17 +346,6 @@ export class ExecutionRunService {
       }
     | { failure: V2CommandResult }
   > {
-    try {
-      this.dependencies.barrier.assertHealthy();
-    } catch (error) {
-      return {
-        failure: commandFailure(
-          input.command.type,
-          error instanceof Error ? error.message : 'Audit barrier tripped',
-          'audit_barrier_tripped',
-        ),
-      };
-    }
     if (this.dependencies.billingConflicts.length > 0) {
       return {
         failure: commandFailure(
@@ -502,6 +503,8 @@ export class ExecutionRunService {
       const requestHash = hashV2Command(input.command);
       const replay = this.replay(input, requestHash);
       if (replay) return replay;
+      const auditFailure = this.auditFailure(input.command.type);
+      if (auditFailure) return auditFailure;
       let current = this.dependencies.runs.view(input.command.runId);
       if (!current || current.run.projectId !== input.command.projectId) {
         return this.storeFailure(
@@ -596,15 +599,6 @@ export class ExecutionRunService {
   private async validateResume(
     view: ExecutionRunView,
   ): Promise<V2CommandResult | undefined> {
-    try {
-      this.dependencies.barrier.assertHealthy();
-    } catch (error) {
-      return commandFailure(
-        'execution_run.resume',
-        error instanceof Error ? error.message : 'Audit barrier tripped',
-        'audit_barrier_tripped',
-      );
-    }
     if (this.dependencies.billingConflicts.length > 0) {
       return commandFailure(
         'execution_run.resume',
@@ -653,8 +647,24 @@ export class ExecutionRunService {
     return undefined;
   }
 
+  private auditFailure(
+    commandType: RunEnvelope['command']['type'],
+  ): V2CommandResult | undefined {
+    try {
+      this.dependencies.barrier.assertHealthy();
+      return undefined;
+    } catch (error) {
+      return commandFailure(
+        commandType,
+        error instanceof Error ? error.message : 'Audit barrier tripped',
+        'audit_barrier_tripped',
+      );
+    }
+  }
+
   private async drainLocked(runId: string): Promise<void> {
     while (true) {
+      if (!this.launchesEnabled) return;
       const current = this.dependencies.runs.view(runId);
       if (!current || current.run.lifecycle !== 'running') return;
       const impossible = current.items.find(
@@ -694,10 +704,11 @@ export class ExecutionRunService {
         await this.finalizeIfDone(runId);
         return;
       }
-      const authority = this.dependencies.planning.taskExecutionAuthority(
-        candidate.projectId,
-        candidate.taskId,
-      );
+      const authority =
+        this.dependencies.planning.taskExecutionAuthorityUnfiltered(
+          candidate.projectId,
+          candidate.taskId,
+        );
       if (
         !authority ||
         authority.task.revision !== candidate.taskCurrentRevision ||

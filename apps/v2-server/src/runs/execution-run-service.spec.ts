@@ -119,6 +119,8 @@ const setup = () => {
   const launches: string[] = [];
   const published: unknown[] = [];
   const views: ExecutionRunView[] = [];
+  let boardHidesTasks = false;
+  let barrierHealthy = true;
   const runs = {
     view: (runId: string) => views.find(({ run }) => run.id === runId),
     listForProject: (projectId: string) =>
@@ -147,9 +149,18 @@ const setup = () => {
     commands: fixture.commands,
     events: fixture.events,
     projects: { get: () => fixture.project },
-    planning: {
-      taskExecutionAuthority: (_projectId, taskId) => authorities.get(taskId),
-    },
+    planning: Object.assign(
+      {
+        taskExecutionAuthority: (_projectId: string, taskId: string) =>
+          boardHidesTasks ? undefined : authorities.get(taskId),
+      },
+      {
+        taskExecutionAuthorityUnfiltered: (
+          _projectId: string,
+          taskId: string,
+        ) => authorities.get(taskId),
+      },
+    ),
     profiles: {
       resolveApproved: (profileId, revision) => {
         if (profileId !== profile.profileId || revision !== 1)
@@ -182,14 +193,19 @@ const setup = () => {
       repositoryIdentity: fixture.project.repositoryIdentity,
       headCommit: fixture.project.headCommit,
     }),
-    barrier: { assertHealthy: () => undefined, trip: () => undefined },
+    barrier: {
+      assertHealthy: () => {
+        if (!barrierHealthy) throw new Error('Audit barrier tripped');
+      },
+      trip: () => undefined,
+    },
     billingConflicts: [],
     now: () => now,
     publishDomain: (event) => published.push(event),
   });
-  const start = (selectedTaskIds = taskIds) =>
+  const start = (selectedTaskIds = taskIds, idempotencyKey = randomUUID()) =>
     service.start({
-      idempotencyKey: randomUUID(),
+      idempotencyKey,
       actor: { kind: 'human' },
       command: {
         type: 'execution_run.start',
@@ -223,6 +239,12 @@ const setup = () => {
     attempts,
     launches,
     published,
+    hideTasksOnBoard: () => {
+      boardHidesTasks = true;
+    },
+    tripBarrier: () => {
+      barrierHealthy = false;
+    },
     start,
     complete,
   };
@@ -295,6 +317,109 @@ describe('ExecutionRunService', () => {
       counts: { completed: 3 },
     });
     expect(context.published.length).toBeGreaterThan(0);
+  });
+
+  it('keeps scheduling frozen items when the Board filter hides them', async () => {
+    const context = setup();
+    await context.start();
+    let view = context.runs.nonterminal()[0];
+    const dependent = context.authorities.get(context.taskIds[2])!;
+    context.authorities.set(context.taskIds[2], {
+      ...dependent,
+      card: {
+        ...dependent.card,
+        readiness: { state: 'actionable', blockers: [] },
+      },
+    });
+    context.hideTasksOnBoard();
+
+    await context.complete(view.items[0].developerAttemptId!);
+    view = context.runs.nonterminal()[0];
+    await context.complete(view.items[1].developerAttemptId!);
+
+    expect(context.launches).toEqual(context.taskIds);
+  });
+
+  it('replays controls but rejects new mutations after the audit barrier trips', async () => {
+    const context = setup();
+    await context.start();
+    let view = context.runs.nonterminal()[0];
+    const pause = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' as const },
+      command: {
+        type: 'execution_run.pause' as const,
+        projectId: context.fixture.project.id,
+        runId: view.run.id,
+        expectedRunRevision: view.run.revision,
+      },
+    };
+    const paused = await context.service.pause(pause);
+    context.tripBarrier();
+
+    await expect(context.service.pause(pause)).resolves.toEqual(paused);
+    view = context.runs.nonterminal()[0];
+    const stopped = await context.service.stop({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'execution_run.stop',
+        projectId: context.fixture.project.id,
+        runId: view.run.id,
+        expectedRunRevision: view.run.revision,
+      },
+    });
+
+    expect(stopped).toMatchObject({
+      ok: false,
+      error: { code: 'audit_barrier_tripped' },
+    });
+    expect(context.runs.nonterminal()[0].run).toMatchObject({
+      lifecycle: 'paused',
+      revision: view.run.revision,
+    });
+  });
+
+  it('does not persist a new Start failure after the audit barrier trips', async () => {
+    const context = setup();
+    const idempotencyKey = randomUUID();
+    context.tripBarrier();
+
+    const result = await context.start(context.taskIds, idempotencyKey);
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'audit_barrier_tripped' },
+    });
+    expect(context.fixture.commands.find(idempotencyKey)).toBeUndefined();
+  });
+
+  it('settles active work without launching another wave after quiescing', async () => {
+    const context = setup();
+    await context.start();
+    let view = context.runs.nonterminal()[0];
+    const dependent = context.authorities.get(context.taskIds[2])!;
+    context.authorities.set(context.taskIds[2], {
+      ...dependent,
+      card: {
+        ...dependent.card,
+        readiness: { state: 'actionable', blockers: [] },
+      },
+    });
+    await (
+      context.service as unknown as { quiesce?(): Promise<void> }
+    ).quiesce?.();
+
+    await context.complete(view.items[0].developerAttemptId!);
+    view = context.runs.nonterminal()[0];
+    await context.complete(view.items[1].developerAttemptId!);
+
+    expect(context.launches).toEqual(context.taskIds.slice(0, 2));
+    expect(context.runs.nonterminal()[0].run.counts).toMatchObject({
+      waiting: 1,
+      active: 0,
+      completed: 2,
+    });
   });
 
   it('rejects a selection missing unfinished prerequisites', async () => {

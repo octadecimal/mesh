@@ -396,7 +396,11 @@ export function BoardPane({
           >
             <h3 id={`board-milestone-${milestone.value}`}>{milestone.label}</h3>
             {cards.map((card) => (
-              <article key={card.taskId} className="planning-board-card">
+              <article
+                key={card.taskId}
+                id={`board-task-${card.taskId}`}
+                className="planning-board-card"
+              >
                 <h4>{card.title}</h4>
                 <p>{card.outcome}</p>
                 <p>
