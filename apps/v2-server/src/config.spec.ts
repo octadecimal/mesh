@@ -108,6 +108,32 @@ describe('loadV2ServerConfig', () => {
     );
   });
 
+  it('accepts an absolute per-task Developer hold directory only in tests', () => {
+    const holdDirectory = join(root, 'fake-developer-holds');
+    expect(
+      loadV2ServerConfig(
+        {
+          NODE_ENV: 'test',
+          MESH_V2_TEST_FAKE_DEVELOPER_HOLD_DIR: holdDirectory,
+        },
+        root,
+      ).testFakeDeveloperHoldDirectory,
+    ).toBe(holdDirectory);
+    expect(() =>
+      loadV2ServerConfig(
+        {
+          NODE_ENV: 'production',
+          MESH_V2_TEST_FAKE_DEVELOPER_HOLD_DIR: holdDirectory,
+        },
+        root,
+      ),
+    ).toThrowError(
+      expect.objectContaining<V2ConfigError>({
+        code: 'invalid_v2_test_option',
+      }),
+    );
+  });
+
   it('accepts the Todo fake PM scenario only in tests and omits it by default', () => {
     expect(loadV2ServerConfig({}, root).testFakePmScenario).toBeUndefined();
     expect(

@@ -535,9 +535,19 @@ export class PlanningRepository {
     );
   }
 
+  taskExecutionAuthorityUnfiltered(
+    projectId: string,
+    taskId: string,
+  ): TaskExecutionAuthority | undefined {
+    return inImmediateTransaction(this.database, () =>
+      this.taskExecutionAuthorityInTransaction(projectId, taskId, true),
+    );
+  }
+
   taskExecutionAuthorityInTransaction(
     projectId: string,
     taskId: string,
+    unfiltered = false,
   ): TaskExecutionAuthority | undefined {
     const row = this.database
       .prepare('SELECT * FROM projects WHERE id = ?')
@@ -566,7 +576,17 @@ export class PlanningRepository {
       intentLedger,
       deliveryPlan,
       currentTaskRevisions,
-      filter,
+      filter: unfiltered
+        ? {
+            ...filter,
+            milestoneIds: [],
+            taskLifecycles: [],
+            readiness: [],
+            priorities: [],
+            labels: [],
+            requirementRecordIds: [],
+          }
+        : filter,
     });
     const card = board.cards.find(({ taskId: id }) => id === taskId);
     if (!card) return undefined;

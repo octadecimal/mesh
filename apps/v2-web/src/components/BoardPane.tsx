@@ -4,8 +4,10 @@ import type {
   BoardFilterSelection,
   BoardTaskCard,
   BoardView,
+  ApprovedDeliveryPlan,
   DeveloperAttempt,
   DeveloperReportRecord,
+  ExecutionRunView,
   ProjectEventCursors,
   ResolvedWorkerProfileSnapshot,
   SetBoardFilterCommand,
@@ -17,6 +19,10 @@ import {
   DeveloperSection,
   type DeveloperActivityProjection,
 } from './DeveloperSection';
+import {
+  ExecutionRunSection,
+  type ExecutionRunCommand,
+} from './ExecutionRunSection';
 import type { PlanningConnection } from './PlanningPane';
 import './planning-board.css';
 
@@ -34,6 +40,14 @@ export type BoardDeveloperProjection = {
   ) => void;
   onInterrupt: (attempt: DeveloperAttempt) => void;
   onReplace: (attempt: DeveloperAttempt) => void;
+};
+
+export type BoardExecutionRunProjection = {
+  deliveryPlan: ApprovedDeliveryPlan | null;
+  runs: readonly ExecutionRunView[];
+  profiles: readonly ResolvedWorkerProfileSnapshot[];
+  error?: string;
+  onCommand(command: ExecutionRunCommand): void;
 };
 
 const emptySelection: BoardFilterSelection = {
@@ -172,6 +186,7 @@ export function BoardPane({
   error,
   onApplyFilter,
   developer,
+  executionRun,
 }: {
   board?: BoardView;
   connection: PlanningConnection;
@@ -179,6 +194,7 @@ export function BoardPane({
   error?: string;
   onApplyFilter: (command: SetBoardFilterCommand) => void;
   developer?: BoardDeveloperProjection;
+  executionRun?: BoardExecutionRunProjection;
 }) {
   const [draft, setDraft] = useState(() => selectionFrom(board));
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
@@ -278,6 +294,18 @@ export function BoardPane({
           plan {board.deliveryPlanRevision ?? 'not approved'}
         </p>
       ) : null}
+      {board && executionRun ? (
+        <ExecutionRunSection
+          board={board}
+          deliveryPlan={executionRun.deliveryPlan}
+          profiles={executionRun.profiles}
+          runs={executionRun.runs}
+          connectionReady={connection.status === 'ready'}
+          submitting={submitting}
+          error={executionRun.error}
+          onCommand={executionRun.onCommand}
+        />
+      ) : null}
       {board?.filter ? (
         <section
           aria-label="Applied Board filters"
@@ -368,13 +396,23 @@ export function BoardPane({
           >
             <h3 id={`board-milestone-${milestone.value}`}>{milestone.label}</h3>
             {cards.map((card) => (
-              <article key={card.taskId} className="planning-board-card">
+              <article
+                key={card.taskId}
+                id={`board-task-${card.taskId}`}
+                className="planning-board-card"
+              >
                 <h4>{card.title}</h4>
                 <p>{card.outcome}</p>
                 <p>
                   {card.lifecycle} · {card.priority} ·{' '}
                   {card.labels.join(' · ') || 'No labels'}
                 </p>
+                {card.executionRunItem ? (
+                  <p>
+                    Run item ·{' '}
+                    {card.executionRunItem.lifecycle.replace('_', ' ')}
+                  </p>
+                ) : null}
                 {card.readiness.state === 'actionable' ? (
                   <p>Actionable</p>
                 ) : (

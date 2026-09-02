@@ -19,6 +19,7 @@ import {
 import { V2HttpError, type V2Api } from '../api/client';
 import { FocusedProjectShell } from '../components/FocusedProjectShell';
 import type { ExecutionActivityProjection } from '../components/FocusedProjectShell';
+import type { ExecutionRunCommand } from '../components/ExecutionRunSection';
 import { ProjectSelector } from '../components/ProjectSelector';
 import type {
   MutationAvailability,
@@ -100,12 +101,27 @@ const freshnessConflictCodes = new Set([
   'developer_workspace_conflict',
   'developer_workspace_identity_mismatch',
   'developer_replacement_unavailable',
+  'execution_run_not_found',
+  'execution_run_conflict',
+  'execution_run_revision_conflict',
+  'execution_run_selection_stale',
+  'execution_run_dependency_not_closed',
+  'execution_run_profile_incompatible',
+  'execution_run_item_conflict',
+  'execution_run_recovery_ambiguous',
 ]);
 
 const developerCommandTypes = new Set<V2CommandEnvelope['command']['type']>([
   'developer_attempt.start',
   'developer_attempt.interrupt',
   'developer_attempt.replace_execution',
+]);
+
+const executionRunCommandTypes = new Set<V2CommandEnvelope['command']['type']>([
+  'execution_run.start',
+  'execution_run.pause',
+  'execution_run.resume',
+  'execution_run.stop',
 ]);
 
 const planningCommandTypes = new Set<V2CommandEnvelope['command']['type']>([
@@ -205,6 +221,7 @@ function ProjectConnection({
   const [submitting, setSubmitting] = useState(false);
   const [commandError, setCommandError] = useState<string>();
   const [developerError, setDeveloperError] = useState<string>();
+  const [executionRunError, setExecutionRunError] = useState<string>();
   const snapshot = useMemo<V2ProjectSnapshot | undefined>(
     () =>
       projection.project && projection.board
@@ -215,6 +232,7 @@ function ProjectConnection({
             executions: projection.executions,
             developerAttempts: Object.values(projection.developerAttempts),
             developerReports: Object.values(projection.developerReports),
+            executionRuns: projection.executionRuns,
             attentionItems: projection.attentionItems,
             planningCycles: projection.planningCycles,
             planningHistoryTruncated: projection.planningHistoryTruncated,
@@ -284,9 +302,11 @@ function ProjectConnection({
       const controller = new AbortController();
       const token = Symbol(expectedType);
       const developerCommand = developerCommandTypes.has(expectedType);
+      const executionRunCommand = executionRunCommandTypes.has(expectedType);
       activeCommand.current = { controller, token };
       setSubmitting(true);
       if (developerCommand) setDeveloperError(undefined);
+      else if (executionRunCommand) setExecutionRunError(undefined);
       else setCommandError(undefined);
       try {
         const requestDomainCursor = projection.domainCursor;
@@ -301,6 +321,7 @@ function ProjectConnection({
             ? 'Unexpected command result.'
             : result.error.message;
           if (developerCommand) setDeveloperError(message);
+          else if (executionRunCommand) setExecutionRunError(message);
           else setCommandError(message);
           if (!result.ok && freshnessConflictCodes.has(result.error.code)) {
             dispatch({
@@ -327,6 +348,7 @@ function ProjectConnection({
           }
         }
         if (developerCommand) setDeveloperError(errorMessage(cause));
+        else if (executionRunCommand) setExecutionRunError(errorMessage(cause));
         else setCommandError(errorMessage(cause));
       } finally {
         if (activeCommand.current?.token === token) {
@@ -566,6 +588,22 @@ function ProjectConnection({
     [projectId, runCommand],
   );
 
+  const runExecutionRunCommand = useCallback(
+    (command: ExecutionRunCommand) => {
+      if (command.projectId !== projectId) return;
+      void runCommand(
+        JSON.stringify(command),
+        {
+          idempotencyKey: crypto.randomUUID(),
+          actor: { kind: 'human' },
+          command,
+        } as V2CommandEnvelope,
+        command.type,
+      );
+    },
+    [projectId, runCommand],
+  );
+
   return (
     <>
       {error || commandError ? (
@@ -596,6 +634,10 @@ function ProjectConnection({
           onStart: startDeveloperAttempt,
           onInterrupt: interruptDeveloperAttempt,
           onReplace: replaceDeveloperExecution,
+        }}
+        executionRun={{
+          error: executionRunError,
+          onCommand: runExecutionRunCommand,
         }}
       />
     </>

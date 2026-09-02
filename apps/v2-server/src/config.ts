@@ -10,6 +10,7 @@ export type V2ServerConfig = {
   testFakeHoldAfterAdapterCursor?: number;
   testFakePmScenario?: 'todo';
   testFakeDeveloperScenario?: FakeDeveloperScenario;
+  testFakeDeveloperHoldDirectory?: string;
 };
 
 export type FakeDeveloperScenario =
@@ -152,6 +153,17 @@ export const loadV2ServerConfig = (
       'Fake Developer scenario is test-only and invalid',
     );
   }
+  const fakeDeveloperHoldDirectory =
+    environment.MESH_V2_TEST_FAKE_DEVELOPER_HOLD_DIR;
+  if (
+    fakeDeveloperHoldDirectory !== undefined &&
+    environment.NODE_ENV !== 'test'
+  ) {
+    throw new V2ConfigError(
+      'invalid_v2_test_option',
+      'Fake Developer hold directory is test-only',
+    );
+  }
   const developmentOrigin =
     environment.MESH_V2_DEV_ORIGIN ??
     (environment.NODE_ENV === 'development'
@@ -182,6 +194,14 @@ export const loadV2ServerConfig = (
       : {
           testFakeDeveloperScenario:
             fakeDeveloperScenario as FakeDeveloperScenario,
+        }),
+    ...(fakeDeveloperHoldDirectory === undefined
+      ? {}
+      : {
+          testFakeDeveloperHoldDirectory: absolute(
+            fakeDeveloperHoldDirectory,
+            'Fake Developer hold directory',
+          ),
         }),
   };
 };

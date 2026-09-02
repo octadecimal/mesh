@@ -18,6 +18,12 @@ import {
   developerCompletionReportSchema,
   developerReportSchema,
   developerTaskAssignmentSchema,
+  executionRunItemSchema,
+  executionRunViewSchema,
+  pauseExecutionRunEnvelopeSchema,
+  resumeExecutionRunEnvelopeSchema,
+  startExecutionRunEnvelopeSchema,
+  stopExecutionRunEnvelopeSchema,
   interruptDeveloperAttemptEnvelopeSchema,
   managedWorkspaceSchema,
   replaceDeveloperAttemptExecutionEnvelopeSchema,
@@ -88,6 +94,8 @@ const projectProfileId = randomUUID();
 const executionId = randomUUID();
 const attemptId = randomUUID();
 const requirementId = randomUUID();
+const executionRunId = randomUUID();
+const executionRunItemId = randomUUID();
 
 const project = {
   id: projectId,
@@ -461,6 +469,200 @@ const profileRevision = {
   approvedAt: now,
   digest: 'd'.repeat(64),
 };
+
+const developerRunProfile = {
+  profileId: randomUUID(),
+  projectId: null,
+  profileRevision: 1,
+  baseProfileId: null,
+  baseRevision: null,
+  document: {
+    apiVersion: WORKER_PROFILE_API_VERSION,
+    kind: 'WorkerProfile' as const,
+    metadata: {
+      name: 'todo-developer',
+      displayName: 'Todo Developer',
+      scope: 'global' as const,
+    },
+    spec: {
+      assignmentKinds: ['developer_task'] as const,
+      preferredRuntime: { harness: 'fake', model: 'deterministic' },
+      alternatives: [],
+      requiredCapabilities: [],
+      skills: { preferred: [], required: [] },
+      instructions: 'Implement the frozen task.',
+      outputSchema: DEVELOPER_REPORT_SCHEMA,
+    },
+  },
+  digest: 'e'.repeat(64),
+};
+
+const runTaskId = randomUUID();
+const runItem = {
+  id: executionRunItemId,
+  runId: executionRunId,
+  projectId,
+  taskId: runTaskId,
+  ordinal: 0,
+  revision: 1,
+  lifecycle: 'waiting' as const,
+  taskContractRevision: 1,
+  taskCurrentRevision: 1,
+  requirementRevisions: [{ recordId: requirementId, recordRevision: 1 }],
+  prerequisiteTaskIds: [],
+  profileSnapshot: developerRunProfile,
+  launchIdempotencyKey: `execution-run:${executionRunItemId}`,
+  developerAttemptId: null,
+  attention: null,
+  createdAt: now,
+  updatedAt: now,
+  endedAt: null,
+};
+const run = {
+  id: executionRunId,
+  projectId,
+  revision: 1,
+  lifecycle: 'running' as const,
+  completionReason: null,
+  deliveryPlanId: randomUUID(),
+  deliveryPlanRevision: 1,
+  intentRevision: 1,
+  ledgerRevision: 1,
+  repositoryIdentity: project.repositoryIdentity,
+  baseCommit: project.headCommit,
+  concurrencyLimit: 2,
+  subscriptionCapacityConfirmed: true as const,
+  attention: null,
+  itemIds: [executionRunItemId],
+  counts: {
+    waiting: 1,
+    launchPending: 0,
+    active: 0,
+    completed: 0,
+    attentionRequired: 0,
+    notStarted: 0,
+  },
+  createdAt: now,
+  updatedAt: now,
+  endedAt: null,
+};
+
+describe('V2 finite execution run contracts', () => {
+  it('parses one self-consistent frozen run aggregate', () => {
+    expect(executionRunItemSchema.parse(runItem)).toEqual(runItem);
+    expect(executionRunViewSchema.parse({ run, items: [runItem] })).toEqual({
+      run,
+      items: [runItem],
+    });
+  });
+
+  it('rejects inconsistent counts, duplicate items, and excess concurrency', () => {
+    expect(() =>
+      executionRunViewSchema.parse({
+        run: { ...run, counts: { ...run.counts, waiting: 0 } },
+        items: [runItem],
+      }),
+    ).toThrow(/count/i);
+    expect(() =>
+      executionRunViewSchema.parse({
+        run: { ...run, itemIds: [executionRunItemId, executionRunItemId] },
+        items: [runItem, runItem],
+      }),
+    ).toThrow(/unique|duplicate/i);
+    expect(() =>
+      executionRunViewSchema.parse({
+        run: { ...run, concurrencyLimit: 5 },
+        items: [runItem],
+      }),
+    ).toThrow(/<=4|too big/i);
+  });
+
+  it('round-trips start, pause, resume, and stop command envelopes', () => {
+    const base = {
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' as const },
+    };
+    const start = startExecutionRunEnvelopeSchema.parse({
+      ...base,
+      command: {
+        type: 'execution_run.start',
+        projectId,
+        expectedDeliveryPlanId: run.deliveryPlanId,
+        expectedDeliveryPlanRevision: 1,
+        expectedBoardFilterRevision: 1,
+        selections: [
+          {
+            taskId: runTaskId,
+            expectedTaskRevision: 1,
+            profileId: developerRunProfile.profileId,
+            profileRevision: 1,
+          },
+        ],
+        concurrencyLimit: 2,
+        subscriptionCapacityConfirmed: true,
+      },
+    });
+    expect(start.command.type).toBe('execution_run.start');
+
+    for (const [schema, type] of [
+      [pauseExecutionRunEnvelopeSchema, 'execution_run.pause'],
+      [resumeExecutionRunEnvelopeSchema, 'execution_run.resume'],
+      [stopExecutionRunEnvelopeSchema, 'execution_run.stop'],
+    ] as const) {
+      expect(
+        schema.parse({
+          ...base,
+          command: {
+            type,
+            projectId,
+            runId: executionRunId,
+            expectedRunRevision: 1,
+          },
+        }).command.type,
+      ).toBe(type);
+    }
+  });
+
+  it('keeps run events and project snapshots project-coherent', () => {
+    const event = {
+      projectId,
+      occurredAt: now,
+      type: 'execution_run.changed' as const,
+      payload: { schemaVersion: 1 as const, run, items: [runItem] },
+    };
+    expect(domainEventDraftSchema.parse(event)).toEqual(event);
+    expect(() =>
+      domainEventDraftSchema.parse({ ...event, projectId: otherProjectId }),
+    ).toThrow(/project/i);
+
+    const snapshot = {
+      protocolVersion: V2_PROTOCOL_VERSION,
+      project,
+      profiles: [developerRunProfile],
+      executions: [],
+      attentionItems: [],
+      planningCycles: [],
+      planningHistoryTruncated: false,
+      intentLedger: null,
+      deliveryPlan: null,
+      board: boardWithoutPlan('intent_required'),
+      executionRuns: [{ run, items: [runItem] }],
+      cursors: { domain: 1, runtime: 0 },
+    };
+    expect(v2ProjectSnapshotSchema.parse(snapshot)).toEqual(snapshot);
+    expect(() =>
+      v2ProjectSnapshotSchema.parse({
+        ...snapshot,
+        executionRuns: [
+          {
+            run: { ...run, projectId: otherProjectId },
+            items: [{ ...runItem, projectId: otherProjectId }],
+          },
+        ],
+      }),
+    ).toThrow(/project/i);
+  });
+});
 
 const globalProfileRevision = {
   profileId,

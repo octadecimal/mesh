@@ -1421,6 +1421,7 @@ describe('startV2Server', () => {
           'developer_attempts_reconciled',
           'planning_bound_cycles_reconciled',
           'planning_pending_reservations_reconciled',
+          'execution_runs_reconciled',
           'recovery_window_published',
           'recovered_sessions_attached',
           'pending_launches_drained',
@@ -2004,6 +2005,7 @@ describe('startV2Server', () => {
         'developer_attempts_reconciled',
         'planning_bound_cycles_reconciled',
         'planning_pending_reservations_reconciled',
+        'execution_runs_reconciled',
         'recovery_window_published',
         'recovered_sessions_attached',
         'pending_launches_drained',
@@ -2391,24 +2393,9 @@ describe('startV2Server', () => {
   });
 
   it.each([
-    [
-      'bound_output',
-      'awaiting_human',
-      0,
-      'planning_pending_reservations_reconciled',
-    ],
-    [
-      'bound_terminal',
-      'attention_required',
-      0,
-      'planning_pending_reservations_reconciled',
-    ],
-    [
-      'unbound_terminal',
-      'attention_required',
-      0,
-      'planning_pending_reservations_reconciled',
-    ],
+    ['bound_output', 'awaiting_human', 0, 'execution_runs_reconciled'],
+    ['bound_terminal', 'attention_required', 0, 'execution_runs_reconciled'],
+    ['unbound_terminal', 'attention_required', 0, 'execution_runs_reconciled'],
     [
       'pending_without_operation',
       'awaiting_human',
@@ -2419,13 +2406,13 @@ describe('startV2Server', () => {
       'ambiguous_before_start',
       'attention_required',
       0,
-      'planning_pending_reservations_reconciled',
+      'execution_runs_reconciled',
     ],
     [
       'ambiguous_after_start',
       'attention_required',
       0,
-      'planning_pending_reservations_reconciled',
+      'execution_runs_reconciled',
     ],
   ] as const)(
     'recovers the %s planning startup window before accepting commands',
@@ -2502,6 +2489,7 @@ describe('startV2Server', () => {
           'developer_attempts_reconciled',
           'planning_bound_cycles_reconciled',
           'planning_pending_reservations_reconciled',
+          'execution_runs_reconciled',
           'recovery_window_published',
           'recovered_sessions_attached',
           'pending_launches_drained',
@@ -2764,6 +2752,7 @@ describe('startV2Server', () => {
         'developer_attempts_reconciled',
         'planning_bound_cycles_reconciled',
         'planning_pending_reservations_reconciled',
+        'execution_runs_reconciled',
         'recovery_window_published',
         'recovered_sessions_attached',
         'pending_launches_drained',

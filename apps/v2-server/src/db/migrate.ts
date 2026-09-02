@@ -67,6 +67,15 @@ const developerStartReservationsMigration = {
   ),
 };
 
+const executionRunsMigration = {
+  version: 7,
+  name: '007_execution_runs',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '007_execution_runs.sql'),
+    'utf8',
+  ),
+};
+
 const migrations = [
   foundationMigration,
   intentLedgerMigration,
@@ -74,6 +83,7 @@ const migrations = [
   developerAttemptsMigration,
   developerAttemptCommandsMigration,
   developerStartReservationsMigration,
+  executionRunsMigration,
 ] as const;
 
 type MigrationLedgerRow = { version: number; name: string };

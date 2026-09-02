@@ -21,6 +21,7 @@ import { BoardPane } from './BoardPane';
 import { DeliveryPlanningPane, PlanningPane } from './PlanningPane';
 import { RequirementsPane } from './RequirementsPane';
 import type { ProjectShellViewModel } from './shell-state';
+import type { ExecutionRunCommand } from './ExecutionRunSection';
 
 const futurePanes = [
   { label: 'Board', slug: 'board' },
@@ -62,6 +63,11 @@ export type DeveloperCommandProjection = {
   onReplace(attempt: DeveloperAttempt): void;
 };
 
+export type ExecutionRunCommandProjection = {
+  error?: string;
+  onCommand(command: ExecutionRunCommand): void;
+};
+
 const inertPlanning: PlanningCommandProjection = {
   submitting: false,
   enabled: true,
@@ -97,6 +103,7 @@ export function FocusedProjectShell({
   activityByExecutionId = {},
   planning = inertPlanning,
   developer,
+  executionRun,
 }: {
   model: ProjectShellViewModel;
   onDeselect: () => void;
@@ -104,6 +111,7 @@ export function FocusedProjectShell({
   activityByExecutionId?: Readonly<Record<string, ExecutionActivityProjection>>;
   planning?: PlanningCommandProjection;
   developer?: DeveloperCommandProjection;
+  executionRun?: ExecutionRunCommandProjection;
 }) {
   const [activePane, setActivePane] = useState<FuturePaneSlug>('board');
   const tabRefs = useRef<Record<FuturePaneSlug, HTMLButtonElement | null>>({
@@ -380,6 +388,17 @@ export function FocusedProjectShell({
                         onStart: developer.onStart,
                         onInterrupt: developer.onInterrupt,
                         onReplace: developer.onReplace,
+                      }
+                    : undefined
+                }
+                executionRun={
+                  executionRun
+                    ? {
+                        deliveryPlan: snapshot.deliveryPlan,
+                        runs: snapshot.executionRuns ?? [],
+                        profiles: snapshot.profiles,
+                        error: executionRun.error,
+                        onCommand: executionRun.onCommand,
                       }
                     : undefined
                 }

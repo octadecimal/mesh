@@ -16,6 +16,7 @@ import {
   taskIdSchema,
 } from './ids';
 import { requirementKindSchema } from './intent';
+import { executionRunItemSummarySchema } from './execution-runs';
 
 export const taskLifecycleSchema = z.enum(['pending', 'completed', 'retired']);
 export type TaskLifecycle = z.infer<typeof taskLifecycleSchema>;
@@ -267,6 +268,7 @@ export const boardTaskCardSchema = z
     labels: z.array(planLabelSchema).max(20).readonly(),
     readiness: taskReadinessSchema,
     dependencies: z.array(boardDependencySummarySchema).max(200).readonly(),
+    executionRunItem: executionRunItemSummarySchema.nullable().optional(),
     detail: boardTaskDetailSchema,
   })
   .superRefine((value, context) => {

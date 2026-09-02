@@ -400,6 +400,66 @@ const approveDeveloperProfile = async (
   await page.reload();
 };
 
+const startTodoRun = async (
+  page: Page,
+  fixture: V2ProcessFixture,
+  titles: readonly string[],
+  concurrencyLimit: number,
+) => {
+  const snapshot = await fixture.projectSnapshot();
+  const plan = snapshot.deliveryPlan?.plan;
+  const filter = snapshot.board.filter;
+  const profile = snapshot.profiles.find(({ document }) =>
+    document.spec.assignmentKinds.some((kind) => kind === 'developer_task'),
+  );
+  const cards = titles.map((title) =>
+    snapshot.board.cards.find((card) => card.title === title),
+  );
+  if (!plan || !filter || !profile || cards.some((card) => !card)) {
+    throw new Error('Finite Todo run authority is unavailable');
+  }
+  const response = await sendCommand(page, {
+    type: 'execution_run.start',
+    projectId: fixture.projectId,
+    expectedDeliveryPlanId: plan.id,
+    expectedDeliveryPlanRevision: plan.revision,
+    expectedBoardFilterRevision: filter.revision,
+    selections: cards.map((card) => ({
+      taskId: card!.taskId,
+      expectedTaskRevision: card!.taskCurrentRevision,
+      profileId: profile.profileId,
+      profileRevision: profile.profileRevision,
+    })),
+    concurrencyLimit,
+    subscriptionCapacityConfirmed: true,
+  });
+  expect(response).toMatchObject({
+    status: 200,
+    body: { ok: true, commandType: 'execution_run.start' },
+  });
+  return { snapshot, cards: cards.map((card) => card!), response };
+};
+
+const controlTodoRun = async (
+  page: Page,
+  fixture: V2ProcessFixture,
+  type: 'execution_run.pause' | 'execution_run.resume' | 'execution_run.stop',
+) => {
+  const snapshot = await fixture.projectSnapshot();
+  const current = snapshot.executionRuns?.find(
+    ({ run }) => run.lifecycle !== 'completed',
+  );
+  if (!current) throw new Error('Current finite Todo run was not found');
+  const response = await sendCommand(page, {
+    type,
+    projectId: fixture.projectId,
+    runId: current.run.id,
+    expectedRunRevision: current.run.revision,
+  });
+  expect(response).toMatchObject({ status: 200, body: { ok: true } });
+  return response;
+};
+
 type CleanupProbe = {
   pid: number;
   origin?: string;
@@ -497,6 +557,180 @@ for (const mode of [
     }
   });
 }
+
+test('finite Todo run pauses across restart and resumes its dependent once', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+    fakeDeveloperScenario: 'completed',
+    fakeDeveloperHolds: true,
+  });
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture);
+    await approveDeveloperProfile(page, fixture);
+    const { cards } = await startTodoRun(
+      page,
+      fixture,
+      ['Build Todo controls', 'Persist Todo items', 'Integrate Todo workflow'],
+      2,
+    );
+    const [ui, persistence, integration] = cards;
+
+    await expect
+      .poll(async () => {
+        const current = (await fixture.projectSnapshot()).executionRuns?.[0];
+        return current?.items.map(({ lifecycle }) => lifecycle);
+      })
+      .toEqual(['active', 'active', 'waiting']);
+
+    await fixture.releaseDeveloperTask(ui.taskId);
+    await expect
+      .poll(async () => {
+        const current = (await fixture.projectSnapshot()).executionRuns?.[0];
+        return current?.items.map(({ lifecycle }) => lifecycle);
+      })
+      .toEqual(['completed', 'active', 'waiting']);
+
+    await controlTodoRun(page, fixture, 'execution_run.pause');
+    await fixture.releaseDeveloperTask(persistence.taskId);
+    await expect
+      .poll(async () => {
+        const current = (await fixture.projectSnapshot()).executionRuns?.[0];
+        return {
+          lifecycle: current?.run.lifecycle,
+          items: current?.items.map(({ lifecycle }) => lifecycle),
+        };
+      })
+      .toEqual({
+        lifecycle: 'paused',
+        items: ['completed', 'completed', 'waiting'],
+      });
+
+    const beforeRestart = await fixture.projectSnapshot();
+    const priorPid = fixture.serverPid;
+    const origin = await fixture.restartWithFreshFake();
+    expect(fixture.serverPid).not.toBe(priorPid);
+    await page.goto(`${origin}/projects/${fixture.projectId}`);
+    const restarted = await fixture.projectSnapshot();
+    expect(restarted.executionRuns?.[0]).toMatchObject({
+      run: { lifecycle: 'paused' },
+      items: [
+        { lifecycle: 'completed' },
+        { lifecycle: 'completed' },
+        { lifecycle: 'waiting' },
+      ],
+    });
+    expect(restarted.developerAttempts).toHaveLength(2);
+    expect(restarted.cursors.domain).toBeGreaterThanOrEqual(
+      beforeRestart.cursors.domain,
+    );
+
+    await controlTodoRun(page, fixture, 'execution_run.resume');
+    await expect
+      .poll(async () => {
+        const snapshot = await fixture.projectSnapshot();
+        return {
+          items: snapshot.executionRuns?.[0]?.items.map(
+            ({ lifecycle }) => lifecycle,
+          ),
+          attempts: snapshot.developerAttempts.filter(
+            ({ taskId }) => taskId === integration.taskId,
+          ).length,
+        };
+      })
+      .toEqual({ items: ['completed', 'completed', 'active'], attempts: 1 });
+    await fixture.releaseDeveloperTask(integration.taskId);
+    await expect
+      .poll(async () => {
+        const snapshot = await fixture.projectSnapshot();
+        const current = snapshot.executionRuns?.[0];
+        return {
+          lifecycle: current?.run.lifecycle,
+          reason: current?.run.completionReason,
+          completed: current?.run.counts.completed,
+          integrationAttempts: snapshot.developerAttempts.filter(
+            ({ taskId }) => taskId === integration.taskId,
+          ).length,
+        };
+      })
+      .toEqual({
+        lifecycle: 'completed',
+        reason: 'finished',
+        completed: 3,
+        integrationAttempts: 1,
+      });
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test('stopping a finite Todo run prevents waiting work and drains active work', async ({
+  page,
+}) => {
+  test.setTimeout(180_000);
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+    fakeDeveloperScenario: 'completed',
+    fakeDeveloperHolds: true,
+  });
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture);
+    await approveDeveloperProfile(page, fixture);
+    const { cards } = await startTodoRun(
+      page,
+      fixture,
+      ['Build Todo controls', 'Persist Todo items'],
+      1,
+    );
+    const [active, waiting] = cards;
+    await expect
+      .poll(async () =>
+        (await fixture.projectSnapshot()).executionRuns?.[0]?.items.map(
+          ({ lifecycle }) => lifecycle,
+        ),
+      )
+      .toEqual(['active', 'waiting']);
+
+    await controlTodoRun(page, fixture, 'execution_run.stop');
+    await expect
+      .poll(async () => {
+        const current = (await fixture.projectSnapshot()).executionRuns?.[0];
+        return {
+          lifecycle: current?.run.lifecycle,
+          items: current?.items.map(({ lifecycle }) => lifecycle),
+        };
+      })
+      .toEqual({ lifecycle: 'stopping', items: ['active', 'not_started'] });
+    await fixture.releaseDeveloperTask(active.taskId);
+    await expect
+      .poll(async () => {
+        const snapshot = await fixture.projectSnapshot();
+        const current = snapshot.executionRuns?.[0];
+        return {
+          lifecycle: current?.run.lifecycle,
+          reason: current?.run.completionReason,
+          items: current?.items.map(({ lifecycle }) => lifecycle),
+          waitingAttempts: snapshot.developerAttempts.filter(
+            ({ taskId }) => taskId === waiting.taskId,
+          ).length,
+        };
+      })
+      .toEqual({
+        lifecycle: 'completed',
+        reason: 'stopped',
+        items: ['completed', 'not_started'],
+        waitingAttempts: 0,
+      });
+  } finally {
+    await fixture.dispose();
+  }
+});
 
 test('early startup exit clears exact child ownership within its deadline', async () => {
   const fixture = await V2ProcessFixture.createTodo();

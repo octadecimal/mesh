@@ -33,6 +33,11 @@ import {
   resolvedWorkerProfileSnapshotSchema,
   workerProfileRevisionSchema,
 } from './profiles';
+import {
+  executionRunItemSchema,
+  executionRunSchema,
+  executionRunViewSchema,
+} from './execution-runs';
 
 export const V2_PROTOCOL_VERSION = 'mesh.v2/1' as const;
 
@@ -115,6 +120,7 @@ export const v2ProjectSnapshotSchema = z
     intentLedger: approvedIntentLedgerSchema.nullable(),
     deliveryPlan: approvedDeliveryPlanSchema.nullable(),
     board: boardViewSchema,
+    executionRuns: z.array(executionRunViewSchema).readonly().optional(),
     cursors: projectEventCursorsSchema,
   })
   .superRefine((value, context) => {
@@ -138,6 +144,15 @@ export const v2ProjectSnapshotSchema = z
           code: 'custom',
           path: ['executions', index, 'projectId'],
           message: 'Execution must match the snapshot project',
+        });
+      }
+    });
+    value.executionRuns?.forEach((view, index) => {
+      if (view.run.projectId !== value.project.id) {
+        context.addIssue({
+          code: 'custom',
+          path: ['executionRuns', index, 'run', 'projectId'],
+          message: 'Execution run must match the snapshot project',
         });
       }
     });
@@ -788,6 +803,34 @@ export type PlanningCommandResponseDisposition = z.infer<
   typeof planningCommandResponseDispositionSchema
 >;
 
+const executionRunCommandSuccessSchema = z
+  .strictObject({
+    ok: z.literal(true),
+    commandType: z.enum([
+      'execution_run.start',
+      'execution_run.pause',
+      'execution_run.resume',
+      'execution_run.stop',
+    ]),
+    schemaVersion: z.literal(1),
+    run: executionRunSchema,
+    items: z.array(executionRunItemSchema).min(1).max(300).readonly(),
+  })
+  .superRefine((value, context) => {
+    if (
+      !executionRunViewSchema.safeParse({
+        run: value.run,
+        items: value.items,
+      }).success
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['run'],
+        message: 'Execution run command result must be coherent',
+      });
+    }
+  });
+
 export const v2CommandResultSchema = z.union([
   z.strictObject({
     ok: z.literal(true),
@@ -830,6 +873,7 @@ export const v2CommandResultSchema = z.union([
     attempt: developerAttemptSchema,
     board: boardViewSchema,
   }),
+  executionRunCommandSuccessSchema,
   persistedPlanningCommandSuccessSchema,
   commandFailureSchema,
 ]);

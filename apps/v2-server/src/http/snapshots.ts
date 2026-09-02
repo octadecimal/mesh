@@ -16,6 +16,7 @@ import type {
 } from '../executions/execution-repository.js';
 import type { WorkerProfileService } from '../profiles/profile-service.js';
 import type { PlanningRepository } from '../planning/planning-repository.js';
+import type { ExecutionRunRepository } from '../runs/execution-run-repository.js';
 import type { V2EventStore } from '../storage/event-store.js';
 import type { DeveloperRepository } from '../developer/developer-repository.js';
 
@@ -35,6 +36,7 @@ export type V2SnapshotDependencies = {
     DeveloperRepository,
     'attemptsForProject' | 'reportsForProject'
   >;
+  runs: Pick<ExecutionRunRepository, 'listForProject'>;
   planning: Pick<PlanningRepository, 'planningSnapshot'>;
   events: Pick<V2EventStore, 'cursors'>;
   barrier: Pick<AuditBarrier, 'health'>;
@@ -117,6 +119,32 @@ export const createV2Snapshots = (dependencies: V2SnapshotDependencies) => ({
         profile.revision,
       ),
     );
+    const executionRuns = dependencies.runs.listForProject(projectId);
+    const currentRun = executionRuns.find(
+      ({ run }) => run.lifecycle !== 'completed',
+    );
+    const currentItems = new Map(
+      (currentRun?.items ?? []).map((item) => [item.taskId, item] as const),
+    );
+    const planning = dependencies.planning.planningSnapshot(projectId);
+    const board = {
+      ...planning.board,
+      cards: planning.board.cards.map((card) => {
+        const item = currentItems.get(card.taskId);
+        return item
+          ? {
+              ...card,
+              executionRunItem: {
+                runId: item.runId,
+                itemId: item.id,
+                lifecycle: item.lifecycle,
+                developerAttemptId: item.developerAttemptId,
+                attention: item.attention,
+              },
+            }
+          : card;
+      }),
+    };
     return v2ProjectSnapshotSchema.parse({
       protocolVersion: V2_PROTOCOL_VERSION,
       project,
@@ -124,10 +152,12 @@ export const createV2Snapshots = (dependencies: V2SnapshotDependencies) => ({
       executions: dependencies.executions.list(projectId),
       developerAttempts: dependencies.developers.attemptsForProject(projectId),
       developerReports: dependencies.developers.reportsForProject(projectId),
+      executionRuns,
       attentionItems: dependencies.executions
         .listAttentionDetails(projectId)
         .map(attentionItem),
-      ...dependencies.planning.planningSnapshot(projectId),
+      ...planning,
+      board,
       cursors: dependencies.events.cursors(projectId),
     });
   },

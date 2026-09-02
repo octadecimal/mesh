@@ -15,7 +15,10 @@ import { afterAll, beforeAll, expect, it } from 'vitest';
 import type { V2Database } from './database.js';
 
 const workspaceRoot = resolve(__dirname, '..', '..', '..', '..');
-const temporaryRoot = mkdtempSync(join(workspaceRoot, '.mesh-v2-build-test-'));
+const testBuildParent = join(workspaceRoot, 'node_modules');
+const temporaryRoot = mkdtempSync(
+  join(testBuildParent, '.mesh-v2-build-test-'),
+);
 const builtRoot = join(temporaryRoot, 'server');
 
 const runProductionV2Build = () => {
@@ -96,7 +99,7 @@ const runProductionV2Build = () => {
 beforeAll(runProductionV2Build, 180_000);
 
 afterAll(() => {
-  const relativeTemporary = relative(workspaceRoot, temporaryRoot);
+  const relativeTemporary = relative(testBuildParent, temporaryRoot);
   if (
     relativeTemporary.startsWith('..') ||
     relativeTemporary === '' ||
@@ -184,6 +187,7 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
       { version: 6, name: '006_developer_start_reservations' },
+      { version: 7, name: '007_execution_runs' },
     ]);
   } finally {
     database.close();

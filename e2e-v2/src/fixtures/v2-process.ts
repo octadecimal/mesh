@@ -4,6 +4,7 @@ import {
   access,
   chmod,
   copyFile,
+  mkdir,
   mkdtemp,
   readFile,
   realpath,
@@ -464,6 +465,7 @@ export class V2ProcessFixture {
     private readonly fakePmScenario?: 'todo',
     private readonly fakeDeveloperScenario?: FakeDeveloperScenario,
     private readonly gitBarrier?: GitBarrier,
+    private readonly fakeDeveloperHoldDirectory?: string,
   ) {
     this.todoRepository = todoRepository;
     this.databasePath = assertContainedPath(
@@ -477,6 +479,7 @@ export class V2ProcessFixture {
       onRoot?: (root: string) => void;
       fakePmScenario?: 'todo';
       fakeDeveloperScenario?: FakeDeveloperScenario;
+      fakeDeveloperHolds?: boolean;
       gitBarrier?: boolean;
     } = {},
   ) {
@@ -489,12 +492,19 @@ export class V2ProcessFixture {
       options.onRoot?.(root);
       const repository = await createTodoRepository(root);
       if (options.gitBarrier) gitBarrier = await createGitBarrier();
+      const fakeDeveloperHoldDirectory = options.fakeDeveloperHolds
+        ? assertContainedPath(root, join(root, 'fake-developer-holds'))
+        : undefined;
+      if (fakeDeveloperHoldDirectory) {
+        await mkdir(fakeDeveloperHoldDirectory);
+      }
       return new V2ProcessFixture(
         root,
         repository,
         options.fakePmScenario,
         options.fakeDeveloperScenario,
         gitBarrier,
+        fakeDeveloperHoldDirectory,
       );
     } catch (error) {
       if (root) await rm(root, { recursive: true, force: true });
@@ -559,6 +569,10 @@ export class V2ProcessFixture {
     if (this.fakeDeveloperScenario) {
       environment.MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO =
         this.fakeDeveloperScenario;
+    }
+    if (this.fakeDeveloperHoldDirectory) {
+      environment.MESH_V2_TEST_FAKE_DEVELOPER_HOLD_DIR =
+        this.fakeDeveloperHoldDirectory;
     }
     if (options.holdAfterAdapterCursor !== undefined) {
       environment.MESH_V2_FAKE_HOLD_AFTER_CURSOR = String(
@@ -958,6 +972,20 @@ export class V2ProcessFixture {
   async releaseGitWorktreeAdd() {
     if (!this.gitBarrier) throw new Error('The Git barrier is not enabled');
     await writeFile(this.gitBarrier.release, '', 'utf8');
+  }
+
+  async releaseDeveloperTask(taskId: string) {
+    if (!this.fakeDeveloperHoldDirectory) {
+      throw new Error('Fake Developer holds are not enabled');
+    }
+    await writeFile(
+      assertContainedPath(
+        this.fakeDeveloperHoldDirectory,
+        join(this.fakeDeveloperHoldDirectory, taskId),
+      ),
+      'release',
+      'utf8',
+    );
   }
 
   async gitWorktreeAddCount() {

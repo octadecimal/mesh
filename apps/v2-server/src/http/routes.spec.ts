@@ -36,6 +36,7 @@ const executionId = '33333333-3333-4333-8333-333333333333';
 const taskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const attemptId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const deliveryPlanId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const runId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const planningCycleId = '44444444-4444-4444-8444-444444444444';
 const proposalId = '55555555-5555-4555-8555-555555555555';
 const projectIntentId = '66666666-6666-4666-8666-666666666666';
@@ -107,6 +108,12 @@ const createDependencies = (): V2RouteDependencies => ({
         'developer_attempt.replace_execution',
         'developer replacement route',
       ),
+  },
+  runs: {
+    start: async () => failed('execution_run.start', 'run start route'),
+    pause: async () => failed('execution_run.pause', 'run pause route'),
+    resume: async () => failed('execution_run.resume', 'run resume route'),
+    stop: async () => failed('execution_run.stop', 'run stop route'),
   },
   planning: {
     submitTurn: async () =>
@@ -313,6 +320,53 @@ describe('V2 HTTP routes', () => {
       },
     ],
     [
+      'run start route',
+      {
+        type: 'execution_run.start',
+        projectId,
+        expectedDeliveryPlanId: deliveryPlanId,
+        expectedDeliveryPlanRevision: 1,
+        expectedBoardFilterRevision: 1,
+        selections: [
+          {
+            taskId,
+            expectedTaskRevision: 1,
+            profileId,
+            profileRevision: 1,
+          },
+        ],
+        concurrencyLimit: 2,
+        subscriptionCapacityConfirmed: true,
+      },
+    ],
+    [
+      'run pause route',
+      {
+        type: 'execution_run.pause',
+        projectId,
+        runId,
+        expectedRunRevision: 1,
+      },
+    ],
+    [
+      'run resume route',
+      {
+        type: 'execution_run.resume',
+        projectId,
+        runId,
+        expectedRunRevision: 1,
+      },
+    ],
+    [
+      'run stop route',
+      {
+        type: 'execution_run.stop',
+        projectId,
+        runId,
+        expectedRunRevision: 1,
+      },
+    ],
+    [
       'reject proposal route',
       {
         type: 'planning_proposal.reject',
@@ -345,7 +399,7 @@ describe('V2 HTTP routes', () => {
       },
     });
 
-    expect(response.statusCode).toBe(200);
+    expect(response.statusCode).toBe(message.startsWith('run ') ? 400 : 200);
     expect(response.json()).toMatchObject({ ok: false, error: { message } });
   });
 
@@ -936,6 +990,7 @@ describe('V2 snapshots', () => {
         profiles,
         executions: new ExecutionRepository(fixture.database),
         developers: new DeveloperRepository(fixture.database),
+        runs: { listForProject: () => [] },
         planning: new PlanningRepository(fixture.database),
         events: fixture.events,
         barrier: new AuditBarrier(),
@@ -972,6 +1027,7 @@ describe('V2 snapshots', () => {
           },
         ],
         executions: [{ id: fixture.execution.id }],
+        executionRuns: [],
         attentionItems: [],
         planningCycles: [],
         planningHistoryTruncated: false,
@@ -1040,6 +1096,7 @@ describe('V2 snapshots', () => {
           attemptsForProject: () => [],
           reportsForProject: () => [],
         },
+        runs: { listForProject: () => [] },
         planning: new PlanningRepository(fixture.database),
         events: fixture.events,
         barrier: new AuditBarrier(),
@@ -1123,6 +1180,7 @@ describe('V2 snapshots', () => {
         }),
         executions: new ExecutionRepository(fixture.database),
         developers: new DeveloperRepository(fixture.database),
+        runs: { listForProject: () => [] },
         planning,
         events: fixture.events,
         barrier: new AuditBarrier(),

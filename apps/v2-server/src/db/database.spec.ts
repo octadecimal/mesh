@@ -63,6 +63,11 @@ const migration5Path = join(
   'migrations',
   '005_developer_attempt_commands.sql',
 );
+const migration6Path = join(
+  __dirname,
+  'migrations',
+  '006_developer_start_reservations.sql',
+);
 
 const createMigration1Database = (path: string) => {
   const database = new BetterSqlite3(path);
@@ -109,6 +114,16 @@ const createMigration5Database = (path: string) => {
     ${readFileSync(migration5Path, 'utf8')}
     INSERT INTO v2_schema_migrations (version, name, applied_at)
     VALUES (5, '005_developer_attempt_commands', '2026-09-01T00:00:00.000Z');
+  `);
+  return database;
+};
+
+const createMigration6Database = (path: string) => {
+  const database = createMigration5Database(path);
+  database.exec(`
+    ${readFileSync(migration6Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (6, '006_developer_start_reservations', '2026-09-01T12:00:00.000Z');
   `);
   return database;
 };
@@ -178,6 +193,12 @@ const developerAttemptCommandTypes = [
   'developer_attempt.interrupt',
   'developer_attempt.replace_execution',
 ] as const;
+const executionRunCommandTypes = [
+  'execution_run.start',
+  'execution_run.pause',
+  'execution_run.resume',
+  'execution_run.stop',
+] as const;
 
 afterEach(async () => {
   for (const fixture of testDatabases.splice(0)) fixture.close();
@@ -216,7 +237,59 @@ describe('V2 database identity and migration', () => {
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
       { version: 6, name: '006_developer_start_reservations' },
+      { version: 7, name: '007_execution_runs' },
     ]);
+  });
+
+  it('upgrades migration 6 without changing commands and accepts run commands', () => {
+    const database = createMigration6Database(
+      join(temporaryDirectory(), 'upgrade-migration-6.sqlite'),
+    );
+    openDatabases.push(database);
+    database
+      .prepare(
+        `INSERT INTO command_results (
+          idempotency_key, command_type, request_hash, result_json, created_at
+        ) VALUES (?, 'developer_attempt.start', ?, ?, ?)`,
+      )
+      .run(
+        'migration-6-command',
+        'a'.repeat(64),
+        '{"ok":false,"commandType":"developer_attempt.start","error":{"code":"invalid_request","message":"preserved"}}',
+        '2026-09-01T12:00:00.000Z',
+      );
+    const before = database.prepare('SELECT * FROM command_results').all();
+
+    migrateV2Database(database);
+
+    expect(
+      database
+        .prepare('SELECT * FROM command_results WHERE idempotency_key = ?')
+        .all('migration-6-command'),
+    ).toEqual(before);
+    const commands = new V2CommandRepository(database);
+    inImmediateTransaction(database, () => {
+      for (const [index, commandType] of executionRunCommandTypes.entries()) {
+        commands.storeInTransaction({
+          idempotencyKey: `execution-run-${index}`,
+          commandType,
+          requestHash: `${index + 1}`.repeat(64),
+          result: {
+            ok: false,
+            commandType,
+            error: { code: 'invalid_request', message: commandType },
+          },
+          createdAt: '2026-09-02T00:00:00.000Z',
+        });
+      }
+    });
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN ('execution_runs', 'execution_run_items') ORDER BY name",
+        )
+        .all(),
+    ).toEqual([{ name: 'execution_run_items' }, { name: 'execution_runs' }]);
   });
 
   it('accepts every Developer attempt command on a fresh database', () => {
@@ -286,7 +359,7 @@ describe('V2 database identity and migration', () => {
       reopened
         .prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations')
         .get(),
-    ).toEqual({ count: 6 });
+    ).toEqual({ count: 7 });
   });
 
   it('migrates an identified pre-foundation V2 database forward', () => {
@@ -315,6 +388,7 @@ describe('V2 database identity and migration', () => {
       { version: 4 },
       { version: 5 },
       { version: 6 },
+      { version: 7 },
     ]);
   });
 
@@ -708,7 +782,7 @@ describe('V2 database identity and migration', () => {
     expect(database.pragma('foreign_key_check')).toEqual([]);
   });
 
-  it('upgrades migration 1 without changing its source or M1 rows and replays all nine command types', () => {
+  it('upgrades migration 1 without changing its source or M1 rows and replays every command type', () => {
     const path = join(temporaryDirectory(), 'upgrade.sqlite');
     const migrationHash = fileHash(migrationPath);
     const database = createMigration1Database(path);
@@ -774,6 +848,8 @@ describe('V2 database identity and migration', () => {
           name !== 'command_results' &&
           !name.startsWith('planning_') &&
           !name.startsWith('developer_') &&
+          !name.startsWith('execution_run') &&
+          name !== 'one_nonterminal_execution_run_per_project' &&
           !name.startsWith('pm_output_') &&
           !name.startsWith('project_intent_') &&
           !name.startsWith('ledger_') &&
@@ -910,6 +986,7 @@ describe('V2 database identity and migration', () => {
       { version: 4 },
       { version: 5 },
       { version: 6 },
+      { version: 7 },
     ]);
   });
 
@@ -950,6 +1027,7 @@ describe('V2 database identity and migration', () => {
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
       { version: 6, name: '006_developer_start_reservations' },
+      { version: 7, name: '007_execution_runs' },
     ]);
     expect(
       database
@@ -1444,6 +1522,7 @@ describe('V2 database identity and migration', () => {
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
       { version: 6, name: '006_developer_start_reservations' },
+      { version: 7, name: '007_execution_runs' },
     ]);
     database.close();
 

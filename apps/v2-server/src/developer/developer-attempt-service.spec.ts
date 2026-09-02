@@ -888,6 +888,29 @@ afterEach(() => {
 });
 
 describe('DeveloperAttemptService', () => {
+  it('starts and replays a run-owned attempt through the same authority boundary', async () => {
+    const context = setup();
+    const input = {
+      idempotencyKey: 'execution-run-item-1',
+      command: context.command.command,
+    };
+
+    const result = await context.service.startFromRun(input);
+    const replay = await context.service.startFromRun(input);
+
+    expect(result).toMatchObject({
+      ok: true,
+      commandType: 'developer_attempt.start',
+      attempt: {
+        taskId: context.command.command.taskId,
+        profileId: expect.any(String),
+      },
+    });
+    expect(replay).toEqual(result);
+    expect(context.attempts).toHaveLength(1);
+    expect(context.commands).toHaveLength(1);
+  });
+
   it('settles an exactly covered completion without mutating its contract', async () => {
     const context = setup();
     await context.service.start(context.command);

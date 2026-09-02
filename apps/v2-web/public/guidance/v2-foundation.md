@@ -1,6 +1,6 @@
 # V2 foundation development
 
-Mesh V2 Milestones 1–4 are implemented beside the existing session
+Mesh V2 Milestones 1–5 are implemented beside the existing session
 platform. V2 has separate Nx projects, wire contracts, settings, ports, and
 SQLite storage. It does not replace, upgrade, read, or migrate V1. For V1
 operation, see [Session platform development](v1-session-platform.md).
@@ -25,7 +25,7 @@ Both hosts remain loopback-only.
 
 The parallel projects and defaults are:
 
-| Surface          | V1                                                 | V2 Milestones 1–4           |
+| Surface          | V1                                                 | V2 Milestones 1–5           |
 | ---------------- | -------------------------------------------------- | --------------------------- |
 | Server           | `server`, port `3737`                              | `v2-server`, port `3838`    |
 | Web              | `web`, port `4200`                                 | `v2-web`, port `4300`       |
@@ -54,6 +54,11 @@ owned by V2; the V1 database is deliberately outside this boundary.
 
 `MESH_V2_FAKE_HOLD_AFTER_CURSOR` is an acceptance-test control. It is rejected
 outside test mode and is not a normal operating setting.
+
+`MESH_V2_TEST_FAKE_DEVELOPER_HOLD_DIR` is another test-only control. The built
+acceptance fixture points it at a temporary owned directory and releases each
+fake Developer task with its exact task-ID marker. It is rejected outside test
+mode and never enables real-agent traffic.
 
 Project registration accepts readable local Git working trees anywhere on the
 machine. Absolute paths, `..`-relative paths, links, and linked worktrees may
@@ -108,10 +113,19 @@ Developer reports as completion or blocker evidence. Interrupt, explicit
 replacement, restart reconciliation, replay, and retained-gap resync preserve
 the complete attempt, workspace, report, execution, activity, and Board truth.
 
-M4 stops at manual single-task execution. M5 owns `ExecutionRun`, task claims,
-queues, waves, concurrency, automatic selection, and continuous scheduling. M6
-owns QA attempts and verdicts, structured rework, integration authority,
-milestone completion, and release gates.
+M5 adds a finite `ExecutionRun` selected from the current Board. Select a
+dependency-closed set, assign one approved Developer profile to each task,
+choose one to four parallel workers, and explicitly confirm subscription
+capacity. The server freezes that authority and starts dependency-ready items
+in plan order through M4. The Board shows waiting, launch-pending, active,
+completed, attention-required, and not-started item state plus aggregate counts.
+
+Pause allows active work to finish but launches nothing new. Resume revalidates
+current project authority before continuing. Stop is irreversible: it prevents
+waiting work from starting and lets active work drain. After restart, the server
+reconnects proven attempts, retries only a proven-absent launch with its original
+idempotency key, and pauses ambiguity. M5 does not run QA, integrate or merge
+workspaces, complete milestones, or remove worktrees. M6 owns those gates.
 
 Run the deterministic Chromium acceptance scenario with:
 
@@ -144,7 +158,14 @@ resynchronization, so M3 does not duplicate it with another reconnect journey.
 Tests wait for observable commands, snapshots, and UI state rather than sleeps
 or retries.
 
-V2 M1–M4 acceptance currently uses only the fake harness adapter. The real
+The finite-run acceptance journeys start two independent Todo tasks at
+concurrency two, keep their dependent waiting, pause through predecessor
+completion and server restart, resume the dependent exactly once, and separately
+prove Stop prevents waiting work while draining active work. Snapshot assertions
+verify durable run, item, attempt, and completion evidence before and after
+restart.
+
+V2 M1–M5 acceptance currently uses only the fake harness adapter. The real
 Claude smoke test documented for the established session platform is separate,
 opt-in, and consumes subscription capacity; it is never part of V2 acceptance
 or default verification. Do not supply `ANTHROPIC_API_KEY` or use API-billed

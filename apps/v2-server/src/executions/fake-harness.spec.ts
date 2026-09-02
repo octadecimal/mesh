@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1050,6 +1056,45 @@ describe('FakeHarnessAdapter', () => {
     } finally {
       fixture.close();
       rmSync(workspacePath, { force: true, recursive: true });
+    }
+  });
+
+  it('holds each Developer task independently until its release file exists', async () => {
+    const fixture = createV2TestDatabase();
+    const workspacePath = mkdtempSync(join(tmpdir(), 'mesh-v2-developer-'));
+    const holdDirectory = mkdtempSync(join(tmpdir(), 'mesh-v2-holds-'));
+    try {
+      const request = developerRequest(fixture, workspacePath);
+      const session = await new FakeHarnessAdapter({
+        developerScenario: 'completed',
+        developerHoldDirectory: holdDirectory,
+      }).start(request);
+      const events = session.events(0)[Symbol.asyncIterator]();
+      await events.next();
+      await events.next();
+      await events.next();
+      const held = events.next();
+
+      expect(
+        await Promise.race([
+          held.then(() => true),
+          new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+        ]),
+      ).toBe(false);
+      if (request.assignment.kind !== 'developer_task') {
+        throw new Error('Developer request was not created');
+      }
+      writeFileSync(join(holdDirectory, request.assignment.taskId), 'release');
+      expect((await held).value?.normalized.type).toBe(
+        'worker_execution.structured_output',
+      );
+      expect((await events.next()).value?.normalized.type).toBe(
+        'worker_execution.completed',
+      );
+    } finally {
+      fixture.close();
+      rmSync(workspacePath, { force: true, recursive: true });
+      rmSync(holdDirectory, { force: true, recursive: true });
     }
   });
 

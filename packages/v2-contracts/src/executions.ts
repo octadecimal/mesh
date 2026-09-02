@@ -88,6 +88,16 @@ export const V2_ERROR_CODES = [
   'developer_report_binding_invalid',
   'developer_report_coverage_invalid',
   'developer_replacement_unavailable',
+  'execution_run_not_found',
+  'execution_run_conflict',
+  'execution_run_revision_conflict',
+  'execution_run_selection_stale',
+  'execution_run_dependency_not_closed',
+  'execution_run_profile_incompatible',
+  'execution_run_item_conflict',
+  'execution_run_recovery_ambiguous',
+  'execution_run_capacity_unconfirmed',
+  'execution_run_concurrency_invalid',
 ] as const;
 
 export const v2ErrorCodeSchema = z.enum(V2_ERROR_CODES);

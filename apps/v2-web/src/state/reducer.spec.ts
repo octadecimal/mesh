@@ -3,6 +3,7 @@ import {
   approvedDeliveryPlanSchema,
   approvedPlanningOutcomeSchema,
   boardViewSchema,
+  executionRunViewSchema,
   normalizeIntentLedgerApprovedPayload,
   persistedPlanningCommandSuccessSchema,
   planningCycleViewSchema,
@@ -523,6 +524,59 @@ const developerReport = {
   },
 } satisfies DeveloperReportRecord;
 
+const executionRunView = executionRunViewSchema.parse({
+  run: {
+    id: '00000000-0000-4000-8000-000000000160',
+    projectId,
+    revision: 1,
+    lifecycle: 'paused',
+    completionReason: null,
+    deliveryPlanId: approvedDeliveryPlan.plan.id,
+    deliveryPlanRevision: approvedDeliveryPlan.plan.revision,
+    intentRevision: 1,
+    ledgerRevision: 1,
+    repositoryIdentity: 'repo-1',
+    baseCommit: 'a'.repeat(40),
+    concurrencyLimit: 2,
+    subscriptionCapacityConfirmed: true,
+    attention: null,
+    itemIds: ['00000000-0000-4000-8000-000000000161'],
+    counts: {
+      waiting: 1,
+      launchPending: 0,
+      active: 0,
+      completed: 0,
+      attentionRequired: 0,
+      notStarted: 0,
+    },
+    createdAt: '2026-08-28T00:00:06.000Z',
+    updatedAt: '2026-08-28T00:00:06.000Z',
+    endedAt: null,
+  },
+  items: [
+    {
+      id: '00000000-0000-4000-8000-000000000161',
+      runId: '00000000-0000-4000-8000-000000000160',
+      projectId,
+      taskId: developerTaskId,
+      ordinal: 0,
+      revision: 1,
+      lifecycle: 'waiting',
+      taskContractRevision: 1,
+      taskCurrentRevision: 1,
+      requirementRevisions: [],
+      prerequisiteTaskIds: [],
+      profileSnapshot: execution.profileSnapshot,
+      launchIdempotencyKey: 'run-item-1',
+      developerAttemptId: null,
+      attention: null,
+      createdAt: '2026-08-28T00:00:06.000Z',
+      updatedAt: '2026-08-28T00:00:06.000Z',
+      endedAt: null,
+    },
+  ],
+});
+
 const snapshot = {
   protocolVersion: V2_PROTOCOL_VERSION,
   project: {
@@ -540,6 +594,7 @@ const snapshot = {
   executions: [execution],
   developerAttempts: [developerAttempt],
   developerReports: [developerReport],
+  executionRuns: [],
   attentionItems: [],
   planningCycles: [],
   planningHistoryTruncated: false,
@@ -1830,5 +1885,41 @@ describe('createV2Store', () => {
 
     expect(listener).toHaveBeenCalledOnce();
     expect(listener.mock.calls[0]?.[0].runtimeCursor).toBe(5);
+  });
+});
+
+describe('execution run projection', () => {
+  it('replaces run history from a project snapshot', () => {
+    const state = reduceProjectProjection(
+      createInitialProjectProjection(projectId),
+      {
+        type: 'snapshot.received',
+        snapshot: { ...snapshot, executionRuns: [executionRunView] },
+      },
+    );
+
+    expect(state.executionRuns).toEqual([executionRunView]);
+  });
+
+  it('upserts a complete run from the durable event', () => {
+    const state = reduceProjectProjection(ready(), {
+      type: 'domain.event',
+      event: {
+        id: '00000000-0000-4000-8000-000000000162',
+        projectId,
+        sequence: 3,
+        occurredAt: '2026-08-28T00:00:07.000Z',
+        type: 'execution_run.changed',
+        payload: {
+          schemaVersion: 1,
+          run: { ...executionRunView.run, revision: 2 },
+          items: executionRunView.items,
+        },
+      },
+    });
+
+    expect(state.executionRuns[0]?.run.revision).toBe(2);
+    expect(state.domainCursor).toBe(3);
+    expect(state.resyncRequested).toBe(false);
   });
 });

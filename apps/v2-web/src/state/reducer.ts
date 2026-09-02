@@ -5,6 +5,7 @@ import type {
   BoardView,
   DeveloperAttempt,
   DeveloperReportRecord,
+  ExecutionRunView,
   PlanningCycleView,
   Project,
   RetainedRuntimeWindow,
@@ -44,6 +45,7 @@ export type ProjectProjection = {
   executions: readonly WorkerExecution[];
   developerAttempts: Readonly<Record<string, DeveloperAttempt>>;
   developerReports: Readonly<Record<string, DeveloperReportRecord>>;
+  executionRuns: readonly ExecutionRunView[];
   attentionItems: readonly V2AttentionItem[];
   planningCycles: readonly PlanningCycleView[];
   planningHistoryTruncated: boolean;
@@ -92,6 +94,7 @@ export const createInitialProjectProjection = (
   executions: [],
   developerAttempts: {},
   developerReports: {},
+  executionRuns: [],
   attentionItems: [],
   planningCycles: [],
   planningHistoryTruncated: false,
@@ -238,6 +241,48 @@ const hasCompleteAttentionProjection = (execution: WorkerExecution) => {
   return needsAttention === (execution.failure !== null);
 };
 
+const orderExecutionRuns = (runs: readonly ExecutionRunView[]) =>
+  [...runs].sort(
+    (left, right) =>
+      descendingCodeUnits(left.run.createdAt, right.run.createdAt) ||
+      descendingCodeUnits(left.run.id, right.run.id),
+  );
+
+const replaceExecutionRun = (
+  runs: readonly ExecutionRunView[],
+  next: ExecutionRunView,
+) =>
+  orderExecutionRuns([
+    next,
+    ...runs.filter(({ run }) => run.id !== next.run.id),
+  ]);
+
+const decorateBoardWithRun = (
+  board: BoardView | undefined,
+  runs: readonly ExecutionRunView[],
+) => {
+  if (!board || runs.length === 0) return board;
+  const current = runs.find(({ run }) => run.lifecycle !== 'completed');
+  return {
+    ...board,
+    cards: board.cards.map((card) => {
+      const item = current?.items.find(({ taskId }) => taskId === card.taskId);
+      return {
+        ...card,
+        executionRunItem: item
+          ? {
+              runId: item.runId,
+              itemId: item.id,
+              lifecycle: item.lifecycle,
+              developerAttemptId: item.developerAttemptId,
+              attention: item.attention,
+            }
+          : null,
+      };
+    }),
+  };
+};
+
 const applyDomainEvent = (
   state: ProjectProjection,
   event: DomainEvent,
@@ -292,7 +337,7 @@ const applyDomainEvent = (
             'deliveryPlan' in outcome
               ? outcome.deliveryPlan
               : state.deliveryPlan,
-          board: outcome.board,
+          board: decorateBoardWithRun(outcome.board, state.executionRuns),
         };
       } catch {
         return undefined;
@@ -307,11 +352,14 @@ const applyDomainEvent = (
           state.planningHistoryTruncated,
         ),
         deliveryPlan: event.payload.deliveryPlan,
-        board: event.payload.board,
+        board: decorateBoardWithRun(event.payload.board, state.executionRuns),
       };
     case 'board.filter_changed':
     case 'task.lifecycle_changed':
-      return { ...state, board: event.payload.board };
+      return {
+        ...state,
+        board: decorateBoardWithRun(event.payload.board, state.executionRuns),
+      };
     case 'developer_attempt.changed':
     case 'developer_workspace.changed':
       return {
@@ -320,7 +368,7 @@ const applyDomainEvent = (
           ...state.developerAttempts,
           [event.payload.attempt.id]: event.payload.attempt,
         },
-        board: event.payload.board,
+        board: decorateBoardWithRun(event.payload.board, state.executionRuns),
       };
     case 'developer_report.recorded':
       return {
@@ -333,8 +381,19 @@ const applyDomainEvent = (
           ...state.developerReports,
           [event.payload.report.id]: event.payload.report,
         },
-        board: event.payload.board,
+        board: decorateBoardWithRun(event.payload.board, state.executionRuns),
       };
+    case 'execution_run.changed': {
+      const executionRuns = replaceExecutionRun(state.executionRuns, {
+        run: event.payload.run,
+        items: event.payload.items,
+      });
+      return {
+        ...state,
+        executionRuns,
+        board: decorateBoardWithRun(state.board, executionRuns),
+      };
+    }
   }
 };
 
@@ -384,7 +443,10 @@ const applyPlanningCommandResult = (
   const value = disposition.result;
   if (value.commandType === 'board_filter.set') {
     return value.board.projectId === state.projectId
-      ? { ...state, board: value.board }
+      ? {
+          ...state,
+          board: decorateBoardWithRun(value.board, state.executionRuns),
+        }
       : stale(state, 'project_mismatch');
   }
   if (value.planningCycle.cycle.projectId !== state.projectId) {
@@ -400,7 +462,7 @@ const applyPlanningCommandResult = (
       ...state,
       ...planning,
       intentLedger: value.intentLedger,
-      board: value.board,
+      board: decorateBoardWithRun(value.board, state.executionRuns),
     };
   }
   if (value.commandType === 'plan_proposal.approve') {
@@ -408,7 +470,7 @@ const applyPlanningCommandResult = (
       ...state,
       ...planning,
       deliveryPlan: value.deliveryPlan,
-      board: value.board,
+      board: decorateBoardWithRun(value.board, state.executionRuns),
     };
   }
   return { ...state, ...planning };
@@ -462,36 +524,43 @@ const replaceSnapshot = (
   snapshot: V2ProjectSnapshot,
   runtimeCursor: number,
   activity: readonly RuntimeEvent[],
-): ProjectProjection => ({
-  ...state,
-  project: snapshot.project,
-  profiles: snapshot.profiles,
-  executions: snapshot.executions,
-  developerAttempts: Object.fromEntries(
-    (snapshot.developerAttempts ?? []).map((attempt) => [attempt.id, attempt]),
-  ),
-  developerReports: Object.fromEntries(
-    (snapshot.developerReports ?? []).map((report) => [report.id, report]),
-  ),
-  attentionItems: snapshot.attentionItems,
-  planningCycles: snapshot.planningCycles,
-  planningHistoryTruncated: snapshot.planningHistoryTruncated,
-  intentLedger: snapshot.intentLedger,
-  deliveryPlan: snapshot.deliveryPlan,
-  board: snapshot.board,
-  activity,
-  domainCursor: snapshot.cursors.domain,
-  runtimeCursor,
-  connection:
-    state.transport === 'subscribed'
-      ? { status: 'ready' }
-      : state.transport === 'disconnected'
-        ? { status: 'disconnected' }
-        : { status: 'loading' },
-  snapshotReady: true,
-  resyncRequested: false,
-  resyncReason: undefined,
-});
+): ProjectProjection => {
+  const executionRuns = orderExecutionRuns(snapshot.executionRuns ?? []);
+  return {
+    ...state,
+    project: snapshot.project,
+    profiles: snapshot.profiles,
+    executions: snapshot.executions,
+    developerAttempts: Object.fromEntries(
+      (snapshot.developerAttempts ?? []).map((attempt) => [
+        attempt.id,
+        attempt,
+      ]),
+    ),
+    developerReports: Object.fromEntries(
+      (snapshot.developerReports ?? []).map((report) => [report.id, report]),
+    ),
+    executionRuns,
+    attentionItems: snapshot.attentionItems,
+    planningCycles: snapshot.planningCycles,
+    planningHistoryTruncated: snapshot.planningHistoryTruncated,
+    intentLedger: snapshot.intentLedger,
+    deliveryPlan: snapshot.deliveryPlan,
+    board: decorateBoardWithRun(snapshot.board, executionRuns),
+    activity,
+    domainCursor: snapshot.cursors.domain,
+    runtimeCursor,
+    connection:
+      state.transport === 'subscribed'
+        ? { status: 'ready' }
+        : state.transport === 'disconnected'
+          ? { status: 'disconnected' }
+          : { status: 'loading' },
+    snapshotReady: true,
+    resyncRequested: false,
+    resyncReason: undefined,
+  };
+};
 
 const runtimeWindowError = (
   projectId: string,

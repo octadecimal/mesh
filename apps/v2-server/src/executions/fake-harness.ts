@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
-import { writeFile } from 'node:fs/promises';
+import { watch } from 'node:fs';
+import { access, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -85,6 +86,37 @@ export type FakeHarnessOptions = {
   interruptThrows?: boolean;
   pmScenario?: FakePmScenario;
   developerScenario?: FakeDeveloperScenario;
+  developerHoldDirectory?: string;
+};
+
+const waitForDeveloperRelease = async (directory: string, taskId: string) => {
+  const releasePath = join(directory, taskId);
+  try {
+    await access(releasePath);
+    return;
+  } catch {
+    // Wait for this exact task's release marker.
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      watcher.close();
+      if (error) reject(error);
+      else resolve();
+    };
+    const check = () =>
+      void access(releasePath).then(
+        () => finish(),
+        () => undefined,
+      );
+    const watcher = watch(directory, (_event, filename) => {
+      if (filename?.toString() === taskId) check();
+    });
+    watcher.once('error', (error) => finish(error));
+    check();
+  });
 };
 
 const encodeHandle = (value: FakeHandle): string => {
@@ -978,6 +1010,16 @@ class FakeHarnessSession implements HarnessSession {
         return;
       }
       yield envelope;
+      if (
+        cursor === 3 &&
+        this.request.assignment.kind === 'developer_task' &&
+        this.options.developerHoldDirectory
+      ) {
+        await waitForDeveloperRelease(
+          this.options.developerHoldDirectory,
+          this.request.assignment.taskId,
+        );
+      }
       if (this.options.holdAfterAdapterCursor === cursor) return;
     }
   }
