@@ -184,6 +184,7 @@ it('opens a fresh identified database through emitted JavaScript and packaged SQ
       { version: 4, name: '004_developer_attempts' },
       { version: 5, name: '005_developer_attempt_commands' },
       { version: 6, name: '006_developer_start_reservations' },
+      { version: 7, name: '007_execution_runs' },
     ]);
   } finally {
     database.close();

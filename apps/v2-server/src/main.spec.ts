@@ -2393,24 +2393,9 @@ describe('startV2Server', () => {
   });
 
   it.each([
-    [
-      'bound_output',
-      'awaiting_human',
-      0,
-      'execution_runs_reconciled',
-    ],
-    [
-      'bound_terminal',
-      'attention_required',
-      0,
-      'execution_runs_reconciled',
-    ],
-    [
-      'unbound_terminal',
-      'attention_required',
-      0,
-      'execution_runs_reconciled',
-    ],
+    ['bound_output', 'awaiting_human', 0, 'execution_runs_reconciled'],
+    ['bound_terminal', 'attention_required', 0, 'execution_runs_reconciled'],
+    ['unbound_terminal', 'attention_required', 0, 'execution_runs_reconciled'],
     [
       'pending_without_operation',
       'awaiting_human',
