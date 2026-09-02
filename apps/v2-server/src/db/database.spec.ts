@@ -52,6 +52,17 @@ const tableNames = (database: V2Database) =>
 
 const migrationPath = join(__dirname, 'migrations', '001_foundation.sql');
 const migration2Path = join(__dirname, 'migrations', '002_intent_ledger.sql');
+const migration3Path = join(__dirname, 'migrations', '003_planning_board.sql');
+const migration4Path = join(
+  __dirname,
+  'migrations',
+  '004_developer_attempts.sql',
+);
+const migration5Path = join(
+  __dirname,
+  'migrations',
+  '005_developer_attempt_commands.sql',
+);
 
 const createMigration1Database = (path: string) => {
   const database = new BetterSqlite3(path);
@@ -75,6 +86,29 @@ const createMigration2Database = (path: string) => {
     ${readFileSync(migration2Path, 'utf8')}
     INSERT INTO v2_schema_migrations (version, name, applied_at)
     VALUES (2, '002_intent_ledger', '2026-08-29T00:00:00.000Z');
+  `);
+  return database;
+};
+
+const createMigration4Database = (path: string) => {
+  const database = createMigration2Database(path);
+  database.exec(`
+    ${readFileSync(migration3Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (3, '003_planning_board', '2026-08-30T00:00:00.000Z');
+    ${readFileSync(migration4Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (4, '004_developer_attempts', '2026-08-31T00:00:00.000Z');
+  `);
+  return database;
+};
+
+const createMigration5Database = (path: string) => {
+  const database = createMigration4Database(path);
+  database.exec(`
+    ${readFileSync(migration5Path, 'utf8')}
+    INSERT INTO v2_schema_migrations (version, name, applied_at)
+    VALUES (5, '005_developer_attempt_commands', '2026-09-01T00:00:00.000Z');
   `);
   return database;
 };
@@ -139,6 +173,12 @@ const schemaRows = (database: V2Database) =>
     )
     .all();
 
+const developerAttemptCommandTypes = [
+  'developer_attempt.start',
+  'developer_attempt.interrupt',
+  'developer_attempt.replace_execution',
+] as const;
+
 afterEach(async () => {
   for (const fixture of testDatabases.splice(0)) fixture.close();
   for (const database of openDatabases.splice(0)) database.close();
@@ -173,7 +213,44 @@ describe('V2 database identity and migration', () => {
       { version: 1, name: '001_foundation' },
       { version: 2, name: '002_intent_ledger' },
       { version: 3, name: '003_planning_board' },
+      { version: 4, name: '004_developer_attempts' },
+      { version: 5, name: '005_developer_attempt_commands' },
+      { version: 6, name: '006_developer_start_reservations' },
     ]);
+  });
+
+  it('accepts every Developer attempt command on a fresh database', () => {
+    const database = openV2Database(
+      join(temporaryDirectory(), 'developer-commands.sqlite'),
+    );
+    openDatabases.push(database);
+    const commands = new V2CommandRepository(database);
+
+    inImmediateTransaction(database, () => {
+      for (const [
+        index,
+        commandType,
+      ] of developerAttemptCommandTypes.entries()) {
+        commands.storeInTransaction({
+          idempotencyKey: `developer-fresh-${index}`,
+          commandType,
+          requestHash: `${index}`.repeat(64),
+          result: {
+            ok: false,
+            commandType,
+            error: { code: 'invalid_request', message: commandType },
+          },
+          createdAt: '2026-09-01T12:00:00.000Z',
+        });
+      }
+    });
+
+    for (const [index, commandType] of developerAttemptCommandTypes.entries()) {
+      expect(commands.find(`developer-fresh-${index}`)?.result).toMatchObject({
+        ok: false,
+        commandType,
+      });
+    }
   });
 
   it('reopens an existing identified V2 database without replacing its data', () => {
@@ -209,7 +286,7 @@ describe('V2 database identity and migration', () => {
       reopened
         .prepare('SELECT COUNT(*) AS count FROM v2_schema_migrations')
         .get(),
-    ).toEqual({ count: 3 });
+    ).toEqual({ count: 6 });
   });
 
   it('migrates an identified pre-foundation V2 database forward', () => {
@@ -231,7 +308,14 @@ describe('V2 database identity and migration', () => {
     expect(tableNames(migrated)).toContain('worker_executions');
     expect(
       migrated.prepare('SELECT version FROM v2_schema_migrations').all(),
-    ).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }]);
+    ).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+      { version: 6 },
+    ]);
   });
 
   it.each([
@@ -421,6 +505,12 @@ describe('V2 database identity and migration', () => {
         'delivery_plan_revision_dependencies',
         'delivery_plan_revision_traces',
         'board_filters',
+        'developer_attempts',
+        'developer_workspaces',
+        'developer_workspace_operations',
+        'developer_attempt_executions',
+        'developer_reports',
+        'developer_output_receipts',
       ]),
     );
     expect(
@@ -435,6 +525,7 @@ describe('V2 database identity and migration', () => {
       expect.arrayContaining([
         'execution_operations_pending',
         'execution_operations_start_request',
+        'developer_attempt_one_controlling_task',
         'planning_cycles_one_nonterminal',
         'planning_turns_one_pending',
         'runtime_events_project_execution_identity',
@@ -442,6 +533,35 @@ describe('V2 database identity and migration', () => {
         'worker_profiles_project_name',
       ]),
     );
+
+    database.pragma('foreign_keys = OFF');
+    const immutableReportId = randomUUID();
+    const immutableAttemptId = randomUUID();
+    const immutableExecutionId = randomUUID();
+    database
+      .prepare(
+        `INSERT INTO developer_reports (
+          id, attempt_id, execution_id, ordinal, report_json, recorded_at
+        ) VALUES (?, ?, ?, 1, '{}', '2026-09-01T12:00:00.000Z')`,
+      )
+      .run(immutableReportId, immutableAttemptId, immutableExecutionId);
+    const immutableReport = database
+      .prepare('SELECT * FROM developer_reports WHERE id = ?')
+      .get(immutableReportId);
+    expect(() =>
+      database
+        .prepare(
+          `INSERT OR REPLACE INTO developer_reports (
+            id, attempt_id, execution_id, ordinal, report_json, recorded_at
+          ) VALUES (?, ?, ?, 1, '{"replaced":true}', '2026-09-01T12:01:00.000Z')`,
+        )
+        .run(immutableReportId, immutableAttemptId, immutableExecutionId),
+    ).toThrow(/immutable/i);
+    expect(
+      database
+        .prepare('SELECT * FROM developer_reports WHERE id = ?')
+        .get(immutableReportId),
+    ).toEqual(immutableReport);
 
     expect(() =>
       database
@@ -588,7 +708,7 @@ describe('V2 database identity and migration', () => {
     expect(database.pragma('foreign_key_check')).toEqual([]);
   });
 
-  it('upgrades migration 1 without changing its source or M1 rows and replays all eight command types', () => {
+  it('upgrades migration 1 without changing its source or M1 rows and replays all nine command types', () => {
     const path = join(temporaryDirectory(), 'upgrade.sqlite');
     const migrationHash = fileHash(migrationPath);
     const database = createMigration1Database(path);
@@ -653,6 +773,7 @@ describe('V2 database identity and migration', () => {
         return (
           name !== 'command_results' &&
           !name.startsWith('planning_') &&
+          !name.startsWith('developer_') &&
           !name.startsWith('pm_output_') &&
           !name.startsWith('project_intent_') &&
           !name.startsWith('ledger_') &&
@@ -662,7 +783,8 @@ describe('V2 database identity and migration', () => {
           name !== 'board_filters' &&
           name !== 'execution_operations_start_request' &&
           name !== 'runtime_events_project_execution_identity' &&
-          name !== 'worker_executions_project_identity'
+          name !== 'worker_executions_project_identity' &&
+          name !== 'command_result_identity_is_immutable'
         );
       }),
     ).toEqual(beforeM1Schema);
@@ -700,7 +822,142 @@ describe('V2 database identity and migration', () => {
         commandType,
       });
     }
+    inImmediateTransaction(database, () => {
+      commands.storeInTransaction({
+        idempotencyKey: 'developer-attempt-start',
+        commandType: 'developer_attempt.start',
+        requestHash: 'd'.repeat(64),
+        result: {
+          ok: false,
+          commandType: 'developer_attempt.start',
+          error: { code: 'invalid_request', message: 'developer start' },
+        },
+        createdAt: '2026-09-01T12:00:00.000Z',
+      });
+    });
+    expect(commands.find('developer-attempt-start')?.result).toMatchObject({
+      ok: false,
+      commandType: 'developer_attempt.start',
+    });
     expect(database.pragma('foreign_key_check')).toEqual([]);
+  });
+
+  it('preserves migration 4 command rows and accepts all three Developer types through migration 5', () => {
+    const database = createMigration4Database(
+      join(temporaryDirectory(), 'upgrade-migration-4.sqlite'),
+    );
+    openDatabases.push(database);
+    database
+      .prepare(
+        `INSERT INTO command_results (
+          idempotency_key, command_type, request_hash, result_json, created_at
+        ) VALUES (?, 'worker_execution.start', ?, ?, ?)`,
+      )
+      .run(
+        'migration-4-command',
+        'a'.repeat(64),
+        JSON.stringify({
+          ok: false,
+          commandType: 'worker_execution.start',
+          error: { code: 'invalid_request', message: 'before migration 5' },
+        }),
+        '2026-08-31T00:00:00.000Z',
+      );
+    const before = database
+      .prepare('SELECT * FROM command_results WHERE idempotency_key = ?')
+      .get('migration-4-command');
+
+    migrateV2Database(database);
+
+    expect(
+      database
+        .prepare('SELECT * FROM command_results WHERE idempotency_key = ?')
+        .get('migration-4-command'),
+    ).toEqual(before);
+    const commands = new V2CommandRepository(database);
+    inImmediateTransaction(database, () => {
+      for (const [
+        index,
+        commandType,
+      ] of developerAttemptCommandTypes.entries()) {
+        commands.storeInTransaction({
+          idempotencyKey: `migration-5-${index}`,
+          commandType,
+          requestHash: `${index}`.repeat(64),
+          result: {
+            ok: false,
+            commandType,
+            error: { code: 'invalid_request', message: commandType },
+          },
+          createdAt: '2026-09-01T12:00:00.000Z',
+        });
+      }
+    });
+    for (const [index, commandType] of developerAttemptCommandTypes.entries()) {
+      expect(commands.find(`migration-5-${index}`)?.result).toMatchObject({
+        ok: false,
+        commandType,
+      });
+    }
+    expect(
+      database
+        .prepare('SELECT version FROM v2_schema_migrations ORDER BY version')
+        .all(),
+    ).toEqual([
+      { version: 1 },
+      { version: 2 },
+      { version: 3 },
+      { version: 4 },
+      { version: 5 },
+      { version: 6 },
+    ]);
+  });
+
+  it('upgrades migration 5 to the final migration 6 without changing command rows', () => {
+    const database = createMigration5Database(
+      join(temporaryDirectory(), 'upgrade-migration-5.sqlite'),
+    );
+    openDatabases.push(database);
+    database
+      .prepare(
+        `INSERT INTO command_results (
+          idempotency_key, command_type, request_hash, result_json, created_at
+        ) VALUES (?, 'developer_attempt.start', ?, ?, ?)`,
+      )
+      .run(
+        'migration-5-developer-start',
+        'a'.repeat(64),
+        '{"ok":false,"commandType":"developer_attempt.start","error":{"code":"invalid_request","message":"preserved"}}',
+        '2026-09-01T00:00:00.000Z',
+      );
+    const before = database.prepare('SELECT * FROM command_results').all();
+
+    migrateV2Database(database);
+
+    expect(database.prepare('SELECT * FROM command_results').all()).toEqual(
+      before,
+    );
+    expect(
+      database
+        .prepare(
+          'SELECT version, name FROM v2_schema_migrations ORDER BY version',
+        )
+        .all(),
+    ).toEqual([
+      { version: 1, name: '001_foundation' },
+      { version: 2, name: '002_intent_ledger' },
+      { version: 3, name: '003_planning_board' },
+      { version: 4, name: '004_developer_attempts' },
+      { version: 5, name: '005_developer_attempt_commands' },
+      { version: 6, name: '006_developer_start_reservations' },
+    ]);
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'developer_start_reservations'",
+        )
+        .get(),
+    ).toEqual({ name: 'developer_start_reservations' });
   });
 
   it('upgrades a nonempty migration 2 database without changing audit bytes, checksums, or cursors', () => {
@@ -1184,6 +1441,9 @@ describe('V2 database identity and migration', () => {
       { version: 1, name: '001_foundation' },
       { version: 2, name: '002_intent_ledger' },
       { version: 3, name: '003_planning_board' },
+      { version: 4, name: '004_developer_attempts' },
+      { version: 5, name: '005_developer_attempt_commands' },
+      { version: 6, name: '006_developer_start_reservations' },
     ]);
     database.close();
 

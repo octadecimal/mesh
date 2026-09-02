@@ -1,6 +1,6 @@
 # V2 foundation development
 
-Mesh V2 Milestones 1–3 are implemented beside the existing session
+Mesh V2 Milestones 1–4 are implemented beside the existing session
 platform. V2 has separate Nx projects, wire contracts, settings, ports, and
 SQLite storage. It does not replace, upgrade, read, or migrate V1. For V1
 operation, see [Session platform development](session-platform.md).
@@ -25,27 +25,27 @@ Both hosts remain loopback-only.
 
 The parallel projects and defaults are:
 
-| Surface | V1 | V2 Milestones 1–3 |
-| --- | --- | --- |
-| Server | `server`, port `3737` | `v2-server`, port `3838` |
-| Web | `web`, port `4200` | `v2-web`, port `4300` |
-| Contracts | `contracts` | `v2-contracts` |
-| Acceptance | `e2e` | `v2-e2e` |
-| Settings | `MESH_*` | `MESH_V2_*` |
+| Surface          | V1                                                 | V2 Milestones 1–4           |
+| ---------------- | -------------------------------------------------- | --------------------------- |
+| Server           | `server`, port `3737`                              | `v2-server`, port `3838`    |
+| Web              | `web`, port `4200`                                 | `v2-web`, port `4300`       |
+| Contracts        | `contracts`                                        | `v2-contracts`              |
+| Acceptance       | `e2e`                                              | `v2-e2e`                    |
+| Settings         | `MESH_*`                                           | `MESH_V2_*`                 |
 | Default database | `~/.mesh-session-platform/session-platform.sqlite` | `~/.mesh/v2/mesh-v2.sqlite` |
 
 ## V2 settings and data
 
-| Setting | Default and constraint |
-| --- | --- |
-| `MESH_V2_HOST` | `127.0.0.1`; only `127.0.0.1` and `::1` are accepted |
-| `MESH_V2_PORT` | `3838` |
+| Setting                  | Default and constraint                                                                                                              |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `MESH_V2_HOST`           | `127.0.0.1`; only `127.0.0.1` and `::1` are accepted                                                                                |
+| `MESH_V2_PORT`           | `3838`                                                                                                                              |
 | `MESH_V2_WORKSPACE_ROOT` | the operator's home directory; overrides must be absolute; used only as the base for relative repository paths, not as an allowlist |
-| `MESH_V2_DATA_DIR` | `~/.mesh/v2`; overrides must be absolute |
-| `MESH_V2_DATABASE_PATH` | `mesh-v2.sqlite` inside the V2 data directory; overrides must be absolute |
-| `MESH_V2_DEV_ORIGIN` | exact loopback HTTP origin; the V2 server development command defaults it to `http://127.0.0.1:4300` |
-| `MESH_V2_GIT_EXECUTABLE` | optional absolute Git executable override |
-| `MESH_V2_WEB_ROOT` | optional absolute path to built V2 web assets |
+| `MESH_V2_DATA_DIR`       | `~/.mesh/v2`; overrides must be absolute                                                                                            |
+| `MESH_V2_DATABASE_PATH`  | `mesh-v2.sqlite` inside the V2 data directory; overrides must be absolute                                                           |
+| `MESH_V2_DEV_ORIGIN`     | exact loopback HTTP origin; the V2 server development command defaults it to `http://127.0.0.1:4300`                                |
+| `MESH_V2_GIT_EXECUTABLE` | optional absolute Git executable override                                                                                           |
+| `MESH_V2_WEB_ROOT`       | optional absolute path to built V2 web assets                                                                                       |
 
 V2 marks and migrates a fresh empty database with its own application identity.
 It refuses a nonempty unmarked database or a database with another application
@@ -101,9 +101,17 @@ canonical lifecycle and dependency state, persists the cross-milestone Board
 filter, and returns the versioned Board projection. Refresh, replay, retained-
 gap resync, and restart rebuild the browser from durable server truth.
 
-M3 stops at planning and deterministic readiness. M4 owns workspace allocation
-and `DeveloperAttempt`; M5 owns `ExecutionRun` scheduling, concurrency, and
-dependency-wave orchestration.
+M4 adds manual execution of one actionable Developer task. Mesh persists the
+frozen assignment and managed-workspace reservation before Git effects, verifies
+the exact owned worktree before execution, and accepts only bound, durable
+Developer reports as completion or blocker evidence. Interrupt, explicit
+replacement, restart reconciliation, replay, and retained-gap resync preserve
+the complete attempt, workspace, report, execution, activity, and Board truth.
+
+M4 stops at manual single-task execution. M5 owns `ExecutionRun`, task claims,
+queues, waves, concurrency, automatic selection, and continuous scheduling. M6
+owns QA attempts and verdicts, structured rework, integration authority,
+milestone completion, and release gates.
 
 Run the deterministic Chromium acceptance scenario with:
 
@@ -136,7 +144,7 @@ resynchronization, so M3 does not duplicate it with another reconnect journey.
 Tests wait for observable commands, snapshots, and UI state rather than sleeps
 or retries.
 
-V2 M1–M3 execution currently uses only the fake harness adapter. The real
+V2 M1–M4 acceptance currently uses only the fake harness adapter. The real
 Claude smoke test documented for the established session platform is separate,
 opt-in, and consumes subscription capacity; it is never part of V2 acceptance
 or default verification. Do not supply `ANTHROPIC_API_KEY` or use API-billed

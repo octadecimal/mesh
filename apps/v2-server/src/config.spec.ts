@@ -146,6 +146,44 @@ describe('loadV2ServerConfig', () => {
     },
   );
 
+  it.each(['completed', 'blocked', 'malformed', 'duplicate', 'missing_output'])(
+    'accepts the %s fake Developer scenario only in tests',
+    (scenario) => {
+      expect(
+        loadV2ServerConfig(
+          { NODE_ENV: 'test', MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO: scenario },
+          root,
+        ).testFakeDeveloperScenario,
+      ).toBe(scenario);
+      expect(() =>
+        loadV2ServerConfig(
+          {
+            NODE_ENV: 'production',
+            MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO: scenario,
+          },
+          root,
+        ),
+      ).toThrowError(
+        expect.objectContaining<V2ConfigError>({
+          code: 'invalid_v2_test_option',
+        }),
+      );
+    },
+  );
+
+  it('rejects unsupported fake Developer scenarios', () => {
+    expect(() =>
+      loadV2ServerConfig(
+        { NODE_ENV: 'test', MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO: 'unknown' },
+        root,
+      ),
+    ).toThrowError(
+      expect.objectContaining<V2ConfigError>({
+        code: 'invalid_v2_test_option',
+      }),
+    );
+  });
+
   it.each(['https://example.com', 'http://localhost:4300'])(
     'rejects non-loopback development origin %s',
     (origin) => {

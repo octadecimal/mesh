@@ -1,8 +1,17 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { access, copyFile, mkdtemp, rm } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  copyFile,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { delimiter, join, relative, resolve } from 'node:path';
 
 import { expect, type Page } from '@playwright/test';
 import {
@@ -61,6 +70,21 @@ type SpawnServerOptions = {
   onDelayedReadyEmitter?: (emit: () => void) => void;
   onReadyObserved?: (ready: ReadyLine) => void;
   onSignal?: (signal: NodeJS.Signals) => void;
+};
+
+type FakeDeveloperScenario =
+  | 'completed'
+  | 'blocked'
+  | 'malformed'
+  | 'duplicate';
+
+type GitBarrier = {
+  root: string;
+  executable: string;
+  realGit: string;
+  entered: string;
+  release: string;
+  count: string;
 };
 
 const workspaceRoot = resolve(__dirname, '..', '..', '..');
@@ -203,6 +227,172 @@ const assertOwnedFixtureRoot = (candidate: string) => {
   return root;
 };
 
+const executableOnPath = async (name: string) => {
+  const searchPath = process.env.PATH ?? process.env.Path ?? '';
+  for (const entry of searchPath.split(delimiter)) {
+    if (!entry) continue;
+    const candidate = resolve(entry, name);
+    try {
+      await access(candidate);
+      return realpath(candidate);
+    } catch {
+      // Continue to the next exact PATH entry.
+    }
+  }
+  throw new Error(`Unable to find ${name} on PATH`);
+};
+
+const compileWindowsGitWrapper = async (source: string, executable: string) => {
+  const windowsRoot = process.env.WINDIR ?? process.env.SystemRoot;
+  if (!windowsRoot) throw new Error('Windows root is unavailable');
+  let compiler: string | undefined;
+  for (const framework of ['Framework64', 'Framework']) {
+    const candidate = join(
+      windowsRoot,
+      'Microsoft.NET',
+      framework,
+      'v4.0.30319',
+      'csc.exe',
+    );
+    try {
+      await access(candidate);
+      compiler = candidate;
+      break;
+    } catch {
+      // Try the other installed .NET Framework compiler.
+    }
+  }
+  if (!compiler) throw new Error('A Windows C# compiler is unavailable');
+  const child = spawn(
+    compiler,
+    ['/nologo', '/target:exe', `/out:${executable}`, source],
+    { shell: false, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
+  );
+  let stderr = '';
+  child.stderr?.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString('utf8');
+  });
+  const code = await new Promise<number | null>((resolveExit, rejectExit) => {
+    child.once('error', rejectExit);
+    child.once('close', resolveExit);
+  });
+  if (code !== 0) {
+    throw new Error(
+      `Git wrapper compilation failed (${String(code)}): ${stderr}`,
+    );
+  }
+};
+
+const createGitBarrier = async (): Promise<GitBarrier> => {
+  const realGit = await executableOnPath(
+    process.platform === 'win32' ? 'git.exe' : 'git',
+  );
+  const root = assertOwnedFixtureRoot(
+    await mkdtemp(join(resolve(tmpdir()), `${fixturePrefix}git-`)),
+  );
+  const barrier = {
+    root,
+    executable: join(root, process.platform === 'win32' ? 'git.exe' : 'git'),
+    realGit,
+    entered: join(root, 'worktree-add.entered'),
+    release: join(root, 'worktree-add.release'),
+    count: join(root, 'worktree-add.count'),
+  };
+  try {
+    if (process.platform === 'win32') {
+      const source = join(root, 'git-wrapper.cs');
+      await writeFile(
+        source,
+        `using System;
+using System.Diagnostics;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
+
+internal static class GitWrapper {
+  private static bool IsWorktreeAdd(string[] args) {
+    for (var index = 0; index + 1 < args.Length; index++) {
+      if (args[index] == "worktree" && args[index + 1] == "add") return true;
+    }
+    return false;
+  }
+
+  private static string ForwardedArguments() {
+    var command = Environment.CommandLine.TrimStart();
+    if (command.Length > 0 && command[0] == (char)34) {
+      var end = command.IndexOf('"', 1);
+      return end < 0 ? "" : command.Substring(end + 1).TrimStart();
+    }
+    var space = command.IndexOf(' ');
+    return space < 0 ? "" : command.Substring(space + 1).TrimStart();
+  }
+
+  public static int Main(string[] args) {
+    if (IsWorktreeAdd(args)) {
+      File.AppendAllText(Environment.GetEnvironmentVariable("MESH_V2_E2E_GIT_COUNT"), "1\\n");
+      var owner = false;
+      try {
+        using (File.Open(Environment.GetEnvironmentVariable("MESH_V2_E2E_GIT_ENTERED"), FileMode.CreateNew)) {}
+        owner = true;
+      } catch (IOException) {}
+      while (owner && !File.Exists(Environment.GetEnvironmentVariable("MESH_V2_E2E_GIT_RELEASE"))) {
+        Thread.Sleep(10);
+      }
+    }
+    var child = new Process();
+    child.StartInfo = new ProcessStartInfo(
+      Environment.GetEnvironmentVariable("MESH_V2_E2E_REAL_GIT"),
+      ForwardedArguments()
+    );
+    child.StartInfo.UseShellExecute = false;
+    child.StartInfo.CreateNoWindow = true;
+    child.StartInfo.RedirectStandardOutput = true;
+    child.StartInfo.RedirectStandardError = true;
+    child.Start();
+    Task<string> stdout = child.StandardOutput.ReadToEndAsync();
+    Task<string> stderr = child.StandardError.ReadToEndAsync();
+    child.WaitForExit();
+    Task.WaitAll(stdout, stderr);
+    Console.Out.Write(stdout.Result);
+    Console.Error.Write(stderr.Result);
+    return child.ExitCode;
+  }
+}
+`,
+        'utf8',
+      );
+      await compileWindowsGitWrapper(source, barrier.executable);
+    } else {
+      await writeFile(
+        barrier.executable,
+        `#!/bin/sh
+previous=
+worktree_add=false
+for argument in "$@"; do
+  if [ "$previous" = worktree ] && [ "$argument" = add ]; then
+    worktree_add=true
+  fi
+  previous=$argument
+done
+if [ "$worktree_add" = true ]; then
+  printf '1\\n' >> "$MESH_V2_E2E_GIT_COUNT"
+  if (set -C; : > "$MESH_V2_E2E_GIT_ENTERED") 2>/dev/null; then
+    while [ ! -e "$MESH_V2_E2E_GIT_RELEASE" ]; do sleep 0.01; done
+  fi
+fi
+exec "$MESH_V2_E2E_REAL_GIT" "$@"
+`,
+        'utf8',
+      );
+      await chmod(barrier.executable, 0o700);
+    }
+    return barrier;
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
+};
+
 const closeExactChild = (
   child: RunningChild,
   options: { force?: boolean } = {},
@@ -272,6 +462,8 @@ export class V2ProcessFixture {
     readonly fixtureRoot: string,
     todoRepository: string,
     private readonly fakePmScenario?: 'todo',
+    private readonly fakeDeveloperScenario?: FakeDeveloperScenario,
+    private readonly gitBarrier?: GitBarrier,
   ) {
     this.todoRepository = todoRepository;
     this.databasePath = assertContainedPath(
@@ -284,18 +476,34 @@ export class V2ProcessFixture {
     options: {
       onRoot?: (root: string) => void;
       fakePmScenario?: 'todo';
+      fakeDeveloperScenario?: FakeDeveloperScenario;
+      gitBarrier?: boolean;
     } = {},
   ) {
     let root: string | undefined;
+    let gitBarrier: GitBarrier | undefined;
     try {
       root = assertOwnedFixtureRoot(
         await mkdtemp(join(resolve(tmpdir()), fixturePrefix)),
       );
       options.onRoot?.(root);
       const repository = await createTodoRepository(root);
-      return new V2ProcessFixture(root, repository, options.fakePmScenario);
+      if (options.gitBarrier) gitBarrier = await createGitBarrier();
+      return new V2ProcessFixture(
+        root,
+        repository,
+        options.fakePmScenario,
+        options.fakeDeveloperScenario,
+        gitBarrier,
+      );
     } catch (error) {
       if (root) await rm(root, { recursive: true, force: true });
+      if (gitBarrier) {
+        await rm(assertOwnedFixtureRoot(gitBarrier.root), {
+          recursive: true,
+          force: true,
+        });
+      }
       throw error;
     }
   }
@@ -348,10 +556,21 @@ export class V2ProcessFixture {
     if (this.fakePmScenario) {
       environment.MESH_V2_TEST_FAKE_PM_SCENARIO = this.fakePmScenario;
     }
+    if (this.fakeDeveloperScenario) {
+      environment.MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO =
+        this.fakeDeveloperScenario;
+    }
     if (options.holdAfterAdapterCursor !== undefined) {
       environment.MESH_V2_FAKE_HOLD_AFTER_CURSOR = String(
         options.holdAfterAdapterCursor,
       );
+    }
+    if (this.gitBarrier) {
+      environment.MESH_V2_GIT_EXECUTABLE = this.gitBarrier.executable;
+      environment.MESH_V2_E2E_REAL_GIT = this.gitBarrier.realGit;
+      environment.MESH_V2_E2E_GIT_ENTERED = this.gitBarrier.entered;
+      environment.MESH_V2_E2E_GIT_RELEASE = this.gitBarrier.release;
+      environment.MESH_V2_E2E_GIT_COUNT = this.gitBarrier.count;
     }
     const child = spawn(process.execPath, [serverMain], {
       cwd: workspaceRoot,
@@ -698,7 +917,126 @@ export class V2ProcessFixture {
       `${this.origin}/api/v2/projects/${this.projectId}/snapshot`,
     );
     expect(response.status).toBe(200);
-    return v2ProjectSnapshotSchema.parse(await response.json());
+    const snapshot = v2ProjectSnapshotSchema.parse(await response.json());
+    return {
+      ...snapshot,
+      developerAttempts: snapshot.developerAttempts ?? [],
+      developerReports: snapshot.developerReports ?? [],
+    };
+  }
+
+  async managedTodoArtifact(attemptId: string) {
+    const attempt = (await this.projectSnapshot()).developerAttempts.find(
+      ({ id }) => id === attemptId,
+    );
+    if (!attempt) throw new Error('Developer attempt was not found');
+    const workspace = assertContainedPath(
+      this.fixtureRoot,
+      attempt.workspace.path,
+    );
+    return readFile(
+      assertContainedPath(workspace, join(workspace, 'todo-m4.txt')),
+      'utf8',
+    );
+  }
+
+  async waitForGitWorktreeAdd() {
+    const barrier = this.gitBarrier;
+    if (!barrier) throw new Error('The Git barrier is not enabled');
+    await expect
+      .poll(async () => {
+        try {
+          await access(barrier.entered);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .toBe(true);
+  }
+
+  async releaseGitWorktreeAdd() {
+    if (!this.gitBarrier) throw new Error('The Git barrier is not enabled');
+    await writeFile(this.gitBarrier.release, '', 'utf8');
+  }
+
+  async gitWorktreeAddCount() {
+    if (!this.gitBarrier) throw new Error('The Git barrier is not enabled');
+    try {
+      return (await readFile(this.gitBarrier.count, 'utf8'))
+        .split(/\r?\n/u)
+        .filter(Boolean).length;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+      throw error;
+    }
+  }
+
+  async managedWorkspacePresence(workspacePath: string) {
+    const workspace = assertContainedPath(this.fixtureRoot, workspacePath);
+    const exists = async (path: string) => {
+      try {
+        await access(path);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    return {
+      workspace: await exists(workspace),
+      artifact: await exists(
+        assertContainedPath(workspace, join(workspace, 'todo-m4.txt')),
+      ),
+    };
+  }
+
+  async expireRetainedEventsThrough(cursors: {
+    domain: number;
+    runtime: number;
+  }) {
+    const database = new Database(this.databasePath);
+    try {
+      database.pragma('busy_timeout = 5000');
+      // The isolated fixture emulates event retention; durable receipts may
+      // continue naming historical runtime events after those rows expire.
+      database.pragma('foreign_keys = OFF');
+      database.transaction(() => {
+        database
+          .prepare(
+            'DELETE FROM domain_events WHERE project_id = ? AND sequence <= ?',
+          )
+          .run(this.projectId, cursors.domain + 1);
+        database
+          .prepare(
+            'DELETE FROM runtime_events WHERE project_id = ? AND sequence <= ?',
+          )
+          .run(this.projectId, cursors.runtime + 1);
+      })();
+      const waterMarks = (
+        streamKind: 'domain' | 'runtime',
+        table: 'domain_events' | 'runtime_events',
+      ) =>
+        database
+          .prepare(
+            `SELECT
+               streams.high_water AS highWater,
+               COALESCE(MIN(events.sequence), streams.high_water + 1) AS lowWater
+             FROM event_streams streams
+             LEFT JOIN ${table} events ON events.project_id = streams.project_id
+             WHERE streams.project_id = ? AND streams.stream_kind = ?
+             GROUP BY streams.high_water`,
+          )
+          .get(this.projectId, streamKind) as {
+          highWater: number;
+          lowWater: number;
+        };
+      return {
+        domain: waterMarks('domain', 'domain_events'),
+        runtime: waterMarks('runtime', 'runtime_events'),
+      };
+    } finally {
+      database.close();
+    }
   }
 
   async waitForBrowserRegistration() {
@@ -894,53 +1232,6 @@ spec:
       } satisfies ClientRealtimeMessage,
     );
     return raw.map((message) => serverRealtimeMessageSchema.parse(message));
-  }
-
-  async forceProjectResync(page: Page) {
-    const snapshot = await this.projectSnapshot();
-    const raw = await page.evaluate(
-      ({ type, projectId, protocolVersion, cursors }) =>
-        new Promise<unknown>((resolveResync, rejectResync) => {
-          const socket = new WebSocket('/api/v2/realtime');
-          socket.onerror = () => rejectResync(new Error('V2 WebSocket failed'));
-          socket.onopen = () =>
-            socket.send(
-              JSON.stringify({
-                type,
-                protocolVersion,
-                projectId,
-                cursors,
-              }),
-            );
-          socket.onmessage = ({ data }) => {
-            const message = JSON.parse(String(data)) as { type?: string };
-            if (message.type !== 'v2.resync_required') return;
-            socket.close();
-            resolveResync(message);
-          };
-        }),
-      {
-        type: 'v2.subscribe',
-        projectId: this.projectId,
-        protocolVersion: V2_PROTOCOL_VERSION,
-        cursors: {
-          domain: snapshot.cursors.domain + 1,
-          runtime: snapshot.cursors.runtime + 1,
-        },
-      } satisfies ClientRealtimeMessage,
-    );
-    expect(serverRealtimeMessageSchema.parse(raw)).toMatchObject({
-      type: 'v2.resync_required',
-      projectId: this.projectId,
-      reason: 'retained_gap',
-    });
-    await page.reload();
-    await expect(
-      page.getByText(
-        `Domain cursor ${snapshot.cursors.domain}; runtime cursor ${snapshot.cursors.runtime}`,
-      ),
-    ).toBeVisible();
-    return this.projectSnapshot();
   }
 
   async expectContinuousStreamsAndStableSnapshots(page: Page) {
@@ -1251,10 +1542,17 @@ spec:
   }
 
   async dispose() {
+    if (this.gitBarrier) await this.releaseGitWorktreeAdd();
     if (this.child) {
       await closeExactChild(this.child);
     }
     const root = assertOwnedFixtureRoot(this.fixtureRoot);
     await rm(root, { recursive: true, force: true });
+    if (this.gitBarrier) {
+      await rm(assertOwnedFixtureRoot(this.gitBarrier.root), {
+        recursive: true,
+        force: true,
+      });
+    }
   }
 }

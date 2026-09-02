@@ -11,6 +11,16 @@ import type {
 
 import { loadV2ServerConfig } from './config.js';
 import { openV2Database, type V2Database } from './db/database.js';
+import { DeveloperAttemptService } from './developer/developer-attempt-service.js';
+import { DeveloperReportConsumer } from './developer/developer-report-consumer.js';
+import { DeveloperRepository } from './developer/developer-repository.js';
+import {
+  createManagedWorkspace,
+  deriveManagedWorkspace,
+  observeManagedWorkspace,
+  recoverManagedWorkspace,
+} from './developer/managed-workspace.js';
+import { reconcileDeveloperAttempts } from './developer/reconcile-developer-attempts.js';
 import { AuditBarrier } from './executions/audit-barrier.js';
 import { ExecutionRepository } from './executions/execution-repository.js';
 import { ExecutionRuntime } from './executions/execution-runtime.js';
@@ -44,6 +54,7 @@ export type RunningV2Server = {
 
 type V2StartupPhase =
   | 'executions_reconciled'
+  | 'developer_attempts_reconciled'
   | 'planning_bound_cycles_reconciled'
   | 'planning_pending_reservations_reconciled'
   | 'recovery_window_published'
@@ -58,6 +69,7 @@ export type StartV2ServerOptions = {
     webRoot?: string;
     onPublished?: (message: ServerRealtimeMessage) => void;
     onStartupPhase?: (phase: V2StartupPhase) => void;
+    onGitCall?: (args: readonly string[]) => void;
   };
 };
 
@@ -179,19 +191,29 @@ export const startV2Server = async (
     const events = new V2EventStore(database);
     const publisher = new V2EventPublisher(options.test?.onPublished);
     const barrier = new AuditBarrier();
+    const trustedProcessRunner = createV2GitProcessRunner(trustedGit);
+    const processRunner = options.test?.onGitCall
+      ? {
+          run: (call: Parameters<typeof trustedProcessRunner.run>[0]) => {
+            options.test!.onGitCall!(call.args);
+            return trustedProcessRunner.run(call);
+          },
+        }
+      : trustedProcessRunner;
+    const resolveRepositoryIdentity = auditAwareRepositoryIdentityResolver(
+      createRepositoryIdentityResolver({
+        workspaceRoot: config.workspaceRoot,
+        gitExecutable: trustedGit.path,
+        processRunner,
+      }),
+      barrier,
+    );
     const projects = new ProjectService({
       database,
       projects: projectsRepository,
       commands,
       events,
-      resolveRepositoryIdentity: auditAwareRepositoryIdentityResolver(
-        createRepositoryIdentityResolver({
-          workspaceRoot: config.workspaceRoot,
-          gitExecutable: trustedGit.path,
-          processRunner: createV2GitProcessRunner(trustedGit),
-        }),
-        barrier,
-      ),
+      resolveRepositoryIdentity,
       publish: (event) => publisher.domain(event),
     });
     const profiles = new WorkerProfileService({
@@ -209,10 +231,14 @@ export const startV2Server = async (
     let recovering = true;
     const fakeHold = createFakeHoldController(
       options.test?.adapter ??
-        new FakeHarnessAdapter({ pmScenario: config.testFakePmScenario }),
+        new FakeHarnessAdapter({
+          pmScenario: config.testFakePmScenario,
+          developerScenario: config.testFakeDeveloperScenario,
+        }),
       config.testFakeHoldAfterAdapterCursor,
     );
     const adapter = fakeHold.adapter;
+    const developerObserver: { current?: DeveloperReportConsumer } = {};
     runtime = new ExecutionRuntime({
       database,
       commands,
@@ -229,9 +255,14 @@ export const startV2Server = async (
       barrier,
       now: () => new Date().toISOString(),
       observer: {
-        structuredOutput: (execution, event) =>
-          planningObserver.structuredOutput(execution, event),
-        terminal: (execution) => planningObserver.terminal(execution),
+        structuredOutput: async (execution, event) => {
+          planningObserver.structuredOutput(execution, event);
+          await developerObserver.current?.structuredOutput(execution, event);
+        },
+        terminal: (execution) => {
+          planningObserver.terminal(execution);
+          developerObserver.current?.terminal(execution);
+        },
       },
     });
     const planning = createPlanningRuntime({
@@ -248,6 +279,86 @@ export const startV2Server = async (
       },
     });
     const planningObserver = planning.observer;
+    const developers = new DeveloperRepository(database);
+    const managedWorkspaceRoot = join(
+      dirname(config.databasePath),
+      'developer-worktrees',
+    );
+    const managedWorkspace = {
+      inspectProject: async (repositoryPath: string) => {
+        const identity = await resolveRepositoryIdentity(repositoryPath);
+        return {
+          repositoryIdentity: identity.repositoryIdentity,
+          headCommit: identity.headCommit,
+        };
+      },
+      derive: deriveManagedWorkspace,
+      create: (workspace: Parameters<typeof createManagedWorkspace>[0]) =>
+        createManagedWorkspace(workspace, {
+          managedRoot: managedWorkspaceRoot,
+          gitExecutable: trustedGit.path,
+          processRunner,
+          resolveRepositoryIdentity,
+          assertCreateReserved: (attemptId) => {
+            const attempt = developers.attempt(attemptId);
+            if (!attempt || attempt.workspace.lifecycle !== 'creating') {
+              throw new Error('Developer workspace creation was not reserved');
+            }
+          },
+        }),
+      recover: (
+        workspace: Parameters<typeof recoverManagedWorkspace>[0],
+        options: Parameters<typeof recoverManagedWorkspace>[2],
+      ) =>
+        recoverManagedWorkspace(
+          workspace,
+          {
+            managedRoot: managedWorkspaceRoot,
+            gitExecutable: trustedGit.path,
+            processRunner,
+            resolveRepositoryIdentity,
+            assertCreateReserved: () => undefined,
+          },
+          options,
+        ),
+      observe: (workspace: Parameters<typeof observeManagedWorkspace>[0]) =>
+        observeManagedWorkspace(
+          workspace,
+          {
+            managedRoot: managedWorkspaceRoot,
+            gitExecutable: trustedGit.path,
+            processRunner,
+            resolveRepositoryIdentity,
+            assertCreateReserved: () => undefined,
+          },
+          { requireClean: false },
+        ),
+    };
+    const developerAttempts = new DeveloperAttemptService({
+      database,
+      planning: planning.repository,
+      developers,
+      profiles,
+      commands,
+      events,
+      executions,
+      execution: runtime,
+      workspace: managedWorkspace,
+      barrier,
+      billingConflicts:
+        environment.ANTHROPIC_API_KEY === undefined ||
+        environment.ANTHROPIC_API_KEY.length === 0
+          ? []
+          : [{ variable: 'ANTHROPIC_API_KEY' }],
+      managedWorkspaceRoot,
+      now: () => new Date().toISOString(),
+      publishDomain: (event) => {
+        if (!recovering) publisher.domain(event);
+      },
+    });
+    developerObserver.current = new DeveloperReportConsumer({
+      attempts: developerAttempts,
+    });
 
     const beforeReconciliation = new Map(
       projectsRepository
@@ -269,6 +380,23 @@ export const startV2Server = async (
       },
     });
     options.test?.onStartupPhase?.('executions_reconciled');
+    for (const output of developers.unreceiptedStructuredOutputs()) {
+      const execution = executions.get(output.executionId);
+      if (!execution)
+        throw new Error('Durable Developer output execution was not found');
+      await developerObserver.current!.structuredOutput(execution, output);
+    }
+    const developerRecovery = await reconcileDeveloperAttempts({
+      database,
+      developers,
+      executions,
+      workspace: { observe: managedWorkspace.observe },
+      planning: planning.repository,
+      events,
+      barrier,
+      now: () => new Date().toISOString(),
+    });
+    options.test?.onStartupPhase?.('developer_attempts_reconciled');
     planning.service.reconcileBoundCycles();
     options.test?.onStartupPhase?.('planning_bound_cycles_reconciled');
     planning.service.reconcilePendingReservations();
@@ -286,6 +414,13 @@ export const startV2Server = async (
     }
     options.test?.onStartupPhase?.('recovered_sessions_attached');
     await planning.service.drainPendingLaunches();
+    await developerAttempts.drainPendingStarts(
+      developerRecovery.pendingStartAttemptIds,
+    );
+    await developerAttempts.drainPendingActivations();
+    await developerAttempts.drainPendingInterrupts(
+      developerRecovery.pendingInterruptAttemptIds,
+    );
     options.test?.onStartupPhase?.('pending_launches_drained');
 
     const allowedOrigins = new Set<string>();
@@ -294,6 +429,7 @@ export const startV2Server = async (
       projects: projectsRepository,
       profiles,
       executions,
+      developers,
       planning: planning.repository,
       events,
       barrier,
@@ -306,6 +442,7 @@ export const startV2Server = async (
         projects,
         profiles,
         runtime,
+        developer: developerAttempts,
         planning: planning.service,
         snapshots,
         events,

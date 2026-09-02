@@ -60,6 +60,12 @@ export type TaskId = z.infer<typeof taskIdSchema>;
 export const taskDependencyIdSchema = brandedUuid<'TaskDependencyId'>();
 export type TaskDependencyId = z.infer<typeof taskDependencyIdSchema>;
 
+export const developerAttemptIdSchema = brandedUuid<'DeveloperAttemptId'>();
+export type DeveloperAttemptId = z.infer<typeof developerAttemptIdSchema>;
+
+export const developerReportIdSchema = brandedUuid<'DeveloperReportId'>();
+export type DeveloperReportId = z.infer<typeof developerReportIdSchema>;
+
 export const isoTimestampSchema = z.string().datetime({ offset: true });
 export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;
 

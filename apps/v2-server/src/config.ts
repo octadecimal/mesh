@@ -9,7 +9,15 @@ export type V2ServerConfig = {
   webRoot?: string;
   testFakeHoldAfterAdapterCursor?: number;
   testFakePmScenario?: 'todo';
+  testFakeDeveloperScenario?: FakeDeveloperScenario;
 };
+
+export type FakeDeveloperScenario =
+  | 'completed'
+  | 'blocked'
+  | 'malformed'
+  | 'duplicate'
+  | 'missing_output';
 
 export type V2ConfigErrorCode =
   | 'invalid_v2_host'
@@ -126,6 +134,24 @@ export const loadV2ServerConfig = (
       'Fake PM scenario must be todo in the test environment',
     );
   }
+  const fakeDeveloperScenario =
+    environment.MESH_V2_TEST_FAKE_DEVELOPER_SCENARIO;
+  if (
+    fakeDeveloperScenario !== undefined &&
+    (environment.NODE_ENV !== 'test' ||
+      ![
+        'completed',
+        'blocked',
+        'malformed',
+        'duplicate',
+        'missing_output',
+      ].includes(fakeDeveloperScenario))
+  ) {
+    throw new V2ConfigError(
+      'invalid_v2_test_option',
+      'Fake Developer scenario is test-only and invalid',
+    );
+  }
   const developmentOrigin =
     environment.MESH_V2_DEV_ORIGIN ??
     (environment.NODE_ENV === 'development'
@@ -151,5 +177,11 @@ export const loadV2ServerConfig = (
     ...(fakePmScenario === undefined
       ? {}
       : { testFakePmScenario: fakePmScenario }),
+    ...(fakeDeveloperScenario === undefined
+      ? {}
+      : {
+          testFakeDeveloperScenario:
+            fakeDeveloperScenario as FakeDeveloperScenario,
+        }),
   };
 };

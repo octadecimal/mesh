@@ -29,6 +29,7 @@ import {
 } from '../storage/command-repository.js';
 import {
   createV2TestDatabase,
+  insertV2TestProject,
   type V2TestDatabase,
 } from '../test/create-v2-test-database.js';
 import { AuditBarrier } from './audit-barrier.js';
@@ -391,6 +392,43 @@ describe('planning observer', () => {
       'publish-terminal',
       'terminal',
     ]);
+  });
+
+  it('contains an observer audit failure without recording an adapter failure', async () => {
+    const holder: { context?: ReturnType<typeof createPmRuntime> } = {};
+    const observer: ExecutionRuntimeObserver = {
+      structuredOutput: () => {
+        const context = holder.context;
+        if (!context) throw new Error('Runtime context is not initialized');
+        const error = new Error('Developer receipt audit failed');
+        context.barrier.trip(error);
+        throw error;
+      },
+      terminal: vi.fn(),
+    };
+    const context = createPmRuntime('todo', {}, undefined, observer);
+    holder.context = context;
+
+    const result = await context.runtime.start(context.start);
+    await context.runtime.drain();
+
+    const executionId =
+      result.ok && 'execution' in result ? result.execution.id : '';
+    expect(context.barrier.status).toBe('tripped');
+    expect(context.executions.get(executionId)).toMatchObject({
+      lifecycle: 'running',
+      failure: null,
+    });
+    expect(
+      context.published.domain.filter((event) => {
+        const domain = event as DomainEvent;
+        return (
+          domain.type === 'worker_execution.lifecycle_changed' &&
+          domain.payload.execution.lifecycle === 'failed'
+        );
+      }),
+    ).toHaveLength(0);
+    expect(observer.terminal).not.toHaveBeenCalled();
   });
 });
 
@@ -871,6 +909,154 @@ describe('ExecutionRuntime', () => {
       nativeHandle: expect.stringMatching(/^fake:v1:/),
     });
   });
+
+  it('reserves an unactivated replacement linked to a terminal execution', async () => {
+    const context = createRuntime();
+    const first = await context.runtime.reserveStart(context.start);
+    await context.runtime.activateReserved(first.execution.id);
+    await context.runtime.drain();
+    const running = required(
+      context.executions.get(first.execution.id),
+      'Expected a running execution',
+    );
+    await context.runtime.interrupt({
+      idempotencyKey: randomUUID(),
+      actor: { kind: 'human' },
+      command: {
+        type: 'worker_execution.interrupt',
+        projectId: running.projectId,
+        executionId: running.id,
+        expectedRevision: running.revision,
+      },
+    });
+    const replacementEnvelope = {
+      ...context.start,
+      idempotencyKey: randomUUID(),
+    };
+
+    const replacement = await context.runtime.reserveReplacement(
+      replacementEnvelope,
+      first.execution.id,
+    );
+
+    expect(replacement.execution).toMatchObject({
+      lifecycle: 'starting',
+      replacementForExecutionId: first.execution.id,
+      assignment: first.execution.assignment,
+      profileSnapshot: first.execution.profileSnapshot,
+    });
+    expect(context.fake.startCount).toBe(1);
+    expect(
+      context.operations.listForExecution(replacement.execution.id),
+    ).toMatchObject([
+      {
+        kind: 'start',
+        request: { replacementForExecutionId: first.execution.id },
+      },
+    ]);
+    await expect(
+      context.runtime.reserveReplacement(
+        replacementEnvelope,
+        first.execution.id,
+      ),
+    ).resolves.toEqual(replacement);
+  });
+
+  it.each([
+    { name: 'nonterminal predecessor' },
+    { name: 'foreign predecessor' },
+    { name: 'different assignment' },
+    { name: 'different profile revision' },
+    { name: 'different profile snapshot' },
+  ])(
+    'refuses replacement with $name before reserving any new authority',
+    async ({ name }) => {
+      const context = createRuntime();
+      const prior = await context.runtime.reserveStart(context.start);
+      if (name !== 'nonterminal predecessor') {
+        await context.runtime.cancelReserved(prior.execution.id);
+      }
+      if (name === 'foreign predecessor') {
+        const foreignProject = insertV2TestProject(context.fixture.database, {
+          id: randomUUID(),
+          displayName: 'Foreign',
+          repositoryIdentity: 'foreign-repository',
+        });
+        context.fixture.database
+          .prepare(
+            'UPDATE worker_executions SET project_id = ?, assignment_json = ? WHERE id = ?',
+          )
+          .run(
+            foreignProject.id,
+            JSON.stringify({
+              ...prior.execution.assignment,
+              projectId: foreignProject.id,
+            }),
+            prior.execution.id,
+          );
+      }
+      if (name === 'different profile revision') {
+        context.fixture.database
+          .prepare(
+            `INSERT INTO worker_profile_revisions (
+            profile_id, revision, source_yaml, normalized_json,
+            base_profile_id, base_revision, approved_by, approved_at, digest
+          ) SELECT profile_id, 2, source_yaml, normalized_json,
+            base_profile_id, base_revision, approved_by, approved_at, digest
+          FROM worker_profile_revisions
+          WHERE profile_id = ? AND revision = 1`,
+          )
+          .run(prior.execution.profileId);
+        context.fixture.database
+          .prepare(
+            'UPDATE worker_executions SET profile_revision = ?, profile_snapshot_json = ? WHERE id = ?',
+          )
+          .run(
+            prior.execution.profileRevision + 1,
+            JSON.stringify({
+              ...prior.execution.profileSnapshot,
+              profileRevision: prior.execution.profileRevision + 1,
+            }),
+            prior.execution.id,
+          );
+      }
+      if (name === 'different profile snapshot') {
+        context.fixture.database
+          .prepare(
+            'UPDATE worker_executions SET profile_snapshot_json = ? WHERE id = ?',
+          )
+          .run(
+            JSON.stringify({
+              ...prior.execution.profileSnapshot,
+              digest: 'c'.repeat(64),
+            }),
+            prior.execution.id,
+          );
+      }
+      const replacement = {
+        ...context.start,
+        idempotencyKey: randomUUID(),
+        command:
+          name === 'different assignment'
+            ? {
+                ...context.start.command,
+                assignment: {
+                  ...context.start.command.assignment,
+                  title: 'A different authority',
+                },
+              }
+            : context.start.command,
+      };
+      const before = durableReservationState(context.fixture);
+
+      await expect(
+        context.runtime.reserveReplacement(replacement, prior.execution.id),
+      ).rejects.toBeInstanceOf(ExecutionReservationError);
+
+      expect(durableReservationState(context.fixture)).toEqual(before);
+      expect(context.fake.startCount).toBe(0);
+    },
+  );
 
   it('preserves public pre-migration replay but fails direct reservation closed', async () => {
     const fake = new FakeHarnessAdapter();

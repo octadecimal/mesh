@@ -1,3 +1,5 @@
+import { useId } from 'react';
+
 import type {
   ProjectEventCursors,
   ResolvedSkillSnapshot,
@@ -50,6 +52,8 @@ const assignmentLabel = (execution: WorkerExecution) => {
       return 'Project manager discovery';
     case 'pm_plan':
       return 'Project manager delivery planning';
+    case 'developer_task':
+      return execution.assignment.title;
   }
 };
 
@@ -85,7 +89,7 @@ export function ExecutionActivity({
   runtimeActivity?: readonly RuntimeEvent[];
   projectCursors: ProjectEventCursors;
 }) {
-  const headingId = `execution-${execution.id}`;
+  const headingId = useId();
   const label = assignmentLabel(execution);
   return (
     <article className="v2-execution" aria-labelledby={headingId}>

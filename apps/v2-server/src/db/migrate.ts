@@ -40,10 +40,40 @@ const planningBoardMigration = {
   ),
 };
 
+const developerAttemptsMigration = {
+  version: 4,
+  name: '004_developer_attempts',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '004_developer_attempts.sql'),
+    'utf8',
+  ),
+};
+
+const developerAttemptCommandsMigration = {
+  version: 5,
+  name: '005_developer_attempt_commands',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '005_developer_attempt_commands.sql'),
+    'utf8',
+  ),
+};
+
+const developerStartReservationsMigration = {
+  version: 6,
+  name: '006_developer_start_reservations',
+  sql: readFileSync(
+    join(__dirname, 'migrations', '006_developer_start_reservations.sql'),
+    'utf8',
+  ),
+};
+
 const migrations = [
   foundationMigration,
   intentLedgerMigration,
   planningBoardMigration,
+  developerAttemptsMigration,
+  developerAttemptCommandsMigration,
+  developerStartReservationsMigration,
 ] as const;
 
 type MigrationLedgerRow = { version: number; name: string };

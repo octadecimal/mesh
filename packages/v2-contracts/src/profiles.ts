@@ -9,6 +9,7 @@ import {
 } from './ids';
 import { PM_DISCOVERY_REPORT_SCHEMA } from './intent';
 import { PM_PLAN_REPORT_SCHEMA } from './delivery-plan';
+import { DEVELOPER_REPORT_SCHEMA } from './developer-attempts';
 
 export const WORKER_PROFILE_API_VERSION = 'mesh.dev/v1alpha1' as const;
 
@@ -56,6 +57,7 @@ const workerProfileSpecShape = {
     z.tuple([z.literal('foundation-check')]).readonly(),
     z.tuple([z.literal('pm_discovery')]).readonly(),
     z.tuple([z.literal('pm_plan')]).readonly(),
+    z.tuple([z.literal('developer_task')]).readonly(),
   ]),
   preferredRuntime: runtimePreferenceSchema,
   alternatives: z.array(runtimePreferenceSchema).max(16).readonly(),
@@ -80,11 +82,22 @@ const requirePmOutputSchema = (
     assignmentKinds?:
       | readonly ['foundation-check']
       | readonly ['pm_discovery']
-      | readonly ['pm_plan'];
+      | readonly ['pm_plan']
+      | readonly ['developer_task'];
     outputSchema?: string;
   },
   context: z.RefinementCtx,
 ) => {
+  if (
+    value.outputSchema === DEVELOPER_REPORT_SCHEMA &&
+    value.assignmentKinds?.[0] !== 'developer_task'
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['outputSchema'],
+      message: `${DEVELOPER_REPORT_SCHEMA} requires developer_task`,
+    });
+  }
   if (
     value.assignmentKinds?.[0] === 'pm_discovery' &&
     value.outputSchema !== PM_DISCOVERY_REPORT_SCHEMA
@@ -103,6 +116,16 @@ const requirePmOutputSchema = (
       code: 'custom',
       path: ['outputSchema'],
       message: `PM plan profiles require ${PM_PLAN_REPORT_SCHEMA}`,
+    });
+  }
+  if (
+    value.assignmentKinds?.[0] === 'developer_task' &&
+    value.outputSchema !== DEVELOPER_REPORT_SCHEMA
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['outputSchema'],
+      message: `Developer profiles require ${DEVELOPER_REPORT_SCHEMA}`,
     });
   }
 };

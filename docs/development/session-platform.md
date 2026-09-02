@@ -406,6 +406,14 @@ an absent API-billing environment. It uses only the fake driver, a temporary Git
 repository, and a temporary SQLite database. Failure traces and screenshots are retained under
 `tmp/playwright/session-platform`.
 
+The parallel V2 M4 acceptance path has the same fake-only safety boundary. It
+uses a fixture-owned repository, database, managed-worktree root, ports, and
+processes to prove Developer reservation-before-Git ordering, restart recovery,
+interruption and replacement, strict report settlement, canonical task
+completion, retained-gap resync, and isolated blocked or invalid output. It does
+not invoke the installed Claude executable, use operator worktrees or runtime
+state, or exercise the M5 scheduler or M6 behavior.
+
 Windows Chromium is the required acceptance environment. The same test suite is the portable basis for future macOS/Linux matrix entries.
 
 The real Claude smoke is separate and opt-in:

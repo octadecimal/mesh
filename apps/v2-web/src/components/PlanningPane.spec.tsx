@@ -678,6 +678,20 @@ describe('PlanningPane', () => {
       screen.getByRole('button', { name: 'Reject proposal' }),
     ).toBeDisabled();
     expect(screen.getByText('Refreshing planning state')).toBeVisible();
+
+    rerender(
+      <PlanningPane
+        cycle={awaitingApprovalCycle}
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={true}
+        onSubmitTurn={vi.fn()}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('A project command is in progress.')).toBeVisible();
   });
 
   it('returns focus to the PM heading for a live error', () => {

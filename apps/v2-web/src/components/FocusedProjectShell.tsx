@@ -3,6 +3,8 @@ import { useRef, useState, type KeyboardEvent } from 'react';
 import type {
   AbandonPlanningCycleCommand,
   ApprovePlanProposalCommand,
+  BoardTaskCard,
+  DeveloperAttempt,
   RejectPlanProposalCommand,
   SetBoardFilterCommand,
   SubmitPlanTurnCommand,
@@ -10,6 +12,7 @@ import type {
   PlanningCycleView,
   PlanningProposal,
   RuntimeEvent,
+  ResolvedWorkerProfileSnapshot,
   WorkerExecution,
 } from '@mesh/v2-contracts';
 
@@ -52,6 +55,13 @@ export type PlanningCommandProjection = {
   onApplyFilter(command: SetBoardFilterCommand): void;
 };
 
+export type DeveloperCommandProjection = {
+  error?: string;
+  onStart(card: BoardTaskCard, profile: ResolvedWorkerProfileSnapshot): void;
+  onInterrupt(attempt: DeveloperAttempt): void;
+  onReplace(attempt: DeveloperAttempt): void;
+};
+
 const inertPlanning: PlanningCommandProjection = {
   submitting: false,
   enabled: true,
@@ -86,12 +96,14 @@ export function FocusedProjectShell({
   onInterrupt,
   activityByExecutionId = {},
   planning = inertPlanning,
+  developer,
 }: {
   model: ProjectShellViewModel;
   onDeselect: () => void;
   onInterrupt: (execution: WorkerExecution) => void;
   activityByExecutionId?: Readonly<Record<string, ExecutionActivityProjection>>;
   planning?: PlanningCommandProjection;
+  developer?: DeveloperCommandProjection;
 }) {
   const [activePane, setActivePane] = useState<FuturePaneSlug>('board');
   const tabRefs = useRef<Record<FuturePaneSlug, HTMLButtonElement | null>>({
@@ -355,6 +367,22 @@ export function FocusedProjectShell({
                 submitting={planning.submitting}
                 error={planning.error}
                 onApplyFilter={planning.onApplyFilter}
+                developer={
+                  developer
+                    ? {
+                        attempts: snapshot.developerAttempts ?? [],
+                        reports: snapshot.developerReports ?? [],
+                        executions: snapshot.executions,
+                        profiles: snapshot.profiles,
+                        projectCursors: snapshot.cursors,
+                        activityByExecutionId,
+                        error: developer.error,
+                        onStart: developer.onStart,
+                        onInterrupt: developer.onInterrupt,
+                        onReplace: developer.onReplace,
+                      }
+                    : undefined
+                }
               />
             </section>
             <section

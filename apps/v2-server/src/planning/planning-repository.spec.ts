@@ -17,6 +17,10 @@ import { inImmediateTransaction, openV2Database } from '../db/database.js';
 import { createV2TestDatabase } from '../test/create-v2-test-database.js';
 import { canonicalJson } from '../storage/canonical-json.js';
 import { PlanningRepository } from './planning-repository.js';
+import {
+  approveTestDeliveryPlan,
+  createTestDeliveryPlanFixture,
+} from '../test/approved-delivery-plan.js';
 
 const fixtures: ReturnType<typeof createV2TestDatabase>[] = [];
 const at = '2026-08-29T00:00:00.000Z';
@@ -24,532 +28,31 @@ const at = '2026-08-29T00:00:00.000Z';
 const setup = () => {
   const fixture = createV2TestDatabase();
   fixtures.push(fixture);
-  return { fixture, repository: new PlanningRepository(fixture.database) };
+  const repository = new PlanningRepository(fixture.database);
+  return { fixture, repository };
 };
+
+type TestDeliveryPlanFixture = ReturnType<typeof createTestDeliveryPlanFixture>;
+type ApprovedRequirementFixture = ReturnType<
+  TestDeliveryPlanFixture['seedApprovedRequirement']
+>;
+type ApprovedDeliveryPlanFixture = ReturnType<
+  TestDeliveryPlanFixture['approveTestDeliveryPlan']
+>;
 
 afterEach(() => {
   for (const fixture of fixtures.splice(0)) fixture.close();
 });
 
-const cycle = (
-  fixture: ReturnType<typeof createV2TestDatabase>,
-): PlanningCycle => ({
-  id: randomUUID(),
-  projectId: fixture.project.id,
-  lifecycle: 'launch_pending',
-  revision: 1,
-  profileId: fixture.profileRevision.profileId,
-  profileRevision: fixture.profileRevision.revision,
-  baseProjectIntentRevision: null,
-  baseLedgerRevision: null,
-  latestProposalRevision: 0,
-  activeExecutionId: null,
-  createdAt: at,
-  updatedAt: at,
-  endedAt: null,
-});
-
-const humanTurn = (value: PlanningCycle): PlanningTurn => ({
-  id: randomUUID(),
-  projectId: value.projectId,
-  planningCycleId: value.id,
-  ordinal: 1,
-  actor: 'human',
-  message: 'Build a Todo application.',
-  launchState: 'launch_pending',
-  executionId: null,
-  createdAt: at,
-});
-
-const seedApprovedRequirement = (
-  fixture: ReturnType<typeof createV2TestDatabase>,
-  repository: PlanningRepository,
-) => {
-  const value = cycle(fixture);
-  const human = humanTurn(value);
-  const pm: PlanningTurn = {
-    id: randomUUID(),
-    projectId: value.projectId,
-    planningCycleId: value.id,
-    ordinal: 2,
-    actor: 'pm',
-    message: 'One approved requirement.',
-    launchState: null,
-    executionId: fixture.execution.id,
-    createdAt: at,
-  };
-  const recordId = randomUUID();
-  const proposal: PlanningProposal = {
-    id: randomUUID(),
-    projectId: value.projectId,
-    planningCycleId: value.id,
-    revision: 1,
-    lifecycle: 'awaiting_approval',
-    baseProjectIntentRevision: null,
-    baseLedgerRevision: null,
-    summary: 'Todo intent',
-    projectIntent: {
-      goal: 'Ship Todo.',
-      targetUsers: ['People'],
-      desiredCapabilities: ['Manage tasks'],
-      constraints: [],
-      nonGoals: [],
-      successConditions: ['Tasks persist'],
-      rationale: 'Requested.',
-      provenance: [
-        {
-          kind: 'conversation_turn',
-          turnId: human.id,
-          rationale: 'Initial request.',
-        },
-      ],
-    },
-    records: [
-      {
-        operation: 'create',
-        key: 'requirement',
-        recordId,
-        content: {
-          type: 'requirement',
-          kind: 'functional',
-          status: 'proposed',
-          priority: 'must',
-          statement: 'Users manage tasks.',
-          rationale: 'Core workflow.',
-        },
-        provenance: [
-          {
-            kind: 'conversation_turn',
-            turnId: human.id,
-            rationale: 'Initial request.',
-          },
-        ],
-      },
-    ],
-    relationships: [],
-    diff: {
-      intentChanges: [
-        'goal',
-        'targetUsers',
-        'desiredCapabilities',
-        'successConditions',
-        'rationale',
-        'provenance',
-      ],
-      recordChanges: { create: 1, revise: 0, reuse: 0 },
-      relationshipChanges: { added: [], removed: [] },
-    },
-    createdByTurnId: pm.id,
-    createdByExecutionId: fixture.execution.id,
-    rejectionFeedback: null,
-    createdAt: at,
-    decidedAt: null,
-  };
-  let approved: ReturnType<
-    PlanningRepository['applyApprovedProposalInTransaction']
-  >;
-  inImmediateTransaction(fixture.database, () => {
-    repository.insertCycleInTransaction({
-      ...value,
-      lifecycle: 'awaiting_approval',
-      revision: 2,
-      latestProposalRevision: 1,
-    });
-    repository.insertTurnInTransaction({
-      ...human,
-      launchState: 'execution_bound',
-      executionId: fixture.execution.id,
-    });
-    repository.insertTurnInTransaction(pm);
-    repository.insertProposalInTransaction(proposal);
-    approved = repository.applyApprovedProposalInTransaction(proposal, at);
-    repository.updateProposalInTransaction({
-      ...proposal,
-      lifecycle: 'approved',
-      decidedAt: at,
-    });
-    repository.updateCycleInTransaction(
-      {
-        ...value,
-        lifecycle: 'approved',
-        revision: 3,
-        latestProposalRevision: 1,
-        endedAt: at,
-      },
-      2,
-    );
-  });
-  return { approved: approved!, recordId };
-};
-
-const deliveryProposal = (
-  fixture: ReturnType<typeof createV2TestDatabase>,
-  repository: PlanningRepository,
-  withDependency = false,
-) => {
-  const { approved, recordId } = seedApprovedRequirement(fixture, repository);
-  const value: PlanningCycle = {
-    ...cycle(fixture),
-    id: randomUUID(),
-    profileId: fixture.pmProfileRevision.profileId,
-    profileRevision: fixture.pmProfileRevision.revision,
-    baseProjectIntentRevision: approved.projectIntent.revision,
-    baseLedgerRevision: approved.ledger.revision,
-    lifecycle: 'awaiting_approval',
-    revision: 2,
-    latestProposalRevision: 1,
-  };
-  const human = humanTurn(value);
-  const boundHuman = {
-    ...human,
-    launchState: 'execution_bound' as const,
-    executionId: fixture.execution.id,
-  };
-  const pm: PlanningTurn = {
-    id: randomUUID(),
-    projectId: value.projectId,
-    planningCycleId: value.id,
-    ordinal: 2,
-    actor: 'pm',
-    message: 'One milestone and task.',
-    launchState: null,
-    executionId: fixture.execution.id,
-    createdAt: at,
-  };
-  const milestoneId = randomUUID();
-  const taskId = randomUUID();
-  const secondTaskId = randomUUID();
-  const dependencyId = randomUUID();
-  const proposal = deliveryPlanProposalSchema.parse({
-    id: randomUUID(),
-    projectId: fixture.project.id,
-    planningCycleId: value.id,
-    revision: 1,
-    lifecycle: 'awaiting_approval',
-    base: {
-      projectIntentId: approved.projectIntent.id,
-      projectIntentRevision: approved.projectIntent.revision,
-      ledgerId: approved.ledger.id,
-      ledgerRevision: approved.ledger.revision,
-      deliveryPlan: { id: null, revision: null },
-    },
-    proposedPlan: {
-      summary: 'One Todo milestone.',
-      milestones: [
-        {
-          operation: 'create',
-          key: 'milestone',
-          content: {
-            title: 'Todo',
-            outcome: 'Todo works.',
-            stopCondition: 'Task persists.',
-            exclusions: [],
-            ordinal: 1,
-          },
-        },
-      ],
-      tasks: [
-        {
-          operation: 'create',
-          key: 'task',
-          content: {
-            milestone: { kind: 'proposal', key: 'milestone' },
-            title: 'Persist task',
-            outcome: 'Task survives restart.',
-            acceptanceCriteria: ['Task is restored.'],
-            verificationCriteria: ['Restart test passes.'],
-            priority: 'must',
-            labels: ['core'],
-            ownedSurfaces: ['storage'],
-            prohibitedSurfaces: [],
-            expectedArtifacts: ['storage.spec.ts'],
-            ordinal: 1,
-          },
-        },
-        ...(withDependency
-          ? [
-              {
-                operation: 'create' as const,
-                key: 'second-task',
-                content: {
-                  milestone: { kind: 'proposal' as const, key: 'milestone' },
-                  title: 'Render task',
-                  outcome: 'Task is visible.',
-                  acceptanceCriteria: ['Task is rendered.'],
-                  verificationCriteria: ['Rendering test passes.'],
-                  priority: 'should' as const,
-                  labels: ['ui'],
-                  ownedSurfaces: ['web'],
-                  prohibitedSurfaces: [],
-                  expectedArtifacts: ['web.spec.ts'],
-                  ordinal: 2,
-                },
-              },
-            ]
-          : []),
-      ],
-      dependencies: withDependency
-        ? [
-            {
-              operation: 'create' as const,
-              key: 'dependency',
-              prerequisite: { kind: 'proposal' as const, key: 'task' },
-              dependent: { kind: 'proposal' as const, key: 'second-task' },
-            },
-          ]
-        : [],
-      traces: [
-        {
-          kind: 'milestone_covers',
-          milestone: { kind: 'proposal', key: 'milestone' },
-          requirement: { recordId, recordRevision: 1 },
-        },
-        {
-          kind: 'task_satisfies',
-          task: { kind: 'proposal', key: 'task' },
-          requirement: { recordId, recordRevision: 1 },
-        },
-        ...(withDependency
-          ? [
-              {
-                kind: 'task_satisfies' as const,
-                task: { kind: 'proposal' as const, key: 'second-task' },
-                requirement: { recordId, recordRevision: 1 },
-              },
-            ]
-          : []),
-      ],
-    },
-    reservations: {
-      milestones: [{ key: 'milestone', id: milestoneId }],
-      tasks: withDependency
-        ? [
-            { key: 'second-task', id: secondTaskId },
-            { key: 'task', id: taskId },
-          ]
-        : [{ key: 'task', id: taskId }],
-      dependencies: withDependency
-        ? [{ key: 'dependency', id: dependencyId }]
-        : [],
-    },
-    diff: {
-      milestones: { create: 1, reuse: 0, revise: 0, retire: 0, reactivate: 0 },
-      tasks: {
-        create: withDependency ? 2 : 1,
-        reuse: 0,
-        revise: 0,
-        retire: 0,
-        reactivate: 0,
-      },
-      dependencies: {
-        create: withDependency ? 1 : 0,
-        reuse: 0,
-        revise: 0,
-        retire: 0,
-        reactivate: 0,
-      },
-      traceCreateCount: withDependency ? 3 : 2,
-      traceRemoveCount: 0,
-    },
-    createdByTurnId: pm.id,
-    createdByExecutionId: fixture.execution.id,
-    createdAt: at,
-    decision: { kind: 'pending' },
-  });
-  inImmediateTransaction(fixture.database, () => {
-    repository.insertCycleInTransaction(value, {
-      planningCycleId: value.id,
-      purpose: 'delivery_plan',
-      baseDeliveryPlanId: null,
-      baseDeliveryPlanRevision: null,
-    });
-    repository.insertTurnInTransaction(boundHuman);
-    repository.insertTurnInTransaction(pm);
-    repository.insertDeliveryPlanProposalInTransaction(proposal);
-  });
-  return {
-    approved,
-    proposal,
-    value,
-    milestoneId,
-    taskId,
-    secondTaskId,
-    dependencyId,
-    recordId,
-  };
-};
-
-const approveDeliveryProposal = (
-  fixture: ReturnType<typeof createV2TestDatabase>,
-  repository: PlanningRepository,
-  withDependency = false,
-) => {
-  const seeded = deliveryProposal(fixture, repository, withDependency);
-  const {
-    approved,
-    proposal,
-    value,
-    milestoneId,
-    taskId,
-    secondTaskId,
-    dependencyId,
-  } = seeded;
-  const plan = approvedDeliveryPlanSchema.parse({
-    plan: {
-      id: randomUUID(),
-      projectId: fixture.project.id,
-      revision: 1,
-      projectIntentId: approved.projectIntent.id,
-      projectIntentRevision: approved.projectIntent.revision,
-      ledgerId: approved.ledger.id,
-      ledgerRevision: approved.ledger.revision,
-      baseDeliveryPlanRevision: null,
-      proposalId: proposal.id,
-      summary: proposal.proposedPlan.summary,
-      approvedBy: 'human',
-      approvedAt: at,
-    },
-    milestones: [
-      {
-        id: milestoneId,
-        projectId: fixture.project.id,
-        revision: 1,
-        lifecycle: 'active',
-        title: 'Todo',
-        outcome: 'Todo works.',
-        stopCondition: 'Task persists.',
-        exclusions: [],
-        ordinal: 1,
-        proposalId: proposal.id,
-        deliveryPlanRevision: 1,
-        approvedAt: at,
-      },
-    ],
-    taskContracts: [
-      {
-        id: taskId,
-        projectId: fixture.project.id,
-        revision: 1,
-        contractRevision: 1,
-        revisionKind: 'plan_contract',
-        lifecycle: 'pending',
-        milestoneId,
-        title: 'Persist task',
-        outcome: 'Task survives restart.',
-        acceptanceCriteria: ['Task is restored.'],
-        verificationCriteria: ['Restart test passes.'],
-        priority: 'must',
-        labels: ['core'],
-        ownedSurfaces: ['storage'],
-        prohibitedSurfaces: [],
-        expectedArtifacts: ['storage.spec.ts'],
-        ordinal: 1,
-        source: {
-          kind: 'plan',
-          proposalId: proposal.id,
-          deliveryPlanRevision: 1,
-        },
-        createdAt: at,
-      },
-      ...(withDependency
-        ? [
-            {
-              id: secondTaskId,
-              projectId: fixture.project.id,
-              revision: 1,
-              contractRevision: 1,
-              revisionKind: 'plan_contract' as const,
-              lifecycle: 'pending' as const,
-              milestoneId,
-              title: 'Render task',
-              outcome: 'Task is visible.',
-              acceptanceCriteria: ['Task is rendered.'],
-              verificationCriteria: ['Rendering test passes.'],
-              priority: 'should' as const,
-              labels: ['ui'],
-              ownedSurfaces: ['web'],
-              prohibitedSurfaces: [],
-              expectedArtifacts: ['web.spec.ts'],
-              ordinal: 2,
-              source: {
-                kind: 'plan' as const,
-                proposalId: proposal.id,
-                deliveryPlanRevision: 1,
-              },
-              createdAt: at,
-            },
-          ]
-        : []),
-    ],
-    dependencies: withDependency
-      ? [
-          {
-            id: dependencyId,
-            projectId: fixture.project.id,
-            revision: 1,
-            prerequisiteTaskId: taskId,
-            dependentTaskId: secondTaskId,
-            lifecycle: 'active' as const,
-            proposalId: proposal.id,
-            deliveryPlanRevision: 1,
-            approvedAt: at,
-          },
-        ]
-      : [],
-    traces: [
-      {
-        kind: 'milestone_covers',
-        milestoneId,
-        milestoneRevision: 1,
-        requirement: {
-          recordId: approved.records[0].recordId,
-          recordRevision: 1,
-        },
-      },
-      {
-        kind: 'task_satisfies',
-        taskId,
-        taskContractRevision: 1,
-        requirement: {
-          recordId: approved.records[0].recordId,
-          recordRevision: 1,
-        },
-      },
-      ...(withDependency
-        ? [
-            {
-              kind: 'task_satisfies' as const,
-              taskId: secondTaskId,
-              taskContractRevision: 1,
-              requirement: {
-                recordId: approved.records[0].recordId,
-                recordRevision: 1,
-              },
-            },
-          ]
-        : []),
-    ],
-    milestoneDependencies: [],
-  });
-  inImmediateTransaction(fixture.database, () => {
-    repository.applyApprovedDeliveryPlanInTransaction(proposal, plan);
-    repository.updateCycleInTransaction(
-      { ...value, lifecycle: 'approved', revision: 3, endedAt: at },
-      2,
-    );
-  });
-  return { ...seeded, plan };
-};
-
 const applySecondDeliveryPlanRevision = (
   fixture: ReturnType<typeof createV2TestDatabase>,
   repository: PlanningRepository,
-  seeded: ReturnType<typeof approveDeliveryProposal>,
+  seeded: ApprovedDeliveryPlanFixture,
 ) => {
   const { approved, plan, milestoneId, taskId, secondTaskId, dependencyId } =
     seeded;
   const value: PlanningCycle = {
-    ...cycle(fixture),
+    ...createTestDeliveryPlanFixture(fixture, repository).cycle(),
     id: randomUUID(),
     profileId: fixture.pmProfileRevision.profileId,
     profileRevision: fixture.pmProfileRevision.revision,
@@ -559,7 +62,9 @@ const applySecondDeliveryPlanRevision = (
     revision: 2,
     latestProposalRevision: 1,
   };
-  const human = humanTurn(value);
+  const human = createTestDeliveryPlanFixture(fixture, repository).humanTurn(
+    value,
+  );
   const pm: PlanningTurn = {
     id: randomUUID(),
     projectId: value.projectId,
@@ -767,13 +272,13 @@ const applySecondDeliveryPlanRevision = (
 const applyLifecycleDeliveryPlanRevision = (
   fixture: ReturnType<typeof createV2TestDatabase>,
   repository: PlanningRepository,
-  approved: ReturnType<typeof seedApprovedRequirement>['approved'],
+  approved: ApprovedRequirementFixture['approved'],
   previous: ApprovedDeliveryPlan,
   lifecycle: 'retired' | 'active',
 ) => {
   const revision = previous.plan.revision + 1;
   const value: PlanningCycle = {
-    ...cycle(fixture),
+    ...createTestDeliveryPlanFixture(fixture, repository).cycle(),
     id: randomUUID(),
     profileId: fixture.pmProfileRevision.profileId,
     profileRevision: fixture.pmProfileRevision.revision,
@@ -783,7 +288,9 @@ const applyLifecycleDeliveryPlanRevision = (
     revision: 2,
     latestProposalRevision: 1,
   };
-  const human = humanTurn(value);
+  const human = createTestDeliveryPlanFixture(fixture, repository).humanTurn(
+    value,
+  );
   const pm: PlanningTurn = {
     id: randomUUID(),
     projectId: value.projectId,
@@ -988,19 +495,21 @@ const applyLifecycleDeliveryPlanRevision = (
 const replaceCurrentIntent = (
   fixture: ReturnType<typeof createV2TestDatabase>,
   repository: PlanningRepository,
-  approved: ReturnType<typeof seedApprovedRequirement>['approved'],
+  approved: ApprovedRequirementFixture['approved'],
   recordId: string,
   operation: 'revise' | 'remove',
 ) => {
   const value: PlanningCycle = {
-    ...cycle(fixture),
+    ...createTestDeliveryPlanFixture(fixture, repository).cycle(),
     lifecycle: 'awaiting_approval',
     revision: 2,
     latestProposalRevision: 1,
     baseProjectIntentRevision: 1,
     baseLedgerRevision: 1,
   };
-  const human = humanTurn(value);
+  const human = createTestDeliveryPlanFixture(fixture, repository).humanTurn(
+    value,
+  );
   const pm: PlanningTurn = {
     id: randomUUID(),
     projectId: value.projectId,
@@ -1090,12 +599,113 @@ const replaceCurrentIntent = (
 };
 
 describe('PlanningRepository', () => {
-  it('persists purpose-aware delivery proposals and reservations without canonical state', () => {
+  it('reads task execution authority within an immediate transaction', () => {
     const { fixture, repository } = setup();
-    const { proposal, value, milestoneId, taskId } = deliveryProposal(
+    const { taskId } = approveTestDeliveryPlan(fixture, repository);
+
+    const authority = inImmediateTransaction(fixture.database, () =>
+      repository.taskExecutionAuthorityInTransaction(
+        fixture.project.id,
+        taskId,
+      ),
+    );
+
+    expect(authority?.task.id).toBe(taskId);
+    expect(authority?.card.readiness.state).toBe('actionable');
+  });
+
+  it('makes a dependent task actionable after its prerequisite completes', () => {
+    const { fixture, repository } = setup();
+    const { plan, taskId, secondTaskId } = approveTestDeliveryPlan(
       fixture,
       repository,
+      true,
     );
+
+    expect(
+      repository.taskExecutionAuthority(fixture.project.id, secondTaskId)?.card
+        .readiness.state,
+    ).toBe('blocked');
+    inImmediateTransaction(fixture.database, () =>
+      repository.appendOperationalTaskLifecycleInTransaction({
+        projectId: fixture.project.id,
+        expectedDeliveryPlanRevision: plan.plan.revision,
+        taskId,
+        expectedContractRevision: 1,
+        expectedCurrentRevision: 1,
+        lifecycle: 'completed',
+        createdAt: at,
+      }),
+    );
+
+    expect(
+      repository.taskExecutionAuthority(fixture.project.id, secondTaskId)?.card
+        .readiness.state,
+    ).toBe('actionable');
+  });
+
+  it('appends a completion revision without changing the task contract', () => {
+    const { fixture, repository } = setup();
+    const { plan, taskId } = approveTestDeliveryPlan(fixture, repository);
+
+    const completed = inImmediateTransaction(fixture.database, () =>
+      repository.appendOperationalTaskLifecycleInTransaction({
+        projectId: fixture.project.id,
+        expectedDeliveryPlanRevision: plan.plan.revision,
+        taskId,
+        expectedContractRevision: 1,
+        expectedCurrentRevision: 1,
+        lifecycle: 'completed',
+        createdAt: at,
+      }),
+    );
+
+    expect(completed).toMatchObject({
+      id: taskId,
+      revision: 2,
+      contractRevision: 1,
+      revisionKind: 'operational_lifecycle',
+      lifecycle: 'completed',
+      source: { kind: 'lifecycle', priorRevision: 1 },
+    });
+    expect(
+      repository.taskExecutionAuthority(fixture.project.id, taskId)?.task,
+    ).toMatchObject({
+      revision: 2,
+      contractRevision: 1,
+      lifecycle: 'completed',
+    });
+  });
+
+  it('returns one coherent execution authority for an actionable task', () => {
+    const { fixture, repository } = setup();
+    const { plan, taskId } = approveTestDeliveryPlan(fixture, repository);
+
+    const authority = repository.taskExecutionAuthority(
+      fixture.project.id,
+      taskId,
+    );
+
+    expect(authority).toMatchObject({
+      project: fixture.project,
+      deliveryPlan: plan,
+      intentRevision: plan.plan.projectIntentRevision,
+      ledgerRevision: plan.plan.ledgerRevision,
+      task: { id: taskId, revision: 1, contractRevision: 1 },
+      card: {
+        taskId,
+        readiness: { state: 'actionable', blockers: [] },
+      },
+    });
+    expect(authority?.requirementRevisions).toEqual([
+      { recordId: plan.traces[1].requirement.recordId, recordRevision: 1 },
+    ]);
+  });
+
+  it('persists purpose-aware delivery proposals and reservations without canonical state', () => {
+    const { fixture, repository } = setup();
+    const { proposal, value, milestoneId, taskId } =
+      createTestDeliveryPlanFixture(fixture, repository).deliveryProposal();
     expect(repository.cyclePurpose(value.id)).toEqual({
       planningCycleId: value.id,
       purpose: 'delivery_plan',
@@ -1150,10 +760,10 @@ describe('PlanningRepository', () => {
 
   it('round-trips nonlexical reservation membership without treating order as corruption', () => {
     const { fixture, repository } = setup();
-    const { approved, proposal, recordId } = deliveryProposal(
+    const { approved, proposal, recordId } = createTestDeliveryPlanFixture(
       fixture,
       repository,
-    );
+    ).deliveryProposal();
     const milestoneTemplate = proposal.proposedPlan.milestones[0];
     const taskTemplate = proposal.proposedPlan.tasks[0];
     if (
@@ -1295,10 +905,8 @@ describe('PlanningRepository', () => {
 
   it('atomically applies canonical state, default filter, guarded lifecycle, and restart snapshot', () => {
     const { fixture, repository } = setup();
-    const { approved, proposal, value, taskId, milestoneId } = deliveryProposal(
-      fixture,
-      repository,
-    );
+    const { approved, proposal, value, taskId, milestoneId } =
+      createTestDeliveryPlanFixture(fixture, repository).deliveryProposal();
     const plan = approvedDeliveryPlanSchema.parse({
       plan: {
         id: randomUUID(),
@@ -1527,10 +1135,8 @@ describe('PlanningRepository', () => {
 
   it('rolls back a representative canonical approval failure without partial state', () => {
     const { fixture, repository } = setup();
-    const { approved, proposal, taskId, milestoneId } = deliveryProposal(
-      fixture,
-      repository,
-    );
+    const { approved, proposal, taskId, milestoneId } =
+      createTestDeliveryPlanFixture(fixture, repository).deliveryProposal();
     const plan: ApprovedDeliveryPlan = approvedDeliveryPlanSchema.parse({
       plan: {
         id: randomUUID(),
@@ -1643,9 +1249,12 @@ describe('PlanningRepository', () => {
 
   it('authenticates current cycle bases and contiguous plan proposal revisions', () => {
     const { fixture, repository } = setup();
-    const { approved, proposal } = deliveryProposal(fixture, repository);
+    const { approved, proposal } = createTestDeliveryPlanFixture(
+      fixture,
+      repository,
+    ).deliveryProposal();
     const stale: PlanningCycle = {
-      ...cycle(fixture),
+      ...createTestDeliveryPlanFixture(fixture, repository).cycle(),
       lifecycle: 'abandoned',
       endedAt: at,
     };
@@ -1682,7 +1291,7 @@ describe('PlanningRepository', () => {
     'keeps stale plan cards traceable to the exact immutable requirement after %s',
     (operation) => {
       const { fixture, repository } = setup();
-      const { approved, recordId, plan } = approveDeliveryProposal(
+      const { approved, recordId, plan } = approveTestDeliveryPlan(
         fixture,
         repository,
       );
@@ -1738,7 +1347,10 @@ describe('PlanningRepository', () => {
   it('fails closed on normalized proposal, decision, and canonical scalar corruption', () => {
     {
       const { fixture, repository } = setup();
-      const { proposal } = deliveryProposal(fixture, repository);
+      const { proposal } = createTestDeliveryPlanFixture(
+        fixture,
+        repository,
+      ).deliveryProposal();
       fixture.database
         .prepare(
           `UPDATE delivery_plan_proposal_tasks
@@ -1751,7 +1363,10 @@ describe('PlanningRepository', () => {
     }
     {
       const { fixture, repository } = setup();
-      const { proposal } = deliveryProposal(fixture, repository);
+      const { proposal } = createTestDeliveryPlanFixture(
+        fixture,
+        repository,
+      ).deliveryProposal();
       const successor = {
         ...proposal,
         id: randomUUID(),
@@ -1783,7 +1398,7 @@ describe('PlanningRepository', () => {
     }
     {
       const { fixture, repository } = setup();
-      const { milestoneId } = approveDeliveryProposal(fixture, repository);
+      const { milestoneId } = approveTestDeliveryPlan(fixture, repository);
       fixture.database
         .prepare(
           `UPDATE milestone_revisions SET lifecycle = 'retired'
@@ -1796,7 +1411,7 @@ describe('PlanningRepository', () => {
     }
     {
       const { fixture, repository } = setup();
-      const { plan } = approveDeliveryProposal(fixture, repository);
+      const { plan } = approveTestDeliveryPlan(fixture, repository);
       fixture.database
         .prepare(
           `UPDATE delivery_plan_revision_milestones SET ordinal = 2
@@ -1811,7 +1426,7 @@ describe('PlanningRepository', () => {
 
   it('authenticates first-creation and selected-revision provenance independently', () => {
     const { fixture, repository } = setup();
-    const seeded = approveDeliveryProposal(fixture, repository, true);
+    const seeded = approveTestDeliveryPlan(fixture, repository, true);
     const { revised } = applySecondDeliveryPlanRevision(
       fixture,
       repository,
@@ -1857,7 +1472,7 @@ describe('PlanningRepository', () => {
 
   it('rejects duplicate and foreign exact-revision requirement trace subjects', () => {
     const { fixture, repository } = setup();
-    const { plan, recordId } = approveDeliveryProposal(fixture, repository);
+    const { plan, recordId } = approveTestDeliveryPlan(fixture, repository);
     const insert = fixture.database.prepare(
       `INSERT INTO delivery_plan_revision_traces (
         delivery_plan_id, delivery_plan_revision, project_id, ordinal, kind,
@@ -1964,7 +1579,7 @@ describe('PlanningRepository', () => {
     },
   ])('fails closed across reopen on $label base corruption', (corruption) => {
     const { fixture, repository } = setup();
-    const seeded = approveDeliveryProposal(fixture, repository, true);
+    const seeded = approveTestDeliveryPlan(fixture, repository, true);
     const revision = applySecondDeliveryPlanRevision(
       fixture,
       repository,
@@ -1995,8 +1610,10 @@ describe('PlanningRepository', () => {
 
   it('persists immutable cycles and ordered turns across reopen', () => {
     const { fixture, repository } = setup();
-    const value = cycle(fixture);
-    const turn = humanTurn(value);
+    const value = createTestDeliveryPlanFixture(fixture, repository).cycle();
+    const turn = createTestDeliveryPlanFixture(fixture, repository).humanTurn(
+      value,
+    );
 
     inImmediateTransaction(fixture.database, () => {
       repository.insertCycleInTransaction(value);
@@ -2045,8 +1662,10 @@ describe('PlanningRepository', () => {
 
   it('enforces one nonterminal cycle per project and conversation-turn provenance ownership', () => {
     const { fixture, repository } = setup();
-    const first = cycle(fixture);
-    const turn = humanTurn(first);
+    const first = createTestDeliveryPlanFixture(fixture, repository).cycle();
+    const turn = createTestDeliveryPlanFixture(fixture, repository).humanTurn(
+      first,
+    );
     inImmediateTransaction(fixture.database, () => {
       repository.insertCycleInTransaction(first);
       repository.insertTurnInTransaction(turn);
@@ -2089,8 +1708,10 @@ describe('PlanningRepository', () => {
 
   it('reserves server record IDs without creating canonical records and normalizes symmetric edges', () => {
     const { fixture, repository } = setup();
-    const value = cycle(fixture);
-    const human = humanTurn(value);
+    const value = createTestDeliveryPlanFixture(fixture, repository).cycle();
+    const human = createTestDeliveryPlanFixture(fixture, repository).humanTurn(
+      value,
+    );
     const executionId = fixture.execution.id;
     const boundHuman = {
       ...human,

@@ -11,7 +11,7 @@ session state and Claude driver processes. The browser sends validated commands
 over HTTP, receives snapshots over HTTP, and follows durable events plus
 transient streaming deltas over a WebSocket connection.
 
-This established session platform is V1. The implemented V2 Milestones 1–3
+This established session platform is V1. The implemented V2 Milestones 1–4
 run beside it with separate applications, contracts, settings, and storage;
 they do not replace or migrate V1. See
 [`v2-foundation.md`](v2-foundation.md) for operating instructions.
@@ -77,8 +77,32 @@ contracts, dependencies, and requirement traces. The server calculates task
 readiness deterministically from canonical lifecycle and dependency state and
 projects the result through the cross-milestone Board and its durable filter.
 The browser displays that projection; it does not infer readiness. M3 does not
-allocate workspaces, create `DeveloperAttempt` records, or schedule
-`ExecutionRun` work. Those responsibilities belong to M4 and M5 respectively.
+allocate workspaces or create `DeveloperAttempt` records.
+
+M4 adds one operator-started Developer attempt for an actionable task.
+`DeveloperAttemptService` owns start, interruption, execution replacement,
+report settlement, and completion authority. A start freezes the approved
+profile, delivery-plan and task revisions, requirements, criteria, verification,
+base commit, and managed workspace into the attempt and execution assignment.
+Completion advances canonical task truth in the same transaction as the report
+and ordered Board event, so the existing M3 readiness calculation makes newly
+unblocked dependents actionable; the browser does not infer that transition.
+
+The durable Developer start claim and managed-workspace intent commit before
+any Git or runtime effect. Managed worktrees have deterministic paths and
+ownership evidence, and missing, dirty, tampered, or ambiguously owned recovery
+state is preserved and fails closed for operator attention. Structured report
+receipts and reports are strict, immutable, and bound to their project,
+attempt, execution, runtime event, digest, and frozen task identity. Their
+acceptance and the resulting attempt, task, Board, command-result, and audit
+events settle atomically.
+
+V2 startup first reconciles generic executions, then unreceipted Developer
+output and claimed Developer workspaces and attempts, planning state, recovery
+publication, and recovered-session attachment. It drains claimed starts,
+pending activations, and pending interruptions before accepting commands. M4
+uses deterministic fake Developer scenarios for acceptance; project scheduling
+and concurrency remain M5 work, and M6 is not implemented by this milestone.
 
 ### Established V1 project workflow
 

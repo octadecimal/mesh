@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
   deliveryPlanIdSchema,
   deliveryPlanProposalIdSchema,
+  developerAttemptIdSchema,
   ledgerIdSchema,
   nonNegativeIntegerSchema,
   planningCycleIdSchema,
@@ -10,6 +11,7 @@ import {
   positiveIntegerSchema,
   projectIdSchema,
   projectIntentIdSchema,
+  taskIdSchema,
   workerExecutionIdSchema,
   workerProfileIdSchema,
 } from './ids';
@@ -30,6 +32,9 @@ export const v2CommandTypeSchema = z.enum([
   'plan_proposal.approve',
   'plan_proposal.reject',
   'board_filter.set',
+  'developer_attempt.start',
+  'developer_attempt.interrupt',
+  'developer_attempt.replace_execution',
 ]);
 export type V2CommandType = z.infer<typeof v2CommandTypeSchema>;
 
@@ -262,6 +267,42 @@ export const setBoardFilterCommandSchema = z.strictObject({
 });
 export type SetBoardFilterCommand = z.infer<typeof setBoardFilterCommandSchema>;
 
+export const startDeveloperAttemptCommandSchema = z.strictObject({
+  type: z.literal('developer_attempt.start'),
+  projectId: projectIdSchema,
+  taskId: taskIdSchema,
+  expectedTaskRevision: positiveIntegerSchema,
+  expectedDeliveryPlanId: deliveryPlanIdSchema,
+  expectedDeliveryPlanRevision: positiveIntegerSchema,
+  profileId: workerProfileIdSchema,
+  profileRevision: positiveIntegerSchema,
+});
+export type StartDeveloperAttemptCommand = z.infer<
+  typeof startDeveloperAttemptCommandSchema
+>;
+
+const developerAttemptMutationShape = {
+  projectId: projectIdSchema,
+  attemptId: developerAttemptIdSchema,
+  expectedAttemptRevision: nonNegativeIntegerSchema,
+};
+
+export const interruptDeveloperAttemptCommandSchema = z.strictObject({
+  type: z.literal('developer_attempt.interrupt'),
+  ...developerAttemptMutationShape,
+});
+export type InterruptDeveloperAttemptCommand = z.infer<
+  typeof interruptDeveloperAttemptCommandSchema
+>;
+
+export const replaceDeveloperAttemptExecutionCommandSchema = z.strictObject({
+  type: z.literal('developer_attempt.replace_execution'),
+  ...developerAttemptMutationShape,
+});
+export type ReplaceDeveloperAttemptExecutionCommand = z.infer<
+  typeof replaceDeveloperAttemptExecutionCommandSchema
+>;
+
 export const v2CommandSchema = z.union([
   projectRegisterCommandSchema,
   profileApprovalCommandSchema,
@@ -275,6 +316,9 @@ export const v2CommandSchema = z.union([
   approvePlanProposalCommandSchema,
   rejectPlanProposalCommandSchema,
   setBoardFilterCommandSchema,
+  startDeveloperAttemptCommandSchema,
+  interruptDeveloperAttemptCommandSchema,
+  replaceDeveloperAttemptExecutionCommandSchema,
 ]);
 export type V2Command = z.infer<typeof v2CommandSchema>;
 
@@ -298,6 +342,18 @@ export const startExecutionEnvelopeSchema = z.strictObject({
 export const interruptExecutionEnvelopeSchema = z.strictObject({
   ...v2CommandEnvelopeBase,
   command: interruptExecutionCommandSchema,
+});
+export const startDeveloperAttemptEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: startDeveloperAttemptCommandSchema,
+});
+export const interruptDeveloperAttemptEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: interruptDeveloperAttemptCommandSchema,
+});
+export const replaceDeveloperAttemptExecutionEnvelopeSchema = z.strictObject({
+  ...v2CommandEnvelopeBase,
+  command: replaceDeveloperAttemptExecutionCommandSchema,
 });
 export const submitPlanningTurnEnvelopeSchema = z.strictObject({
   ...v2CommandEnvelopeBase,
@@ -337,6 +393,9 @@ export const v2CommandEnvelopeSchema = z.union([
   profileApprovalEnvelopeSchema,
   startExecutionEnvelopeSchema,
   interruptExecutionEnvelopeSchema,
+  startDeveloperAttemptEnvelopeSchema,
+  interruptDeveloperAttemptEnvelopeSchema,
+  replaceDeveloperAttemptExecutionEnvelopeSchema,
   submitPlanningTurnEnvelopeSchema,
   approvePlanningProposalEnvelopeSchema,
   rejectPlanningProposalEnvelopeSchema,

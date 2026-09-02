@@ -3,6 +3,8 @@ import type {
   ApprovedDeliveryPlan,
   ApprovedIntentLedger,
   BoardView,
+  DeveloperAttempt,
+  DeveloperReportRecord,
   PlanningCycleView,
   Project,
   RetainedRuntimeWindow,
@@ -40,6 +42,8 @@ export type ProjectProjection = {
   project?: Project;
   profiles: readonly ResolvedWorkerProfileSnapshot[];
   executions: readonly WorkerExecution[];
+  developerAttempts: Readonly<Record<string, DeveloperAttempt>>;
+  developerReports: Readonly<Record<string, DeveloperReportRecord>>;
   attentionItems: readonly V2AttentionItem[];
   planningCycles: readonly PlanningCycleView[];
   planningHistoryTruncated: boolean;
@@ -86,6 +90,8 @@ export const createInitialProjectProjection = (
   projectId,
   profiles: [],
   executions: [],
+  developerAttempts: {},
+  developerReports: {},
   attentionItems: [],
   planningCycles: [],
   planningHistoryTruncated: false,
@@ -306,6 +312,29 @@ const applyDomainEvent = (
     case 'board.filter_changed':
     case 'task.lifecycle_changed':
       return { ...state, board: event.payload.board };
+    case 'developer_attempt.changed':
+    case 'developer_workspace.changed':
+      return {
+        ...state,
+        developerAttempts: {
+          ...state.developerAttempts,
+          [event.payload.attempt.id]: event.payload.attempt,
+        },
+        board: event.payload.board,
+      };
+    case 'developer_report.recorded':
+      return {
+        ...state,
+        developerAttempts: {
+          ...state.developerAttempts,
+          [event.payload.attempt.id]: event.payload.attempt,
+        },
+        developerReports: {
+          ...state.developerReports,
+          [event.payload.report.id]: event.payload.report,
+        },
+        board: event.payload.board,
+      };
   }
 };
 
@@ -438,6 +467,12 @@ const replaceSnapshot = (
   project: snapshot.project,
   profiles: snapshot.profiles,
   executions: snapshot.executions,
+  developerAttempts: Object.fromEntries(
+    (snapshot.developerAttempts ?? []).map((attempt) => [attempt.id, attempt]),
+  ),
+  developerReports: Object.fromEntries(
+    (snapshot.developerReports ?? []).map((report) => [report.id, report]),
+  ),
   attentionItems: snapshot.attentionItems,
   planningCycles: snapshot.planningCycles,
   planningHistoryTruncated: snapshot.planningHistoryTruncated,

@@ -119,12 +119,22 @@ export class V2CommandRepository {
       }
       return;
     }
-    this.insert.run({
-      idempotencyKey: parsed.idempotencyKey,
-      commandType: parsed.commandType,
-      requestHash: parsed.requestHash,
-      resultJson: canonicalJson(parsed.result),
-      createdAt: parsed.createdAt,
-    });
+    try {
+      this.insert.run({
+        idempotencyKey: parsed.idempotencyKey,
+        commandType: parsed.commandType,
+        requestHash: parsed.requestHash,
+        resultJson: canonicalJson(parsed.result),
+        createdAt: parsed.createdAt,
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /Developer start idempotency key is claimed/i.test(error.message)
+      ) {
+        throw new V2IdempotencyConflictError(parsed.idempotencyKey);
+      }
+      throw error;
+    }
   }
 }
