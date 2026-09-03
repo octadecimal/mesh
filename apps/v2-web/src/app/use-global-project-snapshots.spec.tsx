@@ -66,7 +66,11 @@ it('loads partial snapshots, polls, and cancels when disabled', async () => {
   expect(result.current.status).toBe('ready');
   expect(result.current.snapshots).toEqual([alphaSnapshot]);
   expect(result.current.failures).toEqual([
-    { projectId: beta.id, message: 'Project unavailable.' },
+    {
+      projectId: beta.id,
+      projectName: beta.displayName,
+      message: 'Project unavailable.',
+    },
   ]);
 
   await act(() => vi.advanceTimersByTimeAsync(5_000));

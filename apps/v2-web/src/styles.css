@@ -239,6 +239,7 @@ button:disabled {
 }
 .v2-project-content {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   min-width: 0;
 }
@@ -627,7 +628,7 @@ button:disabled {
 @media (max-width: 640px) {
   .v2-app-shell,
   .v2-project-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .v2-global-nav {
     grid-template-columns: repeat(4, auto);

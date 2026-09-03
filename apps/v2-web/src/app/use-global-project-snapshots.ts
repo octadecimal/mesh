@@ -5,6 +5,7 @@ import type { V2Api } from '../api/client';
 
 export type GlobalProjectSnapshotFailure = Readonly<{
   projectId: string;
+  projectName: string;
   message: string;
 }>;
 
@@ -67,6 +68,7 @@ export function useGlobalProjectSnapshots({
         else
           failures.push({
             projectId: targets[index]!.id,
+            projectName: targets[index]!.displayName,
             message: errorMessage(result.reason),
           });
       }

@@ -55,18 +55,13 @@ export function InboxPage({
         <div className="v2-warning" role="alert">
           <p>Some projects could not be refreshed.</p>
           <ul>
-            {state.failures.map((failure) => {
-              const project = state.snapshots.find(
-                ({ project }) => project.id === failure.projectId,
-              )?.project;
-              return (
-                <li key={failure.projectId}>
-                  <strong>{project?.displayName ?? failure.projectId}</strong>
-                  {' — '}
-                  {failure.message}
-                </li>
-              );
-            })}
+            {state.failures.map((failure) => (
+              <li key={failure.projectId}>
+                <strong>{failure.projectName}</strong>
+                {' — '}
+                {failure.message}
+              </li>
+            ))}
           </ul>
         </div>
       ) : null}

@@ -33,15 +33,18 @@ export function parseAppRoute(pathname: string, search = ''): AppRoute {
   try {
     const projectId = decodeURIComponent(match[1]);
     const artifact = (match[2] ?? 'overview') as ProjectArtifact;
-    if (!projectId || (artifact !== 'overview' && !artifactPaths.has(artifact))) {
+    if (
+      !projectId ||
+      (artifact !== 'overview' && !artifactPaths.has(artifact))
+    ) {
       return { page: 'not_found', pathname };
     }
     const params = new URLSearchParams(search);
     const selectedId =
       artifact === 'board'
-        ? params.get('task') ?? undefined
+        ? (params.get('task') ?? undefined)
         : artifact === 'runs'
-          ? params.get('run') ?? undefined
+          ? (params.get('run') ?? undefined)
           : undefined;
     return selectedId
       ? { page: 'project', projectId, artifact, selectedId }
@@ -56,8 +59,14 @@ export function appHref(route: Exclude<AppRoute, { page: 'not_found' }>) {
   if (route.page === 'runs') return '/runs';
   if (route.page === 'projects') return '/projects';
   const base = `/projects/${encodeURIComponent(route.projectId)}`;
-  const path = route.artifact === 'overview' ? base : `${base}/${route.artifact}`;
+  const path =
+    route.artifact === 'overview' ? base : `${base}/${route.artifact}`;
   if (!route.selectedId) return path;
-  const key = route.artifact === 'board' ? 'task' : route.artifact === 'runs' ? 'run' : null;
+  const key =
+    route.artifact === 'board'
+      ? 'task'
+      : route.artifact === 'runs'
+        ? 'run'
+        : null;
   return key ? `${path}?${key}=${encodeURIComponent(route.selectedId)}` : path;
 }

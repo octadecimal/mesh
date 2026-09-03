@@ -850,6 +850,7 @@ describe('App', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Some projects could not be refreshed.',
     );
+    expect(screen.getByRole('alert')).toHaveTextContent('Notes');
     expect(screen.getByRole('alert')).toHaveTextContent('Notes is offline.');
     expect(
       screen.getByRole('heading', { name: 'Attention queue' }),

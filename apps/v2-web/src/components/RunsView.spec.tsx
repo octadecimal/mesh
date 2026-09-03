@@ -209,6 +209,7 @@ describe('GlobalRunsPage', () => {
           failures: [
             {
               projectId: projectSnapshotFixture.project.id,
+              projectName: projectSnapshotFixture.project.displayName,
               message: 'Offline',
             },
           ],

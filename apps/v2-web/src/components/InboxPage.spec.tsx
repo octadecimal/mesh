@@ -103,6 +103,7 @@ describe('InboxPage', () => {
           failures: [
             {
               projectId: decisionSnapshot.project.id,
+              projectName: decisionSnapshot.project.displayName,
               message: 'Offline',
             },
           ],
