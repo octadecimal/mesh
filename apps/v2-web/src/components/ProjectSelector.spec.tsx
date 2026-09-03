@@ -4,6 +4,7 @@ import type { V2SystemSnapshot } from '@mesh/v2-contracts';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ProjectSelector } from './ProjectSelector';
+import { ProjectsPage } from './ProjectsPage';
 
 const systemSnapshot: V2SystemSnapshot = {
   protocolVersion: 'mesh.v2/1',
@@ -34,6 +35,39 @@ const systemSnapshot: V2SystemSnapshot = {
 };
 
 describe('ProjectSelector', () => {
+  it('keeps registration callbacks inside the Projects page composition', async () => {
+    const user = userEvent.setup();
+    const onAddAndSelectProject = vi.fn();
+    const onSelectProject = vi.fn();
+
+    render(
+      <ProjectsPage
+        model={{
+          status: 'ready',
+          snapshot: systemSnapshot,
+          submitting: false,
+          registration: { enabled: true },
+        }}
+        onAddAndSelectProject={onAddAndSelectProject}
+        onSelectProject={onSelectProject}
+        v1GuidanceHref="/guidance/v1"
+      />,
+    );
+
+    expect(
+      screen.getByRole('heading', { name: 'Projects', level: 1 }),
+    ).toBeVisible();
+    expect(
+      screen.getByText('1 registered project · 1 approved global profile'),
+    ).toBeVisible();
+    expect(screen.getByLabelText('Repository path')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Select Todo' }));
+    expect(onSelectProject).toHaveBeenCalledWith(systemSnapshot.projects[0].id);
+    expect(
+      screen.getByRole('link', { name: 'V1 operating guidance' }),
+    ).toHaveAttribute('href', '/guidance/v1');
+  });
+
   it('adds and selects a repository through callback-only controls', async () => {
     const user = userEvent.setup();
     const onAddAndSelectProject = vi.fn();

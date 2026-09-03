@@ -7,11 +7,13 @@ export function ProjectSelector({
   onAddAndSelectProject,
   onSelectProject,
   v1GuidanceHref,
+  headingLevel: Heading = 'h1',
 }: {
   model: SelectorViewModel;
   onAddAndSelectProject: (repositoryPath: string) => void;
   onSelectProject: (projectId: string) => void;
   v1GuidanceHref: string;
+  headingLevel?: 'h1' | 'h2';
 }) {
   const [repositoryPath, setRepositoryPath] = useState('');
   const [validationMessage, setValidationMessage] = useState<string>();
@@ -54,7 +56,7 @@ export function ProjectSelector({
     <section className="v2-selector" aria-labelledby="project-selector-heading">
       <header>
         <p className="v2-eyebrow">Mesh V2</p>
-        <h1 id="project-selector-heading">Choose a project</h1>
+        <Heading id="project-selector-heading">Choose a project</Heading>
         <p>Add a repository to focus its foundation activity.</p>
       </header>
       {model.status === 'loading' ? (
