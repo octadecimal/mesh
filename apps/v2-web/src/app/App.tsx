@@ -30,9 +30,16 @@ import {
   useProjectConnection,
   type ProjectSocketFactory,
 } from './use-project-connection';
+import {
+  appHref,
+  parseAppRoute,
+  type AppRoute,
+  type ProjectArtifact,
+} from './routes';
 
 export type AppLocation = {
   readonly pathname: string;
+  readonly search: string;
   readonly protocol: string;
   readonly host: string;
   addEventListener(type: 'popstate', listener: EventListener): void;
@@ -135,16 +142,6 @@ const planningCommandTypes = new Set<V2CommandEnvelope['command']['type']>([
   'board_filter.set',
 ]);
 
-const routeProjectId = (pathname: string) => {
-  const match = /^\/projects\/([^/]+)$/.exec(pathname);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
-};
-
 const availability = (
   enabled: boolean,
   disabledReason: string,
@@ -199,16 +196,24 @@ function ProjectConnection({
   socketFactory,
   location,
   auditHealthy,
+  artifact,
+  selectedId,
   onAuditBarrier,
   onDeselect,
+  onNavigateArtifact,
+  onNavigate,
 }: {
   api: V2Api;
   projectId: string;
   socketFactory: ProjectSocketFactory;
   location: AppLocation;
   auditHealthy: boolean;
+  artifact: ProjectArtifact;
+  selectedId?: string;
   onAuditBarrier: (message: string) => void;
   onDeselect: () => void;
+  onNavigateArtifact: (artifact: ProjectArtifact) => void;
+  onNavigate: (href: string) => void;
 }) {
   const { projection, error, resyncing, dispatch } = useProjectConnection({
     api,
@@ -611,8 +616,12 @@ function ProjectConnection({
       ) : null}
       <FocusedProjectShell
         model={model}
+        artifact={artifact}
+        selectedId={selectedId}
         onDeselect={onDeselect}
         onInterrupt={interruptExecution}
+        onNavigateArtifact={onNavigateArtifact}
+        onNavigate={onNavigate}
         activityByExecutionId={activityByExecutionId}
         planning={{
           submitting,
@@ -655,7 +664,9 @@ export function App({
   location: AppLocation;
   history: AppHistory;
 }) {
-  const [pathname, setPathname] = useState(location.pathname);
+  const [route, setRoute] = useState<AppRoute>(() =>
+    parseAppRoute(location.pathname, location.search),
+  );
   const [system, setSystem] = useState<SystemState>({ status: 'loading' });
   const [registrationError, setRegistrationError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
@@ -683,18 +694,19 @@ export function App({
     return () => controller.abort();
   }, [api]);
 
-  const takeRouteOwnership = useCallback((next: string) => {
+  const takeRouteOwnership = useCallback((next: AppRoute) => {
     routeGeneration.current += 1;
     activeCommand.current?.controller.abort();
     activeCommand.current = undefined;
     pending.current = undefined;
     setSubmitting(false);
     setRegistrationError(undefined);
-    setPathname(next);
+    setRoute(next);
   }, []);
 
   useEffect(() => {
-    const popstate = () => takeRouteOwnership(location.pathname);
+    const popstate = () =>
+      takeRouteOwnership(parseAppRoute(location.pathname, location.search));
     location.addEventListener('popstate', popstate);
     return () => {
       location.removeEventListener('popstate', popstate);
@@ -707,13 +719,14 @@ export function App({
   const navigate = useCallback(
     (next: string) => {
       history.pushState(null, '', next);
-      takeRouteOwnership(next);
+      const url = new URL(next, `${location.protocol}//${location.host}`);
+      takeRouteOwnership(parseAppRoute(url.pathname, url.search));
     },
-    [history, takeRouteOwnership],
+    [history, location.host, location.protocol, takeRouteOwnership],
   );
   const selectProject = useCallback(
     (projectId: string) =>
-      navigate(`/projects/${encodeURIComponent(projectId)}`),
+      navigate(appHref({ page: 'project', projectId, artifact: 'overview' })),
     [navigate],
   );
   const tripAuditBarrier = useCallback((message: string) => {
@@ -860,9 +873,9 @@ export function App({
         submitting,
         registration,
       };
-  if (pathname === '/') return selector(selectorModel);
+  if (route.page === 'inbox') return selector(selectorModel);
 
-  const projectId = routeProjectId(pathname);
+  const projectId = route.page === 'project' ? route.projectId : undefined;
   if (
     !projectId ||
     !system.snapshot.projects.some(({ id }) => id === projectId)
@@ -882,8 +895,14 @@ export function App({
       socketFactory={socketFactory}
       location={location}
       auditHealthy={system.snapshot.health.status === 'ok'}
+      artifact={route.page === 'project' ? route.artifact : 'overview'}
+      selectedId={route.page === 'project' ? route.selectedId : undefined}
       onAuditBarrier={tripAuditBarrier}
-      onDeselect={() => navigate('/')}
+      onDeselect={() => navigate(appHref({ page: 'inbox' }))}
+      onNavigateArtifact={(artifact) =>
+        navigate(appHref({ page: 'project', projectId, artifact }))
+      }
+      onNavigate={navigate}
     />
   );
 }

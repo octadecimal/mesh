@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ComponentProps } from 'react';
 import type {
   PlanningCycleView,
   V2ProjectSnapshot,
@@ -9,7 +10,28 @@ import type {
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import type { ProjectArtifact } from '../app/routes';
-import { FocusedProjectShell } from './FocusedProjectShell';
+import { FocusedProjectShell as ProjectShell } from './FocusedProjectShell';
+
+type ProjectShellProps = ComponentProps<typeof ProjectShell>;
+
+function FocusedProjectShell({
+  artifact = 'board',
+  onNavigateArtifact = vi.fn(),
+  onNavigate = vi.fn(),
+  ...props
+}: Omit<ProjectShellProps, 'artifact' | 'onNavigateArtifact' | 'onNavigate'> &
+  Partial<
+    Pick<ProjectShellProps, 'artifact' | 'onNavigateArtifact' | 'onNavigate'>
+  >) {
+  return (
+    <ProjectShell
+      {...props}
+      artifact={artifact}
+      onNavigateArtifact={onNavigateArtifact}
+      onNavigate={onNavigate}
+    />
+  );
+}
 
 const executionFixture = {
   id: '22222222-2222-4222-8222-222222222222',
@@ -221,7 +243,7 @@ describe('FocusedProjectShell', () => {
     );
 
     expectTypeOf<
-      Parameters<typeof FocusedProjectShell>[0]['artifact']
+      Parameters<typeof ProjectShell>[0]['artifact']
     >().toEqualTypeOf<ProjectArtifact>();
     expectTypeOf<'inbox'>().not.toMatchTypeOf<ProjectArtifact>();
     expect(screen.getAllByRole('tab')).toHaveLength(5);
@@ -583,9 +605,6 @@ describe('FocusedProjectShell', () => {
     );
     expect(onDeselect).toHaveBeenCalledOnce();
     expect(onInterrupt).toHaveBeenCalledWith(executionFixture);
-    expect(
-      screen.getByRole('region', { name: 'Attention items' }),
-    ).toHaveTextContent('Required skill is unavailable.');
     expect(
       screen.getByRole('list', {
         name: 'Child activity for Todo foundation worker',

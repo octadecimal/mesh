@@ -584,6 +584,8 @@ const activePlanningCycle = planningCycleViewSchema.parse({
 });
 
 class FakeLocation extends EventTarget implements AppLocation {
+  search = '';
+
   constructor(
     public pathname = '/',
     public protocol = 'http:',
@@ -594,10 +596,14 @@ class FakeLocation extends EventTarget implements AppLocation {
 }
 
 const navigation = (pathname = '/') => {
-  const location = new FakeLocation(pathname);
+  const initial = new URL(pathname, 'http://mesh.test');
+  const location = new FakeLocation(initial.pathname);
+  location.search = initial.search;
   const history: AppHistory = {
     pushState: vi.fn((_, __, url) => {
-      location.pathname = String(url);
+      const next = new URL(String(url), 'http://mesh.test');
+      location.pathname = next.pathname;
+      location.search = next.search;
     }),
   };
   return { location, history };
@@ -709,6 +715,28 @@ const subscribed = (): ServerRealtimeMessage => ({
 afterEach(() => vi.restoreAllMocks());
 
 describe('App', () => {
+  it('owns project artifact navigation without remounting the project connection', async () => {
+    const user = userEvent.setup();
+    const app = renderApp({ pathname: `/projects/${projectId}` });
+    const overview = await screen.findByRole('tab', { name: 'Overview' });
+
+    expect(overview).toHaveAttribute('aria-current', 'page');
+    await user.click(screen.getByRole('tab', { name: 'Requirements' }));
+    expect(app.history.pushState).toHaveBeenCalledWith(
+      null,
+      '',
+      `/projects/${projectId}/requirements`,
+    );
+    expect(
+      await screen.findByRole('tab', { name: 'Requirements' }),
+    ).toHaveAttribute('aria-current', 'page');
+    expect(
+      screen.getByRole('tabpanel', { name: 'Requirements' }),
+    ).toHaveTextContent('No approved intent or requirements yet.');
+    expect(app.api.projectSnapshot).toHaveBeenCalledOnce();
+    expect(app.socketFactory).toHaveBeenCalledOnce();
+  });
+
   it('targets only the actual active cycle when terminal history is newer', async () => {
     const user = userEvent.setup();
     const api = createApi();
@@ -720,7 +748,9 @@ describe('App', () => {
       }),
     );
     const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -765,7 +795,9 @@ describe('App', () => {
       planningCycles: [terminalPlanningCycle],
     }));
     const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -813,8 +845,10 @@ describe('App', () => {
       commandType: 'board_filter.set',
       board: clearedFilteredBoard,
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -866,8 +900,10 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -921,8 +957,10 @@ describe('App', () => {
         message: 'Board filters changed elsewhere.',
       },
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -992,8 +1030,10 @@ describe('App', () => {
           return defaultCommand(envelope);
       }
     });
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -1100,8 +1140,10 @@ describe('App', () => {
     const user = userEvent.setup();
     const api = createApi();
     api.projectSnapshot = vi.fn(async () => developerSnapshot);
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -1148,8 +1190,10 @@ describe('App', () => {
       ...developerSnapshot,
       developerAttempts: [activeDeveloperAttempt],
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
 
     await user.click(
       screen.getByRole('button', { name: 'View Persist Todo details' }),
@@ -1189,8 +1233,10 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -1255,8 +1301,10 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -1315,8 +1363,10 @@ describe('App', () => {
         'Task changed. Refreshing current project truth.',
       );
     });
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -1356,7 +1406,9 @@ describe('App', () => {
       '',
       `/projects/${projectId}`,
     );
-    expect(await screen.findByText('Todo foundation worker')).toBeVisible();
+    expect(
+      await screen.findByRole('article', { name: 'Todo foundation worker' }),
+    ).toBeVisible();
     expect(api.projectSnapshot).toHaveBeenCalledWith(
       projectId,
       expect.any(AbortSignal),
@@ -1372,7 +1424,9 @@ describe('App', () => {
 
   it('loads a direct project URL from system and project truth and rejects unknown projects locally', async () => {
     const direct = renderApp({ pathname: `/projects/${projectId}` });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     expect(direct.api.systemSnapshot).toHaveBeenCalledOnce();
     expect(direct.api.projectSnapshot).toHaveBeenCalledWith(
       projectId,
@@ -1452,7 +1506,9 @@ describe('App', () => {
   it('deselects and follows popstate without retaining the old project connection', async () => {
     const user = userEvent.setup();
     const app = renderApp({ pathname: `/projects/${projectId}` });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     expect(app.sockets).toHaveLength(1);
 
     await user.click(screen.getByRole('button', { name: 'Deselect project' }));
@@ -1463,7 +1519,9 @@ describe('App', () => {
     expect(app.sockets[0]?.close).toHaveBeenCalledOnce();
 
     await user.click(screen.getByRole('button', { name: 'Select Todo' }));
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     app.location.pathname = '/';
     act(() => app.location.dispatchEvent(new PopStateEvent('popstate')));
     expect(
@@ -1753,6 +1811,7 @@ describe('App', () => {
     expect(
       screen.getByText('Required verification skill is unavailable.'),
     ).toBeVisible();
+    await user.click(screen.getByRole('tab', { name: 'Board' }));
     expect(screen.getByRole('heading', { name: 'Board' })).toBeVisible();
     expect(screen.getByText(/Showing 0 of 0 tasks/)).toBeVisible();
     expect(
@@ -1791,7 +1850,9 @@ describe('App', () => {
 
   it('shows runtime completion, output, child, and adapter diagnostics before domain lifecycle catches up', async () => {
     const app = renderApp({ pathname: `/projects/${projectId}` });
-    expect(await screen.findByText('Todo foundation worker')).toBeVisible();
+    expect(
+      await screen.findByRole('article', { name: 'Todo foundation worker' }),
+    ).toBeVisible();
 
     const runtimeEvent = (
       sequence: number,
@@ -2012,9 +2073,11 @@ describe('App', () => {
       pathname: `/projects/${projectId}`,
       api: terminalApi,
     });
-    expect(await screen.findAllByText('Todo foundation worker')).toHaveLength(
-      2,
-    );
+    expect(
+      await screen.findAllByRole('article', {
+        name: 'Todo foundation worker',
+      }),
+    ).toHaveLength(2);
     act(() => {
       terminal.sockets[0]?.open();
       terminal.sockets[0]?.message(subscribed());
@@ -2047,7 +2110,7 @@ describe('App', () => {
       pathname: `/projects/${projectId}`,
       api: unsafeApi,
     });
-    await screen.findByText('Todo foundation worker');
+    await screen.findByRole('article', { name: 'Todo foundation worker' });
     act(() => {
       unsafe.sockets[0]?.open();
       unsafe.sockets[0]?.message(subscribed());

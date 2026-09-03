@@ -110,8 +110,8 @@ export function FocusedProjectShell({
   selectedId,
   onDeselect,
   onInterrupt,
-  onNavigateArtifact = () => undefined,
-  onNavigate = () => undefined,
+  onNavigateArtifact,
+  onNavigate,
   activityByExecutionId = {},
   planning = inertPlanning,
   developer,
@@ -129,9 +129,6 @@ export function FocusedProjectShell({
   developer?: DeveloperCommandProjection;
   executionRun?: ExecutionRunCommandProjection;
 }) {
-  // ponytail: remove this fallback when App supplies artifact routes.
-  const legacyArtifact = artifact === undefined;
-  const activeArtifact = artifact ?? 'board';
   const tabRefs = useRef<Record<ProjectArtifact, HTMLAnchorElement | null>>({
     overview: null,
     plans: null,
@@ -391,12 +388,10 @@ export function FocusedProjectShell({
                     id={`project-pane-tab-${item.slug}`}
                     role="tab"
                     href={href}
-                    aria-selected={activeArtifact === item.slug}
-                    aria-current={
-                      activeArtifact === item.slug ? 'page' : undefined
-                    }
+                    aria-selected={artifact === item.slug}
+                    aria-current={artifact === item.slug ? 'page' : undefined}
                     aria-controls="project-artifact-panel"
-                    tabIndex={activeArtifact === item.slug ? 0 : -1}
+                    tabIndex={artifact === item.slug ? 0 : -1}
                     onClick={(event) => {
                       event.preventDefault();
                       activateArtifact(item.slug);
@@ -411,17 +406,17 @@ export function FocusedProjectShell({
             <section
               id="project-artifact-panel"
               role="tabpanel"
-              aria-labelledby={`project-pane-tab-${activeArtifact}`}
+              aria-labelledby={`project-pane-tab-${artifact}`}
             >
-              {activeArtifact === 'overview' ? (
+              {artifact === 'overview' ? (
                 <ProjectOverview
                   snapshot={snapshot}
                   attention={attentionFromSnapshots([snapshot])}
                   onNavigate={onNavigate}
                 />
-              ) : activeArtifact === 'requirements' ? (
+              ) : artifact === 'requirements' ? (
                 <RequirementsPane intentLedger={snapshot.intentLedger} />
-              ) : activeArtifact === 'plans' ? (
+              ) : artifact === 'plans' ? (
                 <section aria-labelledby="plans-heading">
                   <h2 id="plans-heading">Plans</h2>
                   <p>
@@ -429,7 +424,7 @@ export function FocusedProjectShell({
                     manager.
                   </p>
                 </section>
-              ) : activeArtifact === 'board' ? (
+              ) : artifact === 'board' ? (
                 <BoardPane
                   board={snapshot.board}
                   connection={planningConnection}
@@ -521,18 +516,6 @@ export function FocusedProjectShell({
               </ul>
             )}
           </section>
-          {legacyArtifact && snapshot.attentionItems.length > 0 ? (
-            <section aria-label="Attention items">
-              <h2>Attention items</h2>
-              <ul>
-                {snapshot.attentionItems.map((item) => (
-                  <li key={`${item.executionId}-${item.code}`}>
-                    {item.message}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
         </div>
       </div>
     </main>
