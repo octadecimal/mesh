@@ -49,6 +49,7 @@ select {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
+[role='tab']:focus-visible,
 [role='alert']:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 2px;
@@ -260,6 +261,23 @@ button:disabled {
   justify-content: space-between;
   gap: 1rem;
 }
+.v2-shell-header > div {
+  min-width: 0;
+}
+.v2-project-metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 1rem;
+}
+.v2-project-metadata p {
+  margin: 0.25rem 0 0;
+}
+.v2-project-path {
+  flex: 1 1 20rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .v2-eyebrow {
   margin: 0;
   color: var(--accent);
@@ -433,11 +451,57 @@ button:disabled {
   border-bottom: 1px solid var(--border);
   padding-bottom: 0.6rem;
 }
+.v2-project-tabs {
+  overflow-x: auto;
+  padding: 0.4rem 0.4rem 0.75rem;
+  scroll-padding-inline: 0.4rem;
+}
+.v2-project-tabs a {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.55rem 0.75rem;
+  color: inherit;
+  background: var(--surface-muted);
+  text-decoration: none;
+}
 [role='tab'][aria-selected='true'] {
+  color: var(--surface);
   background: var(--accent);
 }
 [role='tabpanel'] {
   padding: 1rem 0;
+}
+.v2-project-overview {
+  display: grid;
+  gap: 1rem;
+}
+.v2-project-overview > header,
+.v2-overview-grid > section,
+.v2-project-overview > section {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: var(--surface);
+}
+.v2-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 1rem;
+}
+.v2-overview-actions {
+  padding: 0;
+  list-style: none;
+}
+.v2-overview-actions > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.v2-overview-actions p {
+  margin: 0.25rem 0 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

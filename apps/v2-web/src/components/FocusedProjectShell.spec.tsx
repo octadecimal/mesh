@@ -6,8 +6,9 @@ import type {
   WorkerExecution,
   WorkerExecutionLifecycle,
 } from '@mesh/v2-contracts';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
+import type { ProjectArtifact } from '../app/routes';
 import { FocusedProjectShell } from './FocusedProjectShell';
 
 const executionFixture = {
@@ -203,6 +204,89 @@ const terminalPlanningCycle = (
 });
 
 describe('FocusedProjectShell', () => {
+  it('uses URL-controlled project artifacts with roving keyboard navigation', async () => {
+    const user = userEvent.setup();
+    const onNavigateArtifact = vi.fn();
+    const onNavigate = vi.fn();
+
+    render(
+      <FocusedProjectShell
+        artifact="overview"
+        model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+        onNavigateArtifact={onNavigateArtifact}
+        onNavigate={onNavigate}
+      />,
+    );
+
+    expectTypeOf<
+      Parameters<typeof FocusedProjectShell>[0]['artifact']
+    >().toEqualTypeOf<ProjectArtifact>();
+    expectTypeOf<'inbox'>().not.toMatchTypeOf<ProjectArtifact>();
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
+    const overview = screen.getByRole('tab', { name: 'Overview' });
+    expect(overview).toHaveAttribute('aria-current', 'page');
+    expect(overview).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText(snapshot.project.repositoryPath)).toBeVisible();
+    expect(screen.getByText('Connected')).toBeVisible();
+    expect(screen.getByText(/Domain cursor 4/)).toBeVisible();
+    expect(screen.getByText(/runtime cursor 12/)).toBeVisible();
+
+    await user.click(screen.getByRole('tab', { name: 'Requirements' }));
+    expect(onNavigateArtifact).toHaveBeenCalledWith('requirements');
+    overview.focus();
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
+    await user.keyboard('{End}');
+    expect(screen.getByRole('tab', { name: 'Runs' })).toHaveFocus();
+    await user.keyboard('{Home}');
+    expect(overview).toHaveFocus();
+    expect(onNavigateArtifact.mock.calls.map(([artifact]) => artifact)).toEqual(
+      ['requirements', 'requirements', 'runs', 'overview'],
+    );
+  });
+
+  it('passes URL-selected run detail only to the Runs artifact', () => {
+    const completed = {
+      ...executionFixture,
+      id: '99999999-9999-4999-8999-999999999999',
+      lifecycle: 'completed',
+      updatedAt: '2026-08-28T00:00:10.000Z',
+      endedAt: '2026-08-28T00:00:10.000Z',
+    } as WorkerExecution;
+
+    render(
+      <FocusedProjectShell
+        artifact="runs"
+        selectedId={completed.id}
+        model={{
+          status: 'ready',
+          snapshot: {
+            ...snapshot,
+            executions: [executionFixture, completed],
+          },
+          interrupt: { enabled: true },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={vi.fn()}
+      />,
+    );
+
+    const panel = screen.getByRole('tabpanel', { name: 'Runs' });
+    expect(within(panel).getByRole('tab', { name: 'History' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(
+      within(screen.getByRole('region', { name: 'Run details' })).getByText(
+        'Completed',
+      ),
+    ).toBeVisible();
+  });
+
   it.each([
     ['approved', 'Proposal approved.'],
     ['proposal_rejected', 'Proposal rejected.'],
@@ -438,7 +522,7 @@ describe('FocusedProjectShell', () => {
     ).toBeVisible();
   });
 
-  it('shows future panes, handles keyboard tabs, and calls deselect and interrupt callbacks', async () => {
+  it('preserves project callbacks and live execution activity', async () => {
     const user = userEvent.setup();
     const onDeselect = vi.fn();
     const onInterrupt = vi.fn();
@@ -485,25 +569,9 @@ describe('FocusedProjectShell', () => {
     expect(
       screen.getByRole('complementary', { name: 'PM Chat' }),
     ).toHaveTextContent('Project manager');
-    const boardTab = screen.getByRole('tab', { name: 'Board' });
-    await user.click(boardTab);
-    await user.keyboard('{ArrowRight}');
-    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
-    expect(
-      screen.getByRole('tabpanel', { name: 'Requirements' }),
-    ).toHaveTextContent('No approved intent or requirements yet.');
-    await user.keyboard('{Home}');
-    expect(screen.getByRole('tab', { name: 'Board' })).toHaveFocus();
-    await user.keyboard('{End}');
-    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
-    expect(boardTab).toHaveAttribute('id', 'project-pane-tab-board');
-    expect(boardTab).toHaveAttribute(
-      'aria-controls',
-      'project-pane-panel-board',
+    expect(screen.getByRole('tab', { name: 'Board' })).toHaveAttribute(
+      'aria-current',
+      'page',
     );
     expect(
       screen.queryByRole('button', { name: /start|approve|create/i }),

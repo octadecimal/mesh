@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent } from 'react';
+import { useRef, type KeyboardEvent } from 'react';
 
 import type {
   AbandonPlanningCycleCommand,
@@ -22,14 +22,22 @@ import { DeliveryPlanningPane, PlanningPane } from './PlanningPane';
 import { RequirementsPane } from './RequirementsPane';
 import type { ProjectShellViewModel } from './shell-state';
 import type { ExecutionRunCommand } from './ExecutionRunSection';
+import type { ProjectArtifact } from '../app/routes';
+import { appHref } from '../app/routes';
+import {
+  attentionFromSnapshots,
+  runsFromSnapshots,
+} from '../app/global-projection';
+import { ProjectOverview } from './ProjectOverview';
+import { RunsView } from './RunsView';
 
-const futurePanes = [
-  { label: 'Board', slug: 'board' },
+const projectArtifacts = [
+  { label: 'Overview', slug: 'overview' },
   { label: 'Requirements', slug: 'requirements' },
+  { label: 'Plans', slug: 'plans' },
+  { label: 'Board', slug: 'board' },
+  { label: 'Runs', slug: 'runs' },
 ] as const;
-
-type FuturePane = (typeof futurePanes)[number];
-type FuturePaneSlug = FuturePane['slug'];
 
 export type ExecutionActivityProjection = {
   childActivities: readonly ChildActivity[];
@@ -98,25 +106,38 @@ function disabledInterruptReason(status: ProjectShellViewModel['status']) {
 
 export function FocusedProjectShell({
   model,
+  artifact,
+  selectedId,
   onDeselect,
   onInterrupt,
+  onNavigateArtifact = () => undefined,
+  onNavigate = () => undefined,
   activityByExecutionId = {},
   planning = inertPlanning,
   developer,
   executionRun,
 }: {
   model: ProjectShellViewModel;
+  artifact: ProjectArtifact;
+  selectedId?: string;
   onDeselect: () => void;
   onInterrupt: (execution: WorkerExecution) => void;
+  onNavigateArtifact(artifact: ProjectArtifact): void;
+  onNavigate(href: string): void;
   activityByExecutionId?: Readonly<Record<string, ExecutionActivityProjection>>;
   planning?: PlanningCommandProjection;
   developer?: DeveloperCommandProjection;
   executionRun?: ExecutionRunCommandProjection;
 }) {
-  const [activePane, setActivePane] = useState<FuturePaneSlug>('board');
-  const tabRefs = useRef<Record<FuturePaneSlug, HTMLButtonElement | null>>({
+  // ponytail: remove this fallback when App supplies artifact routes.
+  const legacyArtifact = artifact === undefined;
+  const activeArtifact = artifact ?? 'board';
+  const tabRefs = useRef<Record<ProjectArtifact, HTMLAnchorElement | null>>({
+    overview: null,
+    plans: null,
     board: null,
     requirements: null,
+    runs: null,
   });
   if (model.status === 'loading') {
     return (
@@ -242,11 +263,11 @@ export function FocusedProjectShell({
     (activePlanningCycle.turns.filter(({ actor }) => actor === 'human')
       .length >= 32 ||
       activePlanningCycle.proposals.length >= 16);
-  function activatePane(pane: FuturePane) {
-    setActivePane(pane.slug);
-    tabRefs.current[pane.slug]?.focus();
+  function activateArtifact(nextArtifact: ProjectArtifact) {
+    onNavigateArtifact(nextArtifact);
+    tabRefs.current[nextArtifact]?.focus();
   }
-  function moveTab(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+  function moveTab(event: KeyboardEvent<HTMLAnchorElement>, index: number) {
     const key = event.key;
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) return;
     event.preventDefault();
@@ -254,10 +275,12 @@ export function FocusedProjectShell({
       key === 'Home'
         ? 0
         : key === 'End'
-          ? futurePanes.length - 1
-          : (index + (key === 'ArrowRight' ? 1 : -1) + futurePanes.length) %
-            futurePanes.length;
-    activatePane(futurePanes[targetIndex]);
+          ? projectArtifacts.length - 1
+          : (index +
+              (key === 'ArrowRight' ? 1 : -1) +
+              projectArtifacts.length) %
+            projectArtifacts.length;
+    activateArtifact(projectArtifacts[targetIndex].slug);
   }
 
   return (
@@ -266,21 +289,26 @@ export function FocusedProjectShell({
         <div>
           <p className="v2-eyebrow">Focused project</p>
           <h1 id="focused-project-heading">{snapshot.project.displayName}</h1>
-          <p>{snapshot.project.repositoryPath}</p>
+          <div className="v2-project-metadata">
+            <p className="v2-project-path">{snapshot.project.repositoryPath}</p>
+            <p
+              role="status"
+              className={
+                model.status === 'ready' ? undefined : 'v2-connection-status'
+              }
+            >
+              {model.status === 'ready' ? 'Connected' : model.message}
+            </p>
+            <p className="v2-cursors">
+              Domain cursor {snapshot.cursors.domain}; runtime cursor{' '}
+              {snapshot.cursors.runtime}
+            </p>
+          </div>
         </div>
         <button type="button" onClick={onDeselect}>
           Deselect project
         </button>
       </header>
-      {model.status === 'stale' || model.status === 'disconnected' ? (
-        <p role="status" className="v2-connection-status">
-          {model.message}
-        </p>
-      ) : null}
-      <p className="v2-cursors">
-        Domain cursor {snapshot.cursors.domain}; runtime cursor{' '}
-        {snapshot.cursors.runtime}
-      </p>
       <div className="v2-project-layout">
         <aside className="v2-pm-pane" aria-label="PM Chat">
           {terminalPlanningHistory ? (
@@ -342,87 +370,109 @@ export function FocusedProjectShell({
           />
         </aside>
         <div className="v2-project-content">
-          <section aria-label="Future workflow panes">
-            <div role="tablist" aria-label="Project panes">
-              {futurePanes.map((pane, index) => (
-                <button
-                  key={pane.slug}
-                  ref={(element) => {
-                    tabRefs.current[pane.slug] = element;
-                  }}
-                  id={`project-pane-tab-${pane.slug}`}
-                  role="tab"
-                  type="button"
-                  aria-selected={activePane === pane.slug}
-                  aria-controls={`project-pane-panel-${pane.slug}`}
-                  tabIndex={activePane === pane.slug ? 0 : -1}
-                  onClick={() => activatePane(pane)}
-                  onKeyDown={(event) => moveTab(event, index)}
-                >
-                  {pane.label}
-                </button>
-              ))}
+          <section aria-label="Project workspace">
+            <div
+              role="tablist"
+              aria-label="Project artifacts"
+              className="v2-project-tabs"
+            >
+              {projectArtifacts.map((item, index) => {
+                const href = appHref({
+                  page: 'project',
+                  projectId: snapshot.project.id,
+                  artifact: item.slug,
+                });
+                return (
+                  <a
+                    key={item.slug}
+                    ref={(element) => {
+                      tabRefs.current[item.slug] = element;
+                    }}
+                    id={`project-pane-tab-${item.slug}`}
+                    role="tab"
+                    href={href}
+                    aria-selected={activeArtifact === item.slug}
+                    aria-current={
+                      activeArtifact === item.slug ? 'page' : undefined
+                    }
+                    aria-controls="project-artifact-panel"
+                    tabIndex={activeArtifact === item.slug ? 0 : -1}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      activateArtifact(item.slug);
+                    }}
+                    onKeyDown={(event) => moveTab(event, index)}
+                  >
+                    {item.label}
+                  </a>
+                );
+              })}
             </div>
             <section
-              id="project-pane-panel-board"
+              id="project-artifact-panel"
               role="tabpanel"
-              aria-labelledby="project-pane-tab-board"
-              hidden={activePane !== 'board'}
+              aria-labelledby={`project-pane-tab-${activeArtifact}`}
             >
-              <BoardPane
-                board={snapshot.board}
-                connection={planningConnection}
-                submitting={planning.submitting}
-                error={planning.error}
-                onApplyFilter={planning.onApplyFilter}
-                developer={
-                  developer
-                    ? {
-                        attempts: snapshot.developerAttempts ?? [],
-                        reports: snapshot.developerReports ?? [],
-                        executions: snapshot.executions,
-                        profiles: snapshot.profiles,
-                        projectCursors: snapshot.cursors,
-                        activityByExecutionId,
-                        error: developer.error,
-                        onStart: developer.onStart,
-                        onInterrupt: developer.onInterrupt,
-                        onReplace: developer.onReplace,
-                      }
-                    : undefined
-                }
-                executionRun={
-                  executionRun
-                    ? {
-                        deliveryPlan: snapshot.deliveryPlan,
-                        runs: snapshot.executionRuns ?? [],
-                        profiles: snapshot.profiles,
-                        error: executionRun.error,
-                        onCommand: executionRun.onCommand,
-                      }
-                    : undefined
-                }
-              />
+              {activeArtifact === 'overview' ? (
+                <ProjectOverview
+                  snapshot={snapshot}
+                  attention={attentionFromSnapshots([snapshot])}
+                  onNavigate={onNavigate}
+                />
+              ) : activeArtifact === 'requirements' ? (
+                <RequirementsPane intentLedger={snapshot.intentLedger} />
+              ) : activeArtifact === 'plans' ? (
+                <section aria-labelledby="plans-heading">
+                  <h2 id="plans-heading">Plans</h2>
+                  <p>
+                    Review intent and delivery planning with the project
+                    manager.
+                  </p>
+                </section>
+              ) : activeArtifact === 'board' ? (
+                <BoardPane
+                  board={snapshot.board}
+                  connection={planningConnection}
+                  submitting={planning.submitting}
+                  error={planning.error}
+                  onApplyFilter={planning.onApplyFilter}
+                  developer={
+                    developer
+                      ? {
+                          attempts: snapshot.developerAttempts ?? [],
+                          reports: snapshot.developerReports ?? [],
+                          executions: snapshot.executions,
+                          profiles: snapshot.profiles,
+                          projectCursors: snapshot.cursors,
+                          activityByExecutionId,
+                          error: developer.error,
+                          onStart: developer.onStart,
+                          onInterrupt: developer.onInterrupt,
+                          onReplace: developer.onReplace,
+                        }
+                      : undefined
+                  }
+                  executionRun={
+                    executionRun
+                      ? {
+                          deliveryPlan: snapshot.deliveryPlan,
+                          runs: snapshot.executionRuns ?? [],
+                          profiles: snapshot.profiles,
+                          error: executionRun.error,
+                          onCommand: executionRun.onCommand,
+                        }
+                      : undefined
+                  }
+                />
+              ) : (
+                <RunsView
+                  runs={runsFromSnapshots([snapshot])}
+                  projectId={snapshot.project.id}
+                  selectedId={selectedId}
+                  onNavigate={onNavigate}
+                />
+              )}
             </section>
-            <section
-              id="project-pane-panel-requirements"
-              role="tabpanel"
-              aria-labelledby="project-pane-tab-requirements"
-              hidden={activePane !== 'requirements'}
-            >
-              <RequirementsPane intentLedger={snapshot.intentLedger} />
-            </section>
-          </section>
-          <section aria-labelledby="profiles-heading">
-            <h2 id="profiles-heading">Approved profiles</h2>
-            <ul>
-              {snapshot.profiles.map((profile) => (
-                <li key={profile.profileId}>
-                  {profile.document.metadata.displayName} · revision{' '}
-                  {profile.profileRevision}
-                </li>
-              ))}
-            </ul>
           </section>
           <section aria-labelledby="activity-heading">
             <h2 id="activity-heading">Worker activity</h2>
@@ -471,7 +521,7 @@ export function FocusedProjectShell({
               </ul>
             )}
           </section>
-          {snapshot.attentionItems.length > 0 ? (
+          {legacyArtifact && snapshot.attentionItems.length > 0 ? (
             <section aria-label="Attention items">
               <h2>Attention items</h2>
               <ul>
