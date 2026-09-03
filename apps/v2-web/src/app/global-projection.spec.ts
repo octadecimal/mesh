@@ -146,6 +146,42 @@ describe('global projections', () => {
     ).toContainEqual(expect.objectContaining({ kind: 'decision' }));
   });
 
+  it('uses the latest nonterminal planning cycle for decisions', () => {
+    const older = {
+      ...decision,
+      cycle: {
+        ...decision.cycle,
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddddd',
+        revision: 6,
+      },
+    } as V2ProjectSnapshot['planningCycles'][number];
+    const latest = {
+      ...decision,
+      cycle: {
+        ...decision.cycle,
+        id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        revision: 8,
+      },
+      proposals: [
+        {
+          ...decision.proposals[1],
+          id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+          summary: 'Current proposal',
+        },
+      ],
+    } as V2ProjectSnapshot['planningCycles'][number];
+
+    expect(
+      attentionFromSnapshots([
+        {
+          ...projectSnapshotFixture,
+          attentionItems: [],
+          planningCycles: [older, latest],
+        } as V2ProjectSnapshot,
+      ]).find(({ kind }) => kind === 'decision'),
+    ).toMatchObject({ id: expect.stringContaining('ffffffff') });
+  });
+
   it('deduplicates an attempt controlled by its execution and orders completed history newest first', () => {
     const old = {
       ...runningExecutionFixture,

@@ -93,12 +93,27 @@ export function attentionFromSnapshots(
         sortRevision: execution?.revision ?? snapshot.cursors.runtime,
       });
     }
-    const cycle = snapshot.planningCycles.find(
-      ({ cycle }) =>
-        cycle.lifecycle !== 'approved' &&
-        cycle.lifecycle !== 'proposal_rejected' &&
-        cycle.lifecycle !== 'abandoned',
-    );
+    const cycle = snapshot.planningCycles
+      .filter(
+        ({ cycle }) =>
+          cycle.lifecycle !== 'approved' &&
+          cycle.lifecycle !== 'proposal_rejected' &&
+          cycle.lifecycle !== 'abandoned',
+      )
+      .reduce<(typeof snapshot.planningCycles)[number] | undefined>(
+        (latest, candidate) => {
+          if (latest === undefined) return candidate;
+          return candidate.cycle.revision > latest.cycle.revision ||
+            (candidate.cycle.revision === latest.cycle.revision &&
+              (compareText(candidate.cycle.updatedAt, latest.cycle.updatedAt) >
+                0 ||
+                (candidate.cycle.updatedAt === latest.cycle.updatedAt &&
+                  compareText(candidate.cycle.id, latest.cycle.id) > 0)))
+            ? candidate
+            : latest;
+        },
+        undefined,
+      );
     const proposals =
       cycle?.purpose.kind === 'delivery_plan'
         ? cycle.deliveryPlanProposals
