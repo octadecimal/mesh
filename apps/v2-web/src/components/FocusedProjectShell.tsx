@@ -154,16 +154,16 @@ export function FocusedProjectShell({
   });
   if (model.status === 'loading') {
     return (
-      <main className="v2-shell">
+      <div className="v2-shell">
         <p role="status">Loading project {model.projectId}…</p>
-      </main>
+      </div>
     );
   }
 
   const snapshot = model.snapshot;
   if (snapshot === undefined) {
     return (
-      <main className="v2-shell">
+      <div className="v2-shell">
         <p role="status">
           {model.status === 'disconnected'
             ? model.message
@@ -172,7 +172,7 @@ export function FocusedProjectShell({
         <button type="button" onClick={onDeselect}>
           Deselect project
         </button>
-      </main>
+      </div>
     );
   }
   const interruptReason =
@@ -383,7 +383,7 @@ export function FocusedProjectShell({
     : undefined;
 
   return (
-    <main className="v2-shell" aria-labelledby="focused-project-heading">
+    <div className="v2-shell" aria-labelledby="focused-project-heading">
       <header className="v2-shell-header">
         <div>
           <p className="v2-eyebrow">Focused project</p>
@@ -583,6 +583,6 @@ export function FocusedProjectShell({
           </section>
         </div>
       </div>
-    </main>
+    </div>
   );
 }
