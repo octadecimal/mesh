@@ -39,7 +39,13 @@ export function RunsView({
     } else if (historyRuns.length > 0) {
       setTab('history');
     }
-  }, [selectedId, selectedRun?.active, activeRuns.length, historyRuns.length]);
+  }, [
+    projectId,
+    selectedId,
+    selectedRun?.active,
+    activeRuns.length,
+    historyRuns.length,
+  ]);
   const rows = tab === 'active' ? activeRuns : historyRuns;
   const selected =
     rows.find(({ executionId }) => executionId === selectedId) ?? rows[0];

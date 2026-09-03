@@ -128,6 +128,49 @@ describe('RunsView', () => {
       screen.getByRole('region', { name: 'Run details' }),
     ).toHaveTextContent('Implement task T-21');
   });
+
+  it('resets to the first active run when the project filter changes', async () => {
+    const user = userEvent.setup();
+    const sameCountRuns = [
+      ...runs,
+      {
+        ...runs[0],
+        executionId: 'history-2',
+        projectId: 'project-b',
+        projectName: 'Beta',
+        title: 'Previous Beta run',
+        href: '/projects/project-b/runs?run=history-2',
+      },
+    ];
+    const { rerender } = render(
+      <RunsView
+        runs={sameCountRuns}
+        projectId="project-a"
+        onNavigate={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('tab', { name: 'History' }));
+    expect(screen.getByRole('tab', { name: 'History' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+
+    rerender(
+      <RunsView
+        runs={sameCountRuns}
+        projectId="project-b"
+        onNavigate={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('tab', { name: 'Active 1' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(
+      screen.getByRole('region', { name: 'Run details' }),
+    ).toHaveTextContent('Verify release');
+  });
 });
 
 describe('GlobalRunsPage', () => {
