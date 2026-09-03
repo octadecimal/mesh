@@ -2,7 +2,13 @@ import { access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { relative, resolve } from 'node:path';
 
-import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type WebSocketRoute,
+} from '@playwright/test';
 
 import { V2ProcessFixture } from './fixtures/v2-process.js';
 
@@ -707,7 +713,7 @@ test('attention-first UI preserves project PM drafts and the chosen theme', asyn
   }
 });
 
-test('attention-first UI keeps project controls keyboard reachable at 320px and 200% page scale', async ({
+test('attention-first UI keeps project controls keyboard reachable at 320px and separately proves 200% visual page scale', async ({
   page,
 }) => {
   const fixture = await V2ProcessFixture.createTodo({
@@ -719,22 +725,64 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
     await registerTodo(page, fixture);
     await approveTodoIntent(page, fixture);
     await approveTodoDeliveryPlan(page, fixture, false);
+    await page.reload();
+
+    const reachByTab = async ({
+      from,
+      to,
+      key = 'Tab',
+    }: {
+      from: Locator;
+      to: Locator;
+      key?: 'Tab' | 'Shift+Tab';
+    }) => {
+      await expect(from).toBeFocused();
+      for (let press = 0; press < 32; press += 1) {
+        await page.keyboard.press(key);
+        if (await to.evaluate((element) => element === document.activeElement))
+          return;
+      }
+      throw new Error(`Control was not reachable with ${key}`);
+    };
 
     expect(await page.evaluate(() => window.innerWidth)).toBe(320);
+    const keyboardOrigin = page.locator('body');
+    await expect(keyboardOrigin).toBeFocused();
     const repositoryPath = page.getByText(fixture.todoRepository, {
       exact: true,
     });
+    const connectionState = page
+      .locator('.v2-project-metadata')
+      .locator('[role="status"]');
     await expect(repositoryPath).toBeVisible();
+    await expect(connectionState).toHaveText('Connected');
     const pathBounds = await repositoryPath.evaluate((element) => {
       const bounds = element.getBoundingClientRect();
       return {
+        bottom: bounds.bottom,
         left: bounds.left,
         right: bounds.right,
+        top: bounds.top,
         viewportWidth: document.documentElement.clientWidth,
+      };
+    });
+    const connectionBounds = await connectionState.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
       };
     });
     expect(pathBounds.left).toBeGreaterThanOrEqual(0);
     expect(pathBounds.right).toBeLessThanOrEqual(pathBounds.viewportWidth);
+    expect(
+      pathBounds.right <= connectionBounds.left ||
+        connectionBounds.right <= pathBounds.left ||
+        pathBounds.bottom <= connectionBounds.top ||
+        connectionBounds.bottom <= pathBounds.top,
+    ).toBe(true);
     expect(
       await page.evaluate(() => ({
         clientWidth: document.documentElement.clientWidth,
@@ -748,7 +796,7 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
     const overviewTab = projectTabs.getByRole('tab', { name: 'Overview' });
     const plansTab = projectTabs.getByRole('tab', { name: 'Plans' });
     const runsTab = projectTabs.getByRole('tab', { name: 'Runs' });
-    await overviewTab.focus();
+    await reachByTab({ from: keyboardOrigin, to: plansTab });
     await page.keyboard.press('End');
     await expect(runsTab).toBeFocused();
     const focusedTabBounds = await projectTabs.evaluate((tablist) => {
@@ -775,21 +823,6 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
     await expect(page).toHaveURL(
       new RegExp(`/projects/${fixture.projectId}/runs$`, 'u'),
     );
-
-    await page.setViewportSize({ width: 640, height: 720 });
-    await zoomSession.send('Emulation.setPageScaleFactor', {
-      pageScaleFactor: 2,
-    });
-    await expect
-      .poll(() =>
-        page.evaluate(() => ({
-          scale: window.visualViewport?.scale,
-          width: window.visualViewport?.width,
-        })),
-      )
-      .toEqual({ scale: 2, width: 320 });
-
-    await runsTab.focus();
     await page.keyboard.press('Home');
     await expect(overviewTab).toBeFocused();
     await page.keyboard.press('ArrowRight');
@@ -803,7 +836,8 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
     const projectManager = page.getByRole('button', {
       name: 'Project manager',
     });
-    await projectManager.focus();
+    await page.keyboard.press('Shift+Tab');
+    await expect(projectManager).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(
       page.getByRole('dialog', {
@@ -814,8 +848,7 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
     await expect(projectManager).toBeFocused();
 
     const approve = page.getByRole('button', { name: 'Approve full plan' });
-    await approve.focus();
-    await expect(approve).toBeFocused();
+    await reachByTab({ from: projectManager, to: approve });
     await page.keyboard.press('Enter');
     await expect
       .poll(
@@ -824,7 +857,9 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
       )
       .toBe(1);
 
-    await plansTab.focus();
+    await page.reload();
+    expect(await page.evaluate(() => window.innerWidth)).toBe(320);
+    await reachByTab({ from: page.locator('body'), to: plansTab });
     await page.keyboard.press('ArrowRight');
     const boardTab = projectTabs.getByRole('tab', { name: 'Board' });
     await expect(boardTab).toBeFocused();
@@ -834,7 +869,7 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
     const openTask = page.getByRole('button', {
       name: 'Open Build Todo controls',
     });
-    await openTask.focus();
+    await reachByTab({ from: boardTab, to: openTask });
     await page.keyboard.press('Enter');
     await expect(
       page.getByRole('region', { name: 'Task details' }),
@@ -845,6 +880,21 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
         level: 3,
       }),
     ).toBeFocused();
+
+    expect(await page.evaluate(() => window.innerWidth)).toBe(320);
+    await page.setViewportSize({ width: 640, height: 720 });
+    expect(await page.evaluate(() => window.innerWidth)).toBe(640);
+    await zoomSession.send('Emulation.setPageScaleFactor', {
+      pageScaleFactor: 2,
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          scale: window.visualViewport?.scale,
+          width: window.visualViewport?.width,
+        })),
+      )
+      .toEqual({ scale: 2, width: 320 });
   } finally {
     await zoomSession.send('Emulation.setPageScaleFactor', {
       pageScaleFactor: 1,
