@@ -70,9 +70,12 @@ describe('PlansPane', () => {
   it('is the canonical proposal-action surface without a conversation composer', async () => {
     const user = userEvent.setup();
     const onApprove = vi.fn();
+    const onRequestIntentRevision = vi.fn();
     render(
       <PlansPane
         projectId={projectId}
+        onRequestIntentRevision={onRequestIntentRevision}
+        onRequestDeliveryPlanRevision={vi.fn()}
         intent={{
           cycle: intentCycle,
           connection: { status: 'ready' },
@@ -104,5 +107,10 @@ describe('PlansPane', () => {
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Approve proposal' }));
     expect(onApprove).toHaveBeenCalledWith(proposalId);
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+    expect(onRequestIntentRevision).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole('textbox', { name: 'Message to project manager' }),
+    ).not.toBeInTheDocument();
   });
 });

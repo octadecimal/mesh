@@ -31,6 +31,7 @@ import { ProjectOverview } from './ProjectOverview';
 import {
   ProjectManagerDrawer,
   PM_PINNED_STORAGE_KEY,
+  type ProjectManagerSection,
 } from './ProjectManagerDrawer';
 import { PlansPane } from './PlansPane';
 import { RunsView } from './RunsView';
@@ -139,6 +140,11 @@ export function FocusedProjectShell({
       typeof localStorage !== 'undefined' &&
       localStorage.getItem(PM_PINNED_STORAGE_KEY) === 'true',
   );
+  const [pmSectionSelection, setPmSectionSelection] = useState<{
+    projectId: string;
+    section: ProjectManagerSection;
+  }>();
+  const [pmComposerFocusRequest, setPmComposerFocusRequest] = useState(0);
   const tabRefs = useRef<Record<ProjectArtifact, HTMLAnchorElement | null>>({
     overview: null,
     plans: null,
@@ -227,6 +233,16 @@ export function FocusedProjectShell({
     deliveryCycles.find(
       ({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle),
     ) ?? deliveryCycles[0];
+  const defaultPmSection: ProjectManagerSection = activePlanningCycle
+    ? 'intent'
+    : deliveryCycle &&
+        !terminalPlanningLifecycles.has(deliveryCycle.cycle.lifecycle)
+      ? 'delivery-plan'
+      : 'intent';
+  const pmSection =
+    pmSectionSelection?.projectId === snapshot.project.id
+      ? pmSectionSelection.section
+      : defaultPmSection;
   const deliveryProfiles = snapshot.profiles
     .filter(
       (profile) =>
@@ -325,6 +341,15 @@ export function FocusedProjectShell({
     onReject: planning.onRejectPlan,
     onAbandon: planning.onAbandonPlan,
   };
+  const focusedProjectId = snapshot.project.id;
+  function selectPmSection(section: ProjectManagerSection) {
+    setPmSectionSelection({ projectId: focusedProjectId, section });
+  }
+  function openPmForRevision(section: ProjectManagerSection) {
+    selectPmSection(section);
+    setPmComposerFocusRequest((request) => request + 1);
+    setPmOpen(true);
+  }
   function activateArtifact(nextArtifact: ProjectArtifact) {
     onNavigateArtifact(nextArtifact);
     tabRefs.current[nextArtifact]?.focus();
@@ -377,8 +402,11 @@ export function FocusedProjectShell({
           projectName={snapshot.project.displayName}
           open={pmOpen}
           pinned={pmPinned}
+          section={pmSection}
+          composerFocusRequest={pmComposerFocusRequest}
           onOpenChange={setPmOpen}
           onPinnedChange={setPmPinned}
+          onSectionChange={selectPmSection}
           onNavigate={onNavigate}
           intent={intentPlanning}
           intentHistory={intentHistory}
@@ -440,6 +468,10 @@ export function FocusedProjectShell({
                   intent={intentPlanning}
                   intentHistory={intentHistory}
                   deliveryPlan={deliveryPlanning}
+                  onRequestIntentRevision={() => openPmForRevision('intent')}
+                  onRequestDeliveryPlanRevision={() =>
+                    openPmForRevision('delivery-plan')
+                  }
                 />
               ) : artifact === 'board' ? (
                 <BoardPane

@@ -8,24 +8,14 @@ import type {
 } from './PlansPane';
 
 export const PM_PINNED_STORAGE_KEY = 'mesh.v2.pm-pinned';
+export type ProjectManagerSection = 'intent' | 'delivery-plan';
 const narrowQuery = '(max-width: 56rem)';
-const terminalLifecycles = new Set([
-  'approved',
-  'proposal_rejected',
-  'abandoned',
-]);
 
 export function pmDraftStorageKey(
   projectId: string,
   purpose: 'intent' | 'delivery_plan',
 ) {
   return `mesh.v2.pm-draft:${projectId}:${purpose}`;
-}
-
-function hasActiveCycle(
-  cycle: IntentPlanningSurfaceProps['cycle'] | undefined,
-) {
-  return cycle && !terminalLifecycles.has(cycle.cycle.lifecycle);
 }
 
 function useNarrowViewport() {
@@ -50,8 +40,11 @@ export function ProjectManagerDrawer({
   projectName,
   open,
   pinned,
+  section,
+  composerFocusRequest,
   onOpenChange,
   onPinnedChange,
+  onSectionChange,
   onNavigate,
   intent,
   intentHistory,
@@ -61,29 +54,22 @@ export function ProjectManagerDrawer({
   projectName: string;
   open: boolean;
   pinned: boolean;
+  section: ProjectManagerSection;
+  composerFocusRequest: number;
   onOpenChange(open: boolean): void;
   onPinnedChange(pinned: boolean): void;
+  onSectionChange(section: ProjectManagerSection): void;
   onNavigate(href: string): void;
   intent: IntentPlanningSurfaceProps;
   intentHistory?: IntentPlanningSurfaceProps;
   deliveryPlan: DeliveryPlanningSurfaceProps;
 }) {
-  const defaultSection = hasActiveCycle(intent.cycle)
-    ? 'intent'
-    : hasActiveCycle(deliveryPlan.cycle)
-      ? 'delivery-plan'
-      : 'intent';
-  const [section, setSection] = useState<'intent' | 'delivery-plan'>(
-    defaultSection,
-  );
   const triggerRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
   const narrow = useNarrowViewport();
   const pinnedLayout = pinned && !narrow;
   const title = `Project manager · ${projectName}`;
   const reviewHref = `/projects/${encodeURIComponent(projectId)}/plans`;
-
-  useEffect(() => setSection(defaultSection), [defaultSection, projectId]);
 
   function changePinned(next: boolean) {
     localStorage.setItem(PM_PINNED_STORAGE_KEY, String(next));
@@ -118,7 +104,7 @@ export function ProjectManagerDrawer({
           type="button"
           role="tab"
           aria-selected={section === 'intent'}
-          onClick={() => setSection('intent')}
+          onClick={() => onSectionChange('intent')}
         >
           Intent
         </button>
@@ -126,7 +112,7 @@ export function ProjectManagerDrawer({
           type="button"
           role="tab"
           aria-selected={section === 'delivery-plan'}
-          onClick={() => setSection('delivery-plan')}
+          onClick={() => onSectionChange('delivery-plan')}
         >
           Delivery Plan
         </button>
@@ -149,6 +135,7 @@ export function ProjectManagerDrawer({
             reviewHref={reviewHref}
             onReviewProposal={() => onNavigate(reviewHref)}
             draftStorageKey={pmDraftStorageKey(projectId, 'intent')}
+            composerFocusRequest={composerFocusRequest}
           />
         </div>
       ) : (
@@ -161,6 +148,7 @@ export function ProjectManagerDrawer({
             reviewHref={reviewHref}
             onReviewProposal={() => onNavigate(reviewHref)}
             draftStorageKey={pmDraftStorageKey(projectId, 'delivery_plan')}
+            composerFocusRequest={composerFocusRequest}
           />
         </div>
       )}

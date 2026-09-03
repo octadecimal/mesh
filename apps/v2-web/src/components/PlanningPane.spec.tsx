@@ -360,13 +360,25 @@ describe('PlanningPane', () => {
     expect(onReviewProposal).toHaveBeenCalledOnce();
     conversation.unmount();
 
-    render(<PlanningPane {...props} surface="review" />);
+    const onRequestRevision = vi.fn();
+    render(
+      <PlanningPane
+        {...props}
+        surface="review"
+        onRequestRevision={onRequestRevision}
+      />,
+    );
     expect(
       screen.queryByRole('textbox', { name: 'Message to project manager' }),
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: 'Approve proposal' }),
     ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+    expect(onRequestRevision).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole('textbox', { name: 'Message to project manager' }),
+    ).not.toBeInTheDocument();
   });
 
   it('keeps sibling pane labels and relationships unique while preserving the default heading', () => {
@@ -466,10 +478,12 @@ describe('PlanningPane', () => {
 
   it('renders a complete proposal and delegates single approve, revision, and reject actions', async () => {
     const user = userEvent.setup();
+    const onRequestRevision = vi.fn();
     const { onApprove, onReject, onSubmitTurn } = renderPane({
       surface: 'review',
       cycle: awaitingApprovalCycle,
       approvedIntentLedger,
+      onRequestRevision,
     });
 
     expect(
@@ -488,16 +502,10 @@ describe('PlanningPane', () => {
 
     await user.click(screen.getByRole('button', { name: 'Approve proposal' }));
     await user.click(screen.getByRole('button', { name: 'Request revision' }));
-    await user.type(
-      screen.getByLabelText('Message to project manager'),
-      'Clarify offline behavior',
-    );
-    await user.click(
-      screen.getByRole('button', { name: 'Send revision request' }),
-    );
 
     expect(onApprove).toHaveBeenCalledWith(proposalId);
-    expect(onSubmitTurn).toHaveBeenCalledWith('Clarify offline behavior');
+    expect(onRequestRevision).toHaveBeenCalledOnce();
+    expect(onSubmitTurn).not.toHaveBeenCalled();
     expect(onReject).not.toHaveBeenCalled();
   });
 
@@ -598,15 +606,15 @@ describe('PlanningPane', () => {
     );
   });
 
-  it('hides a requested revision form when the authoritative proposal is no longer awaiting approval', async () => {
-    const user = userEvent.setup();
+  it('hides the revision request when the authoritative proposal is no longer awaiting approval', () => {
+    const onRequestRevision = vi.fn();
     const { rerender } = renderPane({
       surface: 'review',
       cycle: awaitingApprovalCycle,
+      onRequestRevision,
     });
-    await user.click(screen.getByRole('button', { name: 'Request revision' }));
     expect(
-      screen.getByRole('button', { name: 'Send revision request' }),
+      screen.getByRole('button', { name: 'Request revision' }),
     ).toBeVisible();
     rerender(
       <PlanningPane
@@ -641,11 +649,13 @@ describe('PlanningPane', () => {
         onApprove={vi.fn()}
         onReject={vi.fn()}
         onAbandon={vi.fn()}
+        onRequestRevision={onRequestRevision}
       />,
     );
     expect(
-      screen.queryByRole('button', { name: 'Send revision request' }),
+      screen.queryByRole('button', { name: 'Request revision' }),
     ).not.toBeInTheDocument();
+    expect(onRequestRevision).not.toHaveBeenCalled();
   });
 
   it('uses a profile that arrives late in the same instance to submit the initial turn', async () => {
@@ -1517,13 +1527,25 @@ describe('DeliveryPlanningPane', () => {
     expect(onReviewProposal).toHaveBeenCalledOnce();
     conversation.unmount();
 
-    render(<DeliveryPlanningPane {...props} surface="review" />);
+    const onRequestRevision = vi.fn();
+    render(
+      <DeliveryPlanningPane
+        {...props}
+        surface="review"
+        onRequestRevision={onRequestRevision}
+      />,
+    );
     expect(
       screen.queryByRole('textbox', { name: 'Message to project manager' }),
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: 'Approve full plan' }),
     ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Request revision' }));
+    expect(onRequestRevision).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole('textbox', { name: 'Message to project manager' }),
+    ).not.toBeInTheDocument();
   });
 
   it('keeps terminal history inspectable while starting an exact current-base replan', async () => {
@@ -2237,7 +2259,7 @@ describe('DeliveryPlanningPane', () => {
       onAbandon: vi.fn(),
     };
     const { rerender } = render(
-      <DeliveryPlanningPane surface="review" {...props} />,
+      <DeliveryPlanningPane surface="conversation" {...props} />,
     );
 
     expect(
@@ -2245,7 +2267,6 @@ describe('DeliveryPlanningPane', () => {
         `Project manager: Todo PM · profile ${profile.profileId} · revision 1`,
       ),
     ).toBeVisible();
-    await user.click(screen.getByRole('button', { name: 'Request revision' }));
     expect(
       screen.queryByLabelText('Project manager profile'),
     ).not.toBeInTheDocument();
@@ -2253,9 +2274,7 @@ describe('DeliveryPlanningPane', () => {
       screen.getByLabelText('Message to project manager'),
       'Keep immutable history.',
     );
-    await user.click(
-      screen.getByRole('button', { name: 'Send revision request' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
     const command = onSubmit.mock.calls[0]?.[0];
     expect(command).toEqual(
       expect.objectContaining({
@@ -2268,7 +2287,7 @@ describe('DeliveryPlanningPane', () => {
 
     rerender(
       <DeliveryPlanningPane
-        surface="review"
+        surface="conversation"
         {...props}
         profiles={[
           workerProfileSummarySchema.parse({
@@ -2287,7 +2306,7 @@ describe('DeliveryPlanningPane', () => {
     expect(screen.queryByText(/Newer Todo PM/)).not.toBeInTheDocument();
 
     rerender(
-      <DeliveryPlanningPane surface="review" {...props} profiles={[]} />,
+      <DeliveryPlanningPane surface="conversation" {...props} profiles={[]} />,
     );
     expect(
       screen.getByText(
@@ -2312,7 +2331,7 @@ describe('DeliveryPlanningPane', () => {
       onReject: vi.fn(),
       onAbandon: vi.fn(),
     };
-    const { rerender, unmount } = render(
+    const { rerender } = render(
       <DeliveryPlanningPane surface="review" {...props} />,
     );
     rerender(
@@ -2339,18 +2358,6 @@ describe('DeliveryPlanningPane', () => {
       />,
     );
     expect(screen.getByLabelText('Rejection feedback')).toHaveFocus();
-    unmount();
-
-    const second = render(<DeliveryPlanningPane surface="review" {...props} />);
-    await user.click(screen.getByRole('button', { name: 'Request revision' }));
-    second.rerender(
-      <DeliveryPlanningPane
-        surface="review"
-        {...props}
-        error="Revision conflict"
-      />,
-    );
-    expect(screen.getByLabelText('Message to project manager')).toHaveFocus();
   });
 
   it('gates and submits a new delivery planning cycle with exact frozen bases', async () => {
@@ -2552,6 +2559,7 @@ describe('DeliveryPlanningPane', () => {
     const onReject = vi.fn();
     const onAbandon = vi.fn();
     const onSubmit = vi.fn();
+    const onRequestRevision = vi.fn();
     render(
       <DeliveryPlanningPane
         surface="review"
@@ -2567,6 +2575,7 @@ describe('DeliveryPlanningPane', () => {
         onApprove={onApprove}
         onReject={onReject}
         onAbandon={onAbandon}
+        onRequestRevision={onRequestRevision}
       />,
     );
 
@@ -2605,20 +2614,11 @@ describe('DeliveryPlanningPane', () => {
     });
 
     await user.click(screen.getByRole('button', { name: 'Request revision' }));
-    await user.type(
-      screen.getByLabelText('Message to project manager'),
-      'Split the experience milestone.',
-    );
-    await user.click(
-      screen.getByRole('button', { name: 'Send revision request' }),
-    );
-    expect(onSubmit).toHaveBeenCalledWith({
-      type: 'planning_cycle.submit_plan_turn',
-      projectId,
-      planningCycleId: cycleId,
-      expectedCycleRevision: 3,
-      message: 'Split the experience milestone.',
-    });
+    expect(onRequestRevision).toHaveBeenCalledOnce();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(
+      screen.queryByLabelText('Message to project manager'),
+    ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
     expect(screen.getByLabelText('Rejection feedback')).toHaveAttribute(

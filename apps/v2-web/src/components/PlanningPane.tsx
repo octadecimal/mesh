@@ -312,7 +312,9 @@ export type PlanningPaneProps = {
   onAbandon: (cycleId: PlanningCycleView['cycle']['id']) => void;
   reviewHref?: string;
   onReviewProposal?: () => void;
+  onRequestRevision?: () => void;
   draftStorageKey?: string;
+  composerFocusRequest?: number;
 };
 
 export function PlanningPane({
@@ -334,13 +336,15 @@ export function PlanningPane({
   onAbandon,
   reviewHref,
   onReviewProposal,
+  onRequestRevision,
   draftStorageKey,
+  composerFocusRequest,
 }: PlanningPaneProps) {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState(() => storedDraft(draftStorageKey));
   const [profileId, setProfileId] = useState(profiles[0]?.profileId ?? '');
-  const [requestingRevision, setRequestingRevision] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [rejectionFeedback, setRejectionFeedback] = useState('');
   const lifecycle = cycle?.cycle.lifecycle;
@@ -363,9 +367,7 @@ export function PlanningPane({
   const retryable =
     lifecycle === 'attention_required' && recovery?.kind === 'retryable';
   const canShowForm =
-    surface === 'conversation'
-      ? accepting || proposalReady || retryable
-      : proposalReady && requestingRevision;
+    surface === 'conversation' && (accepting || proposalReady || retryable);
   const nonterminal =
     lifecycle !== undefined &&
     !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
@@ -399,6 +401,9 @@ export function PlanningPane({
     if (error) headingRef.current?.focus();
   }, [error]);
   useEffect(() => {
+    if (composerFocusRequest) messageRef.current?.focus();
+  }, [composerFocusRequest]);
+  useEffect(() => {
     if (!profiles.some((profile) => profile.profileId === profileId))
       setProfileId(profiles[0]?.profileId ?? '');
   }, [profileId, profiles]);
@@ -408,7 +413,6 @@ export function PlanningPane({
     clearDraft();
   }, [draftProjection]);
   useEffect(() => {
-    setRequestingRevision(false);
     setRejecting(false);
     setRejectionFeedback('');
   }, [lifecycle, proposal?.id, proposal?.revision]);
@@ -537,13 +541,15 @@ export function PlanningPane({
           >
             Approve proposal
           </button>
-          <button
-            type="button"
-            disabled={commandDisabled}
-            onClick={() => setRequestingRevision(true)}
-          >
-            Request revision
-          </button>
+          {onRequestRevision ? (
+            <button
+              type="button"
+              disabled={commandDisabled}
+              onClick={onRequestRevision}
+            >
+              Request revision
+            </button>
+          ) : null}
           <button
             type="button"
             disabled={commandDisabled}
@@ -597,12 +603,13 @@ export function PlanningPane({
           <label htmlFor="pm-message">Message to project manager</label>
           <textarea
             id="pm-message"
+            ref={messageRef}
             value={draft}
             onChange={(event) => updateDraft(event.target.value)}
             disabled={commandDisabled}
           />
           <button type="submit" disabled={commandDisabled || !draft.trim()}>
-            {requestingRevision ? 'Send revision request' : 'Send message'}
+            Send message
           </button>
         </form>
       ) : null}
@@ -936,7 +943,9 @@ export type DeliveryPlanningPaneProps = {
   onAbandon: (command: AbandonPlanningCycleCommand) => void;
   reviewHref?: string;
   onReviewProposal?: () => void;
+  onRequestRevision?: () => void;
   draftStorageKey?: string;
+  composerFocusRequest?: number;
 };
 
 export function DeliveryPlanningPane({
@@ -958,7 +967,9 @@ export function DeliveryPlanningPane({
   onAbandon,
   reviewHref,
   onReviewProposal,
+  onRequestRevision,
   draftStorageKey,
+  composerFocusRequest,
 }: DeliveryPlanningPaneProps) {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -968,7 +979,6 @@ export function DeliveryPlanningPane({
   const [startOpen, setStartOpen] = useState(false);
   const [draft, setDraft] = useState(() => storedDraft(draftStorageKey));
   const [profileId, setProfileId] = useState(profiles[0]?.profileId ?? '');
-  const [requestingRevision, setRequestingRevision] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const [feedback, setFeedback] = useState('');
   const lifecycle = cycle?.cycle.lifecycle;
@@ -1022,10 +1032,7 @@ export function DeliveryPlanningPane({
       lifecycle === 'awaiting_human' ||
       retryable ||
       awaitingApproval);
-  const canContinue =
-    surface === 'conversation'
-      ? canContinueConversation
-      : !historyLimitReached && awaitingApproval && requestingRevision;
+  const canContinue = surface === 'conversation' && canContinueConversation;
   const canSendMessage =
     canContinue ||
     (surface === 'conversation' && startOpen && continuingCycle === undefined);
@@ -1047,17 +1054,18 @@ export function DeliveryPlanningPane({
   useEffect(() => {
     if (!error) return;
     if (rejecting) rejectionRef.current?.focus();
-    else if (requestingRevision || startOpen || canContinue)
-      messageRef.current?.focus();
+    else if (startOpen || canContinue) messageRef.current?.focus();
     else proposalHeadingRef.current?.focus();
-  }, [canContinue, error, rejecting, requestingRevision, startOpen]);
+  }, [canContinue, error, rejecting, startOpen]);
+  useEffect(() => {
+    if (composerFocusRequest) messageRef.current?.focus();
+  }, [composerFocusRequest]);
   useEffect(() => {
     if (!profiles.some(({ profileId: id }) => id === profileId))
       setProfileId(profiles[0]?.profileId ?? '');
   }, [profileId, profiles]);
   useEffect(() => {
     setSelectedProposalRevision(proposal?.revision ?? 0);
-    setRequestingRevision(false);
     setRejecting(false);
     setFeedback('');
   }, [cycle?.cycle.id, proposal?.id, proposal?.revision]);
@@ -1070,12 +1078,13 @@ export function DeliveryPlanningPane({
 
   function openStart() {
     const replacing = deliveryPlan !== null;
-    updateDraft(
-      replacing
-        ? 'Revise the approved delivery plan against the current intent and requirement ledger.'
-        : 'Propose a delivery plan for the approved intent and requirement ledger.',
-    );
     setStartOpen(true);
+    if (draft === '')
+      updateDraft(
+        replacing
+          ? 'Revise the approved delivery plan against the current intent and requirement ledger.'
+          : 'Propose a delivery plan for the approved intent and requirement ledger.',
+      );
   }
 
   function submit(event: FormEvent<HTMLFormElement>) {
@@ -1300,7 +1309,6 @@ export function DeliveryPlanningPane({
             value={selectedProposal?.revision}
             onChange={(event) => {
               setSelectedProposalRevision(Number(event.target.value));
-              setRequestingRevision(false);
               setRejecting(false);
               setFeedback('');
             }}
@@ -1354,16 +1362,15 @@ export function DeliveryPlanningPane({
           >
             Approve full plan
           </button>
-          <button
-            type="button"
-            disabled={commandDisabled}
-            onClick={() => {
-              setRequestingRevision(true);
-              clearDraft();
-            }}
-          >
-            Request revision
-          </button>
+          {onRequestRevision ? (
+            <button
+              type="button"
+              disabled={commandDisabled}
+              onClick={onRequestRevision}
+            >
+              Request revision
+            </button>
+          ) : null}
           <button
             type="button"
             disabled={commandDisabled}
@@ -1430,7 +1437,7 @@ export function DeliveryPlanningPane({
             onChange={(event) => updateDraft(event.target.value)}
           />
           <button type="submit" disabled={commandDisabled || !draft.trim()}>
-            {requestingRevision ? 'Send revision request' : 'Send message'}
+            Send message
           </button>
         </form>
       ) : null}

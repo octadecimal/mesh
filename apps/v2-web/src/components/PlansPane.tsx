@@ -7,7 +7,12 @@ import {
 
 export type IntentPlanningSurfaceProps = Omit<
   PlanningPaneProps,
-  'surface' | 'reviewHref' | 'onReviewProposal' | 'draftStorageKey'
+  | 'surface'
+  | 'reviewHref'
+  | 'onReviewProposal'
+  | 'onRequestRevision'
+  | 'draftStorageKey'
+  | 'composerFocusRequest'
 >;
 
 export type DeliveryPlanningSurfaceProps = Omit<
@@ -16,7 +21,9 @@ export type DeliveryPlanningSurfaceProps = Omit<
   | 'projectId'
   | 'reviewHref'
   | 'onReviewProposal'
+  | 'onRequestRevision'
   | 'draftStorageKey'
+  | 'composerFocusRequest'
 >;
 
 export type PlansPaneProps = {
@@ -24,6 +31,8 @@ export type PlansPaneProps = {
   intent: IntentPlanningSurfaceProps;
   intentHistory?: IntentPlanningSurfaceProps;
   deliveryPlan: DeliveryPlanningSurfaceProps;
+  onRequestIntentRevision(): void;
+  onRequestDeliveryPlanRevision(): void;
 };
 
 export function PlansPane({
@@ -31,6 +40,8 @@ export function PlansPane({
   intent,
   intentHistory,
   deliveryPlan,
+  onRequestIntentRevision,
+  onRequestDeliveryPlanRevision,
 }: PlansPaneProps) {
   return (
     <section className="v2-plans-pane" aria-labelledby="plans-heading">
@@ -38,11 +49,16 @@ export function PlansPane({
       {intentHistory ? (
         <PlanningPane {...intentHistory} surface="review" />
       ) : null}
-      <PlanningPane {...intent} surface="review" />
+      <PlanningPane
+        {...intent}
+        surface="review"
+        onRequestRevision={onRequestIntentRevision}
+      />
       <DeliveryPlanningPane
         {...deliveryPlan}
         projectId={projectId}
         surface="review"
+        onRequestRevision={onRequestDeliveryPlanRevision}
       />
     </section>
   );

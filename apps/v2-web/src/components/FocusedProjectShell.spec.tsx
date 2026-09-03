@@ -1,11 +1,13 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
-import type {
-  PlanningCycleView,
-  V2ProjectSnapshot,
-  WorkerExecution,
-  WorkerExecutionLifecycle,
+import {
+  deliveryPlanPlanningCycleViewSchema,
+  type DeliveryPlanPlanningCycleView,
+  type PlanningCycleView,
+  type V2ProjectSnapshot,
+  type WorkerExecution,
+  type WorkerExecutionLifecycle,
 } from '@mesh/v2-contracts';
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
@@ -224,6 +226,180 @@ const terminalPlanningCycle = (
     },
   ],
 });
+
+const awaitingIntentReviewCycle = (() => {
+  const cycle = terminalPlanningCycle('approved');
+  return {
+    ...cycle,
+    cycle: {
+      ...cycle.cycle,
+      lifecycle: 'awaiting_approval',
+      endedAt: null,
+    },
+    proposals: cycle.proposals.map((proposal) => ({
+      ...proposal,
+      lifecycle: 'awaiting_approval' as const,
+      decidedAt: null,
+    })),
+  } as PlanningCycleView;
+})();
+
+const awaitingDeliveryReviewCycle: DeliveryPlanPlanningCycleView =
+  deliveryPlanPlanningCycleViewSchema.parse({
+    purpose: {
+      kind: 'delivery_plan',
+      baseDeliveryPlanId: null,
+      baseDeliveryPlanRevision: null,
+    },
+    cycle: {
+      ...planningCycle.cycle,
+      id: '70707070-7070-4070-8070-707070707070',
+      lifecycle: 'awaiting_approval',
+      baseProjectIntentRevision: 1,
+      baseLedgerRevision: 1,
+      latestProposalRevision: 1,
+    },
+    turns: [
+      {
+        id: '75757575-7575-4575-8575-757575757575',
+        projectId: snapshot.project.id,
+        planningCycleId: '70707070-7070-4070-8070-707070707070',
+        ordinal: 1,
+        actor: 'human',
+        message: 'Plan delivery.',
+        launchState: 'execution_bound',
+        executionId: executionFixture.id,
+        createdAt: '2026-08-28T00:00:01.000Z',
+      },
+      {
+        id: '74747474-7474-4474-8474-747474747474',
+        projectId: snapshot.project.id,
+        planningCycleId: '70707070-7070-4070-8070-707070707070',
+        ordinal: 2,
+        actor: 'pm',
+        message: 'Review this delivery plan.',
+        launchState: null,
+        executionId: executionFixture.id,
+        createdAt: '2026-08-28T00:00:02.000Z',
+      },
+    ],
+    questions: [],
+    proposals: [],
+    deliveryPlanProposals: [
+      {
+        id: '71717171-7171-4171-8171-717171717171',
+        projectId: snapshot.project.id,
+        planningCycleId: '70707070-7070-4070-8070-707070707070',
+        revision: 1,
+        lifecycle: 'awaiting_approval',
+        base: {
+          projectIntentId: '72727272-7272-4272-8272-727272727272',
+          projectIntentRevision: 1,
+          ledgerId: '73737373-7373-4373-8373-737373737373',
+          ledgerRevision: 1,
+          deliveryPlan: { id: null, revision: null },
+        },
+        proposedPlan: {
+          summary: 'Deliver the approved intent.',
+          milestones: [
+            {
+              operation: 'create',
+              key: 'delivery',
+              content: {
+                title: 'Delivery',
+                outcome: 'The approved intent is delivered.',
+                stopCondition: 'The delivery criteria pass.',
+                exclusions: [],
+                ordinal: 1,
+              },
+            },
+          ],
+          tasks: [
+            {
+              operation: 'create',
+              key: 'deliver-intent',
+              content: {
+                milestone: { kind: 'proposal', key: 'delivery' },
+                title: 'Deliver intent',
+                outcome: 'The approved intent works.',
+                acceptanceCriteria: ['The intent is delivered.'],
+                verificationCriteria: ['Verify the delivered intent.'],
+                priority: 'must',
+                labels: [],
+                ownedSurfaces: ['Delivery'],
+                prohibitedSurfaces: [],
+                expectedArtifacts: ['Focused test'],
+                ordinal: 1,
+              },
+            },
+          ],
+          dependencies: [],
+          traces: [
+            {
+              kind: 'milestone_covers',
+              milestone: { kind: 'proposal', key: 'delivery' },
+              requirement: {
+                recordId: '76767676-7676-4676-8676-767676767676',
+                recordRevision: 1,
+              },
+            },
+            {
+              kind: 'task_satisfies',
+              task: { kind: 'proposal', key: 'deliver-intent' },
+              requirement: {
+                recordId: '76767676-7676-4676-8676-767676767676',
+                recordRevision: 1,
+              },
+            },
+          ],
+        },
+        reservations: {
+          milestones: [
+            {
+              key: 'delivery',
+              id: '77777777-7777-4777-8777-777777777777',
+            },
+          ],
+          tasks: [
+            {
+              key: 'deliver-intent',
+              id: '78787878-7878-4878-8878-787878787878',
+            },
+          ],
+          dependencies: [],
+        },
+        diff: {
+          milestones: {
+            create: 1,
+            reuse: 0,
+            revise: 0,
+            retire: 0,
+            reactivate: 0,
+          },
+          tasks: {
+            create: 1,
+            reuse: 0,
+            revise: 0,
+            retire: 0,
+            reactivate: 0,
+          },
+          dependencies: {
+            create: 0,
+            reuse: 0,
+            revise: 0,
+            retire: 0,
+            reactivate: 0,
+          },
+          traceCreateCount: 2,
+          traceRemoveCount: 0,
+        },
+        createdByTurnId: '74747474-7474-4474-8474-747474747474',
+        createdByExecutionId: executionFixture.id,
+        createdAt: '2026-08-28T00:00:02.000Z',
+        decision: { kind: 'pending' },
+      },
+    ],
+  });
 
 describe('FocusedProjectShell', () => {
   it('uses URL-controlled project artifacts with roving keyboard navigation', async () => {
@@ -812,5 +988,86 @@ describe('FocusedProjectShell', () => {
     expect(
       screen.queryByRole('textbox', { name: 'Message to project manager' }),
     ).not.toBeInTheDocument();
+  });
+
+  it('routes pinned Plans revision requests to the sole matching drawer composer', async () => {
+    localStorage.setItem('mesh.v2.pm-pinned', 'true');
+    const user = userEvent.setup();
+    const { container } = render(
+      <ProjectShell
+        artifact="plans"
+        model={{
+          status: 'ready',
+          interrupt: { enabled: true },
+          snapshot: {
+            ...snapshot,
+            profiles: [pmProfile],
+            planningCycles: [
+              awaitingIntentReviewCycle,
+              awaitingDeliveryReviewCycle,
+            ],
+          },
+        }}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={vi.fn()}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const intentReview = screen
+      .getByRole('heading', { name: 'Intent' })
+      .closest('section');
+    const deliveryReview = screen
+      .getByRole('heading', { name: 'Planning' })
+      .closest('section');
+    if (!intentReview || !deliveryReview)
+      throw new Error('Expected both Plans review sections');
+
+    await user.click(
+      within(deliveryReview).getByRole('button', { name: 'Request revision' }),
+    );
+    let drawer = screen.getByRole('complementary', {
+      name: 'Project manager · Todo',
+    });
+    expect(
+      within(drawer).getByRole('tab', { name: 'Delivery Plan' }),
+    ).toHaveAttribute('aria-selected', 'true');
+    expect(
+      screen.getAllByRole('textbox', { name: 'Message to project manager' }),
+    ).toHaveLength(1);
+    expect(
+      within(drawer).getByRole('textbox', {
+        name: 'Message to project manager',
+      }),
+    ).toHaveFocus();
+    expect(
+      new Set([...container.querySelectorAll('[id]')].map(({ id }) => id)).size,
+    ).toBe(container.querySelectorAll('[id]').length);
+
+    await user.click(
+      within(drawer).getByRole('button', { name: 'Close project manager' }),
+    );
+    await user.click(
+      within(intentReview).getByRole('button', { name: 'Request revision' }),
+    );
+    drawer = screen.getByRole('complementary', {
+      name: 'Project manager · Todo',
+    });
+    expect(within(drawer).getByRole('tab', { name: 'Intent' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(
+      screen.getAllByRole('textbox', { name: 'Message to project manager' }),
+    ).toHaveLength(1);
+    expect(
+      within(drawer).getByRole('textbox', {
+        name: 'Message to project manager',
+      }),
+    ).toHaveFocus();
+    expect(
+      new Set([...container.querySelectorAll('[id]')].map(({ id }) => id)).size,
+    ).toBe(container.querySelectorAll('[id]').length);
+    localStorage.removeItem('mesh.v2.pm-pinned');
   });
 });

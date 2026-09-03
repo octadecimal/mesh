@@ -1,9 +1,13 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { useState } from 'react';
+import { useState, type ComponentProps } from 'react';
+import { approvedIntentLedgerSchema } from '@mesh/v2-contracts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ProjectManagerDrawer } from './ProjectManagerDrawer';
+import {
+  ProjectManagerDrawer,
+  type ProjectManagerSection,
+} from './ProjectManagerDrawer';
 
 const projectId = '11111111-1111-4111-8111-111111111111';
 const profile = {
@@ -37,6 +41,67 @@ const deliveryPlan = {
   onReject: vi.fn(),
   onAbandon: vi.fn(),
 };
+
+const approvedIntentLedger = approvedIntentLedgerSchema.parse({
+  projectIntent: {
+    id: '55555555-5555-4555-8555-555555555555',
+    projectId,
+    revision: 1,
+    proposalId: '66666666-6666-4666-8666-666666666666',
+    approvedBy: 'human',
+    approvedAt: '2026-09-03T00:00:00.000Z',
+    content: {
+      goal: 'Keep project manager drafts.',
+      targetUsers: ['Operators'],
+      desiredCapabilities: ['Plan delivery'],
+      constraints: [],
+      nonGoals: [],
+      successConditions: ['Drafts survive tab switches'],
+      rationale: 'Drafts are session work.',
+      provenance: [
+        {
+          kind: 'conversation_turn',
+          turnId: '77777777-7777-4777-8777-777777777777',
+          rationale: 'The operator requested delivery planning.',
+        },
+      ],
+    },
+  },
+  ledger: {
+    id: '88888888-8888-4888-8888-888888888888',
+    projectId,
+    revision: 1,
+    proposalId: '66666666-6666-4666-8666-666666666666',
+    approvedBy: 'human',
+    approvedAt: '2026-09-03T00:00:00.000Z',
+  },
+  records: [
+    {
+      recordId: '99999999-9999-4999-8999-999999999999',
+      projectId,
+      revision: 1,
+      proposalId: '66666666-6666-4666-8666-666666666666',
+      approvedBy: 'human',
+      approvedAt: '2026-09-03T00:00:00.000Z',
+      content: {
+        type: 'requirement',
+        statement: 'Preserve draft text.',
+        rationale: 'Operators should not lose work.',
+        kind: 'quality',
+        status: 'approved',
+        priority: 'must',
+      },
+      provenance: [
+        {
+          kind: 'conversation_turn',
+          turnId: '77777777-7777-4777-8777-777777777777',
+          rationale: 'The operator requested delivery planning.',
+        },
+      ],
+    },
+  ],
+  relationships: [],
+});
 
 const activeDeliveryCycle = {
   purpose: {
@@ -82,23 +147,35 @@ function Harness({
   currentProjectId = projectId,
   currentProjectName = 'Mesh',
   pinned = false,
+  initiallyOpen = false,
+  initialSection = 'intent',
+  drawerDeliveryPlan = deliveryPlan,
 }: {
   currentProjectId?: string;
   currentProjectName?: string;
   pinned?: boolean;
+  initiallyOpen?: boolean;
+  initialSection?: ProjectManagerSection;
+  drawerDeliveryPlan?: ComponentProps<
+    typeof ProjectManagerDrawer
+  >['deliveryPlan'];
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initiallyOpen);
+  const [section, setSection] = useState<ProjectManagerSection>(initialSection);
   return (
     <ProjectManagerDrawer
       projectId={currentProjectId}
       projectName={currentProjectName}
       open={open}
       pinned={pinned}
+      section={section}
+      composerFocusRequest={0}
       onOpenChange={setOpen}
       onPinnedChange={vi.fn()}
+      onSectionChange={setSection}
       onNavigate={vi.fn()}
       intent={intent}
-      deliveryPlan={deliveryPlan}
+      deliveryPlan={drawerDeliveryPlan}
     />
   );
 }
@@ -133,8 +210,11 @@ describe('ProjectManagerDrawer', () => {
         projectName="Mesh"
         open
         pinned
+        section="intent"
+        composerFocusRequest={0}
         onOpenChange={vi.fn()}
         onPinnedChange={onPinnedChange}
+        onSectionChange={vi.fn()}
         onNavigate={vi.fn()}
         intent={intent}
         deliveryPlan={deliveryPlan}
@@ -152,19 +232,14 @@ describe('ProjectManagerDrawer', () => {
     expect(localStorage.getItem('mesh.v2.pm-pinned')).toBe('false');
   });
 
-  it('defaults to the active planning section and switches sections', async () => {
+  it('renders the selected planning section and switches sections', async () => {
     const user = userEvent.setup();
     render(
-      <ProjectManagerDrawer
-        projectId={projectId}
-        projectName="Mesh"
-        open
+      <Harness
         pinned
-        onOpenChange={vi.fn()}
-        onPinnedChange={vi.fn()}
-        onNavigate={vi.fn()}
-        intent={intent}
-        deliveryPlan={{ ...deliveryPlan, cycle: activeDeliveryCycle }}
+        initiallyOpen
+        initialSection="delivery-plan"
+        drawerDeliveryPlan={{ ...deliveryPlan, cycle: activeDeliveryCycle }}
       />,
     );
 
@@ -219,6 +294,37 @@ describe('ProjectManagerDrawer', () => {
     ).toHaveValue('Mesh draft');
   });
 
+  it('keeps a nonempty delivery draft when the start form remounts after a tab switch', async () => {
+    const user = userEvent.setup();
+    render(
+      <Harness
+        pinned
+        initiallyOpen
+        drawerDeliveryPlan={{
+          ...deliveryPlan,
+          approvedIntentLedger,
+          profiles: [profile],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('tab', { name: 'Delivery Plan' }));
+    await user.click(screen.getByRole('button', { name: 'Plan delivery' }));
+    const composer = screen.getByRole('textbox', {
+      name: 'Message to project manager',
+    });
+    await user.clear(composer);
+    await user.type(composer, 'Keep the operator draft.');
+
+    await user.click(screen.getByRole('tab', { name: 'Intent' }));
+    await user.click(screen.getByRole('tab', { name: 'Delivery Plan' }));
+    await user.click(screen.getByRole('button', { name: 'Plan delivery' }));
+
+    expect(
+      screen.getByRole('textbox', { name: 'Message to project manager' }),
+    ).toHaveValue('Keep the operator draft.');
+  });
+
   it('forces a stored pinned preference into an overlay on narrow screens', () => {
     setNarrow(true);
     render(
@@ -227,8 +333,11 @@ describe('ProjectManagerDrawer', () => {
         projectName="Mesh"
         open
         pinned
+        section="intent"
+        composerFocusRequest={0}
         onOpenChange={vi.fn()}
         onPinnedChange={vi.fn()}
+        onSectionChange={vi.fn()}
         onNavigate={vi.fn()}
         intent={intent}
         deliveryPlan={deliveryPlan}
