@@ -35,7 +35,15 @@ export function AppShell({
   return (
     <div className="v2-app-shell">
       <nav className="v2-global-nav" aria-label="Global navigation">
-        <a href={appHref({ page: 'inbox' })}>Mesh</a>
+        <a
+          href={appHref({ page: 'inbox' })}
+          onClick={(event) => {
+            event.preventDefault();
+            onNavigate('/');
+          }}
+        >
+          Mesh
+        </a>
         {destinations.map(({ label, route: destination }) => {
           const href = appHref(destination);
           return (
