@@ -7,6 +7,8 @@ import type {
   WorkerExecution,
 } from '@mesh/v2-contracts';
 
+import { assignmentLabel } from '../presentation/assignment-label';
+
 export type ChildActivity = {
   id: string;
   title: string;
@@ -44,19 +46,6 @@ function runtimeActivityLabel(activity: RuntimeEvent) {
   }
 }
 
-const assignmentLabel = (execution: WorkerExecution) => {
-  switch (execution.assignment.kind) {
-    case 'foundation-check':
-      return execution.assignment.title;
-    case 'pm_discovery':
-      return 'Project manager discovery';
-    case 'pm_plan':
-      return 'Project manager delivery planning';
-    case 'developer_task':
-      return execution.assignment.title;
-  }
-};
-
 function ChildActivityTree({
   activities,
   label,
@@ -90,7 +79,7 @@ export function ExecutionActivity({
   projectCursors: ProjectEventCursors;
 }) {
   const headingId = useId();
-  const label = assignmentLabel(execution);
+  const label = assignmentLabel(execution.assignment);
   return (
     <article className="v2-execution" aria-labelledby={headingId}>
       <header>

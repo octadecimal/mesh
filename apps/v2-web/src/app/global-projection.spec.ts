@@ -1,4 +1,4 @@
-import type { V2ProjectSnapshot } from '@mesh/v2-contracts';
+import type { V2ProjectSnapshot, WorkerExecution } from '@mesh/v2-contracts';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -144,6 +144,39 @@ describe('global projections', () => {
         } as V2ProjectSnapshot,
       ]),
     ).toContainEqual(expect.objectContaining({ kind: 'decision' }));
+  });
+
+  it('labels PM discovery and delivery planning executions', () => {
+    const executions = [
+      {
+        ...runningExecutionFixture,
+        id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+        assignment: { kind: 'pm_discovery' } as WorkerExecution['assignment'],
+      },
+      {
+        ...runningExecutionFixture,
+        id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+        assignment: { kind: 'pm_plan' } as WorkerExecution['assignment'],
+      },
+    ];
+    const pmSnapshot = {
+      ...projectSnapshotFixture,
+      attentionItems: [],
+      executions,
+    } as V2ProjectSnapshot;
+
+    expect(runsFromSnapshots([pmSnapshot]).map(({ title }) => title)).toEqual([
+      'Project manager discovery',
+      'Project manager delivery planning',
+    ]);
+    expect(
+      attentionFromSnapshots([pmSnapshot])
+        .filter(({ kind }) => kind === 'runtime')
+        .map(({ title }) => title),
+    ).toEqual([
+      'Project manager discovery',
+      'Project manager delivery planning',
+    ]);
   });
 
   it('uses the latest nonterminal planning cycle for decisions', () => {

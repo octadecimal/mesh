@@ -1,6 +1,7 @@
 import type { V2ProjectSnapshot, WorkerExecution } from '@mesh/v2-contracts';
 
 import { appHref } from './routes';
+import { assignmentLabel } from '../presentation/assignment-label';
 
 export type GlobalAttentionKind =
   | 'runtime'
@@ -61,7 +62,7 @@ export function attentionFromSnapshots(
         projectId: project.id,
         projectName,
         kind: 'runtime',
-        title: execution.assignment.title,
+        title: assignmentLabel(execution.assignment),
         description:
           execution.lifecycle === 'starting' ? 'Starting' : 'Running',
         href: appHref({
@@ -82,7 +83,9 @@ export function attentionFromSnapshots(
         projectId: project.id,
         projectName,
         kind: 'failure',
-        title: execution?.assignment.title ?? 'Execution needs attention',
+        title: execution
+          ? assignmentLabel(execution.assignment)
+          : 'Execution needs attention',
         description: item.message,
         href: appHref({
           page: 'project',
@@ -199,7 +202,7 @@ export function runsFromSnapshots(
         executionId: execution.id,
         projectId: snapshot.project.id,
         projectName: snapshot.project.displayName,
-        title: execution.assignment.title,
+        title: assignmentLabel(execution.assignment),
         lifecycle: execution.lifecycle,
         active: active(execution.lifecycle),
         updatedAt: execution.updatedAt,
