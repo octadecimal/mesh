@@ -25,9 +25,17 @@ export type PlanningConnection =
   | { status: 'loading' }
   | { status: 'disconnected' | 'stale'; message: string };
 
+export type PlanningSurface = 'conversation' | 'review';
+
 type ProfileSelection = Pick<WorkerProfileSummary, 'profileId'> & {
   profileRevision: number;
 };
+
+function storedDraft(key: string | undefined) {
+  return key && typeof sessionStorage !== 'undefined'
+    ? (sessionStorage.getItem(key) ?? '')
+    : '';
+}
 
 function latestProposal(cycle: PlanningCycleView | undefined) {
   return cycle?.proposals.at(-1);
@@ -283,23 +291,8 @@ function proposalCard(
   );
 }
 
-export function PlanningPane({
-  cycle,
-  connection,
-  profiles,
-  submitting,
-  error,
-  historyTruncated = false,
-  historyLimitReached = false,
-  headingLabel = 'PM Chat',
-  recovery,
-  executions = [],
-  approvedIntentLedger = null,
-  onSubmitTurn,
-  onApprove,
-  onReject,
-  onAbandon,
-}: {
+export type PlanningPaneProps = {
+  surface: PlanningSurface;
   cycle?: PlanningCycleView;
   connection: PlanningConnection;
   profiles: readonly WorkerProfileSummary[];
@@ -317,10 +310,35 @@ export function PlanningPane({
   onApprove: (proposalId: PlanningProposal['id']) => void;
   onReject: (proposalId: PlanningProposal['id'], feedback: string) => void;
   onAbandon: (cycleId: PlanningCycleView['cycle']['id']) => void;
-}) {
+  reviewHref?: string;
+  onReviewProposal?: () => void;
+  draftStorageKey?: string;
+};
+
+export function PlanningPane({
+  surface,
+  cycle,
+  connection,
+  profiles,
+  submitting,
+  error,
+  historyTruncated = false,
+  historyLimitReached = false,
+  headingLabel = 'PM Chat',
+  recovery,
+  executions = [],
+  approvedIntentLedger = null,
+  onSubmitTurn,
+  onApprove,
+  onReject,
+  onAbandon,
+  reviewHref,
+  onReviewProposal,
+  draftStorageKey,
+}: PlanningPaneProps) {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => storedDraft(draftStorageKey));
   const [profileId, setProfileId] = useState(profiles[0]?.profileId ?? '');
   const [requestingRevision, setRequestingRevision] = useState(false);
   const [rejecting, setRejecting] = useState(false);
@@ -345,7 +363,9 @@ export function PlanningPane({
   const retryable =
     lifecycle === 'attention_required' && recovery?.kind === 'retryable';
   const canShowForm =
-    accepting || (proposalReady && requestingRevision) || retryable;
+    surface === 'conversation'
+      ? accepting || proposalReady || retryable
+      : proposalReady && requestingRevision;
   const nonterminal =
     lifecycle !== undefined &&
     !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
@@ -356,6 +376,24 @@ export function PlanningPane({
     : submitting
       ? 'A project command is in progress.'
       : undefined;
+  const draftProjection = [
+    cycle?.cycle.id,
+    cycle?.cycle.revision,
+    lifecycle,
+    latestTurn?.id,
+    latestTurn?.launchState,
+  ].join(':');
+  const previousDraftProjection = useRef(draftProjection);
+
+  function updateDraft(value: string) {
+    setDraft(value);
+    if (draftStorageKey) sessionStorage.setItem(draftStorageKey, value);
+  }
+
+  function clearDraft() {
+    setDraft('');
+    if (draftStorageKey) sessionStorage.removeItem(draftStorageKey);
+  }
 
   useEffect(() => {
     if (error) headingRef.current?.focus();
@@ -365,14 +403,10 @@ export function PlanningPane({
       setProfileId(profiles[0]?.profileId ?? '');
   }, [profileId, profiles]);
   useEffect(() => {
-    setDraft('');
-  }, [
-    cycle?.cycle.id,
-    cycle?.cycle.revision,
-    lifecycle,
-    latestTurn?.id,
-    latestTurn?.launchState,
-  ]);
+    if (previousDraftProjection.current === draftProjection) return;
+    previousDraftProjection.current = draftProjection;
+    clearDraft();
+  }, [draftProjection]);
   useEffect(() => {
     setRequestingRevision(false);
     setRejecting(false);
@@ -432,7 +466,7 @@ export function PlanningPane({
           This cycle reached its history limit. Abandon it to begin a new cycle.
         </p>
       ) : null}
-      {cycle ? (
+      {surface === 'conversation' && cycle ? (
         <ol aria-label="Planning conversation">
           {cycle.turns.map((turn) => (
             <li key={turn.id}>
@@ -443,10 +477,10 @@ export function PlanningPane({
             </li>
           ))}
         </ol>
-      ) : (
+      ) : surface === 'conversation' ? (
         <p>Describe the outcome you want to discover.</p>
-      )}
-      {cycle?.questions.length ? (
+      ) : null}
+      {surface === 'conversation' && cycle?.questions.length ? (
         <section aria-label="Planning questions">
           <h3>Questions</h3>
           {cycle.questions.map((question) => (
@@ -460,7 +494,7 @@ export function PlanningPane({
                       key={choice}
                       type="button"
                       disabled={commandDisabled || !canShowForm}
-                      onClick={() => setDraft(choice)}
+                      onClick={() => updateDraft(choice)}
                     >
                       {choice}
                     </button>
@@ -471,12 +505,30 @@ export function PlanningPane({
           ))}
         </section>
       ) : null}
-      {cycle?.proposals.map((candidate) => (
-        <div key={candidate.id}>
-          {proposalCard(candidate, approvedIntentLedger)}
-        </div>
-      ))}
-      {proposalReady ? (
+      {surface === 'conversation' &&
+      proposalReady &&
+      reviewHref &&
+      onReviewProposal ? (
+        <p>
+          A proposal is ready for review.{' '}
+          <a
+            href={reviewHref}
+            onClick={(event) => {
+              event.preventDefault();
+              onReviewProposal();
+            }}
+          >
+            Review intent proposal in Plans
+          </a>
+        </p>
+      ) : null}
+      {surface === 'review' &&
+        cycle?.proposals.map((candidate) => (
+          <div key={candidate.id}>
+            {proposalCard(candidate, approvedIntentLedger)}
+          </div>
+        ))}
+      {surface === 'review' && proposalReady ? (
         <p className="intent-ledger-actions">
           <button
             type="button"
@@ -501,7 +553,7 @@ export function PlanningPane({
           </button>
         </p>
       ) : null}
-      {proposalReady && rejecting ? (
+      {surface === 'review' && proposalReady && rejecting ? (
         <section aria-label="Reject proposal">
           <label htmlFor="rejection-feedback">Rejection feedback</label>
           <textarea
@@ -546,7 +598,7 @@ export function PlanningPane({
           <textarea
             id="pm-message"
             value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => updateDraft(event.target.value)}
             disabled={commandDisabled}
           />
           <button type="submit" disabled={commandDisabled || !draft.trim()}>
@@ -575,7 +627,7 @@ export function PlanningPane({
           ) : null}
         </section>
       ) : null}
-      {nonterminal ? (
+      {surface === 'review' && nonterminal ? (
         <button
           type="button"
           disabled={commandDisabled}
@@ -863,23 +915,8 @@ function DeliveryProposalCard({
   );
 }
 
-export function DeliveryPlanningPane({
-  projectId,
-  cycle,
-  approvedIntentLedger,
-  deliveryPlan,
-  planStale,
-  connection,
-  profiles,
-  submitting,
-  error,
-  historyLimitReached = false,
-  recovery,
-  onSubmit,
-  onApprove,
-  onReject,
-  onAbandon,
-}: {
+export type DeliveryPlanningPaneProps = {
+  surface: PlanningSurface;
   projectId: string;
   cycle?: DeliveryPlanPlanningCycleView;
   approvedIntentLedger: ApprovedIntentLedger | null;
@@ -897,14 +934,39 @@ export function DeliveryPlanningPane({
   onApprove: (command: ApprovePlanProposalCommand) => void;
   onReject: (command: RejectPlanProposalCommand) => void;
   onAbandon: (command: AbandonPlanningCycleCommand) => void;
-}) {
+  reviewHref?: string;
+  onReviewProposal?: () => void;
+  draftStorageKey?: string;
+};
+
+export function DeliveryPlanningPane({
+  surface,
+  projectId,
+  cycle,
+  approvedIntentLedger,
+  deliveryPlan,
+  planStale,
+  connection,
+  profiles,
+  submitting,
+  error,
+  historyLimitReached = false,
+  recovery,
+  onSubmit,
+  onApprove,
+  onReject,
+  onAbandon,
+  reviewHref,
+  onReviewProposal,
+  draftStorageKey,
+}: DeliveryPlanningPaneProps) {
   const headingId = useId();
   const headingRef = useRef<HTMLHeadingElement>(null);
   const proposalHeadingRef = useRef<HTMLHeadingElement>(null);
   const rejectionRef = useRef<HTMLTextAreaElement>(null);
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const [startOpen, setStartOpen] = useState(false);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(() => storedDraft(draftStorageKey));
   const [profileId, setProfileId] = useState(profiles[0]?.profileId ?? '');
   const [requestingRevision, setRequestingRevision] = useState(false);
   const [rejecting, setRejecting] = useState(false);
@@ -954,17 +1016,33 @@ export function DeliveryPlanningPane({
   const decisionAllowed = awaitingApproval && !historyLimitReached;
   const retryable =
     lifecycle === 'attention_required' && recovery?.kind === 'retryable';
-  const canContinue =
+  const canContinueConversation =
     !historyLimitReached &&
     (lifecycle === 'discovering' ||
       lifecycle === 'awaiting_human' ||
       retryable ||
-      (awaitingApproval && requestingRevision));
+      awaitingApproval);
+  const canContinue =
+    surface === 'conversation'
+      ? canContinueConversation
+      : !historyLimitReached && awaitingApproval && requestingRevision;
   const canSendMessage =
-    canContinue || (startOpen && continuingCycle === undefined);
+    canContinue ||
+    (surface === 'conversation' && startOpen && continuingCycle === undefined);
   const nonterminal =
     lifecycle !== undefined &&
     !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
+  const previousCycleId = useRef(cycle?.cycle.id);
+
+  function updateDraft(value: string) {
+    setDraft(value);
+    if (draftStorageKey) sessionStorage.setItem(draftStorageKey, value);
+  }
+
+  function clearDraft() {
+    setDraft('');
+    if (draftStorageKey) sessionStorage.removeItem(draftStorageKey);
+  }
 
   useEffect(() => {
     if (!error) return;
@@ -984,14 +1062,15 @@ export function DeliveryPlanningPane({
     setFeedback('');
   }, [cycle?.cycle.id, proposal?.id, proposal?.revision]);
   useEffect(() => {
-    if (!cycle?.cycle.id) return;
+    if (previousCycleId.current === cycle?.cycle.id) return;
+    previousCycleId.current = cycle?.cycle.id;
     setStartOpen(false);
-    setDraft('');
+    clearDraft();
   }, [cycle?.cycle.id]);
 
   function openStart() {
     const replacing = deliveryPlan !== null;
-    setDraft(
+    updateDraft(
       replacing
         ? 'Revise the approved delivery plan against the current intent and requirement ledger.'
         : 'Propose a delivery plan for the approved intent and requirement ledger.',
@@ -1146,21 +1225,24 @@ export function DeliveryPlanningPane({
           )}
         </section>
       ) : null}
-      {!continuingCycle &&
+      {surface === 'conversation' &&
+      !continuingCycle &&
       (!approvedIntentLedger || approvedRequirements.length === 0) ? (
         <p>
           Approve at least one current requirement before planning delivery.
         </p>
       ) : null}
-      {!continuingCycle && profiles.length === 0 ? (
+      {surface === 'conversation' &&
+      !continuingCycle &&
+      profiles.length === 0 ? (
         <p>No compatible PM profiles are available.</p>
       ) : null}
-      {!continuingCycle ? (
+      {surface === 'conversation' && !continuingCycle ? (
         <button type="button" disabled={!canStart} onClick={openStart}>
           {startLabel}
         </button>
       ) : null}
-      {cycle ? (
+      {surface === 'conversation' && cycle ? (
         <ol aria-label="Delivery planning conversation">
           {cycle.turns.map((turn) => (
             <li key={turn.id}>
@@ -1172,7 +1254,7 @@ export function DeliveryPlanningPane({
           ))}
         </ol>
       ) : null}
-      {cycle?.questions.length ? (
+      {surface === 'conversation' && cycle?.questions.length ? (
         <section aria-label="Delivery planning questions">
           <h3>Questions</h3>
           {cycle.questions.map((question) => (
@@ -1184,7 +1266,7 @@ export function DeliveryPlanningPane({
                   key={choice}
                   type="button"
                   disabled={commandDisabled || !canContinue}
-                  onClick={() => setDraft(choice)}
+                  onClick={() => updateDraft(choice)}
                 >
                   {choice}
                 </button>
@@ -1193,7 +1275,24 @@ export function DeliveryPlanningPane({
           ))}
         </section>
       ) : null}
-      {cycle?.deliveryPlanProposals.length ? (
+      {surface === 'conversation' &&
+      awaitingApproval &&
+      reviewHref &&
+      onReviewProposal ? (
+        <p>
+          A delivery proposal is ready for review.{' '}
+          <a
+            href={reviewHref}
+            onClick={(event) => {
+              event.preventDefault();
+              onReviewProposal();
+            }}
+          >
+            Review delivery proposal in Plans
+          </a>
+        </p>
+      ) : null}
+      {surface === 'review' && cycle?.deliveryPlanProposals.length ? (
         <section aria-label="Plan proposal revision history">
           <label htmlFor="delivery-proposal-revision">Proposal revision</label>
           <select
@@ -1228,13 +1327,19 @@ export function DeliveryPlanningPane({
           ) : null}
         </section>
       ) : null}
-      {decisionAllowed && proposal && !selectedIsLatest ? (
+      {surface === 'review' &&
+      decisionAllowed &&
+      proposal &&
+      !selectedIsLatest ? (
         <p role="status">
           Viewing historical proposal revision {selectedProposal?.revision}.
           Select proposal revision {proposal.revision} to make a decision.
         </p>
       ) : null}
-      {decisionAllowed && proposal && selectedIsLatest ? (
+      {surface === 'review' &&
+      decisionAllowed &&
+      proposal &&
+      selectedIsLatest ? (
         <section
           className="planning-board-actions"
           aria-label={`Decision controls for proposal revision ${proposal.revision}`}
@@ -1254,7 +1359,7 @@ export function DeliveryPlanningPane({
             disabled={commandDisabled}
             onClick={() => {
               setRequestingRevision(true);
-              setDraft('');
+              clearDraft();
             }}
           >
             Request revision
@@ -1268,7 +1373,11 @@ export function DeliveryPlanningPane({
           </button>
         </section>
       ) : null}
-      {decisionAllowed && proposal && selectedIsLatest && rejecting ? (
+      {surface === 'review' &&
+      decisionAllowed &&
+      proposal &&
+      selectedIsLatest &&
+      rejecting ? (
         <section aria-label="Reject plan proposal">
           <label htmlFor="plan-rejection-feedback">Rejection feedback</label>
           <textarea
@@ -1318,14 +1427,14 @@ export function DeliveryPlanningPane({
             ref={messageRef}
             value={draft}
             disabled={commandDisabled}
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => updateDraft(event.target.value)}
           />
           <button type="submit" disabled={commandDisabled || !draft.trim()}>
             {requestingRevision ? 'Send revision request' : 'Send message'}
           </button>
         </form>
       ) : null}
-      {nonterminal ? (
+      {surface === 'review' && nonterminal ? (
         <button
           type="button"
           disabled={commandDisabled}

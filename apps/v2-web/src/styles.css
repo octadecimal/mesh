@@ -43,12 +43,14 @@ body {
 }
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 [role='tab']:focus-visible,
 [role='alert']:focus-visible {
   outline: 3px solid var(--accent);
@@ -229,7 +231,7 @@ button:disabled {
 }
 .v2-project-layout {
   display: grid;
-  grid-template-columns: minmax(14rem, 0.36fr) minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 1rem;
   min-width: 0;
 }
@@ -238,14 +240,71 @@ button:disabled {
   gap: 1rem;
   min-width: 0;
 }
-.v2-pm-pane {
-  align-self: stretch;
+.v2-pm-drawer,
+.v2-pm-drawer-panel,
+.v2-plans-pane {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+}
+.v2-pm-drawer {
+  width: min(26rem, 36vw);
+}
+.v2-pm-drawer-panel {
   min-width: 0;
+  max-height: calc(100vh - 2rem);
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: 0.75rem;
   padding: 1rem;
+  color: var(--text);
   background: var(--surface);
+  box-shadow: 0 1rem 2.5rem rgb(0 0 0 / 24%);
+}
+.v2-pm-drawer-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.v2-pm-drawer-header > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.v2-pm-drawer-panel button {
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.55rem 0.75rem;
+  color: var(--surface);
+  background: var(--accent);
+}
+.v2-pm-drawer-panel textarea {
+  width: 100%;
+  min-height: 6rem;
+}
+.v2-pm-drawer-overlay {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  background: rgb(9 13 22 / 55%);
+}
+.v2-pm-drawer-dialog {
+  position: fixed;
+  z-index: 21;
+  top: 1rem;
+  right: 1rem;
+  bottom: 1rem;
+  width: min(34rem, calc(100vw - 2rem));
+}
+.v2-dialog-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .v2-selector header,
 .v2-shell-header,

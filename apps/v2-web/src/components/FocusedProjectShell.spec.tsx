@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 import type {
@@ -333,16 +333,16 @@ describe('FocusedProjectShell', () => {
           onInterrupt={vi.fn()}
         />,
       );
+      fireEvent.click(screen.getByRole('button', { name: 'Project manager' }));
 
       expect(screen.getByText(status)).toBeVisible();
       expect(
         screen.getByText(`Visible ${lifecycle} planning transcript.`),
       ).toBeVisible();
-      expect(screen.getByText(`Visible ${lifecycle} proposal.`)).toBeVisible();
       expect(
-        screen.getByRole('heading', { name: 'PM Chat history' }),
+        screen.getByRole('heading', { name: 'Intent history' }),
       ).toBeVisible();
-      expect(screen.getByRole('heading', { name: 'PM Chat' })).toBeVisible();
+      expect(screen.getByRole('heading', { name: 'Intent' })).toBeVisible();
       expect(screen.getByLabelText('Project manager profile')).toBeVisible();
       expect(screen.getByLabelText('Message to project manager')).toBeVisible();
       const ids = [...container.querySelectorAll<HTMLElement>('[id]')].map(
@@ -386,6 +386,7 @@ describe('FocusedProjectShell', () => {
 
     render(
       <FocusedProjectShell
+        artifact="plans"
         model={{
           status: 'ready',
           interrupt: { enabled: true },
@@ -469,6 +470,7 @@ describe('FocusedProjectShell', () => {
           onInterrupt={vi.fn()}
         />,
       );
+      fireEvent.click(screen.getByRole('button', { name: 'Project manager' }));
 
       expect(screen.getAllByText(message)[0]).toBeVisible();
       expect(screen.getByLabelText('Message to project manager')).toBeVisible();
@@ -505,6 +507,7 @@ describe('FocusedProjectShell', () => {
 
     render(
       <FocusedProjectShell
+        artifact="plans"
         model={{
           status: 'ready',
           interrupt: { enabled: true },
@@ -589,8 +592,8 @@ describe('FocusedProjectShell', () => {
       ),
     ).toBeVisible();
     expect(
-      screen.getByRole('complementary', { name: 'PM Chat' }),
-    ).toHaveTextContent('Project manager');
+      screen.getByRole('button', { name: 'Project manager' }),
+    ).toBeVisible();
     expect(screen.getByRole('tab', { name: 'Board' })).toHaveAttribute(
       'aria-current',
       'page',
@@ -772,5 +775,42 @@ describe('FocusedProjectShell', () => {
     await user.click(runningInterrupt);
     expect(onInterrupt).toHaveBeenCalledOnce();
     expect(onInterrupt).toHaveBeenCalledWith(executionFixture);
+  });
+
+  it('keeps one project manager drawer mounted beside every artifact', async () => {
+    const user = userEvent.setup();
+    const shell = (artifact: ProjectArtifact) => (
+      <ProjectShell
+        model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
+        artifact={artifact}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={vi.fn()}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />
+    );
+    const view = render(shell('overview'));
+
+    expect(
+      screen.getByRole('button', { name: 'Project manager' }),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Project manager' }));
+    expect(
+      screen.getByRole('dialog', { name: 'Project manager · Todo' }),
+    ).toBeVisible();
+
+    view.rerender(shell('board'));
+    expect(
+      screen.getByRole('dialog', { name: 'Project manager · Todo' }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole('button', { name: 'Close project manager' }),
+    );
+
+    view.rerender(shell('plans'));
+    expect(screen.getByRole('heading', { name: 'Plans' })).toBeVisible();
+    expect(
+      screen.queryByRole('textbox', { name: 'Message to project manager' }),
+    ).not.toBeInTheDocument();
   });
 });

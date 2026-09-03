@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent } from 'react';
+import { useRef, useState, type KeyboardEvent } from 'react';
 
 import type {
   AbandonPlanningCycleCommand,
@@ -18,7 +18,6 @@ import type {
 
 import { ExecutionActivity, type ChildActivity } from './ExecutionActivity';
 import { BoardPane } from './BoardPane';
-import { DeliveryPlanningPane, PlanningPane } from './PlanningPane';
 import { RequirementsPane } from './RequirementsPane';
 import type { ProjectShellViewModel } from './shell-state';
 import type { ExecutionRunCommand } from './ExecutionRunSection';
@@ -29,6 +28,11 @@ import {
   runsFromSnapshots,
 } from '../app/global-projection';
 import { ProjectOverview } from './ProjectOverview';
+import {
+  ProjectManagerDrawer,
+  PM_PINNED_STORAGE_KEY,
+} from './ProjectManagerDrawer';
+import { PlansPane } from './PlansPane';
 import { RunsView } from './RunsView';
 
 const projectArtifacts = [
@@ -129,6 +133,12 @@ export function FocusedProjectShell({
   developer?: DeveloperCommandProjection;
   executionRun?: ExecutionRunCommandProjection;
 }) {
+  const [pmOpen, setPmOpen] = useState(false);
+  const [pmPinned, setPmPinned] = useState(
+    () =>
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem(PM_PINNED_STORAGE_KEY) === 'true',
+  );
   const tabRefs = useRef<Record<ProjectArtifact, HTMLAnchorElement | null>>({
     overview: null,
     plans: null,
@@ -260,6 +270,61 @@ export function FocusedProjectShell({
     (activePlanningCycle.turns.filter(({ actor }) => actor === 'human')
       .length >= 32 ||
       activePlanningCycle.proposals.length >= 16);
+  const deliveryHistoryLimitReached =
+    deliveryCycle !== undefined &&
+    (deliveryCycle.turns.filter(({ actor }) => actor === 'human').length >=
+      32 ||
+      deliveryCycle.deliveryPlanProposals.length >= 16);
+  const intentHistory = terminalPlanningHistory
+    ? {
+        cycle: terminalPlanningHistory,
+        connection: { status: 'ready' } as const,
+        profiles: [],
+        submitting: false,
+        headingLabel: 'Intent history',
+        historyTruncated: snapshot.planningHistoryTruncated,
+        executions: snapshot.executions,
+        approvedIntentLedger: snapshot.intentLedger,
+        onSubmitTurn: planning.onSubmitTurn,
+        onApprove: planning.onApprove,
+        onReject: planning.onReject,
+        onAbandon: planning.onAbandon,
+      }
+    : undefined;
+  const intentPlanning = {
+    cycle: activePlanningCycle,
+    connection: planningConnection,
+    profiles: planningProfiles,
+    submitting: planning.submitting,
+    error: planning.error,
+    headingLabel: 'Intent',
+    historyTruncated: terminalPlanningHistory
+      ? false
+      : snapshot.planningHistoryTruncated,
+    historyLimitReached: planningHistoryLimitReached,
+    recovery: planningRecovery,
+    executions: snapshot.executions,
+    approvedIntentLedger: snapshot.intentLedger,
+    onSubmitTurn: planning.onSubmitTurn,
+    onApprove: planning.onApprove,
+    onReject: planning.onReject,
+    onAbandon: planning.onAbandon,
+  };
+  const deliveryPlanning = {
+    cycle: deliveryCycle,
+    approvedIntentLedger: snapshot.intentLedger,
+    deliveryPlan: snapshot.deliveryPlan,
+    planStale: snapshot.board.stale,
+    connection: planningConnection,
+    profiles: deliveryProfiles,
+    submitting: planning.submitting,
+    error: planning.error,
+    historyLimitReached: deliveryHistoryLimitReached,
+    onSubmit: planning.onSubmitPlan,
+    onApprove: planning.onApprovePlan,
+    onReject: planning.onRejectPlan,
+    onAbandon: planning.onAbandonPlan,
+  };
   function activateArtifact(nextArtifact: ProjectArtifact) {
     onNavigateArtifact(nextArtifact);
     tabRefs.current[nextArtifact]?.focus();
@@ -307,65 +372,18 @@ export function FocusedProjectShell({
         </button>
       </header>
       <div className="v2-project-layout">
-        <aside className="v2-pm-pane" aria-label="PM Chat">
-          {terminalPlanningHistory ? (
-            <PlanningPane
-              cycle={terminalPlanningHistory}
-              connection={{ status: 'ready' }}
-              profiles={[]}
-              submitting={false}
-              headingLabel="PM Chat history"
-              historyTruncated={snapshot.planningHistoryTruncated}
-              executions={snapshot.executions}
-              approvedIntentLedger={snapshot.intentLedger}
-              onSubmitTurn={planning.onSubmitTurn}
-              onApprove={planning.onApprove}
-              onReject={planning.onReject}
-              onAbandon={planning.onAbandon}
-            />
-          ) : null}
-          <PlanningPane
-            cycle={activePlanningCycle}
-            connection={planningConnection}
-            profiles={planningProfiles}
-            submitting={planning.submitting}
-            error={planning.error}
-            historyTruncated={
-              terminalPlanningHistory
-                ? false
-                : snapshot.planningHistoryTruncated
-            }
-            historyLimitReached={planningHistoryLimitReached}
-            recovery={planningRecovery}
-            executions={snapshot.executions}
-            approvedIntentLedger={snapshot.intentLedger}
-            onSubmitTurn={planning.onSubmitTurn}
-            onApprove={planning.onApprove}
-            onReject={planning.onReject}
-            onAbandon={planning.onAbandon}
-          />
-          <DeliveryPlanningPane
-            projectId={snapshot.project.id}
-            cycle={deliveryCycle}
-            approvedIntentLedger={snapshot.intentLedger}
-            deliveryPlan={snapshot.deliveryPlan}
-            planStale={snapshot.board.stale}
-            connection={planningConnection}
-            profiles={deliveryProfiles}
-            submitting={planning.submitting}
-            error={planning.error}
-            historyLimitReached={
-              deliveryCycle !== undefined &&
-              (deliveryCycle.turns.filter(({ actor }) => actor === 'human')
-                .length >= 32 ||
-                deliveryCycle.deliveryPlanProposals.length >= 16)
-            }
-            onSubmit={planning.onSubmitPlan}
-            onApprove={planning.onApprovePlan}
-            onReject={planning.onRejectPlan}
-            onAbandon={planning.onAbandonPlan}
-          />
-        </aside>
+        <ProjectManagerDrawer
+          projectId={snapshot.project.id}
+          projectName={snapshot.project.displayName}
+          open={pmOpen}
+          pinned={pmPinned}
+          onOpenChange={setPmOpen}
+          onPinnedChange={setPmPinned}
+          onNavigate={onNavigate}
+          intent={intentPlanning}
+          intentHistory={intentHistory}
+          deliveryPlan={deliveryPlanning}
+        />
         <div className="v2-project-content">
           <section aria-label="Project workspace">
             <div
@@ -417,13 +435,12 @@ export function FocusedProjectShell({
               ) : artifact === 'requirements' ? (
                 <RequirementsPane intentLedger={snapshot.intentLedger} />
               ) : artifact === 'plans' ? (
-                <section aria-labelledby="plans-heading">
-                  <h2 id="plans-heading">Plans</h2>
-                  <p>
-                    Review intent and delivery planning with the project
-                    manager.
-                  </p>
-                </section>
+                <PlansPane
+                  projectId={snapshot.project.id}
+                  intent={intentPlanning}
+                  intentHistory={intentHistory}
+                  deliveryPlan={deliveryPlanning}
+                />
               ) : artifact === 'board' ? (
                 <BoardPane
                   board={snapshot.board}

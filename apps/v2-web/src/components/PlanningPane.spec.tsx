@@ -313,6 +313,7 @@ function renderPane(
   };
   const result = render(
     <PlanningPane
+      surface="conversation"
       cycle={baseCycle}
       connection={{ status: 'ready' }}
       profiles={[profile]}
@@ -325,6 +326,49 @@ function renderPane(
 }
 
 describe('PlanningPane', () => {
+  it('separates conversation from proposal review ownership', async () => {
+    const user = userEvent.setup();
+    const props = {
+      cycle: awaitingApprovalCycle,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmitTurn: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const onReviewProposal = vi.fn();
+    const conversation = render(
+      <PlanningPane
+        {...props}
+        surface="conversation"
+        reviewHref={`/projects/${projectId}/plans`}
+        onReviewProposal={onReviewProposal}
+      />,
+    );
+
+    expect(
+      screen.getByRole('textbox', { name: 'Message to project manager' }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'Approve proposal' }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole('link', { name: 'Review intent proposal in Plans' }),
+    );
+    expect(onReviewProposal).toHaveBeenCalledOnce();
+    conversation.unmount();
+
+    render(<PlanningPane {...props} surface="review" />);
+    expect(
+      screen.queryByRole('textbox', { name: 'Message to project manager' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Approve proposal' }),
+    ).toBeVisible();
+  });
+
   it('keeps sibling pane labels and relationships unique while preserving the default heading', () => {
     const terminalCycle: PlanningCycleView = {
       ...baseCycle,
@@ -343,6 +387,7 @@ describe('PlanningPane', () => {
     const { container } = render(
       <>
         <PlanningPane
+          surface="conversation"
           cycle={terminalCycle}
           connection={{ status: 'ready' }}
           profiles={[]}
@@ -351,6 +396,7 @@ describe('PlanningPane', () => {
           {...callbacks}
         />
         <PlanningPane
+          surface="conversation"
           connection={{ status: 'ready' }}
           profiles={[profile]}
           submitting={false}
@@ -421,6 +467,7 @@ describe('PlanningPane', () => {
   it('renders a complete proposal and delegates single approve, revision, and reject actions', async () => {
     const user = userEvent.setup();
     const { onApprove, onReject, onSubmitTurn } = renderPane({
+      surface: 'review',
       cycle: awaitingApprovalCycle,
       approvedIntentLedger,
     });
@@ -462,6 +509,7 @@ describe('PlanningPane', () => {
     const onAbandon = vi.fn<(id: PlanningCycleView['cycle']['id']) => void>();
     render(
       <PlanningPane
+        surface="review"
         cycle={awaitingApprovalCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -480,7 +528,11 @@ describe('PlanningPane', () => {
   });
 
   it('renders every intent field and operation-specific record and relationship details', () => {
-    renderPane({ cycle: awaitingApprovalCycle, approvedIntentLedger });
+    renderPane({
+      surface: 'review',
+      cycle: awaitingApprovalCycle,
+      approvedIntentLedger,
+    });
 
     const proposedIntent = screen.getByRole('region', {
       name: 'Proposed intent revision 1',
@@ -527,7 +579,10 @@ describe('PlanningPane', () => {
 
   it('requires rejection feedback and forwards it with the proposal ID', async () => {
     const user = userEvent.setup();
-    const { onReject } = renderPane({ cycle: awaitingApprovalCycle });
+    const { onReject } = renderPane({
+      surface: 'review',
+      cycle: awaitingApprovalCycle,
+    });
     await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
     expect(
       screen.getByRole('button', { name: 'Confirm rejection' }),
@@ -545,13 +600,17 @@ describe('PlanningPane', () => {
 
   it('hides a requested revision form when the authoritative proposal is no longer awaiting approval', async () => {
     const user = userEvent.setup();
-    const { rerender } = renderPane({ cycle: awaitingApprovalCycle });
+    const { rerender } = renderPane({
+      surface: 'review',
+      cycle: awaitingApprovalCycle,
+    });
     await user.click(screen.getByRole('button', { name: 'Request revision' }));
     expect(
       screen.getByRole('button', { name: 'Send revision request' }),
     ).toBeVisible();
     rerender(
       <PlanningPane
+        surface="review"
         cycle={{
           ...planningCycleViewSchema.parse({
             ...awaitingApprovalCycle,
@@ -601,6 +660,7 @@ describe('PlanningPane', () => {
     expect(screen.getByRole('button', { name: 'Send message' })).toBeDisabled();
     rerender(
       <PlanningPane
+        surface="conversation"
         cycle={undefined}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -647,6 +707,7 @@ describe('PlanningPane', () => {
   it('disables mutation actions for disconnected, stale, and submitting projections while retaining the reason', () => {
     const { rerender } = render(
       <PlanningPane
+        surface="review"
         cycle={awaitingApprovalCycle}
         connection={{ status: 'disconnected', message: 'Connection lost' }}
         profiles={[profile]}
@@ -664,6 +725,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="review"
         cycle={awaitingApprovalCycle}
         connection={{ status: 'stale', message: 'Refreshing planning state' }}
         profiles={[profile]}
@@ -681,6 +743,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="review"
         cycle={awaitingApprovalCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -699,6 +762,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="conversation"
         cycle={baseCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -724,6 +788,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="conversation"
         cycle={baseCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -759,6 +824,7 @@ describe('PlanningPane', () => {
     });
     rerender(
       <PlanningPane
+        surface="conversation"
         cycle={revisedCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -776,6 +842,7 @@ describe('PlanningPane', () => {
     });
     rerender(
       <PlanningPane
+        surface="conversation"
         cycle={attentionCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -802,6 +869,7 @@ describe('PlanningPane', () => {
     });
     rerender(
       <PlanningPane
+        surface="conversation"
         cycle={nextCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -851,6 +919,7 @@ describe('PlanningPane', () => {
     });
     rerender(
       <PlanningPane
+        surface="conversation"
         cycle={pendingTurnCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -875,6 +944,7 @@ describe('PlanningPane', () => {
     });
     rerender(
       <PlanningPane
+        surface="conversation"
         cycle={boundTurnCycle}
         connection={{ status: 'ready' }}
         profiles={[profile]}
@@ -894,6 +964,7 @@ describe('PlanningPane', () => {
       questions: [],
     });
     const { onAbandon } = renderPane({
+      surface: 'review',
       cycle: attentionCycle,
       recovery: { kind: 'ambiguous_start', operation: 'operation-123' },
     });
@@ -907,7 +978,7 @@ describe('PlanningPane', () => {
   });
 
   it('renders history-limit guidance separately and permits abandonment', () => {
-    renderPane({ historyLimitReached: true });
+    renderPane({ surface: 'review', historyLimitReached: true });
     expect(
       screen.getByText(
         'This cycle reached its history limit. Abandon it to begin a new cycle.',
@@ -918,6 +989,7 @@ describe('PlanningPane', () => {
 
   it('projects pending, active, attention, and terminal lifecycle guidance without local authority', () => {
     const { rerender } = renderPane({
+      surface: 'review',
       cycle: planningCycleViewSchema.parse({
         ...baseCycle,
         cycle: { ...baseCycle.cycle, lifecycle: 'launch_pending' },
@@ -941,6 +1013,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="review"
         cycle={planningCycleViewSchema.parse({
           ...baseCycle,
           cycle: {
@@ -966,6 +1039,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="review"
         cycle={planningCycleViewSchema.parse({
           ...baseCycle,
           cycle: { ...baseCycle.cycle, lifecycle: 'attention_required' },
@@ -993,6 +1067,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="review"
         cycle={planningCycleViewSchema.parse({
           ...awaitingApprovalCycle,
           cycle: {
@@ -1021,6 +1096,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="review"
         cycle={planningCycleViewSchema.parse({
           ...awaitingApprovalCycle,
           cycle: {
@@ -1050,6 +1126,7 @@ describe('PlanningPane', () => {
 
     rerender(
       <PlanningPane
+        surface="review"
         cycle={planningCycleViewSchema.parse({
           ...baseCycle,
           cycle: {
@@ -1400,6 +1477,55 @@ const approvedDeliveryPlan = approvedDeliveryPlanSchema.parse({
 });
 
 describe('DeliveryPlanningPane', () => {
+  it('separates conversation from delivery proposal review ownership', async () => {
+    const user = userEvent.setup();
+    const props = {
+      projectId,
+      cycle: deliveryCycle,
+      approvedIntentLedger,
+      deliveryPlan: null,
+      planStale: false,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmit: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+    };
+    const onReviewProposal = vi.fn();
+    const conversation = render(
+      <DeliveryPlanningPane
+        {...props}
+        surface="conversation"
+        reviewHref={`/projects/${projectId}/plans`}
+        onReviewProposal={onReviewProposal}
+      />,
+    );
+
+    expect(
+      screen.getByRole('textbox', { name: 'Message to project manager' }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'Approve full plan' }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      screen.getByRole('link', {
+        name: 'Review delivery proposal in Plans',
+      }),
+    );
+    expect(onReviewProposal).toHaveBeenCalledOnce();
+    conversation.unmount();
+
+    render(<DeliveryPlanningPane {...props} surface="review" />);
+    expect(
+      screen.queryByRole('textbox', { name: 'Message to project manager' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Approve full plan' }),
+    ).toBeVisible();
+  });
+
   it('keeps terminal history inspectable while starting an exact current-base replan', async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
@@ -1423,8 +1549,9 @@ describe('DeliveryPlanningPane', () => {
       ],
     });
 
-    render(
+    const review = render(
       <DeliveryPlanningPane
+        surface="review"
         projectId={projectId}
         cycle={terminalCycle}
         approvedIntentLedger={approvedIntentLedger}
@@ -1441,6 +1568,24 @@ describe('DeliveryPlanningPane', () => {
     );
 
     expect(screen.getByText(/Proposal revision 1 · Approved/)).toBeVisible();
+    review.unmount();
+    render(
+      <DeliveryPlanningPane
+        surface="conversation"
+        projectId={projectId}
+        cycle={terminalCycle}
+        approvedIntentLedger={approvedIntentLedger}
+        deliveryPlan={approvedDeliveryPlan}
+        planStale
+        connection={{ status: 'ready' }}
+        profiles={[profile]}
+        submitting={false}
+        onSubmit={onSubmit}
+        onApprove={vi.fn()}
+        onReject={vi.fn()}
+        onAbandon={vi.fn()}
+      />,
+    );
     await user.click(
       screen.getByRole('button', { name: 'Replan current requirements' }),
     );
@@ -1499,7 +1644,11 @@ describe('DeliveryPlanningPane', () => {
       onAbandon: vi.fn(),
     };
     const { rerender } = render(
-      <DeliveryPlanningPane {...props} cycle={replacementHistory} />,
+      <DeliveryPlanningPane
+        surface="review"
+        {...props}
+        cycle={replacementHistory}
+      />,
     );
 
     await user.selectOptions(screen.getByLabelText('Proposal revision'), '1');
@@ -1547,7 +1696,13 @@ describe('DeliveryPlanningPane', () => {
         },
       ],
     });
-    rerender(<DeliveryPlanningPane {...props} cycle={abandonedHistory} />);
+    rerender(
+      <DeliveryPlanningPane
+        surface="review"
+        {...props}
+        cycle={abandonedHistory}
+      />,
+    );
     expect(
       screen.getByText('Superseded because this planning cycle was abandoned.'),
     ).toBeVisible();
@@ -1654,6 +1809,7 @@ describe('DeliveryPlanningPane', () => {
 
     const { rerender } = render(
       <DeliveryPlanningPane
+        surface="review"
         projectId={projectId}
         cycle={reuseCycle}
         approvedIntentLedger={approvedIntentLedger}
@@ -1724,6 +1880,7 @@ describe('DeliveryPlanningPane', () => {
     });
     rerender(
       <DeliveryPlanningPane
+        surface="review"
         projectId={projectId}
         cycle={reuseCycle}
         approvedIntentLedger={approvedIntentLedger}
@@ -1788,6 +1945,7 @@ describe('DeliveryPlanningPane', () => {
     });
     rerender(
       <DeliveryPlanningPane
+        surface="review"
         projectId={projectId}
         cycle={reviseCycle}
         approvedIntentLedger={approvedIntentLedger}
@@ -1839,6 +1997,7 @@ describe('DeliveryPlanningPane', () => {
     });
     rerender(
       <DeliveryPlanningPane
+        surface="review"
         projectId={projectId}
         cycle={terminalReuseCycle}
         approvedIntentLedger={approvedIntentLedger}
@@ -1973,6 +2132,7 @@ describe('DeliveryPlanningPane', () => {
 
     render(
       <DeliveryPlanningPane
+        surface="review"
         projectId={projectId}
         cycle={historicalCycle}
         approvedIntentLedger={approvedIntentLedger}
@@ -2026,11 +2186,15 @@ describe('DeliveryPlanningPane', () => {
       onReject: vi.fn(),
       onAbandon: vi.fn(),
     };
-    const { rerender } = render(<DeliveryPlanningPane {...props} />);
+    const { rerender } = render(
+      <DeliveryPlanningPane surface="review" {...props} />,
+    );
     await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
     expect(screen.getByLabelText('Rejection feedback')).toBeVisible();
 
-    rerender(<DeliveryPlanningPane {...props} historyLimitReached />);
+    rerender(
+      <DeliveryPlanningPane surface="review" {...props} historyLimitReached />,
+    );
 
     expect(
       screen.getByText(
@@ -2072,7 +2236,9 @@ describe('DeliveryPlanningPane', () => {
       onReject: vi.fn(),
       onAbandon: vi.fn(),
     };
-    const { rerender } = render(<DeliveryPlanningPane {...props} />);
+    const { rerender } = render(
+      <DeliveryPlanningPane surface="review" {...props} />,
+    );
 
     expect(
       screen.getByText(
@@ -2102,6 +2268,7 @@ describe('DeliveryPlanningPane', () => {
 
     rerender(
       <DeliveryPlanningPane
+        surface="review"
         {...props}
         profiles={[
           workerProfileSummarySchema.parse({
@@ -2119,7 +2286,9 @@ describe('DeliveryPlanningPane', () => {
     ).toBeVisible();
     expect(screen.queryByText(/Newer Todo PM/)).not.toBeInTheDocument();
 
-    rerender(<DeliveryPlanningPane {...props} profiles={[]} />);
+    rerender(
+      <DeliveryPlanningPane surface="review" {...props} profiles={[]} />,
+    );
     expect(
       screen.getByText(
         `Project manager profile ${profile.profileId} · revision 1 (no longer available)`,
@@ -2143,8 +2312,16 @@ describe('DeliveryPlanningPane', () => {
       onReject: vi.fn(),
       onAbandon: vi.fn(),
     };
-    const { rerender, unmount } = render(<DeliveryPlanningPane {...props} />);
-    rerender(<DeliveryPlanningPane {...props} error="Approval conflict" />);
+    const { rerender, unmount } = render(
+      <DeliveryPlanningPane surface="review" {...props} />,
+    );
+    rerender(
+      <DeliveryPlanningPane
+        surface="review"
+        {...props}
+        error="Approval conflict"
+      />,
+    );
     expect(screen.getByText('Approval conflict')).toHaveAttribute(
       'aria-live',
       'assertive',
@@ -2154,14 +2331,24 @@ describe('DeliveryPlanningPane', () => {
     ).toHaveFocus();
 
     await user.click(screen.getByRole('button', { name: 'Reject proposal' }));
-    rerender(<DeliveryPlanningPane {...props} error="Rejection conflict" />);
+    rerender(
+      <DeliveryPlanningPane
+        surface="review"
+        {...props}
+        error="Rejection conflict"
+      />,
+    );
     expect(screen.getByLabelText('Rejection feedback')).toHaveFocus();
     unmount();
 
-    const second = render(<DeliveryPlanningPane {...props} />);
+    const second = render(<DeliveryPlanningPane surface="review" {...props} />);
     await user.click(screen.getByRole('button', { name: 'Request revision' }));
     second.rerender(
-      <DeliveryPlanningPane {...props} error="Revision conflict" />,
+      <DeliveryPlanningPane
+        surface="review"
+        {...props}
+        error="Revision conflict"
+      />,
     );
     expect(screen.getByLabelText('Message to project manager')).toHaveFocus();
   });
@@ -2171,6 +2358,7 @@ describe('DeliveryPlanningPane', () => {
     const onSubmit = vi.fn();
     render(
       <DeliveryPlanningPane
+        surface="conversation"
         projectId={projectId}
         approvedIntentLedger={approvedIntentLedger}
         deliveryPlan={null}
@@ -2222,7 +2410,9 @@ describe('DeliveryPlanningPane', () => {
       onReject: vi.fn(),
       onAbandon: vi.fn(),
     };
-    const { rerender } = render(<DeliveryPlanningPane {...props} />);
+    const { rerender } = render(
+      <DeliveryPlanningPane surface="conversation" {...props} />,
+    );
 
     await user.click(screen.getByRole('button', { name: 'Plan delivery' }));
     expect(screen.getByLabelText('Message to project manager')).toBeVisible();
@@ -2249,13 +2439,20 @@ describe('DeliveryPlanningPane', () => {
       ],
       deliveryPlanProposals: [],
     });
-    rerender(<DeliveryPlanningPane {...props} cycle={launchPending} />);
+    rerender(
+      <DeliveryPlanningPane
+        surface="conversation"
+        {...props}
+        cycle={launchPending}
+      />,
+    );
     expect(
       screen.queryByLabelText('Message to project manager'),
     ).not.toBeInTheDocument();
 
     rerender(
       <DeliveryPlanningPane
+        surface="conversation"
         {...props}
         cycle={deliveryPlanPlanningCycleViewSchema.parse({
           ...launchPending,
@@ -2283,6 +2480,7 @@ describe('DeliveryPlanningPane', () => {
   it('explains requirements and profile gates', () => {
     render(
       <DeliveryPlanningPane
+        surface="conversation"
         projectId={projectId}
         approvedIntentLedger={{ ...approvedIntentLedger, records: [] }}
         deliveryPlan={null}
@@ -2315,6 +2513,7 @@ describe('DeliveryPlanningPane', () => {
     const planId = 'abababab-abab-4bab-8bab-abababababab';
     render(
       <DeliveryPlanningPane
+        surface="conversation"
         projectId={projectId}
         approvedIntentLedger={approvedIntentLedger}
         deliveryPlan={{
@@ -2355,6 +2554,7 @@ describe('DeliveryPlanningPane', () => {
     const onSubmit = vi.fn();
     render(
       <DeliveryPlanningPane
+        surface="review"
         projectId={projectId}
         cycle={deliveryCycle}
         approvedIntentLedger={approvedIntentLedger}
