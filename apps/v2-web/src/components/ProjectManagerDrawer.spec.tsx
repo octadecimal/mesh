@@ -232,6 +232,26 @@ describe('ProjectManagerDrawer', () => {
     expect(localStorage.getItem('mesh.v2.pm-pinned')).toBe('false');
   });
 
+  it('reserves the pinned drawer width only while its panel is open', async () => {
+    const user = userEvent.setup();
+    render(<Harness pinned />);
+
+    const trigger = screen.getByRole('button', { name: 'Project manager' });
+    expect(trigger.closest('.v2-pm-drawer')).not.toHaveClass(
+      'v2-pm-drawer-open',
+    );
+
+    await user.click(trigger);
+    expect(trigger.closest('.v2-pm-drawer')).toHaveClass('v2-pm-drawer-open');
+
+    await user.click(
+      screen.getByRole('button', { name: 'Close project manager' }),
+    );
+    expect(trigger.closest('.v2-pm-drawer')).not.toHaveClass(
+      'v2-pm-drawer-open',
+    );
+  });
+
   it('renders the selected planning section and switches sections', async () => {
     const user = userEvent.setup();
     render(

@@ -53,6 +53,7 @@ export type AppLocation = {
 
 export type AppHistory = {
   pushState(data: unknown, unused: string, url?: string | URL | null): void;
+  replaceState(data: unknown, unused: string, url?: string | URL | null): void;
 };
 
 type SystemState =
@@ -218,7 +219,7 @@ function ProjectConnection({
   onAuditBarrier: (message: string) => void;
   onDeselect: () => void;
   onNavigateArtifact: (artifact: ProjectArtifact) => void;
-  onNavigate: (href: string) => void;
+  onNavigate: (href: string, mode?: 'push' | 'replace') => void;
 }) {
   const { projection, error, resyncing, dispatch } = useProjectConnection({
     api,
@@ -729,8 +730,12 @@ export function App({
   }, [location, takeRouteOwnership]);
 
   const navigate = useCallback(
-    (next: string) => {
-      history.pushState(null, '', next);
+    (next: string, mode: 'push' | 'replace' = 'push') => {
+      history[mode === 'replace' ? 'replaceState' : 'pushState'](
+        null,
+        '',
+        next,
+      );
       const url = new URL(next, `${location.protocol}//${location.host}`);
       takeRouteOwnership(parseAppRoute(url.pathname, url.search));
     },

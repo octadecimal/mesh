@@ -157,7 +157,7 @@ export function ProjectManagerDrawer({
 
   if (pinnedLayout) {
     return (
-      <div className="v2-pm-drawer">
+      <div className={open ? 'v2-pm-drawer v2-pm-drawer-open' : 'v2-pm-drawer'}>
         {trigger}
         {open ? (
           <aside className="v2-pm-drawer-panel" aria-labelledby={titleId}>

@@ -128,7 +128,7 @@ export function FocusedProjectShell({
   onDeselect: () => void;
   onInterrupt: (execution: WorkerExecution) => void;
   onNavigateArtifact(artifact: ProjectArtifact): void;
-  onNavigate(href: string): void;
+  onNavigate(href: string, mode?: 'push' | 'replace'): void;
   activityByExecutionId?: Readonly<Record<string, ExecutionActivityProjection>>;
   planning?: PlanningCommandProjection;
   developer?: DeveloperCommandProjection;
@@ -493,16 +493,16 @@ export function FocusedProjectShell({
                   error={planning.error}
                   onApplyFilter={planning.onApplyFilter}
                   selectedId={selectedId}
-                  onSelectTask={(taskId) =>
-                    onNavigate(
-                      appHref({
-                        page: 'project',
-                        projectId: snapshot.project.id,
-                        artifact: 'board',
-                        selectedId: taskId,
-                      }),
-                    )
-                  }
+                  onSelectTask={(taskId, mode) => {
+                    const href = appHref({
+                      page: 'project',
+                      projectId: snapshot.project.id,
+                      artifact: 'board',
+                      selectedId: taskId,
+                    });
+                    if (mode === undefined) onNavigate(href);
+                    else onNavigate(href, mode);
+                  }}
                   developer={
                     developer
                       ? {

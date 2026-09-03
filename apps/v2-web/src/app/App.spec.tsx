@@ -599,11 +599,33 @@ const navigation = (pathname = '/') => {
   const initial = new URL(pathname, 'http://mesh.test');
   const location = new FakeLocation(initial.pathname);
   location.search = initial.search;
-  const history: AppHistory = {
+  const entries = [`${initial.pathname}${initial.search}`];
+  let index = 0;
+  const apply = (href: string) => {
+    const next = new URL(href, 'http://mesh.test');
+    location.pathname = next.pathname;
+    location.search = next.search;
+  };
+  const history: AppHistory & { back(): void; forward(): void } = {
     pushState: vi.fn((_, __, url) => {
-      const next = new URL(String(url), 'http://mesh.test');
-      location.pathname = next.pathname;
-      location.search = next.search;
+      entries.splice(index + 1);
+      entries.push(String(url));
+      index = entries.length - 1;
+      apply(entries[index]!);
+    }),
+    replaceState: vi.fn((_, __, url) => {
+      entries[index] = String(url);
+      apply(entries[index]!);
+    }),
+    back: vi.fn(() => {
+      if (index === 0) return;
+      apply(entries[--index]!);
+      location.dispatchEvent(new PopStateEvent('popstate'));
+    }),
+    forward: vi.fn(() => {
+      if (index === entries.length - 1) return;
+      apply(entries[++index]!);
+      location.dispatchEvent(new PopStateEvent('popstate'));
     }),
   };
   return { location, history };
@@ -947,6 +969,71 @@ describe('App', () => {
     ).toBeVisible();
     expect(app.api.projectSnapshot).toHaveBeenCalledOnce();
     expect(app.socketFactory).toHaveBeenCalledOnce();
+  });
+
+  it('replaces a disappeared task selection without poisoning Back or Forward', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => developerSnapshot);
+    const app = renderApp({
+      pathname: `/projects/${projectId}/board`,
+      api,
+    });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+
+    const open = screen.getByRole('button', { name: 'Open Persist Todo' });
+    await user.click(open);
+    await user.click(
+      screen.getByRole('button', { name: 'Close task details' }),
+    );
+    await user.click(open);
+    expect(app.history.pushState).toHaveBeenCalledTimes(3);
+
+    const boardWithoutTask = boardViewSchema.parse({
+      ...developerBoard,
+      emptyReason: 'filter_empty',
+      matchedTaskCount: 0,
+      filter: {
+        ...developerBoard.filter!,
+        revision: developerBoard.filter!.revision + 1,
+      },
+      cards: [],
+    });
+    act(() =>
+      app.sockets[0]?.message({
+        type: 'v2.domain_event',
+        protocolVersion: V2_PROTOCOL_VERSION,
+        projectId,
+        event: {
+          id: '91919191-9191-4191-8191-919191919191',
+          projectId,
+          sequence: 4,
+          occurredAt: '2026-08-28T00:00:10.000Z',
+          type: 'board.filter_changed',
+          payload: { schemaVersion: 1, board: boardWithoutTask },
+        },
+      }),
+    );
+
+    await waitFor(() => expect(app.location.search).toBe(''));
+    expect(app.history.replaceState).toHaveBeenCalledWith(
+      null,
+      '',
+      `/projects/${projectId}/board`,
+    );
+    expect(app.history.pushState).toHaveBeenCalledTimes(3);
+
+    act(() => app.history.back());
+    expect(app.location.search).toBe('');
+    act(() => app.history.forward());
+    expect(app.location.search).toBe('');
+    expect(app.history.pushState).toHaveBeenCalledTimes(3);
   });
 
   it('renders explicit unknown-project and invalid-route recovery links', async () => {

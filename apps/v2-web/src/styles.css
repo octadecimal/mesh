@@ -9,11 +9,12 @@
   --accent: #4f46e5;
   --accent-muted: #e8e7ff;
   --success: #198754;
-  --warning: #d68a18;
+  --warning: #8a4b08;
   --danger: #d94d61;
   --rail: #101725;
   --rail-text: #f0f4fa;
   --rail-active: #302e71;
+  --rail-focus: #f0f4fa;
   color: var(--text);
   background: var(--canvas);
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
@@ -183,7 +184,9 @@ button:disabled {
   color: var(--success);
 }
 .v2-state-failure,
-.v2-state-stale {
+.v2-state-stale,
+.v2-state-fallback,
+.v2-state-unavailable {
   color: var(--warning);
 }
 .v2-state-decision {
@@ -211,6 +214,9 @@ button:disabled {
 .v2-global-nav a[aria-current='page'] {
   background: var(--rail-active);
 }
+.v2-global-nav a:focus-visible {
+  outline-color: var(--rail-focus);
+}
 .v2-app-content {
   min-width: 0;
 }
@@ -233,13 +239,15 @@ button:disabled {
 }
 .v2-project-layout {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 1rem;
   min-width: 0;
 }
 .v2-project-content {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
+  grid-column: 1;
+  grid-row: 1;
   gap: 1rem;
   min-width: 0;
 }
@@ -250,8 +258,12 @@ button:disabled {
   align-content: start;
   gap: 1rem;
 }
-.v2-pm-drawer {
+.v2-pm-drawer-open {
   width: min(26rem, 36vw);
+}
+.v2-pm-drawer {
+  grid-column: 2;
+  grid-row: 1;
 }
 .v2-pm-drawer-panel {
   min-width: 0;
@@ -421,6 +433,9 @@ button:disabled {
   margin: 0;
   color: var(--accent);
   font-weight: 700;
+}
+.v2-execution [role='status'].v2-state-failure {
+  color: var(--warning);
 }
 .v2-execution details {
   border-top: 1px solid var(--border);
@@ -636,6 +651,10 @@ button:disabled {
   .v2-app-header,
   .v2-shell-header {
     display: grid;
+  }
+  .v2-project-content {
+    grid-column: auto;
+    grid-row: auto;
   }
   .v2-selector,
   .v2-shell,

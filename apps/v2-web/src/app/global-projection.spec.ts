@@ -215,6 +215,70 @@ describe('global projections', () => {
     ).toMatchObject({ id: expect.stringContaining('ffffffff') });
   });
 
+  it('projects failed executions and developer attempts without duplicating snapshot attention', () => {
+    const failedExecution = {
+      ...runningExecutionFixture,
+      id: 'failed-execution',
+      lifecycle: 'failed' as const,
+      revision: 9,
+      failure: { code: 'runtime_failed', message: 'Runtime failed.' },
+    };
+    const attentionExecution = {
+      ...runningExecutionFixture,
+      id: 'attention-execution',
+      lifecycle: 'attention_required' as const,
+      revision: 8,
+      failure: { code: 'audit_unavailable', message: 'Audit unavailable.' },
+    };
+    const attempt = {
+      id: 'attention-attempt',
+      taskId: 'T-21',
+      lifecycle: 'attention_required',
+      revision: 10,
+      assignment: { title: 'Ship inbox' },
+      attention: {
+        code: 'workspace_attention_required',
+        message: 'Workspace needs attention.',
+      },
+    } as V2ProjectSnapshot['developerAttempts'][number];
+    const attentionSnapshot = {
+      ...projectSnapshotFixture,
+      executions: [failedExecution, attentionExecution],
+      developerAttempts: [attempt],
+      attentionItems: [
+        {
+          executionId: failedExecution.id,
+          code: 'runtime_failed',
+          message: 'Enriched runtime failure.',
+        },
+      ],
+    } as V2ProjectSnapshot;
+
+    const failures = attentionFromSnapshots([attentionSnapshot]).filter(
+      ({ kind }) => kind === 'failure',
+    );
+
+    expect(failures).toHaveLength(3);
+    expect(failures).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: 'Todo foundation worker',
+          description: 'Enriched runtime failure.',
+          href: `/projects/${attentionSnapshot.project.id}/runs?run=${failedExecution.id}`,
+        }),
+        expect.objectContaining({
+          description: 'Audit unavailable.',
+          href: `/projects/${attentionSnapshot.project.id}/runs?run=${attentionExecution.id}`,
+        }),
+        expect.objectContaining({
+          title: 'Ship inbox',
+          description: 'Workspace needs attention.',
+          href: `/projects/${attentionSnapshot.project.id}/board?task=T-21`,
+        }),
+      ]),
+    );
+  });
+
   it('deduplicates an attempt controlled by its execution and orders completed history newest first', () => {
     const old = {
       ...runningExecutionFixture,
@@ -259,6 +323,58 @@ describe('global projections', () => {
         ({ executionId }) => executionId === runningExecutionFixture.id,
       ),
     ).toHaveLength(1);
+  });
+
+  it('caps terminal history at the newest 50 executions', () => {
+    const executions = Array.from({ length: 51 }, (_, index) => ({
+      ...runningExecutionFixture,
+      id: `terminal-${String(index).padStart(2, '0')}`,
+      lifecycle: 'completed' as const,
+      updatedAt: `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`,
+      endedAt: `2026-08-28T00:00:${String(index).padStart(2, '0')}.000Z`,
+    }));
+
+    const history = runsFromSnapshots([
+      {
+        ...projectSnapshotFixture,
+        executions: executions.toReversed(),
+      } as V2ProjectSnapshot,
+    ]);
+
+    expect(history).toHaveLength(50);
+    expect(history.map(({ executionId }) => executionId)).toEqual(
+      executions
+        .slice(1)
+        .toReversed()
+        .map(({ id }) => id),
+    );
+  });
+
+  it('preserves every active execution beyond the terminal history cap', () => {
+    const terminals = Array.from({ length: 51 }, (_, index) => ({
+      ...runningExecutionFixture,
+      id: `terminal-${index}`,
+      lifecycle: 'failed' as const,
+      updatedAt: `2026-08-28T00:${String(index).padStart(2, '0')}:00.000Z`,
+      endedAt: `2026-08-28T00:${String(index).padStart(2, '0')}:00.000Z`,
+    }));
+    const activeExecutions = Array.from({ length: 3 }, (_, index) => ({
+      ...runningExecutionFixture,
+      id: `active-${index}`,
+      revision: index,
+    }));
+
+    const runs = runsFromSnapshots([
+      {
+        ...projectSnapshotFixture,
+        executions: [...terminals, ...activeExecutions],
+      } as V2ProjectSnapshot,
+    ]);
+
+    expect(
+      runs.filter(({ active }) => active).map(({ executionId }) => executionId),
+    ).toEqual(['active-0', 'active-1', 'active-2']);
+    expect(runs.filter(({ active }) => !active)).toHaveLength(50);
   });
 
   it('excludes inactive Board cards from ready attention', () => {

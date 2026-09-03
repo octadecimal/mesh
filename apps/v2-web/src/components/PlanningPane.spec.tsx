@@ -1487,6 +1487,100 @@ const approvedDeliveryPlan = approvedDeliveryPlanSchema.parse({
 });
 
 describe('DeliveryPlanningPane', () => {
+  it('clears a sent draft when the authoritative cycle advances', async () => {
+    const user = userEvent.setup();
+    const draftStorageKey = 'delivery-plan-draft-success';
+    sessionStorage.removeItem(draftStorageKey);
+    const props = {
+      surface: 'conversation' as const,
+      projectId,
+      cycle: deliveryCycle,
+      approvedIntentLedger,
+      deliveryPlan: null,
+      planStale: false,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmit: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+      draftStorageKey,
+    };
+    const { rerender } = render(<DeliveryPlanningPane {...props} />);
+
+    await user.type(
+      screen.getByLabelText('Message to project manager'),
+      'Refine the verification steps.',
+    );
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+    expect(sessionStorage.getItem(draftStorageKey)).toBe(
+      'Refine the verification steps.',
+    );
+
+    const advanced = deliveryPlanPlanningCycleViewSchema.parse({
+      ...deliveryCycle,
+      cycle: {
+        ...deliveryCycle.cycle,
+        lifecycle: 'launch_pending',
+        revision: deliveryCycle.cycle.revision + 1,
+        updatedAt: '2026-08-30T00:00:02.000Z',
+      },
+      turns: [
+        ...deliveryCycle.turns,
+        {
+          id: 'abababab-abab-4aba-8aba-abababababab',
+          projectId,
+          planningCycleId: cycleId,
+          ordinal: deliveryCycle.turns.length + 1,
+          actor: 'human',
+          message: 'Refine the verification steps.',
+          launchState: 'launch_pending',
+          executionId: null,
+          createdAt: '2026-08-30T00:00:02.000Z',
+        },
+      ],
+    });
+    rerender(<DeliveryPlanningPane {...props} cycle={advanced} />);
+
+    expect(sessionStorage.getItem(draftStorageKey)).toBeNull();
+  });
+
+  it('preserves a sent draft when a command fails without authoritative advancement', async () => {
+    const user = userEvent.setup();
+    const draftStorageKey = 'delivery-plan-draft-failure';
+    sessionStorage.removeItem(draftStorageKey);
+    const props = {
+      surface: 'conversation' as const,
+      projectId,
+      cycle: deliveryCycle,
+      approvedIntentLedger,
+      deliveryPlan: null,
+      planStale: false,
+      connection: { status: 'ready' } as const,
+      profiles: [profile],
+      submitting: false,
+      onSubmit: vi.fn(),
+      onApprove: vi.fn(),
+      onReject: vi.fn(),
+      onAbandon: vi.fn(),
+      draftStorageKey,
+    };
+    const { rerender } = render(<DeliveryPlanningPane {...props} />);
+
+    const message = screen.getByLabelText('Message to project manager');
+    await user.type(message, 'Keep this draft for retry.');
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+    rerender(
+      <DeliveryPlanningPane {...props} error="Planning command failed." />,
+    );
+
+    expect(message).toHaveValue('Keep this draft for retry.');
+    expect(sessionStorage.getItem(draftStorageKey)).toBe(
+      'Keep this draft for retry.',
+    );
+  });
+
   it('separates conversation from delivery proposal review ownership', async () => {
     const user = userEvent.setup();
     const props = {

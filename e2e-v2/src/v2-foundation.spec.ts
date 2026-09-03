@@ -674,6 +674,66 @@ test('attention-first UI preserves project PM drafts and the chosen theme', asyn
     expect(profile).toMatchObject({ status: 200, body: { ok: true } });
     await page.reload();
 
+    await page.getByRole('link', { name: 'Projects' }).focus();
+    await page.keyboard.press('Shift+Tab');
+    const focusedRailLink = page.locator('.v2-global-nav a:focus-visible');
+    await expect(focusedRailLink).toHaveCount(1);
+    const lightThemeContrast = await focusedRailLink.evaluate((link) => {
+      const parseColor = (color: string): [number, number, number] => {
+        const value = color.trim();
+        if (/^#[0-9a-f]{3}$/iu.test(value)) {
+          return [1, 2, 3].map((index) =>
+            Number.parseInt(value[index] + value[index], 16),
+          ) as [number, number, number];
+        }
+        if (/^#[0-9a-f]{6}$/iu.test(value)) {
+          return [1, 3, 5].map((start) =>
+            Number.parseInt(value.slice(start, start + 2), 16),
+          ) as [number, number, number];
+        }
+        const values = value
+          .match(/[\d.]+/gu)
+          ?.slice(0, 3)
+          .map(Number);
+        if (values?.length === 3) {
+          return values as [number, number, number];
+        }
+        throw new Error(`Unsupported color value: ${JSON.stringify(color)}`);
+      };
+      const luminance = (color: string) => {
+        const [red, green, blue] = parseColor(color).map((channel) => {
+          const normalized = channel / 255;
+          return normalized <= 0.04045
+            ? normalized / 12.92
+            : ((normalized + 0.055) / 1.055) ** 2.4;
+        });
+        return red * 0.2126 + green * 0.7152 + blue * 0.0722;
+      };
+      const contrast = (first: string, second: string) => {
+        const [lighter, darker] = [luminance(first), luminance(second)].sort(
+          (left, right) => right - left,
+        );
+        return (lighter + 0.05) / (darker + 0.05);
+      };
+      const root = getComputedStyle(document.documentElement);
+      const rail = link.closest<HTMLElement>('.v2-global-nav');
+      if (!rail)
+        throw new Error('Focused link is outside the navigation rail.');
+
+      return {
+        warning: contrast(
+          root.getPropertyValue('--warning'),
+          root.getPropertyValue('--surface'),
+        ),
+        railFocus: contrast(
+          getComputedStyle(link).outlineColor,
+          getComputedStyle(rail).backgroundColor,
+        ),
+      };
+    });
+    expect(lightThemeContrast.railFocus).toBeGreaterThanOrEqual(3);
+    expect(lightThemeContrast.warning).toBeGreaterThanOrEqual(4.5);
+
     await page.getByRole('button', { name: 'Project manager' }).click();
     const dialog = page.getByRole('dialog', {
       name: /Project manager · todo-repository/u,
@@ -682,6 +742,21 @@ test('attention-first UI preserves project PM drafts and the chosen theme', asyn
     const drawer = page.getByRole('complementary', {
       name: /Project manager · todo-repository/u,
     });
+    const projectContent = page.locator('.v2-project-content');
+    const openDrawerBox = await drawer.boundingBox();
+    const openContentBox = await projectContent.boundingBox();
+    expect(openDrawerBox).not.toBeNull();
+    expect(openContentBox).not.toBeNull();
+    expect(openDrawerBox?.x).toBeGreaterThan(openContentBox?.x ?? 0);
+
+    await drawer.getByRole('button', { name: 'Close project manager' }).click();
+    const closedContentBox = await projectContent.boundingBox();
+    expect(closedContentBox).not.toBeNull();
+    expect(closedContentBox?.width ?? 0).toBeGreaterThan(
+      (openContentBox?.width ?? 0) + 100,
+    );
+    await page.getByRole('button', { name: 'Project manager' }).click();
+
     const draft = 'Keep this unsent Intent draft with the project.';
     await drawer
       .getByRole('textbox', { name: 'Message to project manager' })

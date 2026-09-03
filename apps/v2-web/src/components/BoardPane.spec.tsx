@@ -734,6 +734,8 @@ describe('BoardPane', () => {
     expect(
       screen.getByText('No tasks match the applied Board filters.'),
     ).toBeVisible();
-    await waitFor(() => expect(onSelectTask).toHaveBeenCalledWith(undefined));
+    await waitFor(() =>
+      expect(onSelectTask).toHaveBeenCalledWith(undefined, 'replace'),
+    );
   });
 });

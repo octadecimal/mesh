@@ -61,22 +61,29 @@ export function useGlobalProjectSnapshots({
       targets.map(({ id }) => api.projectSnapshot(id, next.signal)),
     ).then((results) => {
       if (next.signal.aborted || generation.current !== token) return;
-      const snapshots: V2ProjectSnapshot[] = [];
       const failures: GlobalProjectSnapshotFailure[] = [];
       for (const [index, result] of results.entries()) {
-        if (result.status === 'fulfilled') snapshots.push(result.value);
-        else
+        if (result.status === 'rejected')
           failures.push({
             projectId: targets[index]!.id,
             projectName: targets[index]!.displayName,
             message: errorMessage(result.reason),
           });
       }
-      setState({
-        status: 'ready',
-        snapshots,
-        failures,
-        refreshing: false,
+      setState((previous) => {
+        const retained = new Map(
+          previous.snapshots.map((snapshot) => [snapshot.project.id, snapshot]),
+        );
+        return {
+          status: 'ready',
+          snapshots: results.flatMap((result, index) => {
+            if (result.status === 'fulfilled') return [result.value];
+            const snapshot = retained.get(targets[index]!.id);
+            return snapshot ? [snapshot] : [];
+          }),
+          failures,
+          refreshing: false,
+        };
       });
     });
   }, [api, enabled, projectIds]);

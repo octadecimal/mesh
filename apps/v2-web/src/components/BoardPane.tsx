@@ -233,7 +233,7 @@ export function BoardPane({
   error?: string;
   onApplyFilter: (command: SetBoardFilterCommand) => void;
   selectedId?: string;
-  onSelectTask(taskId?: string): void;
+  onSelectTask(taskId?: string, mode?: 'push' | 'replace'): void;
   developer?: BoardDeveloperProjection;
   executionRun?: BoardExecutionRunProjection;
 }) {
@@ -246,7 +246,8 @@ export function BoardPane({
 
   useEffect(() => setDraft(selectionFrom(board)), [board?.filter]);
   useEffect(() => {
-    if (board && selectedId && !selectedCard) onSelectTask(undefined);
+    if (board && selectedId && !selectedCard)
+      onSelectTask(undefined, 'replace');
   }, [board, onSelectTask, selectedCard, selectedId]);
 
   function toggle<K extends keyof BoardFilterSelection>(

@@ -74,12 +74,38 @@ export function attentionFromSnapshots(
         sortRevision: execution.revision,
       });
     }
+    for (const execution of snapshot.executions) {
+      if (
+        execution.lifecycle !== 'failed' &&
+        execution.lifecycle !== 'attention_required'
+      )
+        continue;
+      add({
+        id: `failure:${project.id}:${execution.id}`,
+        projectId: project.id,
+        projectName,
+        kind: 'failure',
+        title: assignmentLabel(execution.assignment),
+        description:
+          execution.failure?.message ??
+          (execution.lifecycle === 'failed'
+            ? 'Execution failed.'
+            : 'Execution requires operator attention.'),
+        href: appHref({
+          page: 'project',
+          projectId: project.id,
+          artifact: 'runs',
+          selectedId: execution.id,
+        }),
+        sortRevision: execution.revision,
+      });
+    }
     for (const item of snapshot.attentionItems) {
       const execution = snapshot.executions.find(
         ({ id }) => id === item.executionId,
       );
       add({
-        id: `failure:${project.id}:${item.executionId}:${item.code}`,
+        id: `failure:${project.id}:${item.executionId}`,
         projectId: project.id,
         projectName,
         kind: 'failure',
@@ -94,6 +120,32 @@ export function attentionFromSnapshots(
           selectedId: item.executionId,
         }),
         sortRevision: execution?.revision ?? snapshot.cursors.runtime,
+      });
+    }
+    for (const attempt of snapshot.developerAttempts ?? []) {
+      if (
+        attempt.lifecycle !== 'blocked' &&
+        attempt.lifecycle !== 'attention_required'
+      )
+        continue;
+      add({
+        id: `failure:${project.id}:attempt:${attempt.id}`,
+        projectId: project.id,
+        projectName,
+        kind: 'failure',
+        title: attempt.assignment.title,
+        description:
+          attempt.attention?.message ??
+          (attempt.lifecycle === 'blocked'
+            ? 'Developer attempt is blocked.'
+            : 'Developer attempt requires operator attention.'),
+        href: appHref({
+          page: 'project',
+          projectId: project.id,
+          artifact: 'board',
+          selectedId: attempt.taskId,
+        }),
+        sortRevision: attempt.revision,
       });
     }
     const cycle = snapshot.planningCycles
@@ -215,11 +267,15 @@ export function runsFromSnapshots(
       });
     }
   }
-  return [...runs.values()].sort(
+  const sorted = [...runs.values()].sort(
     (left, right) =>
       Number(right.active) - Number(left.active) ||
       compareText(right.updatedAt, left.updatedAt) ||
       compareText(left.projectName, right.projectName) ||
       compareText(left.executionId, right.executionId),
   );
+  return [
+    ...sorted.filter(({ active }) => active),
+    ...sorted.filter(({ active }) => !active).slice(0, 50),
+  ];
 }

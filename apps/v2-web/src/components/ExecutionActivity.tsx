@@ -17,12 +17,18 @@ export type ChildActivity = {
 
 function skillOutcome(skill: ResolvedSkillSnapshot) {
   if (skill.resolution.kind === 'mesh-native-fallback') {
-    return 'Preferred skill fallback';
+    return {
+      label: 'Preferred skill fallback',
+      className: 'v2-state v2-state-fallback',
+    };
   }
   if (skill.resolution.kind === 'unavailable') {
-    return 'Required skill unavailable';
+    return {
+      label: 'Required skill unavailable',
+      className: 'v2-state v2-state-unavailable',
+    };
   }
-  return 'Skill resolved';
+  return { label: 'Skill resolved', className: undefined };
 }
 
 function runtimeActivityLabel(activity: RuntimeEvent) {
@@ -87,19 +93,31 @@ export function ExecutionActivity({
         <dl className="v2-execution-summary">
           <div>
             <dt>Lifecycle</dt>
-            <dd role="status">{execution.lifecycle}</dd>
+            <dd
+              role="status"
+              className={
+                execution.lifecycle === 'failed'
+                  ? 'v2-state v2-state-failure'
+                  : undefined
+              }
+            >
+              {execution.lifecycle}
+            </dd>
           </div>
         </dl>
       </header>
       <section aria-label="Skill outcomes">
         <h4>Skill outcomes</h4>
         <dl className="v2-execution-skills">
-          {execution.resolvedSkills.map((skill) => (
-            <div key={`${skill.mode}-${skill.requested.id}`}>
-              <dt>{skill.requested.id}</dt>
-              <dd>{skillOutcome(skill)}</dd>
-            </div>
-          ))}
+          {execution.resolvedSkills.map((skill) => {
+            const outcome = skillOutcome(skill);
+            return (
+              <div key={`${skill.mode}-${skill.requested.id}`}>
+                <dt>{skill.requested.id}</dt>
+                <dd className={outcome.className}>{outcome.label}</dd>
+              </div>
+            );
+          })}
         </dl>
       </section>
       <details

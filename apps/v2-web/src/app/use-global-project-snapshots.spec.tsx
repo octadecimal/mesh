@@ -171,6 +171,38 @@ it('keeps successful snapshots visible while a manual refresh settles', async ()
   expect(result.current.snapshots).toEqual([betaSnapshot]);
 });
 
+it('keeps the last successful snapshot when its next refresh fails', async () => {
+  let calls = 0;
+  const api = {
+    projectSnapshot: vi.fn(() =>
+      calls++ === 0
+        ? Promise.resolve(alphaSnapshot)
+        : Promise.reject(new Error('Project unavailable.')),
+    ),
+  } satisfies Pick<V2Api, 'projectSnapshot'>;
+  const { result } = renderHook(() =>
+    useGlobalProjectSnapshots({
+      api,
+      projects: [alpha],
+      enabled: true,
+      pollIntervalMs: 0,
+    }),
+  );
+
+  await waitFor(() => expect(result.current.status).toBe('ready'));
+  act(() => result.current.refresh());
+  await waitFor(() => expect(result.current.refreshing).toBe(false));
+
+  expect(result.current.snapshots).toEqual([alphaSnapshot]);
+  expect(result.current.failures).toEqual([
+    {
+      projectId: alpha.id,
+      projectName: alpha.displayName,
+      message: 'Project unavailable.',
+    },
+  ]);
+});
+
 it('refreshes on focus instead of polling when the interval is zero', async () => {
   const api = {
     projectSnapshot: vi.fn(async () => alphaSnapshot),

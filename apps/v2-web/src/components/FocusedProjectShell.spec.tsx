@@ -19,6 +19,7 @@ import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import type { ProjectArtifact } from '../app/routes';
 import { FocusedProjectShell as ProjectShell } from './FocusedProjectShell';
+import { PM_PINNED_STORAGE_KEY } from './ProjectManagerDrawer';
 
 type ProjectShellProps = ComponentProps<typeof ProjectShell>;
 
@@ -475,6 +476,29 @@ const awaitingDeliveryReviewCycle: DeliveryPlanPlanningCycleView =
   });
 
 describe('FocusedProjectShell', () => {
+  it('keeps the pinned project manager first in keyboard order', () => {
+    localStorage.setItem(PM_PINNED_STORAGE_KEY, 'true');
+
+    try {
+      const { container } = render(
+        <FocusedProjectShell
+          artifact="overview"
+          model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
+          onDeselect={vi.fn()}
+          onInterrupt={vi.fn()}
+          onNavigateArtifact={vi.fn()}
+          onNavigate={vi.fn()}
+        />,
+      );
+
+      const layout = container.querySelector('.v2-project-layout');
+      expect(layout?.children[0]).toHaveClass('v2-pm-drawer');
+      expect(layout?.children[1]).toHaveClass('v2-project-content');
+    } finally {
+      localStorage.removeItem(PM_PINNED_STORAGE_KEY);
+    }
+  });
+
   it('uses URL-controlled project artifacts with roving keyboard navigation', async () => {
     const user = userEvent.setup();
     const onNavigateArtifact = vi.fn();
@@ -696,6 +720,7 @@ describe('FocusedProjectShell', () => {
     await waitFor(() =>
       expect(onNavigate).toHaveBeenCalledWith(
         `/projects/${snapshot.project.id}/board`,
+        'replace',
       ),
     );
   });

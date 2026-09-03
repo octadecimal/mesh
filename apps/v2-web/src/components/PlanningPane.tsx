@@ -1039,7 +1039,15 @@ export function DeliveryPlanningPane({
   const nonterminal =
     lifecycle !== undefined &&
     !['approved', 'proposal_rejected', 'abandoned'].includes(lifecycle);
-  const previousCycleId = useRef(cycle?.cycle.id);
+  const latestTurn = cycle?.turns.at(-1);
+  const draftProjection = [
+    cycle?.cycle.id,
+    cycle?.cycle.revision,
+    lifecycle,
+    latestTurn?.id,
+    latestTurn?.launchState,
+  ].join(':');
+  const previousDraftProjection = useRef(draftProjection);
 
   function updateDraft(value: string) {
     setDraft(value);
@@ -1070,11 +1078,11 @@ export function DeliveryPlanningPane({
     setFeedback('');
   }, [cycle?.cycle.id, proposal?.id, proposal?.revision]);
   useEffect(() => {
-    if (previousCycleId.current === cycle?.cycle.id) return;
-    previousCycleId.current = cycle?.cycle.id;
+    if (previousDraftProjection.current === draftProjection) return;
+    previousDraftProjection.current = draftProjection;
     setStartOpen(false);
     clearDraft();
-  }, [cycle?.cycle.id]);
+  }, [draftProjection]);
 
   function openStart() {
     const replacing = deliveryPlan !== null;
