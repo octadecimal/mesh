@@ -51,6 +51,8 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
+a:focus-visible,
+summary:focus-visible,
 [role='tab']:focus-visible,
 [role='alert']:focus-visible {
   outline: 3px solid var(--accent);
@@ -399,6 +401,12 @@ button:disabled {
   padding: 0;
   list-style: none;
 }
+.v2-project-runs,
+.v2-run-evidence {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
 .v2-execution-list > li {
   display: grid;
   gap: 0.6rem;
@@ -416,6 +424,23 @@ button:disabled {
 .v2-execution details {
   border-top: 1px solid var(--border);
   padding-top: 0.75rem;
+}
+.v2-execution-summary,
+.v2-execution-skills,
+.v2-developer-metadata {
+  margin: 0;
+}
+.v2-execution-skills > div {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.35fr) minmax(0, 1fr);
+  gap: 0.25rem 1rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.5rem;
+}
+.v2-execution-disclosure > summary,
+.v2-developer-disclosure > summary {
+  cursor: pointer;
+  font-weight: 700;
 }
 .v2-developer-section {
   display: grid;
@@ -448,6 +473,33 @@ button:disabled {
   margin: 0;
   color: var(--accent);
   font-weight: 700;
+}
+.v2-developer-disclosure > summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+}
+.v2-developer-metadata {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: 0.5rem 1rem;
+  padding-top: 0.75rem;
+}
+.v2-developer-metadata dt {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+.v2-developer-metadata dd {
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+.v2-developer-section details {
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+.v2-developer-section li,
+.v2-execution li {
+  overflow-wrap: anywhere;
 }
 .v2-developer-attention,
 .v2-developer-section [role='alert'] {

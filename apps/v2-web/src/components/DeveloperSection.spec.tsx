@@ -5,7 +5,7 @@ import {
   type ResolvedWorkerProfileSnapshot,
   type WorkerExecution,
 } from '@mesh/v2-contracts';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -332,6 +332,12 @@ describe('DeveloperSection', () => {
     expect(screen.getByRole('heading', { name: card.title })).toBeVisible();
     expect(screen.getByText('Run focused tests')).toBeVisible();
     expect(screen.getByText(/dirty: yes/i)).toBeVisible();
+    const attempt = screen.getByRole('article', { name: 'Attempt 1' });
+    expect(within(attempt).getByText('Attempt revision').tagName).toBe('DT');
+    const workspace = within(attempt).getByText('Workspace').closest('details');
+    expect(workspace).not.toBeNull();
+    expect(workspace).toHaveAttribute('open');
+    expect(within(attempt).getByText('Path').tagName).toBe('DT');
 
     fireEvent.click(
       screen.getByRole('button', { name: 'Interrupt attempt 1' }),
@@ -451,6 +457,9 @@ describe('DeveloperSection', () => {
     expect(screen.getByText(/SQLite row is restored\./)).toBeVisible();
     expect(screen.getByText(/pnpm test.*passed/)).toBeVisible();
     expect(screen.getAllByText(/head 2222222/i)).toHaveLength(2);
+    expect(
+      screen.getByText('Completion evidence').closest('details'),
+    ).toHaveAttribute('open');
 
     rerender(
       <DeveloperSection
@@ -471,6 +480,9 @@ describe('DeveloperSection', () => {
     ).toBeVisible();
     expect(screen.getByText(/restore the fixture/i)).toBeVisible();
     expect(screen.getByText(/workspace will be preserved/i)).toBeVisible();
+    expect(screen.getByText('Blocker').closest('details')).toHaveAttribute(
+      'open',
+    );
 
     rerender(
       <DeveloperSection

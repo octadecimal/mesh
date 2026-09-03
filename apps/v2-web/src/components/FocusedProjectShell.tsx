@@ -369,6 +369,18 @@ export function FocusedProjectShell({
             projectArtifacts.length;
     activateArtifact(projectArtifacts[targetIndex].slug);
   }
+  const selectedExecution =
+    artifact === 'runs' && selectedId
+      ? snapshot.executions.find(({ id }) => id === selectedId)
+      : undefined;
+  const selectedActivity = selectedExecution
+    ? activityByExecutionId[selectedExecution.id]
+    : undefined;
+  const selectedInterruptReason = selectedExecution
+    ? selectedExecution.lifecycle === 'running'
+      ? interruptReason
+      : 'Only running executions can be interrupted.'
+    : undefined;
 
   return (
     <main className="v2-shell" aria-labelledby="focused-project-heading">
@@ -480,6 +492,17 @@ export function FocusedProjectShell({
                   submitting={planning.submitting}
                   error={planning.error}
                   onApplyFilter={planning.onApplyFilter}
+                  selectedId={selectedId}
+                  onSelectTask={(taskId) =>
+                    onNavigate(
+                      appHref({
+                        page: 'project',
+                        projectId: snapshot.project.id,
+                        artifact: 'board',
+                        selectedId: taskId,
+                      }),
+                    )
+                  }
                   developer={
                     developer
                       ? {
@@ -509,61 +532,54 @@ export function FocusedProjectShell({
                   }
                 />
               ) : (
-                <RunsView
-                  runs={runsFromSnapshots([snapshot])}
-                  projectId={snapshot.project.id}
-                  selectedId={selectedId}
-                  onNavigate={onNavigate}
-                />
-              )}
-            </section>
-          </section>
-          <section aria-labelledby="activity-heading">
-            <h2 id="activity-heading">Worker activity</h2>
-            {snapshot.executions.length === 0 ? (
-              <p>No worker executions yet.</p>
-            ) : (
-              <ul className="v2-execution-list">
-                {snapshot.executions.map((execution) => {
-                  const activity = activityByExecutionId[execution.id];
-                  const rowInterruptReason =
-                    execution.lifecycle === 'running'
-                      ? interruptReason
-                      : 'Only running executions can be interrupted.';
-                  return (
-                    <li key={execution.id}>
+                <div className="v2-project-runs">
+                  <RunsView
+                    runs={runsFromSnapshots([snapshot])}
+                    projectId={snapshot.project.id}
+                    selectedId={selectedId}
+                    onNavigate={onNavigate}
+                  />
+                  {selectedExecution ? (
+                    <section
+                      className="v2-run-evidence"
+                      aria-label="Selected run evidence"
+                    >
                       <ExecutionActivity
-                        execution={execution}
-                        childActivities={activity?.childActivities}
-                        diagnosticId={activity?.diagnosticId}
-                        runtimeActivity={activity?.runtimeActivity}
+                        execution={selectedExecution}
+                        childActivities={selectedActivity?.childActivities}
+                        diagnosticId={selectedActivity?.diagnosticId}
+                        runtimeActivity={selectedActivity?.runtimeActivity}
                         projectCursors={snapshot.cursors}
                       />
                       <button
                         type="button"
-                        disabled={rowInterruptReason !== undefined}
+                        disabled={selectedInterruptReason !== undefined}
                         aria-describedby={
-                          rowInterruptReason
-                            ? `interrupt-reason-${execution.id}`
+                          selectedInterruptReason
+                            ? `interrupt-reason-${selectedExecution.id}`
                             : undefined
                         }
                         onClick={() => {
-                          if (rowInterruptReason === undefined)
-                            onInterrupt(execution);
+                          if (selectedInterruptReason === undefined)
+                            onInterrupt(selectedExecution);
                         }}
                       >
                         Interrupt execution
                       </button>
-                      {rowInterruptReason ? (
-                        <p id={`interrupt-reason-${execution.id}`}>
-                          {rowInterruptReason}
+                      {selectedInterruptReason ? (
+                        <p id={`interrupt-reason-${selectedExecution.id}`}>
+                          {selectedInterruptReason}
                         </p>
                       ) : null}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
+                    </section>
+                  ) : selectedId ? (
+                    <p role="status">
+                      Selected run is unavailable in current project truth.
+                    </p>
+                  ) : null}
+                </div>
+              )}
+            </section>
           </section>
         </div>
       </div>

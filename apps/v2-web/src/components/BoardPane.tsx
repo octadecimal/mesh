@@ -105,36 +105,73 @@ function TaskDetails({
   developer,
   connection,
   submitting,
+  onClose,
 }: {
   card: BoardTaskCard;
   developer?: BoardDeveloperProjection;
   connection: PlanningConnection;
   submitting: boolean;
+  onClose(): void;
 }) {
   const headingRef = useRef<HTMLHeadingElement>(null);
-  useEffect(() => headingRef.current?.focus(), []);
+  useEffect(() => headingRef.current?.focus(), [card.taskId]);
   return (
-    <section className="planning-board-details" aria-label="Task details">
-      <h4 ref={headingRef} tabIndex={-1}>
-        Task details
-      </h4>
-      <p>Acceptance: {card.detail.acceptanceCriteria.join(' · ')}</p>
-      <p>Verification: {card.detail.verificationCriteria.join(' · ')}</p>
-      <p>Owned surfaces: {card.detail.ownedSurfaces.join(' · ') || 'None'}</p>
-      <p>
-        Prohibited surfaces:{' '}
-        {card.detail.prohibitedSurfaces.join(' · ') || 'None'}
-      </p>
-      <p>
-        Expected artifacts:{' '}
-        {card.detail.expectedArtifacts.join(' · ') || 'None'}
-      </p>
-      <p>Milestone outcome: {card.detail.milestoneOutcome}</p>
-      <p>Milestone stop condition: {card.detail.milestoneStopCondition}</p>
-      <p>
-        Milestone exclusions:{' '}
-        {card.detail.milestoneExclusions.join(' · ') || 'None'}
-      </p>
+    <section
+      id="planning-board-task-details"
+      className="planning-board-details"
+      aria-label="Task details"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        event.stopPropagation();
+        onClose();
+      }}
+    >
+      <header>
+        <div>
+          <p className="v2-eyebrow">Task details</p>
+          <h3 ref={headingRef} tabIndex={-1}>
+            {card.title}
+          </h3>
+        </div>
+        <button type="button" onClick={onClose}>
+          Close task details
+        </button>
+      </header>
+      <p>{card.outcome}</p>
+      <dl className="planning-board-detail-list">
+        <div>
+          <dt>Acceptance</dt>
+          <dd>{card.detail.acceptanceCriteria.join(' · ')}</dd>
+        </div>
+        <div>
+          <dt>Verification</dt>
+          <dd>{card.detail.verificationCriteria.join(' · ')}</dd>
+        </div>
+        <div>
+          <dt>Owned surfaces</dt>
+          <dd>{card.detail.ownedSurfaces.join(' · ') || 'None'}</dd>
+        </div>
+        <div>
+          <dt>Prohibited surfaces</dt>
+          <dd>{card.detail.prohibitedSurfaces.join(' · ') || 'None'}</dd>
+        </div>
+        <div>
+          <dt>Expected artifacts</dt>
+          <dd>{card.detail.expectedArtifacts.join(' · ') || 'None'}</dd>
+        </div>
+        <div>
+          <dt>Milestone outcome</dt>
+          <dd>{card.detail.milestoneOutcome}</dd>
+        </div>
+        <div>
+          <dt>Milestone stop condition</dt>
+          <dd>{card.detail.milestoneStopCondition}</dd>
+        </div>
+        <div>
+          <dt>Milestone exclusions</dt>
+          <dd>{card.detail.milestoneExclusions.join(' · ') || 'None'}</dd>
+        </div>
+      </dl>
       <h5>Requirement traceability</h5>
       {card.detail.requirementTraces.length === 0 ? (
         <p>No requirement traces.</p>
@@ -185,6 +222,8 @@ export function BoardPane({
   submitting,
   error,
   onApplyFilter,
+  selectedId,
+  onSelectTask,
   developer,
   executionRun,
 }: {
@@ -193,11 +232,12 @@ export function BoardPane({
   submitting: boolean;
   error?: string;
   onApplyFilter: (command: SetBoardFilterCommand) => void;
+  selectedId?: string;
+  onSelectTask(taskId?: string): void;
   developer?: BoardDeveloperProjection;
   executionRun?: BoardExecutionRunProjection;
 }) {
   const [draft, setDraft] = useState(() => selectionFrom(board));
-  const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
   const headingId = useId();
   const detailButtons = useRef(new Map<string, HTMLButtonElement>());
   const disabled =
@@ -224,8 +264,8 @@ export function BoardPane({
   }
 
   function closeDetails() {
-    const closedTaskId = detailTaskId;
-    setDetailTaskId(null);
+    const closedTaskId = selectedId;
+    onSelectTask(undefined);
     if (closedTaskId) detailButtons.current.get(closedTaskId)?.focus();
   }
 
@@ -249,6 +289,7 @@ export function BoardPane({
             ? 'No tasks match the applied Board filters.'
             : undefined;
   const filterRevision = board?.filter?.revision;
+  const selectedCard = board?.cards.find(({ taskId }) => taskId === selectedId);
   const optionOrder = board
     ? {
         milestoneIds: board.facets.milestones.map(({ value }) => value),
@@ -277,17 +318,23 @@ export function BoardPane({
     <section className="planning-board-pane" aria-labelledby={headingId}>
       <h2 id={headingId}>Board</h2>
       {error ? (
-        <p role="alert" aria-live="assertive">
+        <p className="v2-warning" role="alert" aria-live="assertive">
           {error}
         </p>
       ) : null}
       {connection.status === 'disconnected' || connection.status === 'stale' ? (
-        <p role="status">{connection.message}</p>
+        <p className="v2-warning" role="status">
+          {connection.message}
+        </p>
       ) : null}
       {submitting ? (
         <p role="status">A project command is in progress.</p>
       ) : null}
-      {board?.stale ? <p role="status">Approved plan is stale.</p> : null}
+      {board?.stale ? (
+        <p className="v2-warning" role="status">
+          Approved plan is stale.
+        </p>
+      ) : null}
       {board ? (
         <p role="status" aria-live="polite">
           Showing {board.matchedTaskCount} of {board.totalTaskCount} tasks ·
@@ -384,102 +431,121 @@ export function BoardPane({
         </form>
       ) : null}
       {emptyMessage ? <p>{emptyMessage}</p> : null}
-      {board?.facets.milestones.map((milestone) => {
-        const cards = board.cards.filter(
-          ({ milestoneId }) => milestoneId === milestone.value,
-        );
-        if (cards.length === 0) return null;
-        return (
-          <section
-            key={milestone.value}
-            aria-labelledby={`board-milestone-${milestone.value}`}
-          >
-            <h3 id={`board-milestone-${milestone.value}`}>{milestone.label}</h3>
-            {cards.map((card) => (
-              <article
-                key={card.taskId}
-                id={`board-task-${card.taskId}`}
-                className="planning-board-card"
-              >
-                <h4>{card.title}</h4>
-                <p>{card.outcome}</p>
-                <p>
-                  {card.lifecycle} · {card.priority} ·{' '}
-                  {card.labels.join(' · ') || 'No labels'}
-                </p>
-                {card.executionRunItem ? (
-                  <p>
-                    Run item ·{' '}
-                    {card.executionRunItem.lifecycle.replace('_', ' ')}
-                  </p>
-                ) : null}
-                {card.readiness.state === 'actionable' ? (
-                  <p>Actionable</p>
-                ) : (
-                  <ul aria-label={`Readiness for ${card.title}`}>
-                    {card.readiness.blockers.map((blocker) => (
-                      <li
-                        key={
-                          blocker.kind === 'dependency_incomplete'
-                            ? blocker.dependencyId
-                            : blocker.kind
-                        }
-                      >
-                        {readinessReason(card, blocker)}
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                <p>
-                  Requirements:{' '}
-                  {card.detail.requirementTraces.length === 0
-                    ? 'None'
-                    : card.detail.requirementTraces
-                        .map(
-                          ({ title, recordRevision }) =>
-                            `${title} · revision ${recordRevision}`,
-                        )
-                        .join(' · ')}
-                </p>
-                {card.dependencies.length ? (
-                  <ul aria-label={`Dependencies for ${card.title}`}>
-                    {card.dependencies.map((dependency) => (
-                      <li key={dependency.dependencyId}>
-                        {dependency.direction}: {dependency.otherTaskTitle} ·{' '}
-                        {dependency.otherTaskLifecycle}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                <button
-                  type="button"
-                  ref={(node) => {
-                    if (node) detailButtons.current.set(card.taskId, node);
-                    else detailButtons.current.delete(card.taskId);
-                  }}
-                  aria-label={`View ${card.title} details`}
-                  onClick={() => setDetailTaskId(card.taskId)}
+      {board && board.cards.length > 0 ? (
+        <div className="planning-board-master-detail">
+          <div className="planning-board-columns" aria-label="Board tasks">
+            {board.facets.milestones.map((milestone) => {
+              const cards = board.cards.filter(
+                ({ milestoneId }) => milestoneId === milestone.value,
+              );
+              if (cards.length === 0) return null;
+              return (
+                <section
+                  className="planning-board-column"
+                  key={milestone.value}
+                  aria-labelledby={`board-milestone-${milestone.value}`}
                 >
-                  View details
-                </button>
-                {detailTaskId === card.taskId ? (
-                  <>
-                    <TaskDetails
-                      card={card}
-                      developer={developer}
-                      connection={connection}
-                      submitting={submitting}
-                    />
-                    <button type="button" onClick={closeDetails}>
-                      Close task details
-                    </button>
-                  </>
-                ) : null}
-              </article>
-            ))}
-          </section>
-        );
-      })}
+                  <h3 id={`board-milestone-${milestone.value}`}>
+                    {milestone.label}
+                  </h3>
+                  {cards.map((card) => {
+                    const cardHeadingId = `board-task-${card.taskId}-heading`;
+                    const selected = selectedCard?.taskId === card.taskId;
+                    return (
+                      <article
+                        key={card.taskId}
+                        id={`board-task-${card.taskId}`}
+                        className="planning-board-card"
+                        aria-labelledby={cardHeadingId}
+                      >
+                        <h4 id={cardHeadingId}>{card.title}</h4>
+                        <p>{card.outcome}</p>
+                        <p>
+                          {card.lifecycle} · {card.priority} ·{' '}
+                          {card.labels.join(' · ') || 'No labels'}
+                        </p>
+                        {card.executionRunItem ? (
+                          <p>
+                            Run item ·{' '}
+                            {card.executionRunItem.lifecycle.replace('_', ' ')}
+                          </p>
+                        ) : null}
+                        {card.readiness.state === 'actionable' ? (
+                          <p className="v2-state v2-state-ready">Actionable</p>
+                        ) : (
+                          <ul
+                            className="v2-warning"
+                            aria-label={`Readiness for ${card.title}`}
+                          >
+                            {card.readiness.blockers.map((blocker) => (
+                              <li
+                                key={
+                                  blocker.kind === 'dependency_incomplete'
+                                    ? blocker.dependencyId
+                                    : blocker.kind
+                                }
+                              >
+                                {readinessReason(card, blocker)}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        <p>
+                          Requirements:{' '}
+                          {card.detail.requirementTraces.length === 0
+                            ? 'None'
+                            : card.detail.requirementTraces
+                                .map(
+                                  ({ title, recordRevision }) =>
+                                    `${title} · revision ${recordRevision}`,
+                                )
+                                .join(' · ')}
+                        </p>
+                        {card.dependencies.length ? (
+                          <ul aria-label={`Dependencies for ${card.title}`}>
+                            {card.dependencies.map((dependency) => (
+                              <li key={dependency.dependencyId}>
+                                {dependency.direction}:{' '}
+                                {dependency.otherTaskTitle} ·{' '}
+                                {dependency.otherTaskLifecycle}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        <button
+                          type="button"
+                          ref={(node) => {
+                            if (node)
+                              detailButtons.current.set(card.taskId, node);
+                            else detailButtons.current.delete(card.taskId);
+                          }}
+                          aria-label={`Open ${card.title}`}
+                          aria-pressed={selected}
+                          aria-controls={
+                            selected ? 'planning-board-task-details' : undefined
+                          }
+                          onClick={() => onSelectTask(card.taskId)}
+                        >
+                          Open task
+                        </button>
+                      </article>
+                    );
+                  })}
+                </section>
+              );
+            })}
+          </div>
+          {selectedCard ? (
+            <TaskDetails
+              card={selectedCard}
+              developer={developer}
+              connection={connection}
+              submitting={submitting}
+              onClose={closeDetails}
+            />
+          ) : null}
+        </div>
+      ) : null}
     </section>
   );
 }

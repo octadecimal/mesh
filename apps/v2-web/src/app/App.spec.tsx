@@ -747,7 +747,7 @@ describe('App', () => {
         planningCycles: [terminalPlanningCycle, activePlanningCycle],
       }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    const app = renderApp({ pathname: `/projects/${projectId}/plans`, api });
     expect(
       await screen.findByRole('heading', { name: 'Todo', level: 1 }),
     ).toBeVisible();
@@ -794,7 +794,7 @@ describe('App', () => {
       profiles: [...projectSnapshot.profiles, pmProfile],
       planningCycles: [terminalPlanningCycle],
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    const app = renderApp({ pathname: `/projects/${projectId}/plans`, api });
     expect(
       await screen.findByRole('heading', { name: 'Todo', level: 1 }),
     ).toBeVisible();
@@ -802,6 +802,7 @@ describe('App', () => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
+    await user.click(screen.getByRole('button', { name: 'Project manager' }));
     await user.selectOptions(
       screen.getByLabelText('Project manager profile'),
       pmProfile.profileId,
@@ -975,6 +976,13 @@ describe('App', () => {
     expect(
       screen.getByRole('button', { name: 'Apply filters' }),
     ).toBeDisabled();
+    await user.click(screen.getByRole('tab', { name: 'Runs' }));
+    await user.click(
+      within(screen.getByRole('list', { name: 'Active runs' })).getByRole(
+        'link',
+        { name: /Todo foundation worker/i },
+      ),
+    );
     expect(
       screen
         .getAllByRole('button', { name: 'Interrupt execution' })
@@ -1038,9 +1046,7 @@ describe('App', () => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
     await user.click(
       screen.getByRole('button', { name: 'Start Developer attempt' }),
@@ -1188,20 +1194,25 @@ describe('App', () => {
     const api = createApi();
     api.projectSnapshot = vi.fn(async () => ({
       ...developerSnapshot,
-      developerAttempts: [activeDeveloperAttempt],
+      developerAttempts: [
+        activeDeveloperAttempt,
+        developerAttemptSchema.parse({
+          ...activeDeveloperAttempt,
+          id: '28282828-2828-4282-8282-282828282828',
+          ordinal: 2,
+        }),
+      ],
     }));
     const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
     expect(
       await screen.findByRole('heading', { name: 'Todo', level: 1 }),
     ).toBeVisible();
 
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
-    const executionArticles = screen.getAllByRole('article', {
-      name: 'Persist Todo',
-    });
+    const executionArticles = within(
+      screen.getByRole('region', { name: 'Developer for Persist Todo' }),
+    ).getAllByRole('article', { name: 'Persist Todo' });
     expect(executionArticles).toHaveLength(2);
     const labelIds = executionArticles.map((article) =>
       article.getAttribute('aria-labelledby'),
@@ -1241,9 +1252,7 @@ describe('App', () => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
     const start = screen.getByRole('button', {
       name: 'Start Developer attempt',
@@ -1309,9 +1318,7 @@ describe('App', () => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
     const apply = screen.getByRole('button', { name: 'Apply filters' });
     await user.click(apply);
@@ -1371,9 +1378,7 @@ describe('App', () => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
     await user.click(
       screen.getByRole('button', { name: 'Start Developer attempt' }),
     );
@@ -1405,6 +1410,13 @@ describe('App', () => {
       null,
       '',
       `/projects/${projectId}`,
+    );
+    await user.click(await screen.findByRole('tab', { name: 'Runs' }));
+    await user.click(
+      within(screen.getByRole('list', { name: 'Active runs' })).getByRole(
+        'link',
+        { name: /Todo foundation worker/i },
+      ),
     );
     expect(
       await screen.findByRole('article', { name: 'Todo foundation worker' }),
@@ -1485,7 +1497,10 @@ describe('App', () => {
       highWater: 5,
       events: retained.filter(({ sequence }) => sequence > after),
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    const app = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+      api,
+    });
 
     expect(await screen.findByText('child.started')).toBeVisible();
     const child = screen.getByRole('list', {
@@ -1584,7 +1599,10 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    const app = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+      api,
+    });
     const interrupt = await screen.findByRole('button', {
       name: 'Interrupt execution',
     });
@@ -1731,7 +1749,9 @@ describe('App', () => {
 
   it('disables interruption while disconnected or stale and sends the exact running revision', async () => {
     const user = userEvent.setup();
-    const disconnected = renderApp({ pathname: `/projects/${projectId}` });
+    const disconnected = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+    });
     const button = await screen.findByRole('button', {
       name: 'Interrupt execution',
     });
@@ -1755,7 +1775,9 @@ describe('App', () => {
     ).toBeVisible();
     disconnected.unmount();
 
-    const app = renderApp({ pathname: `/projects/${projectId}` });
+    const app = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+    });
     const activeButton = await screen.findByRole('button', {
       name: 'Interrupt execution',
     });
@@ -1806,10 +1828,8 @@ describe('App', () => {
   it('shows attention, activity, diagnostics, planning, and the Board', async () => {
     const user = userEvent.setup();
     const app = renderApp({ pathname: `/projects/${projectId}` });
-    expect(await screen.findByText('Preferred skill fallback')).toBeVisible();
-    expect(screen.getByText('Required skill unavailable')).toBeVisible();
     expect(
-      screen.getByText('Required verification skill is unavailable.'),
+      await screen.findByText('Required verification skill is unavailable.'),
     ).toBeVisible();
     await user.click(screen.getByRole('tab', { name: 'Board' }));
     expect(screen.getByRole('heading', { name: 'Board' })).toBeVisible();
@@ -1817,6 +1837,15 @@ describe('App', () => {
     expect(
       screen.queryByRole('button', { name: /start|approve|create/i }),
     ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Runs' }));
+    await user.click(
+      within(screen.getByRole('list', { name: 'Active runs' })).getByRole(
+        'link',
+        { name: /Todo foundation worker/i },
+      ),
+    );
+    expect(screen.getByText('Preferred skill fallback')).toBeVisible();
+    expect(screen.getByText('Required skill unavailable')).toBeVisible();
 
     act(() =>
       app.sockets[0]?.message({
@@ -1849,7 +1878,9 @@ describe('App', () => {
   });
 
   it('shows runtime completion, output, child, and adapter diagnostics before domain lifecycle catches up', async () => {
-    const app = renderApp({ pathname: `/projects/${projectId}` });
+    const app = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+    });
     expect(
       await screen.findByRole('article', { name: 'Todo foundation worker' }),
     ).toBeVisible();
@@ -2053,6 +2084,7 @@ describe('App', () => {
 
   it('enables only running execution interrupts and disables all controls when audit health is unsafe', async () => {
     const user = userEvent.setup();
+    const completedExecutionId = '66666666-6666-4666-8666-666666666666';
     const terminalApi = createApi();
     vi.mocked(terminalApi.projectSnapshot).mockResolvedValueOnce(
       v2ProjectSnapshotSchema.parse({
@@ -2061,7 +2093,7 @@ describe('App', () => {
           execution,
           {
             ...execution,
-            id: '66666666-6666-4666-8666-666666666666',
+            id: completedExecutionId,
             lifecycle: 'completed',
             revision: 5,
             endedAt: '2026-08-28T00:00:08.000Z',
@@ -2070,27 +2102,42 @@ describe('App', () => {
       }),
     );
     const terminal = renderApp({
-      pathname: `/projects/${projectId}`,
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
       api: terminalApi,
     });
     expect(
-      await screen.findAllByRole('article', {
+      await screen.findByRole('article', {
         name: 'Todo foundation worker',
       }),
-    ).toHaveLength(2);
+    ).toBeVisible();
+    expect(
+      within(screen.getByRole('list', { name: 'Active runs' })).getAllByRole(
+        'listitem',
+      ),
+    ).toHaveLength(1);
     act(() => {
       terminal.sockets[0]?.open();
       terminal.sockets[0]?.message(subscribed());
     });
-    const buttons = screen.getAllByRole('button', {
+    const runningInterrupt = screen.getByRole('button', {
       name: 'Interrupt execution',
     });
-    expect(buttons[0]).toBeEnabled();
-    expect(buttons[1]).toBeDisabled();
-    await user.click(buttons[0]);
+    expect(runningInterrupt).toBeEnabled();
+    await user.click(runningInterrupt);
     expect(apiInterruptEnvelope(terminalApi)).toMatchObject({
       command: { expectedRevision: 4, executionId },
     });
+    await user.click(screen.getByRole('tab', { name: 'History' }));
+    const historyRuns = screen.getByRole('list', { name: 'History runs' });
+    expect(within(historyRuns).getAllByRole('listitem')).toHaveLength(1);
+    await user.click(
+      within(historyRuns).getByRole('link', {
+        name: /Todo foundation worker/i,
+      }),
+    );
+    expect(
+      screen.getByRole('button', { name: 'Interrupt execution' }),
+    ).toBeDisabled();
     terminal.unmount();
 
     const unsafeApi = createApi();
@@ -2107,7 +2154,7 @@ describe('App', () => {
       }),
     );
     const unsafe = renderApp({
-      pathname: `/projects/${projectId}`,
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
       api: unsafeApi,
     });
     await screen.findByRole('article', { name: 'Todo foundation worker' });

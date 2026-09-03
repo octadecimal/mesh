@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { approvedIntentLedgerSchema } from '@mesh/v2-contracts';
 import { describe, expect, it } from 'vitest';
 
@@ -87,7 +88,8 @@ const intentLedger = {
 const approvedIntentLedger = approvedIntentLedgerSchema.parse(intentLedger);
 
 describe('RequirementsPane', () => {
-  it('renders the approved intent, all five record groups, metadata, provenance, and textual relationship endpoints', () => {
+  it('renders counted semantic groups, compact record metadata, provenance, and textual relationship endpoints', async () => {
+    const user = userEvent.setup();
     render(<RequirementsPane intentLedger={approvedIntentLedger} />);
 
     expect(screen.getByText('Build Todo.')).toBeVisible();
@@ -110,9 +112,9 @@ describe('RequirementsPane', () => {
       'Questions',
       'Risks',
     ]) {
-      expect(
-        screen.getAllByRole('heading', { name: group }).at(-1),
-      ).toBeVisible();
+      const heading = screen.getByRole('heading', { name: `${group} · 1` });
+      expect(heading).toBeVisible();
+      expect(heading.tagName).toBe('H3');
     }
     expect(
       screen.getByText('Requirement · Functional · Approved · Must'),
@@ -129,11 +131,98 @@ describe('RequirementsPane', () => {
     ).toHaveTextContent(
       '00000000-0000-4000-8000-000000000002 · Decision · decision statement constrains 00000000-0000-4000-8000-000000000001 · Requirement · requirement statement',
     );
+    const requirementCard = screen.getByRole('article', {
+      name: 'requirement statement',
+    });
+    await user.click(
+      within(requirementCard).getByText('Revision and provenance'),
+    );
     expect(
-      screen.getByRole('list', {
+      within(requirementCard).getByRole('list', {
         name: 'Provenance for requirement statement',
       }),
     ).toHaveTextContent('requirement source');
+  });
+
+  it('counts each category and keeps relationship direction explicit', () => {
+    const extraRequirement = (suffix: number) => ({
+      ...approvedIntentLedger.records[0],
+      recordId: `00000000-0000-4000-8000-00000000000${suffix}`,
+      content: {
+        ...approvedIntentLedger.records[0].content,
+        statement: `requirement statement ${suffix}`,
+      },
+    });
+    const extraDecision = {
+      ...approvedIntentLedger.records[1],
+      recordId: '00000000-0000-4000-8000-000000000008',
+      content: {
+        ...approvedIntentLedger.records[1].content,
+        statement: 'decision statement 8',
+      },
+    };
+    render(
+      <RequirementsPane
+        intentLedger={{
+          ...approvedIntentLedger,
+          records: [
+            ...approvedIntentLedger.records,
+            extraRequirement(6),
+            extraRequirement(7),
+            extraDecision,
+          ],
+          relationships: [
+            ...approvedIntentLedger.relationships,
+            {
+              kind: 'depends_on',
+              fromRecordId: extraRequirement(6).recordId,
+              toRecordId: extraRequirement(7).recordId,
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByRole('heading', { name: 'Requirements · 3' }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole('heading', { name: 'Decisions · 2' }),
+    ).toBeVisible();
+    expect(
+      screen.getByText(`depends on ${extraRequirement(7).recordId}`),
+    ).toBeVisible();
+  });
+
+  it('keeps approval and record revision depth in native disclosures', async () => {
+    const user = userEvent.setup();
+    render(<RequirementsPane intentLedger={approvedIntentLedger} />);
+
+    const approval = screen.getByText('Approval history').closest('details');
+    const card = screen.getByRole('article', {
+      name: 'requirement statement',
+    });
+    const revision = within(card)
+      .getByText('Revision and provenance')
+      .closest('details');
+    expect(approval).not.toBeNull();
+    expect(revision).not.toBeNull();
+    if (!approval || !revision) throw new Error('Expected ledger disclosures');
+    expect(approval).not.toHaveAttribute('open');
+    expect(revision).not.toHaveAttribute('open');
+
+    await user.click(screen.getByText('Approval history'));
+    expect(within(approval).getByText('Approved by')).toBeVisible();
+    expect(
+      within(approval).getByText('2026-08-29T00:00:00.000Z'),
+    ).toBeVisible();
+    await user.click(within(card).getByText('Revision and provenance'));
+    expect(within(card).getByText('Revision 1')).toBeVisible();
+    expect(
+      within(card).getByRole('list', {
+        name: 'Provenance for requirement statement',
+      }),
+    ).toBeVisible();
   });
 
   it('renders loading, error, empty-before-approval, and no-record states without inventing coverage or readiness', () => {

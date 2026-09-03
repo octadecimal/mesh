@@ -289,6 +289,17 @@ describe('ExecutionActivity', () => {
     ).toBeVisible();
     expect(screen.getByText('Preferred skill fallback')).toBeVisible();
     expect(screen.getByText('Required skill unavailable')).toBeVisible();
+    const executionSummary = screen.getByText('Lifecycle').closest('dl');
+    expect(executionSummary).not.toBeNull();
+    expect(screen.getByText('Lifecycle').tagName).toBe('DT');
+    expect(
+      screen
+        .getByRole('region', { name: 'Skill outcomes' })
+        .querySelector('dl'),
+    ).not.toBeNull();
+    expect(
+      screen.getByText('Child activity · 2').closest('details'),
+    ).toHaveAttribute('open');
     const childActivity = screen.getByRole('list', {
       name: 'Child activity for Todo foundation worker',
     });

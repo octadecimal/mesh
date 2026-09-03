@@ -1,7 +1,46 @@
 .intent-ledger-pane {
   display: grid;
   gap: 1rem;
+  min-width: 0;
 }
+
+.intent-ledger-approved,
+.intent-ledger-relationships,
+.intent-ledger-card {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: var(--surface);
+}
+
+.intent-ledger-pane dl,
+.intent-ledger-records {
+  margin: 0;
+}
+
+.intent-ledger-pane dt {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.intent-ledger-pane dd {
+  margin: 0.15rem 0 0.75rem;
+}
+
+.intent-ledger-pane dd,
+.intent-ledger-pane li {
+  overflow-wrap: anywhere;
+}
+
+.intent-ledger-records {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 0.75rem;
+  padding: 0;
+  list-style: none;
+}
+
 .intent-ledger-pane textarea {
   display: block;
   min-height: 6rem;
@@ -11,12 +50,27 @@
   margin: 0.25rem;
 }
 .intent-ledger-card {
-  border: 1px solid currentColor;
-  padding: 0.75rem;
+  height: 100%;
 }
 .intent-ledger-card > :first-child {
   margin-top: 0;
 }
+
+.intent-ledger-metadata {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.intent-ledger-history {
+  border-top: 1px solid var(--border);
+  padding-top: 0.75rem;
+}
+
+.intent-ledger-history summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
 .intent-ledger-actions {
   display: flex;
   flex-wrap: wrap;

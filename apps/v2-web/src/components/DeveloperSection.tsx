@@ -47,21 +47,47 @@ function commandDisabledReason(
 
 function WorkspaceTruth({ attempt }: { attempt: DeveloperAttempt }) {
   const { workspace } = attempt;
+  const head = workspace.observedHead?.slice(0, 7) ?? 'not observed';
+  const dirty =
+    workspace.observedDirty === null
+      ? 'not observed'
+      : workspace.observedDirty
+        ? 'yes'
+        : 'no';
   return (
-    <section aria-label={`Workspace for attempt ${attempt.ordinal}`}>
-      <h5>Workspace</h5>
-      <p>
-        {lifecycleLabel(workspace.lifecycle)} · head{' '}
-        {workspace.observedHead?.slice(0, 7) ?? 'not observed'} · dirty:{' '}
-        {workspace.observedDirty === null
-          ? 'not observed'
-          : workspace.observedDirty
-            ? 'yes'
-            : 'no'}
-      </p>
-      <p>{workspace.path}</p>
-      {workspace.failure ? <p>{workspace.failure.message}</p> : null}
-    </section>
+    <details
+      className="v2-developer-disclosure"
+      aria-label={`Workspace for attempt ${attempt.ordinal}`}
+      open
+    >
+      <summary>
+        <span>Workspace</span>{' '}
+        <span>
+          {lifecycleLabel(workspace.lifecycle)} · head {head} · dirty: {dirty}
+        </span>
+      </summary>
+      <dl className="v2-developer-metadata">
+        <div>
+          <dt>Lifecycle</dt>
+          <dd>{lifecycleLabel(workspace.lifecycle)}</dd>
+        </div>
+        <div>
+          <dt>Head</dt>
+          <dd>{head}</dd>
+        </div>
+        <div>
+          <dt>Dirty</dt>
+          <dd>{dirty}</dd>
+        </div>
+        <div>
+          <dt>Path</dt>
+          <dd>{workspace.path}</dd>
+        </div>
+      </dl>
+      {workspace.failure ? (
+        <p className="v2-warning">{workspace.failure.message}</p>
+      ) : null}
+    </details>
   );
 }
 
@@ -69,8 +95,12 @@ function ReportEvidence({ record }: { record: DeveloperReportRecord }) {
   const { report } = record;
   if (report.disposition === 'blocked') {
     return (
-      <section aria-label="Developer blocker report">
-        <h5>Blocker</h5>
+      <details
+        className="v2-developer-disclosure"
+        aria-label="Developer blocker report"
+        open
+      >
+        <summary>Blocker</summary>
         <p>{report.blocker}</p>
         {report.evidence.length > 0 ? (
           <ul>
@@ -79,14 +109,23 @@ function ReportEvidence({ record }: { record: DeveloperReportRecord }) {
             ))}
           </ul>
         ) : null}
-        <p>Suggested next action: {report.suggestedNextAction}</p>
+        <dl className="v2-developer-metadata">
+          <div>
+            <dt>Suggested next action</dt>
+            <dd>{report.suggestedNextAction}</dd>
+          </div>
+        </dl>
         <p>The workspace will be preserved for recovery and operator review.</p>
-      </section>
+      </details>
     );
   }
   return (
-    <section aria-label="Developer completion report">
-      <h5>Completion evidence</h5>
+    <details
+      className="v2-developer-disclosure"
+      aria-label="Developer completion report"
+      open
+    >
+      <summary>Completion evidence</summary>
       <h6>Acceptance criteria</h6>
       {report.criterionCoverage.length === 0 ? (
         <p>No criterion coverage reported.</p>
@@ -151,11 +190,16 @@ function ReportEvidence({ record }: { record: DeveloperReportRecord }) {
           </ul>
         </>
       ) : null}
-      <p>
-        Reported workspace · head {report.workspace.headCommit.slice(0, 7)} ·
-        dirty: {report.workspace.dirty ? 'yes' : 'no'}
-      </p>
-    </section>
+      <dl className="v2-developer-metadata">
+        <div>
+          <dt>Reported workspace</dt>
+          <dd>
+            head {report.workspace.headCommit.slice(0, 7)} · dirty:{' '}
+            {report.workspace.dirty ? 'yes' : 'no'}
+          </dd>
+        </div>
+      </dl>
+    </details>
   );
 }
 
@@ -214,7 +258,32 @@ function AttemptHistory({
           {lifecycleLabel(attempt.lifecycle)}
         </p>
       </header>
-      <p>Attempt revision {attempt.revision}</p>
+      <dl className="v2-developer-metadata">
+        <div>
+          <dt>Attempt revision</dt>
+          <dd>{attempt.revision}</dd>
+        </div>
+        <div>
+          <dt>Task contract revision</dt>
+          <dd>{attempt.taskContractRevision}</dd>
+        </div>
+        <div>
+          <dt>Task revision</dt>
+          <dd>{attempt.taskCurrentRevision}</dd>
+        </div>
+        <div>
+          <dt>Intent revision</dt>
+          <dd>{attempt.intentRevision}</dd>
+        </div>
+        <div>
+          <dt>Ledger revision</dt>
+          <dd>{attempt.ledgerRevision}</dd>
+        </div>
+        <div>
+          <dt>Delivery plan revision</dt>
+          <dd>{attempt.deliveryPlanRevision}</dd>
+        </div>
+      </dl>
       {attempt.attention ? (
         <p className="v2-developer-attention">
           Attention required: {attempt.attention.message}
@@ -224,47 +293,56 @@ function AttemptHistory({
       {attempt.executionIds.length === 0 ? (
         <p>No Developer execution has been attached yet.</p>
       ) : (
-        <ol
-          className="v2-developer-executions"
-          aria-label={`Executions for attempt ${attempt.ordinal}`}
-        >
-          {attempt.executionIds.map((id, index) => {
-            const execution = executionById.get(id);
-            if (!execution) {
+        <details className="v2-developer-disclosure" open>
+          <summary>Executions · {attempt.executionIds.length}</summary>
+          <ol
+            className="v2-developer-executions"
+            aria-label={`Executions for attempt ${attempt.ordinal}`}
+          >
+            {attempt.executionIds.map((id, index) => {
+              const execution = executionById.get(id);
+              if (!execution) {
+                return (
+                  <li key={id}>
+                    Execution {index + 1} is unavailable in current project
+                    truth.
+                  </li>
+                );
+              }
+              const activity = activityByExecutionId[id];
+              const replacedExecutionIndex = execution.replacementForExecutionId
+                ? attempt.executionIds.indexOf(
+                    execution.replacementForExecutionId,
+                  )
+                : -1;
               return (
                 <li key={id}>
-                  Execution {index + 1} is unavailable in current project truth.
+                  <h5>Execution {index + 1}</h5>
+                  {execution.replacementForExecutionId ? (
+                    <dl className="v2-developer-metadata">
+                      <div>
+                        <dt>Replacement</dt>
+                        <dd>
+                          Replaces execution{' '}
+                          {replacedExecutionIndex >= 0
+                            ? replacedExecutionIndex + 1
+                            : execution.replacementForExecutionId}
+                        </dd>
+                      </div>
+                    </dl>
+                  ) : null}
+                  <ExecutionActivity
+                    execution={execution}
+                    childActivities={activity?.childActivities}
+                    diagnosticId={activity?.diagnosticId}
+                    runtimeActivity={activity?.runtimeActivity}
+                    projectCursors={projectCursors}
+                  />
                 </li>
               );
-            }
-            const activity = activityByExecutionId[id];
-            const replacedExecutionIndex = execution.replacementForExecutionId
-              ? attempt.executionIds.indexOf(
-                  execution.replacementForExecutionId,
-                )
-              : -1;
-            return (
-              <li key={id}>
-                <h5>Execution {index + 1}</h5>
-                {execution.replacementForExecutionId ? (
-                  <p>
-                    Replaces execution{' '}
-                    {replacedExecutionIndex >= 0
-                      ? replacedExecutionIndex + 1
-                      : execution.replacementForExecutionId}
-                  </p>
-                ) : null}
-                <ExecutionActivity
-                  execution={execution}
-                  childActivities={activity?.childActivities}
-                  diagnosticId={activity?.diagnosticId}
-                  runtimeActivity={activity?.runtimeActivity}
-                  projectCursors={projectCursors}
-                />
-              </li>
-            );
-          })}
-        </ol>
+            })}
+          </ol>
+        </details>
       )}
       {attempt.lifecycle === 'active' ? (
         <>

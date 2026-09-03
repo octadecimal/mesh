@@ -84,28 +84,39 @@ export function ExecutionActivity({
     <article className="v2-execution" aria-labelledby={headingId}>
       <header>
         <h3 id={headingId}>{label}</h3>
-        <p role="status">{execution.lifecycle}</p>
+        <dl className="v2-execution-summary">
+          <div>
+            <dt>Lifecycle</dt>
+            <dd role="status">{execution.lifecycle}</dd>
+          </div>
+        </dl>
       </header>
       <section aria-label="Skill outcomes">
         <h4>Skill outcomes</h4>
-        <ul>
+        <dl className="v2-execution-skills">
           {execution.resolvedSkills.map((skill) => (
-            <li key={`${skill.mode}-${skill.requested.id}`}>
-              <strong>{skill.requested.id}</strong>:{' '}
-              <span>{skillOutcome(skill)}</span>
-            </li>
+            <div key={`${skill.mode}-${skill.requested.id}`}>
+              <dt>{skill.requested.id}</dt>
+              <dd>{skillOutcome(skill)}</dd>
+            </div>
           ))}
-        </ul>
+        </dl>
       </section>
-      <section aria-label={`Child activity for ${label}`}>
-        <h4>Child activity</h4>
+      <details
+        className="v2-execution-disclosure"
+        open={childActivities.length > 0}
+      >
+        <summary>Child activity · {childActivities.length}</summary>
         <ChildActivityTree
           activities={childActivities}
           label={`Child activity for ${label}`}
         />
-      </section>
-      <section aria-label={`Runtime activity for ${label}`}>
-        <h4>Runtime activity</h4>
+      </details>
+      <details
+        className="v2-execution-disclosure"
+        open={runtimeActivity.length > 0}
+      >
+        <summary>Runtime activity · {runtimeActivity.length}</summary>
         {runtimeActivity.length === 0 ? (
           <p>No runtime activity reported.</p>
         ) : (
@@ -115,7 +126,7 @@ export function ExecutionActivity({
             ))}
           </ul>
         )}
-      </section>
+      </details>
       <details>
         <summary>Diagnostics</summary>
         <dl>

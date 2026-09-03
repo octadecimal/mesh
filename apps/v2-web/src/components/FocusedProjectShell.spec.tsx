@@ -100,6 +100,73 @@ const snapshot: V2ProjectSnapshot = {
   cursors: { domain: 4, runtime: 12 },
 };
 
+const boardTask = {
+  taskId: 'T-21',
+  taskContractRevision: 1,
+  taskCurrentRevision: 2,
+  milestoneId: 'M-1',
+  milestoneRevision: 1,
+  title: 'Build controls',
+  outcome: 'Operators can control a build.',
+  lifecycle: 'pending' as const,
+  priority: 'must' as const,
+  labels: ['web'],
+  readiness: { state: 'actionable' as const, blockers: [] },
+  dependencies: [],
+  detail: {
+    acceptanceCriteria: ['Build controls are operable.'],
+    verificationCriteria: ['Exercise the build controls.'],
+    ownedSurfaces: ['Build controls'],
+    prohibitedSurfaces: ['Runtime policy'],
+    expectedArtifacts: ['Focused component test'],
+    milestoneOutcome: 'Builds are controllable.',
+    milestoneStopCondition: 'The focused test passes.',
+    milestoneExclusions: [],
+    requirementTraces: [],
+  },
+};
+
+const snapshotWithBoardTask: V2ProjectSnapshot = {
+  ...snapshot,
+  board: {
+    ...snapshot.board,
+    deliveryPlanRevision: 1,
+    emptyReason: null,
+    filter: {
+      projectId: snapshot.project.id,
+      revision: 1,
+      milestoneIds: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirementRecordIds: [],
+      updatedAt: '2026-08-28T00:00:00.000Z',
+    },
+    totalTaskCount: 1,
+    matchedTaskCount: 1,
+    facets: {
+      milestones: [
+        {
+          value: boardTask.milestoneId,
+          label: 'Delivery',
+          selected: false,
+          matchingTaskCount: 1,
+          milestoneRevision: 1,
+          lifecycle: 'active',
+          historical: false,
+        },
+      ],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [boardTask],
+  },
+};
+
 const pmProfile = {
   profileId: '33333333-3333-4333-8333-333333333333',
   projectId: snapshot.project.id,
@@ -445,11 +512,20 @@ describe('FocusedProjectShell', () => {
     );
   });
 
-  it('passes URL-selected run detail only to the Runs artifact', () => {
+  it('renders the URL-selected project run with its live durable evidence', async () => {
+    const user = userEvent.setup();
     const completed = {
       ...executionFixture,
       id: '99999999-9999-4999-8999-999999999999',
       lifecycle: 'completed',
+      resolvedSkills: [
+        {
+          requested: { id: 'verification-before-completion' },
+          mode: 'required',
+          resolution: { kind: 'unavailable', reason: 'Not installed' },
+        },
+      ],
+      nativeHandle: 'opaque-completed-run',
       updatedAt: '2026-08-28T00:00:10.000Z',
       endedAt: '2026-08-28T00:00:10.000Z',
     } as WorkerExecution;
@@ -470,6 +546,31 @@ describe('FocusedProjectShell', () => {
         onInterrupt={vi.fn()}
         onNavigateArtifact={vi.fn()}
         onNavigate={vi.fn()}
+        activityByExecutionId={{
+          [completed.id]: {
+            diagnosticId: 'raw-completed-run',
+            childActivities: [
+              {
+                id: 'child-completed',
+                title: 'Verify completed build',
+                lifecycle: 'completed',
+              },
+            ],
+            runtimeActivity: [
+              {
+                id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                projectId: snapshot.project.id,
+                executionId: completed.id,
+                diagnosticId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                sequence: 12,
+                adapterCursor: 8,
+                occurredAt: '2026-08-28T00:00:10.000Z',
+                type: 'worker_execution.completed',
+                payload: { outcome: 'completed' },
+              },
+            ],
+          },
+        }}
       />,
     );
 
@@ -483,6 +584,71 @@ describe('FocusedProjectShell', () => {
         'Completed',
       ),
     ).toBeVisible();
+    const runList = within(panel).getByRole('list', { name: 'History runs' });
+    expect(within(runList).getAllByRole('listitem')).toHaveLength(1);
+    expect(runList).toHaveTextContent(snapshot.project.displayName);
+    const evidence = within(panel).getByRole('article', {
+      name: 'Todo foundation worker',
+    });
+    expect(within(panel).getAllByRole('article')).toHaveLength(1);
+    expect(evidence).toHaveTextContent('Required skill unavailable');
+    expect(evidence).toHaveTextContent('Verify completed build');
+    expect(evidence).toHaveTextContent('Execution completed');
+    await user.click(within(evidence).getByText('Diagnostics'));
+    expect(evidence).toHaveTextContent('raw-completed-run');
+    expect(
+      within(evidence).getByText('Domain cursor').nextElementSibling,
+    ).toHaveTextContent('4');
+    expect(
+      within(evidence).getByText('Runtime cursor').nextElementSibling,
+    ).toHaveTextContent('12');
+  });
+
+  it('routes controlled Board task selection through canonical project URLs', async () => {
+    const user = userEvent.setup();
+    const onNavigate = vi.fn();
+    const shell = (selectedId?: string) => (
+      <FocusedProjectShell
+        artifact="board"
+        selectedId={selectedId}
+        model={{
+          status: 'ready',
+          snapshot: snapshotWithBoardTask,
+          interrupt: { enabled: true },
+        }}
+        developer={{
+          onStart: vi.fn(),
+          onInterrupt: vi.fn(),
+          onReplace: vi.fn(),
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={onNavigate}
+      />
+    );
+    const view = render(shell());
+
+    await user.click(
+      screen.getByRole('button', { name: 'Open Build controls' }),
+    );
+    expect(onNavigate).toHaveBeenLastCalledWith(
+      `/projects/${snapshot.project.id}/board?task=T-21`,
+    );
+
+    view.rerender(shell(boardTask.taskId));
+    expect(
+      screen.getByRole('region', { name: 'Task details' }),
+    ).toHaveTextContent('Build controls');
+    expect(
+      screen.getByRole('region', { name: 'Developer for Build controls' }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole('button', { name: 'Close task details' }),
+    );
+    expect(onNavigate).toHaveBeenLastCalledWith(
+      `/projects/${snapshot.project.id}/board`,
+    );
   });
 
   it.each([
@@ -727,35 +893,36 @@ describe('FocusedProjectShell', () => {
     const user = userEvent.setup();
     const onDeselect = vi.fn();
     const onInterrupt = vi.fn();
-    render(
+    const activityByExecutionId = {
+      [executionFixture.id]: {
+        childActivities: [
+          {
+            id: 'child-1',
+            title: 'Read package.json',
+            lifecycle: 'running' as const,
+          },
+        ],
+        runtimeActivity: [
+          {
+            id: '55555555-5555-4555-8555-555555555555',
+            projectId: snapshot.project.id,
+            executionId: executionFixture.id,
+            diagnosticId: '66666666-6666-4666-8666-666666666666',
+            sequence: 13,
+            adapterCursor: 9,
+            occurredAt: '2026-08-28T00:00:09.000Z',
+            type: 'worker_execution.completed' as const,
+            payload: { outcome: 'completed' as const },
+          },
+        ],
+      },
+    };
+    const view = render(
       <FocusedProjectShell
         model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
         onDeselect={onDeselect}
         onInterrupt={onInterrupt}
-        activityByExecutionId={{
-          [executionFixture.id]: {
-            childActivities: [
-              {
-                id: 'child-1',
-                title: 'Read package.json',
-                lifecycle: 'running',
-              },
-            ],
-            runtimeActivity: [
-              {
-                id: '55555555-5555-4555-8555-555555555555',
-                projectId: snapshot.project.id,
-                executionId: executionFixture.id,
-                diagnosticId: '66666666-6666-4666-8666-666666666666',
-                sequence: 13,
-                adapterCursor: 9,
-                occurredAt: '2026-08-28T00:00:09.000Z',
-                type: 'worker_execution.completed',
-                payload: { outcome: 'completed' },
-              },
-            ],
-          },
-        }}
+        activityByExecutionId={activityByExecutionId}
       />,
     );
 
@@ -779,18 +946,31 @@ describe('FocusedProjectShell', () => {
     ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Deselect project' }));
+    view.rerender(
+      <FocusedProjectShell
+        artifact="runs"
+        selectedId={executionFixture.id}
+        model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
+        onDeselect={onDeselect}
+        onInterrupt={onInterrupt}
+        activityByExecutionId={activityByExecutionId}
+      />,
+    );
+    const runPanel = screen.getByRole('tabpanel', { name: 'Runs' });
     await user.click(
-      screen.getByRole('button', { name: 'Interrupt execution' }),
+      within(runPanel).getByRole('button', {
+        name: 'Interrupt execution',
+      }),
     );
     expect(onDeselect).toHaveBeenCalledOnce();
     expect(onInterrupt).toHaveBeenCalledWith(executionFixture);
     expect(
-      screen.getByRole('list', {
+      within(runPanel).getByRole('list', {
         name: 'Child activity for Todo foundation worker',
       }),
     ).toHaveTextContent('Read package.json');
     expect(
-      screen.getByRole('list', {
+      within(runPanel).getByRole('list', {
         name: 'Runtime activity for Todo foundation worker',
       }),
     ).toHaveTextContent('Execution completed');
@@ -810,6 +990,8 @@ describe('FocusedProjectShell', () => {
     (lifecycle: WorkerExecutionLifecycle) => {
       render(
         <FocusedProjectShell
+          artifact="runs"
+          selectedId={executionFixture.id}
           model={{
             status: 'ready',
             interrupt: { enabled: true },
@@ -824,7 +1006,10 @@ describe('FocusedProjectShell', () => {
       );
       expect(
         within(
-          screen.getByRole('article', { name: 'Todo foundation worker' }),
+          within(screen.getByRole('tabpanel', { name: 'Runs' })).getByRole(
+            'article',
+            { name: 'Todo foundation worker' },
+          ),
         ).getByRole('status'),
       ).toHaveTextContent(lifecycle);
     },
@@ -842,6 +1027,8 @@ describe('FocusedProjectShell', () => {
 
     rerender(
       <FocusedProjectShell
+        artifact="runs"
+        selectedId={executionFixture.id}
         model={{ status: 'stale', snapshot, message: 'Resyncing project' }}
         onDeselect={vi.fn()}
         onInterrupt={vi.fn()}
@@ -859,6 +1046,8 @@ describe('FocusedProjectShell', () => {
 
     rerender(
       <FocusedProjectShell
+        artifact="runs"
+        selectedId={executionFixture.id}
         model={{ status: 'disconnected', snapshot, message: 'Connection lost' }}
         onDeselect={vi.fn()}
         onInterrupt={vi.fn()}
@@ -875,6 +1064,8 @@ describe('FocusedProjectShell', () => {
   it('uses the ready presentation reason when interrupting is unavailable', () => {
     render(
       <FocusedProjectShell
+        artifact="runs"
+        selectedId={executionFixture.id}
         model={{
           status: 'ready',
           snapshot,
@@ -909,8 +1100,10 @@ describe('FocusedProjectShell', () => {
       lifecycle: 'completed',
       revision: 5,
     } as WorkerExecution;
-    render(
+    const shell = (selectedId: string) => (
       <FocusedProjectShell
+        artifact="runs"
+        selectedId={selectedId}
         model={{
           status: 'ready',
           interrupt: { enabled: true },
@@ -921,33 +1114,24 @@ describe('FocusedProjectShell', () => {
         }}
         onDeselect={vi.fn()}
         onInterrupt={onInterrupt}
-      />,
+      />
     );
+    const view = render(shell(completedExecution.id));
+    const completedInterrupt = within(
+      screen.getByRole('region', { name: 'Selected run evidence' }),
+    ).getByRole('button', { name: 'Interrupt execution' });
 
-    const runningRow = screen
-      .getByRole('article', { name: 'Todo foundation worker' })
-      .closest('li');
-    const completedRow = screen
-      .getByRole('article', { name: 'Completed Todo worker' })
-      .closest('li');
-    expect(runningRow).not.toBeNull();
-    expect(completedRow).not.toBeNull();
-    if (runningRow === null || completedRow === null) {
-      throw new Error('Expected an execution list row for each execution');
-    }
-    const runningInterrupt = within(runningRow).getByRole('button', {
-      name: 'Interrupt execution',
-    });
-    const completedInterrupt = within(completedRow).getByRole('button', {
-      name: 'Interrupt execution',
-    });
-
-    expect(runningInterrupt).toBeEnabled();
     expect(completedInterrupt).toBeDisabled();
     expect(completedInterrupt).toHaveAccessibleDescription(
       'Only running executions can be interrupted.',
     );
     await user.click(completedInterrupt);
+
+    view.rerender(shell(executionFixture.id));
+    const runningInterrupt = within(
+      screen.getByRole('region', { name: 'Selected run evidence' }),
+    ).getByRole('button', { name: 'Interrupt execution' });
+    expect(runningInterrupt).toBeEnabled();
     await user.click(runningInterrupt);
     expect(onInterrupt).toHaveBeenCalledOnce();
     expect(onInterrupt).toHaveBeenCalledWith(executionFixture);
