@@ -3,11 +3,17 @@ import type { Project, V2ProjectSnapshot } from '@mesh/v2-contracts';
 import { afterEach, expect, it, vi } from 'vitest';
 
 import type { V2Api } from '../api/client';
-import { projectFixture, projectSnapshotFixture } from '../test/project-snapshot-fixture';
+import {
+  projectFixture,
+  projectSnapshotFixture,
+} from '../test/project-snapshot-fixture';
 import { useGlobalProjectSnapshots } from './use-global-project-snapshots';
 
 const alpha = projectFixture as Project;
-const beta = { ...alpha, id: '22222222-2222-4222-8222-222222222222' } as Project;
+const beta = {
+  ...alpha,
+  id: '22222222-2222-4222-8222-222222222222',
+} as Project;
 const alphaSnapshot = projectSnapshotFixture as V2ProjectSnapshot;
 const betaSnapshot = {
   ...alphaSnapshot,
@@ -24,10 +30,15 @@ const deferred = <T,>() => {
   return { promise, resolve, reject };
 };
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 it('loads partial snapshots, polls, and cancels when disabled', async () => {
   vi.useFakeTimers();
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+  vi.spyOn(document, 'hasFocus').mockReturnValue(true);
   const signals: AbortSignal[] = [];
   const api = {
     projectSnapshot: vi.fn((projectId: string, signal?: AbortSignal) => {
@@ -63,6 +74,65 @@ it('loads partial snapshots, polls, and cancels when disabled', async () => {
 
   rerender({ enabled: false, pollIntervalMs: 5_000 });
   expect(signals.at(-1)?.aborted).toBe(true);
+  unmount();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it('pauses Runs polling while inactive and resumes it when active', async () => {
+  vi.useFakeTimers();
+  let visibilityState: DocumentVisibilityState = 'visible';
+  let focused = true;
+  vi.spyOn(document, 'visibilityState', 'get').mockImplementation(
+    () => visibilityState,
+  );
+  vi.spyOn(document, 'hasFocus').mockImplementation(() => focused);
+  const signals: AbortSignal[] = [];
+  const api = {
+    projectSnapshot: vi.fn((_: string, signal?: AbortSignal) => {
+      if (signal) signals.push(signal);
+      return new Promise<V2ProjectSnapshot>(() => undefined);
+    }),
+  } satisfies Pick<V2Api, 'projectSnapshot'>;
+  const { result, unmount } = renderHook(() =>
+    useGlobalProjectSnapshots({
+      api,
+      projects: [alpha],
+      enabled: true,
+      pollIntervalMs: 5_000,
+    }),
+  );
+
+  expect(api.projectSnapshot).toHaveBeenCalledOnce();
+  expect(vi.getTimerCount()).toBe(1);
+
+  visibilityState = 'hidden';
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(result.current.refreshing).toBe(false);
+  expect(signals[0]?.aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+  await act(() => vi.advanceTimersByTimeAsync(10_000));
+  expect(api.projectSnapshot).toHaveBeenCalledOnce();
+
+  visibilityState = 'visible';
+  act(() => document.dispatchEvent(new Event('visibilitychange')));
+  expect(api.projectSnapshot).toHaveBeenCalledTimes(2);
+  expect(vi.getTimerCount()).toBe(1);
+  await act(() => vi.advanceTimersByTimeAsync(5_000));
+  expect(signals[1]?.aborted).toBe(true);
+  expect(api.projectSnapshot).toHaveBeenCalledTimes(3);
+
+  focused = false;
+  act(() => window.dispatchEvent(new Event('blur')));
+  expect(signals[2]?.aborted).toBe(true);
+  expect(vi.getTimerCount()).toBe(0);
+  await act(() => vi.advanceTimersByTimeAsync(10_000));
+  expect(api.projectSnapshot).toHaveBeenCalledTimes(3);
+
+  focused = true;
+  act(() => window.dispatchEvent(new Event('focus')));
+  expect(api.projectSnapshot).toHaveBeenCalledTimes(4);
+  expect(vi.getTimerCount()).toBe(1);
+
   unmount();
   expect(vi.getTimerCount()).toBe(0);
 });

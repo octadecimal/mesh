@@ -712,10 +712,15 @@ const subscribed = (): ServerRealtimeMessage => ({
   cursors: projectSnapshot.cursors,
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe('App', () => {
   it('composes global pages without opening a project connection or issuing commands', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
     const user = userEvent.setup();
     const app = renderApp();
 
@@ -762,13 +767,55 @@ describe('App', () => {
     );
     inbox.unmount();
 
-    const setInterval = vi.spyOn(window, 'setInterval');
+    vi.useFakeTimers();
+    let visibilityState: DocumentVisibilityState = 'visible';
+    let focused = true;
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(
+      () => visibilityState,
+    );
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => focused);
+    const signals: AbortSignal[] = [];
     const runsApi = createApi();
+    runsApi.projectSnapshot = vi.fn(
+      (_: string, signal?: AbortSignal) =>
+        new Promise<V2ProjectSnapshot>(() => {
+          if (signal) signals.push(signal);
+        }),
+    );
     const runs = renderApp({ pathname: '/runs', api: runsApi });
-    await screen.findByRole('heading', { name: 'Runs', level: 1 });
-    await waitFor(() => expect(runsApi.projectSnapshot).toHaveBeenCalledOnce());
-    expect(setInterval).toHaveBeenCalledWith(expect.any(Function), 5000);
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(
+      screen.getByRole('heading', { name: 'Runs', level: 1 }),
+    ).toBeVisible();
+    expect(runsApi.projectSnapshot).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(1);
+
+    visibilityState = 'hidden';
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(runsApi.projectSnapshot).toHaveBeenCalledOnce();
+
+    visibilityState = 'visible';
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(runsApi.projectSnapshot).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(1);
+
+    focused = false;
+    act(() => window.dispatchEvent(new Event('blur')));
+    expect(signals[1]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(runsApi.projectSnapshot).toHaveBeenCalledTimes(2);
+
+    focused = true;
+    act(() => window.dispatchEvent(new Event('focus')));
+    expect(runsApi.projectSnapshot).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(1);
     runs.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
 
     const projectsApi = createApi();
     renderApp({ pathname: '/projects', api: projectsApi });

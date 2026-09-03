@@ -83,11 +83,15 @@ export function useGlobalProjectSnapshots({
     if (!enabled) {
       controller.current?.abort();
       controller.current = undefined;
-      setState((previous) => ({ ...previous, status: 'idle', refreshing: false }));
+      setState((previous) => ({
+        ...previous,
+        status: 'idle',
+        refreshing: false,
+      }));
       return;
     }
-    refresh();
     if (pollIntervalMs === 0) {
+      refresh();
       window.addEventListener('focus', refresh);
       return () => {
         window.removeEventListener('focus', refresh);
@@ -95,11 +99,40 @@ export function useGlobalProjectSnapshots({
         controller.current = undefined;
       };
     }
-    const interval = window.setInterval(refresh, pollIntervalMs);
-    return () => {
-      window.clearInterval(interval);
+
+    let interval: number | undefined;
+    const stopPolling = () => {
+      if (interval !== undefined) {
+        window.clearInterval(interval);
+        interval = undefined;
+      }
       controller.current?.abort();
       controller.current = undefined;
+    };
+    const pausePolling = () => {
+      stopPolling();
+      setState((previous) =>
+        previous.refreshing ? { ...previous, refreshing: false } : previous,
+      );
+    };
+    const syncPolling = () => {
+      if (document.visibilityState !== 'visible' || !document.hasFocus()) {
+        pausePolling();
+        return;
+      }
+      if (interval !== undefined) return;
+      refresh();
+      interval = window.setInterval(refresh, pollIntervalMs);
+    };
+    document.addEventListener('visibilitychange', syncPolling);
+    window.addEventListener('focus', syncPolling);
+    window.addEventListener('blur', syncPolling);
+    syncPolling();
+    return () => {
+      document.removeEventListener('visibilitychange', syncPolling);
+      window.removeEventListener('focus', syncPolling);
+      window.removeEventListener('blur', syncPolling);
+      stopPolling();
     };
   }, [enabled, pollIntervalMs, refresh]);
 
