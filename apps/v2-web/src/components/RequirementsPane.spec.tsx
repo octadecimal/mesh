@@ -225,6 +225,89 @@ describe('RequirementsPane', () => {
     ).toBeVisible();
   });
 
+  it('exposes the complete literal ledger approval identity in a native disclosure', async () => {
+    const user = userEvent.setup();
+    render(<RequirementsPane intentLedger={approvedIntentLedger} />);
+
+    const ledger = screen.getByText('Ledger revision 1').closest('details');
+    expect(ledger).not.toBeNull();
+    if (!ledger) throw new Error('Expected a ledger disclosure');
+    await user.click(within(ledger).getByText('Ledger revision 1'));
+
+    expect(
+      within(ledger).getByText('Ledger ID').nextElementSibling,
+    ).toHaveTextContent('55555555-5555-4555-8555-555555555555');
+    expect(
+      within(ledger).getByText('Project ID').nextElementSibling,
+    ).toHaveTextContent('11111111-1111-4111-8111-111111111111');
+    expect(
+      within(ledger).getByText('Proposal ID').nextElementSibling,
+    ).toHaveTextContent('22222222-2222-4222-8222-222222222222');
+    expect(
+      within(ledger).getByText('Approved by').nextElementSibling,
+    ).toHaveTextContent('human');
+    expect(
+      within(ledger).getByText('Approved at').nextElementSibling,
+    ).toHaveTextContent('2026-08-29T00:00:00.000Z');
+  });
+
+  it('exposes the complete literal intent approval identity', async () => {
+    const user = userEvent.setup();
+    render(<RequirementsPane intentLedger={approvedIntentLedger} />);
+
+    const approval = screen.getByText('Approval history').closest('details');
+    expect(approval).not.toBeNull();
+    if (!approval) throw new Error('Expected an intent approval disclosure');
+    await user.click(within(approval).getByText('Approval history'));
+
+    expect(
+      within(approval).getByText('Intent ID').nextElementSibling,
+    ).toHaveTextContent('33333333-3333-4333-8333-333333333333');
+    expect(
+      within(approval).getByText('Project ID').nextElementSibling,
+    ).toHaveTextContent('11111111-1111-4111-8111-111111111111');
+    expect(
+      within(approval).getByText('Proposal ID').nextElementSibling,
+    ).toHaveTextContent('22222222-2222-4222-8222-222222222222');
+    expect(
+      within(approval).getByText('Approved by').nextElementSibling,
+    ).toHaveTextContent('human');
+    expect(
+      within(approval).getByText('Approved at').nextElementSibling,
+    ).toHaveTextContent('2026-08-29T00:00:00.000Z');
+  });
+
+  it('exposes the complete literal record approval identity', async () => {
+    const user = userEvent.setup();
+    render(<RequirementsPane intentLedger={approvedIntentLedger} />);
+
+    const card = screen.getByRole('article', {
+      name: 'requirement statement',
+    });
+    const revision = within(card)
+      .getByText('Revision and provenance')
+      .closest('details');
+    expect(revision).not.toBeNull();
+    if (!revision) throw new Error('Expected a record revision disclosure');
+    await user.click(within(revision).getByText('Revision and provenance'));
+
+    expect(
+      within(revision).getByText('Record ID').nextElementSibling,
+    ).toHaveTextContent('00000000-0000-4000-8000-000000000001');
+    expect(
+      within(revision).getByText('Project ID').nextElementSibling,
+    ).toHaveTextContent('11111111-1111-4111-8111-111111111111');
+    expect(
+      within(revision).getByText('Proposal ID').nextElementSibling,
+    ).toHaveTextContent('22222222-2222-4222-8222-222222222222');
+    expect(
+      within(revision).getByText('Approved by').nextElementSibling,
+    ).toHaveTextContent('human');
+    expect(
+      within(revision).getByText('Approved at').nextElementSibling,
+    ).toHaveTextContent('2026-08-29T00:00:00.000Z');
+  });
+
   it('renders loading, error, empty-before-approval, and no-record states without inventing coverage or readiness', () => {
     const { rerender } = render(
       <RequirementsPane loading intentLedger={null} />,

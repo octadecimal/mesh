@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState, type ComponentProps } from 'react';
 import {
@@ -706,7 +712,8 @@ describe('BoardPane', () => {
     ).toBeDisabled();
   });
 
-  it('does not retain a selected task when filtered results are empty', () => {
+  it('clears a selected task when filtered Board truth no longer contains it', async () => {
+    const onSelectTask = vi.fn();
     render(
       <ControlledBoardPane
         board={{
@@ -719,7 +726,7 @@ describe('BoardPane', () => {
         connection={{ status: 'ready' }}
         submitting={false}
         onApplyFilter={vi.fn()}
-        onSelectTask={vi.fn()}
+        onSelectTask={onSelectTask}
       />,
     );
 
@@ -727,5 +734,6 @@ describe('BoardPane', () => {
     expect(
       screen.getByText('No tasks match the applied Board filters.'),
     ).toBeVisible();
+    await waitFor(() => expect(onSelectTask).toHaveBeenCalledWith(undefined));
   });
 });

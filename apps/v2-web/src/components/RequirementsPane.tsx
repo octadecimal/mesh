@@ -144,6 +144,10 @@ export function RequirementsPane({
               <dd>{intentLedger.projectIntent.id}</dd>
             </div>
             <div>
+              <dt>Project ID</dt>
+              <dd>{intentLedger.projectIntent.projectId}</dd>
+            </div>
+            <div>
               <dt>Proposal ID</dt>
               <dd>{intentLedger.projectIntent.proposalId}</dd>
             </div>
@@ -169,7 +173,35 @@ export function RequirementsPane({
           </ul>
         </details>
       </section>
-      <p>Ledger revision {intentLedger.ledger.revision}</p>
+      <details className="intent-ledger-history">
+        <summary>Ledger revision {intentLedger.ledger.revision}</summary>
+        <dl>
+          <div>
+            <dt>Ledger ID</dt>
+            <dd>{intentLedger.ledger.id}</dd>
+          </div>
+          <div>
+            <dt>Project ID</dt>
+            <dd>{intentLedger.ledger.projectId}</dd>
+          </div>
+          <div>
+            <dt>Proposal ID</dt>
+            <dd>{intentLedger.ledger.proposalId}</dd>
+          </div>
+          <div>
+            <dt>Approved by</dt>
+            <dd>{intentLedger.ledger.approvedBy}</dd>
+          </div>
+          <div>
+            <dt>Approved at</dt>
+            <dd>
+              <time dateTime={intentLedger.ledger.approvedAt}>
+                {intentLedger.ledger.approvedAt}
+              </time>
+            </dd>
+          </div>
+        </dl>
+      </details>
       {intentLedger.records.length === 0 ? (
         <p>No ledger records are in this approved revision.</p>
       ) : null}
@@ -212,6 +244,10 @@ export function RequirementsPane({
                             <div>
                               <dt>Record ID</dt>
                               <dd>{record.recordId}</dd>
+                            </div>
+                            <div>
+                              <dt>Project ID</dt>
+                              <dd>{record.projectId}</dd>
                             </div>
                             <div>
                               <dt>Proposal ID</dt>

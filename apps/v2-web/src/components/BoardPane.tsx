@@ -242,8 +242,12 @@ export function BoardPane({
   const detailButtons = useRef(new Map<string, HTMLButtonElement>());
   const disabled =
     connection.status !== 'ready' || submitting || !board?.filter;
+  const selectedCard = board?.cards.find(({ taskId }) => taskId === selectedId);
 
   useEffect(() => setDraft(selectionFrom(board)), [board?.filter]);
+  useEffect(() => {
+    if (board && selectedId && !selectedCard) onSelectTask(undefined);
+  }, [board, onSelectTask, selectedCard, selectedId]);
 
   function toggle<K extends keyof BoardFilterSelection>(
     key: K,
@@ -289,7 +293,6 @@ export function BoardPane({
             ? 'No tasks match the applied Board filters.'
             : undefined;
   const filterRevision = board?.filter?.revision;
-  const selectedCard = board?.cards.find(({ taskId }) => taskId === selectedId);
   const optionOrder = board
     ? {
         milestoneIds: board.facets.milestones.map(({ value }) => value),

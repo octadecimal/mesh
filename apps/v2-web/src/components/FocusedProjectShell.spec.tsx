@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 import {
@@ -648,6 +654,49 @@ describe('FocusedProjectShell', () => {
     );
     expect(onNavigate).toHaveBeenLastCalledWith(
       `/projects/${snapshot.project.id}/board`,
+    );
+  });
+
+  it('clears the canonical Board task URL when filtered truth removes the selection', async () => {
+    const onNavigate = vi.fn();
+    const shell = (currentSnapshot: V2ProjectSnapshot) => (
+      <FocusedProjectShell
+        artifact="board"
+        selectedId={boardTask.taskId}
+        model={{
+          status: 'ready',
+          snapshot: currentSnapshot,
+          interrupt: { enabled: true },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={onNavigate}
+      />
+    );
+    const view = render(shell(snapshotWithBoardTask));
+    expect(
+      screen.getByRole('region', { name: 'Task details' }),
+    ).toHaveTextContent('Build controls');
+
+    onNavigate.mockClear();
+    view.rerender(
+      shell({
+        ...snapshotWithBoardTask,
+        board: {
+          ...snapshotWithBoardTask.board,
+          emptyReason: 'filter_empty',
+          matchedTaskCount: 0,
+          cards: [],
+        },
+      }),
+    );
+
+    expect(screen.queryByRole('region', { name: 'Task details' })).toBeNull();
+    await waitFor(() =>
+      expect(onNavigate).toHaveBeenCalledWith(
+        `/projects/${snapshot.project.id}/board`,
+      ),
     );
   });
 
