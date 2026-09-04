@@ -2,7 +2,13 @@ import { access, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { relative, resolve } from 'node:path';
 
-import { expect, test, type Page, type WebSocketRoute } from '@playwright/test';
+import {
+  expect,
+  test,
+  type Locator,
+  type Page,
+  type WebSocketRoute,
+} from '@playwright/test';
 
 import { V2ProcessFixture } from './fixtures/v2-process.js';
 
@@ -170,7 +176,7 @@ const registerTodo = async (
   start: { holdAfterAdapterCursor?: number } = {},
 ) => {
   await fixture.start(start);
-  await page.goto(fixture.origin);
+  await page.goto(`${fixture.origin}/projects`);
   await page.getByLabel('Repository path').fill(fixture.todoRepository);
   await page.getByRole('button', { name: 'Add and select project' }).click();
   await fixture.waitForBrowserRegistration();
@@ -186,6 +192,7 @@ const approveTodoIntent = async (page: Page, fixture: V2ProcessFixture) => {
   expect(profile).toMatchObject({ status: 200, body: { ok: true } });
   await page.reload();
 
+  await page.getByRole('button', { name: 'Project manager' }).click();
   await page
     .getByRole('textbox', { name: 'Message to project manager' })
     .fill('Build a Todo app where people can add and complete items.');
@@ -199,6 +206,7 @@ const approveTodoIntent = async (page: Page, fixture: V2ProcessFixture) => {
     )
     .toBe(2);
   await page.reload();
+  await page.getByRole('button', { name: 'Project manager' }).click();
   await expect(
     page.getByRole('heading', { name: 'How should Todo items persist?' }),
   ).toBeVisible();
@@ -217,6 +225,7 @@ const approveTodoIntent = async (page: Page, fixture: V2ProcessFixture) => {
     )
     .toBe(1);
   await page.reload();
+  await page.getByRole('tab', { name: 'Plans' }).click();
   await expect(
     page.getByRole('heading', {
       name: 'Proposal revision 1 · awaiting_approval',
@@ -235,6 +244,7 @@ const approveTodoIntent = async (page: Page, fixture: V2ProcessFixture) => {
 const approveTodoDeliveryPlan = async (
   page: Page,
   fixture: V2ProcessFixture,
+  approve = true,
 ) => {
   const intent = await fixture.projectSnapshot();
   const profile = await sendCommand(page, {
@@ -254,7 +264,11 @@ const approveTodoDeliveryPlan = async (
   });
   await page.reload();
 
-  const planning = page.getByRole('complementary', { name: 'PM Chat' });
+  await page.getByRole('button', { name: 'Project manager' }).click();
+  const planning = page.getByRole('dialog', {
+    name: /Project manager ·/u,
+  });
+  await planning.getByRole('tab', { name: 'Delivery Plan' }).click();
   await planning.getByRole('button', { name: 'Plan delivery' }).click();
   const profileSelector = planning.getByLabel('Project manager profile').last();
   await expect(profileSelector).toContainText('Todo plan manager · revision 1');
@@ -280,7 +294,7 @@ const approveTodoDeliveryPlan = async (
   await page.reload();
 
   await expect(
-    planning.getByRole('heading', {
+    page.getByRole('heading', {
       name: 'Proposal revision 1 · awaiting approval',
     }),
   ).toBeVisible();
@@ -312,14 +326,17 @@ const approveTodoDeliveryPlan = async (
   expect(proposed.deliveryPlan).toBeNull();
   expect(proposed.board.cards).toEqual([]);
 
-  await planning.getByRole('button', { name: 'Request revision' }).click();
-  await planning
+  await page.getByRole('button', { name: 'Request revision' }).click();
+  const revisionPlanning = page.getByRole('dialog', {
+    name: /Project manager ·/u,
+  });
+  await revisionPlanning
     .getByRole('textbox', { name: 'Message to project manager' })
     .last()
     .fill(
       'Make keyboard acceptance explicit and persistence verification isolated.',
     );
-  await planning.getByRole('button', { name: 'Send revision request' }).click();
+  await revisionPlanning.getByRole('button', { name: 'Send message' }).click();
   await expect
     .poll(
       async () =>
@@ -330,25 +347,25 @@ const approveTodoDeliveryPlan = async (
     .toBe(2);
   await page.reload();
   await expect(
-    planning.getByRole('heading', {
+    page.getByRole('heading', {
       name: 'Proposal revision 2 · awaiting approval',
     }),
   ).toBeVisible();
-  const proposalRevision = planning.getByLabel('Proposal revision', {
+  const proposalRevision = page.getByLabel('Proposal revision', {
     exact: true,
   });
   await proposalRevision.selectOption('1');
   await expect(
-    planning.getByRole('heading', { name: 'Proposal revision 1 · superseded' }),
+    page.getByRole('heading', { name: 'Proposal revision 1 · superseded' }),
   ).toBeVisible();
   await expect(
-    planning.getByText(
+    page.getByText(
       'A keyboard user can add and complete a Todo item without a pointer.',
     ),
   ).toHaveCount(0);
   await proposalRevision.selectOption('2');
   await expect(
-    planning.getByText(
+    page.getByText(
       'A keyboard user can add and complete a Todo item without a pointer.',
     ),
   ).toBeVisible();
@@ -356,12 +373,13 @@ const approveTodoDeliveryPlan = async (
   const beforeApproval = await fixture.projectSnapshot();
   expect(beforeApproval.deliveryPlan).toBeNull();
   expect(beforeApproval.board.cards).toEqual([]);
+  if (!approve) return beforeApproval;
   const approvalResponse = page.waitForResponse(
     (response) =>
       response.url().endsWith('/api/v2/commands') &&
       response.request().postData()?.includes('plan_proposal.approve') === true,
   );
-  await planning.getByRole('button', { name: 'Approve full plan' }).click();
+  await page.getByRole('button', { name: 'Approve full plan' }).click();
   const approval = await (await approvalResponse).json();
   expect(approval).toMatchObject({
     ok: true,
@@ -507,6 +525,706 @@ const expectProcessAndListenerGone = async ({
   expect(elapsedMs).toBeLessThan(8_000);
   expect(namedListenerCount).toBe(0);
 };
+
+test('attention-first UI routes Inbox decisions to canonical Plans approval', async ({
+  page,
+}) => {
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+  });
+  const approvalCommands: string[] = [];
+  const recordApprovalCommand = (request: { postData(): string | null }) => {
+    const body = request.postData();
+    if (body?.includes('plan_proposal.approve')) approvalCommands.push(body);
+  };
+  page.on('request', recordApprovalCommand);
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture, false);
+
+    await page.goto(`${fixture.origin}/`);
+    await expect(
+      page.getByRole('heading', { name: 'Needs attention' }),
+    ).toBeVisible();
+    await expect(approvalCommands).toHaveLength(0);
+
+    await page.getByRole('link', { name: 'Review in project' }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${fixture.projectId}/plans$`, 'u'),
+    );
+    const approve = page.getByRole('button', { name: 'Approve full plan' });
+    await expect(approve).toBeVisible();
+    await expect(approvalCommands).toHaveLength(0);
+
+    const approvalResponse = page.waitForResponse(
+      (response) =>
+        response.url().endsWith('/api/v2/commands') &&
+        response.request().postData()?.includes('plan_proposal.approve') ===
+          true,
+    );
+    await approve.click();
+    await expect(await (await approvalResponse).json()).toMatchObject({
+      ok: true,
+      commandType: 'plan_proposal.approve',
+    });
+    await expect
+      .poll(
+        async () =>
+          (await fixture.projectSnapshot()).deliveryPlan?.plan.revision,
+      )
+      .toBe(1);
+    expect(approvalCommands).toHaveLength(1);
+  } finally {
+    page.off('request', recordApprovalCommand);
+    await fixture.dispose();
+  }
+});
+
+test('attention-first UI opens active runs with replay and live completion', async ({
+  page,
+}) => {
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+    fakeDeveloperScenario: 'completed',
+    fakeDeveloperHolds: true,
+  });
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture);
+    await approveDeveloperProfile(page, fixture);
+    const { cards } = await startTodoRun(
+      page,
+      fixture,
+      ['Build Todo controls'],
+      1,
+    );
+    const [card] = cards;
+    await expect
+      .poll(async () => {
+        const snapshot = await fixture.projectSnapshot();
+        return snapshot.executions.find(
+          ({ assignment }) =>
+            assignment.kind === 'developer_task' &&
+            assignment.taskId === card.taskId,
+        )?.lifecycle;
+      })
+      .toBe('running');
+    const active = await fixture.projectSnapshot();
+    const execution = active.executions.find(
+      ({ assignment }) =>
+        assignment.kind === 'developer_task' &&
+        assignment.taskId === card.taskId,
+    );
+    if (!execution) throw new Error('Active Todo execution was not found');
+
+    await page.goto(`${fixture.origin}/runs`);
+    const activeRuns = page.getByRole('list', { name: 'Active runs' });
+    const run = activeRuns.getByRole('link').filter({
+      hasText: 'Build Todo controls',
+    });
+    await expect(run).toContainText('todo-repository');
+    await expect(run).toContainText('Build Todo controls');
+    await run.click();
+    const details = page.getByRole('region', { name: 'Run details' });
+    await details.getByRole('link', { name: 'Open run in project' }).click();
+
+    await expect(page).toHaveURL(
+      new RegExp(
+        `/projects/${fixture.projectId}/runs\\?run=${execution.id}$`,
+        'u',
+      ),
+    );
+    await expect(
+      page.getByRole('list', {
+        name: 'Runtime activity for Build Todo controls',
+      }),
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        `Domain cursor ${active.cursors.domain}; runtime cursor ${active.cursors.runtime}`,
+      ),
+    ).toBeVisible();
+
+    await fixture.releaseDeveloperTask(card.taskId);
+    await expect
+      .poll(async () => {
+        const current = page.getByRole('region', { name: 'Run details' });
+        return current.getByText('Completed', { exact: true }).isVisible();
+      })
+      .toBe(true);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test('attention-first UI preserves project PM drafts and the chosen theme', async ({
+  page,
+}) => {
+  const fixture = await V2ProcessFixture.createTodo();
+  try {
+    await registerTodo(page, fixture);
+    const profile = await sendCommand(page, {
+      type: 'worker_profile.approve_revision',
+      scope: 'global',
+      expectedLatestRevision: 0,
+      sourceYaml: pmProfileYaml,
+    });
+    expect(profile).toMatchObject({ status: 200, body: { ok: true } });
+    await page.reload();
+
+    await page.getByRole('link', { name: 'Projects' }).focus();
+    await page.keyboard.press('Shift+Tab');
+    const focusedRailLink = page.locator('.v2-global-nav a:focus-visible');
+    await expect(focusedRailLink).toHaveCount(1);
+    const lightThemeContrast = await focusedRailLink.evaluate((link) => {
+      const parseColor = (color: string): [number, number, number] => {
+        const value = color.trim();
+        if (/^#[0-9a-f]{3}$/iu.test(value)) {
+          return [1, 2, 3].map((index) =>
+            Number.parseInt(value[index] + value[index], 16),
+          ) as [number, number, number];
+        }
+        if (/^#[0-9a-f]{6}$/iu.test(value)) {
+          return [1, 3, 5].map((start) =>
+            Number.parseInt(value.slice(start, start + 2), 16),
+          ) as [number, number, number];
+        }
+        const values = value
+          .match(/[\d.]+/gu)
+          ?.slice(0, 3)
+          .map(Number);
+        if (values?.length === 3) {
+          return values as [number, number, number];
+        }
+        throw new Error(`Unsupported color value: ${JSON.stringify(color)}`);
+      };
+      const luminance = (color: string) => {
+        const [red, green, blue] = parseColor(color).map((channel) => {
+          const normalized = channel / 255;
+          return normalized <= 0.04045
+            ? normalized / 12.92
+            : ((normalized + 0.055) / 1.055) ** 2.4;
+        });
+        return red * 0.2126 + green * 0.7152 + blue * 0.0722;
+      };
+      const contrast = (first: string, second: string) => {
+        const [lighter, darker] = [luminance(first), luminance(second)].sort(
+          (left, right) => right - left,
+        );
+        return (lighter + 0.05) / (darker + 0.05);
+      };
+      const root = getComputedStyle(document.documentElement);
+      const rail = link.closest<HTMLElement>('.v2-global-nav');
+      if (!rail)
+        throw new Error('Focused link is outside the navigation rail.');
+
+      return {
+        warning: contrast(
+          root.getPropertyValue('--warning'),
+          root.getPropertyValue('--surface'),
+        ),
+        railFocus: contrast(
+          getComputedStyle(link).outlineColor,
+          getComputedStyle(rail).backgroundColor,
+        ),
+      };
+    });
+    expect(lightThemeContrast.railFocus).toBeGreaterThanOrEqual(3);
+    expect(lightThemeContrast.warning).toBeGreaterThanOrEqual(4.5);
+
+    await page.getByRole('button', { name: 'Project manager' }).click();
+    const dialog = page.getByRole('dialog', {
+      name: /Project manager · todo-repository/u,
+    });
+    await dialog.getByRole('button', { name: 'Pin project manager' }).click();
+    const drawer = page.getByRole('complementary', {
+      name: /Project manager · todo-repository/u,
+    });
+    const projectContent = page.locator('.v2-project-content');
+    const openDrawerBox = await drawer.boundingBox();
+    const openContentBox = await projectContent.boundingBox();
+    expect(openDrawerBox).not.toBeNull();
+    expect(openContentBox).not.toBeNull();
+    expect(openDrawerBox?.x).toBeGreaterThan(openContentBox?.x ?? 0);
+
+    await drawer.getByRole('button', { name: 'Close project manager' }).click();
+    const closedContentBox = await projectContent.boundingBox();
+    expect(closedContentBox).not.toBeNull();
+    expect(closedContentBox?.width ?? 0).toBeGreaterThan(
+      (openContentBox?.width ?? 0) + 100,
+    );
+    await page.getByRole('button', { name: 'Project manager' }).click();
+
+    const draft = 'Keep this unsent Intent draft with the project.';
+    await drawer
+      .getByRole('textbox', { name: 'Message to project manager' })
+      .fill(draft);
+
+    await page.getByRole('tab', { name: 'Board' }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${fixture.projectId}/board$`, 'u'),
+    );
+    await expect(drawer).toBeVisible();
+    await expect(
+      drawer.getByRole('textbox', { name: 'Message to project manager' }),
+    ).toHaveValue(draft);
+
+    await page.getByRole('combobox', { name: 'Theme' }).selectOption('dark');
+    await page.getByRole('link', { name: 'Inbox' }).click();
+    await expect(
+      page.getByRole('heading', { name: 'Needs attention' }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: 'Project manager' }),
+    ).toHaveCount(0);
+    await page.reload();
+    await expect
+      .poll(() => page.evaluate(() => document.documentElement.dataset.theme))
+      .toBe('dark');
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test('attention-first UI keeps project controls keyboard reachable at 320px and separately proves 200% visual page scale', async ({
+  page,
+}) => {
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+  });
+  const zoomSession = await page.context().newCDPSession(page);
+  try {
+    await page.setViewportSize({ width: 320, height: 720 });
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture, false);
+    await page.reload();
+    // Stress platform font-metric differences without changing the viewport.
+    await page.addStyleTag({
+      content: '.v2-global-nav { letter-spacing: 0.08em; }',
+    });
+
+    const reachByTab = async ({
+      from,
+      to,
+      key = 'Tab',
+    }: {
+      from: Locator;
+      to: Locator;
+      key?: 'Tab' | 'Shift+Tab';
+    }) => {
+      await expect(from).toBeFocused();
+      for (let press = 0; press < 32; press += 1) {
+        await page.keyboard.press(key);
+        if (await to.evaluate((element) => element === document.activeElement))
+          return;
+      }
+      throw new Error(`Control was not reachable with ${key}`);
+    };
+
+    expect(await page.evaluate(() => window.innerWidth)).toBe(320);
+    const keyboardOrigin = page.locator('body');
+    await expect(keyboardOrigin).toBeFocused();
+    const repositoryPath = page.getByText(fixture.todoRepository, {
+      exact: true,
+    });
+    const connectionState = page
+      .locator('.v2-project-metadata')
+      .locator('[role="status"]');
+    await expect(repositoryPath).toBeVisible();
+    await expect(connectionState).toHaveText('Connected');
+    const pathBounds = await repositoryPath.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+        viewportWidth: document.documentElement.clientWidth,
+      };
+    });
+    const connectionBounds = await connectionState.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return {
+        bottom: bounds.bottom,
+        left: bounds.left,
+        right: bounds.right,
+        top: bounds.top,
+      };
+    });
+    expect(pathBounds.left).toBeGreaterThanOrEqual(0);
+    expect(pathBounds.right).toBeLessThanOrEqual(pathBounds.viewportWidth);
+    expect(
+      pathBounds.right <= connectionBounds.left ||
+        connectionBounds.right <= pathBounds.left ||
+        pathBounds.bottom <= connectionBounds.top ||
+        connectionBounds.bottom <= pathBounds.top,
+    ).toBe(true);
+    expect(
+      await page.evaluate(() => ({
+        clientWidth: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+      })),
+    ).toEqual({ clientWidth: 320, scrollWidth: 320 });
+
+    const projectTabs = page.getByRole('tablist', {
+      name: 'Project artifacts',
+    });
+    const overviewTab = projectTabs.getByRole('tab', { name: 'Overview' });
+    const plansTab = projectTabs.getByRole('tab', { name: 'Plans' });
+    const runsTab = projectTabs.getByRole('tab', { name: 'Runs' });
+    await reachByTab({ from: keyboardOrigin, to: plansTab });
+    await page.keyboard.press('End');
+    await expect(runsTab).toBeFocused();
+    const focusedTabBounds = await projectTabs.evaluate((tablist) => {
+      const listBounds = tablist.getBoundingClientRect();
+      const selected = tablist.querySelector<HTMLElement>(
+        '[aria-selected=true]',
+      );
+      const selectedBounds = selected?.getBoundingClientRect();
+      return {
+        listLeft: listBounds.left,
+        listRight: listBounds.right,
+        selectedLeft: selectedBounds?.left,
+        selectedRight: selectedBounds?.right,
+        scrollable: tablist.scrollWidth > tablist.clientWidth,
+      };
+    });
+    expect(focusedTabBounds.scrollable).toBe(true);
+    expect(focusedTabBounds.selectedLeft).toBeGreaterThanOrEqual(
+      focusedTabBounds.listLeft,
+    );
+    expect(focusedTabBounds.selectedRight).toBeLessThanOrEqual(
+      focusedTabBounds.listRight,
+    );
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${fixture.projectId}/runs$`, 'u'),
+    );
+    await page.keyboard.press('Home');
+    await expect(overviewTab).toBeFocused();
+    await page.keyboard.press('ArrowRight');
+    await page.keyboard.press('ArrowRight');
+    await expect(plansTab).toBeFocused();
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${fixture.projectId}/plans$`, 'u'),
+    );
+    await expect(repositoryPath).toBeVisible();
+
+    const projectManager = page.getByRole('button', {
+      name: 'Project manager',
+    });
+    await page.keyboard.press('Shift+Tab');
+    await expect(projectManager).toBeFocused();
+    await page.keyboard.press('Enter');
+    await expect(
+      page.getByRole('dialog', {
+        name: /Project manager · todo-repository/u,
+      }),
+    ).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(projectManager).toBeFocused();
+
+    const approve = page.getByRole('button', { name: 'Approve full plan' });
+    await reachByTab({ from: projectManager, to: approve });
+    await page.keyboard.press('Enter');
+    await expect
+      .poll(
+        async () =>
+          (await fixture.projectSnapshot()).deliveryPlan?.plan.revision,
+      )
+      .toBe(1);
+
+    await page.reload();
+    expect(await page.evaluate(() => window.innerWidth)).toBe(320);
+    await reachByTab({ from: page.locator('body'), to: plansTab });
+    await page.keyboard.press('ArrowRight');
+    const boardTab = projectTabs.getByRole('tab', { name: 'Board' });
+    await expect(boardTab).toBeFocused();
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${fixture.projectId}/board$`, 'u'),
+    );
+    const openTask = page.getByRole('button', {
+      name: 'Open Build Todo controls',
+    });
+    await reachByTab({ from: boardTab, to: openTask });
+    await page.keyboard.press('Enter');
+    await expect(
+      page.getByRole('region', { name: 'Task details' }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('heading', {
+        name: 'Build Todo controls',
+        level: 3,
+      }),
+    ).toBeFocused();
+
+    expect(await page.evaluate(() => window.innerWidth)).toBe(320);
+    await page.setViewportSize({ width: 640, height: 720 });
+    expect(await page.evaluate(() => window.innerWidth)).toBe(640);
+    await zoomSession.send('Emulation.setPageScaleFactor', {
+      pageScaleFactor: 2,
+    });
+    await expect
+      .poll(() =>
+        page.evaluate(() => ({
+          scale: window.visualViewport?.scale,
+          width: window.visualViewport?.width,
+        })),
+      )
+      .toEqual({ scale: 2, width: 320 });
+  } finally {
+    await zoomSession.send('Emulation.setPageScaleFactor', {
+      pageScaleFactor: 1,
+    });
+    await zoomSession.detach();
+    await fixture.dispose();
+  }
+});
+
+test('attention-first UI keeps healthy Inbox attention beside a named partial failure', async ({
+  page,
+}) => {
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+  });
+  const unavailableProjectId = '00000000-0000-4000-8000-000000000503';
+  const unavailableProjectName = 'Unavailable checkout';
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture, false);
+
+    await page.route(`${fixture.origin}/api/v2/snapshot`, async (route) => {
+      const response = await route.fetch();
+      const snapshot = (await response.json()) as {
+        projects: Array<Record<string, unknown>>;
+      };
+      const healthyProject = snapshot.projects[0];
+      if (!healthyProject)
+        throw new Error('Registered project is missing from system snapshot');
+      await route.fulfill({
+        response,
+        json: {
+          ...snapshot,
+          projects: [
+            healthyProject,
+            {
+              ...healthyProject,
+              id: unavailableProjectId,
+              displayName: unavailableProjectName,
+            },
+          ],
+        },
+      });
+    });
+    await page.route(
+      `${fixture.origin}/api/v2/projects/${unavailableProjectId}/snapshot`,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            schemaVersion: 2,
+            error: {
+              code: 'internal_error',
+              message: 'The project snapshot is deliberately unavailable.',
+            },
+          }),
+        });
+      },
+    );
+
+    await page.goto(`${fixture.origin}/`);
+    await expect(
+      page.getByRole('heading', { name: 'Needs attention' }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole('link', { name: 'Review in project' }),
+    ).toBeVisible();
+    const alert = page.getByRole('alert').filter({
+      hasText: 'Some projects could not be refreshed.',
+    });
+    await expect(alert).toContainText(unavailableProjectName);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test('attention-first UI retains durable project truth while resync disables commands', async ({
+  page,
+}) => {
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+    fakeDeveloperScenario: 'completed',
+  });
+  const appSocket = await controlAppSubscription(page);
+  let releaseResyncSnapshot: () => void = () => undefined;
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture);
+    await approveDeveloperProfile(page, fixture);
+    const prepared = await fixture.projectSnapshot();
+    const build = prepared.board.cards.find(
+      ({ title }) => title === 'Build Todo controls',
+    );
+    if (!build) throw new Error('Build Todo controls task was not found');
+
+    await page.getByRole('link', { name: 'Inbox' }).click();
+    appSocket.holdNext(fixture.projectId);
+    await page.goto(
+      `${fixture.origin}/projects/${fixture.projectId}/board?task=${build.taskId}`,
+    );
+    await appSocket.waitUntilHeld();
+    const staleSnapshot = await fixture.projectSnapshot();
+    await expect(
+      page.getByText(
+        `Domain cursor ${staleSnapshot.cursors.domain}; runtime cursor ${staleSnapshot.cursors.runtime}`,
+      ),
+    ).toBeVisible();
+    const staleBoard = page.getByRole('region', { name: 'Board' });
+    const buildCard = staleBoard.getByRole('article', {
+      name: 'Build Todo controls',
+      exact: true,
+    });
+    await expect(buildCard.getByText(/^pending ·/u)).toBeVisible();
+    await expect(
+      staleBoard.getByRole('button', { name: 'Start Developer attempt' }),
+    ).toBeDisabled();
+
+    const actorPage = await page.context().newPage();
+    try {
+      await actorPage.goto(
+        `${fixture.origin}/projects/${fixture.projectId}/board?task=${build.taskId}`,
+      );
+      const actorBoard = actorPage.getByRole('region', { name: 'Board' });
+      await actorBoard
+        .getByRole('button', { name: 'Start Developer attempt' })
+        .click();
+      await expect
+        .poll(
+          async () =>
+            (await fixture.projectSnapshot()).board.cards.find(
+              ({ taskId }) => taskId === build.taskId,
+            )?.lifecycle,
+        )
+        .toBe('completed');
+    } finally {
+      await actorPage.close();
+    }
+
+    const currentSnapshot = await fixture.projectSnapshot();
+    expect(currentSnapshot.cursors.domain).toBeGreaterThan(
+      staleSnapshot.cursors.domain,
+    );
+    await fixture.expireRetainedEventsThrough(staleSnapshot.cursors);
+    let resyncSnapshotRequested = false;
+    const snapshotGate = new Promise<void>((resolveGate) => {
+      releaseResyncSnapshot = () => resolveGate();
+    });
+    await page.route(
+      `${fixture.origin}/api/v2/projects/${fixture.projectId}/snapshot`,
+      async (route) => {
+        resyncSnapshotRequested = true;
+        await snapshotGate;
+        await route.continue();
+      },
+      { times: 1 },
+    );
+
+    appSocket.release();
+    await appSocket.waitForResync();
+    await expect.poll(() => resyncSnapshotRequested).toBe(true);
+    await expect(page.getByText('Resyncing project.').first()).toBeVisible();
+    await expect(
+      page.getByText(
+        `Domain cursor ${staleSnapshot.cursors.domain}; runtime cursor ${staleSnapshot.cursors.runtime}`,
+      ),
+    ).toBeVisible();
+    await expect(buildCard.getByText(/^pending ·/u)).toBeVisible();
+    await expect(
+      staleBoard.getByRole('button', { name: 'Start Developer attempt' }),
+    ).toBeDisabled();
+
+    releaseResyncSnapshot();
+    releaseResyncSnapshot = () => undefined;
+    await expect(
+      page.getByText(
+        `Domain cursor ${currentSnapshot.cursors.domain}; runtime cursor ${currentSnapshot.cursors.runtime}`,
+      ),
+    ).toBeVisible();
+    await expect(buildCard.getByText(/^completed ·/u)).toBeVisible();
+  } finally {
+    releaseResyncSnapshot();
+    await fixture.dispose();
+  }
+});
+
+test('attention-first UI keeps the audit barrier banner and mutations disabled', async ({
+  page,
+}) => {
+  const fixture = await V2ProcessFixture.createTodo({
+    fakePmScenario: 'todo',
+  });
+  try {
+    await registerTodo(page, fixture);
+    await approveTodoIntent(page, fixture);
+    await approveTodoDeliveryPlan(page, fixture);
+    await approveDeveloperProfile(page, fixture);
+    const snapshot = await fixture.projectSnapshot();
+    const build = snapshot.board.cards.find(
+      ({ title }) => title === 'Build Todo controls',
+    );
+    if (!build) throw new Error('Build Todo controls task was not found');
+
+    await page.route(`${fixture.origin}/api/v2/snapshot`, async (route) => {
+      const response = await route.fetch();
+      const system = (await response.json()) as Record<string, unknown>;
+      await route.fulfill({
+        response,
+        json: {
+          ...system,
+          health: {
+            status: 'audit_barrier_tripped',
+            error: {
+              code: 'audit_barrier_tripped',
+              message: 'Audit persistence is unavailable.',
+            },
+          },
+        },
+      });
+    });
+    await page.goto(
+      `${fixture.origin}/projects/${fixture.projectId}/board?task=${build.taskId}`,
+    );
+
+    const banner = page.getByRole('banner');
+    await expect(banner.getByRole('status')).toHaveText(
+      'Audit persistence is unavailable.',
+    );
+    const board = page.getByRole('region', { name: 'Board' });
+    await expect(
+      board.getByRole('button', { name: 'Apply filters' }),
+    ).toBeDisabled();
+    await expect(
+      board.getByRole('button', { name: 'Start Developer attempt' }),
+    ).toBeDisabled();
+
+    await page.getByRole('button', { name: 'Project manager' }).click();
+    const projectManager = page.getByRole('dialog', {
+      name: /Project manager · todo-repository/u,
+    });
+    await expect(
+      projectManager.getByRole('textbox', {
+        name: 'Message to project manager',
+      }),
+    ).toBeDisabled();
+  } finally {
+    await fixture.dispose();
+  }
+});
 
 test('repository setup failure removes only its owned fixture root', async () => {
   const originalPath = process.env.PATH;
@@ -790,23 +1508,25 @@ test('Todo foundation survives restart without V1 state', async ({ page }) => {
   const fixture = await V2ProcessFixture.createTodo();
   try {
     const firstOrigin = await fixture.start({ holdAfterAdapterCursor: 2 });
-    await page.goto(fixture.origin);
+    await page.goto(`${fixture.origin}/projects`);
     await page.getByLabel('Repository path').fill(fixture.todoRepository);
     await page.getByRole('button', { name: 'Add and select project' }).click();
     await fixture.waitForBrowserRegistration();
     await expect(
-      page.getByRole('heading', { name: 'todo-repository' }),
+      page.getByRole('heading', { name: 'todo-repository', level: 1 }),
     ).toBeVisible();
 
     const held = await fixture.approveProfilesAndStartExecution();
     await expect(
       page.getByText('Todo foundation worker · revision 1'),
     ).toBeVisible();
-    const activity = page.getByRole('region', {
+    await page.getByRole('tab', { name: 'Runs' }).click();
+    await page.getByRole('link', { name: 'Open run in project' }).click();
+    const activity = page.getByRole('list', {
       name: 'Runtime activity for Todo foundation check',
     });
     await expect(
-      activity.getByText('child.started', { exact: true }),
+      activity.getByText('child.started Todo check', { exact: true }),
     ).toBeVisible();
     await expect(page.getByText('Preferred skill fallback')).toBeVisible();
     await expect(page.getByText('Skill resolved')).toBeVisible();
@@ -814,7 +1534,9 @@ test('Todo foundation survives restart without V1 state', async ({ page }) => {
     const firstServerPid = fixture.serverPid;
     const restartOrigin = await fixture.restartWithFreshFake();
     expect(fixture.serverPid).not.toBe(firstServerPid);
-    await page.goto(`${restartOrigin}/projects/${fixture.projectId}`);
+    await page.goto(
+      `${restartOrigin}/projects/${fixture.projectId}/runs?run=${fixture.executionId}`,
+    );
     await page.reload();
     const execution = page.getByRole('article', {
       name: 'Todo foundation check',
@@ -822,14 +1544,14 @@ test('Todo foundation survives restart without V1 state', async ({ page }) => {
     await expect(execution.getByRole('status')).toHaveText('completed');
     await expect(
       execution
-        .getByRole('region', {
+        .getByRole('list', {
           name: 'Runtime activity for Todo foundation check',
         })
-        .getByText('child.started', { exact: true }),
+        .getByText('child.started Todo check', { exact: true }),
     ).toBeVisible();
     await expect(
       execution
-        .getByRole('region', {
+        .getByRole('list', {
           name: 'Child activity for Todo foundation check',
         })
         .getByText('Todo check completed', { exact: true }),
@@ -898,7 +1620,7 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
   const fixture = await V2ProcessFixture.createTodo({ fakePmScenario: 'todo' });
   try {
     await fixture.start();
-    await page.goto(fixture.origin);
+    await page.goto(`${fixture.origin}/projects`);
     await page.getByLabel('Repository path').fill(fixture.todoRepository);
     await page.getByRole('button', { name: 'Add and select project' }).click();
     await fixture.waitForBrowserRegistration();
@@ -930,9 +1652,13 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
     });
 
     await page.reload();
-    await expect(page.getByLabel('Project manager profile')).toContainText(
-      'Project manager · revision 1',
-    );
+    await page.getByRole('button', { name: 'Project manager' }).click();
+    const projectManager = page.getByRole('dialog', {
+      name: /Project manager ·/u,
+    });
+    await expect(
+      projectManager.getByLabel('Project manager profile'),
+    ).toContainText('Project manager · revision 1');
     const firstDescription =
       'Build a Todo app where people can add and complete items.';
     await page
@@ -967,6 +1693,7 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
 
     const questionRestartOrigin = await fixture.restartWithFreshFake();
     await page.goto(`${questionRestartOrigin}/projects/${fixture.projectId}`);
+    await page.getByRole('button', { name: 'Project manager' }).click();
     await expect(
       page.getByRole('list', { name: 'Planning conversation' }),
     ).toContainText(firstDescription);
@@ -985,6 +1712,14 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
       .getByRole('textbox', { name: 'Message to project manager' })
       .fill(answer);
     await page.getByRole('button', { name: 'Send message' }).click();
+    await expect
+      .poll(
+        async () =>
+          (await fixture.projectSnapshot()).planningCycles[0]?.proposals.length,
+      )
+      .toBe(1);
+    await page.getByRole('button', { name: 'Close project manager' }).click();
+    await page.getByRole('tab', { name: 'Plans' }).click();
     await expect(
       page.getByRole('heading', {
         name: 'Proposal revision 1 · awaiting_approval',
@@ -1054,11 +1789,11 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
       ).toBeVisible();
       await expect(requirements.getByText('Ledger revision 1')).toBeVisible();
       for (const heading of [
-        'Requirements',
-        'Decisions',
-        'Assumptions',
-        'Questions',
-        'Risks',
+        'Requirements · 3',
+        'Decisions · 1',
+        'Assumptions · 1',
+        'Questions · 1',
+        'Risks · 1',
       ]) {
         await expect(
           requirements.getByRole('heading', {
@@ -1090,6 +1825,13 @@ test('conversation becomes an approved intent ledger', async ({ page }) => {
       const intentProvenance = requirements.getByRole('list', {
         name: 'Approved intent provenance',
       });
+      await requirements.getByText('Approval history', { exact: true }).click();
+      for (const statement of recordStatements) {
+        await requirements
+          .getByRole('article', { name: statement })
+          .getByText('Revision and provenance', { exact: true })
+          .click();
+      }
       for (const turnId of humanTurnIds) {
         await expect(intentProvenance).toContainText(turnId);
         for (const statement of recordStatements) {
@@ -1216,6 +1958,7 @@ test('approved delivery plan becomes a deterministic Board', async ({
       /DeveloperAttempt|ExecutionRun|workspaceId|workerAssignment/u,
     );
 
+    await page.getByRole('tab', { name: 'Board' }).click();
     const board = page.getByRole('tabpanel', { name: 'Board' });
     await expect(
       board.getByText('Showing 3 of 3 tasks · plan 1'),
@@ -1255,22 +1998,35 @@ test('approved delivery plan becomes a deterministic Board', async ({
     expect(filtered.board.filter?.readiness).toEqual(['actionable', 'blocked']);
 
     await board
-      .getByRole('button', { name: 'View Integrate Todo workflow details' })
+      .getByRole('button', { name: 'Open Integrate Todo workflow' })
       .click();
     const details = board.getByRole('region', { name: 'Task details' });
     await expect(
-      details.getByRole('heading', { name: 'Task details' }),
+      details.getByRole('heading', {
+        name: 'Integrate Todo workflow',
+        level: 3,
+      }),
     ).toBeFocused();
-    await expect(details).toContainText(
-      'Acceptance: Adding, reloading, and completing a Todo item works end to end.',
-    );
-    await expect(details).toContainText(
-      'Verification: Run the integrated Todo acceptance journey.',
-    );
-    await expect(details).toContainText('Owned surfaces: Todo integration');
-    await expect(details).toContainText(
-      'Milestone stop condition: The integrated Todo flow passes its acceptance and verification criteria.',
-    );
+    await expect(
+      details.getByText(
+        'Adding, reloading, and completing a Todo item works end to end.',
+        { exact: true },
+      ),
+    ).toBeVisible();
+    await expect(
+      details.getByText('Run the integrated Todo acceptance journey.', {
+        exact: true,
+      }),
+    ).toBeVisible();
+    await expect(
+      details.getByText('Todo integration', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      details.getByText(
+        'The integrated Todo flow passes its acceptance and verification criteria.',
+        { exact: true },
+      ),
+    ).toBeVisible();
     await expect(details).toContainText('revision 1');
     await expect(
       board.getByRole('list', {
@@ -1299,6 +2055,7 @@ test('approved planning state survives a built server restart', async ({
     await registerTodo(page, fixture);
     await approveTodoIntent(page, fixture);
     await approveTodoDeliveryPlan(page, fixture);
+    await page.getByRole('tab', { name: 'Board' }).click();
     const board = page.getByRole('tabpanel', { name: 'Board' });
     await board.getByLabel(/^actionable · 2 tasks$/u).check();
     await board.getByRole('button', { name: 'Apply filters' }).click();
@@ -1309,7 +2066,7 @@ test('approved planning state survives a built server restart', async ({
     const oldPid = fixture.serverPid;
     const origin = await fixture.restartWithFreshFake();
     expect(fixture.serverPid).not.toBe(oldPid);
-    await page.goto(`${origin}/projects/${fixture.projectId}`);
+    await page.goto(`${origin}/projects/${fixture.projectId}/board`);
     await expect(
       page
         .getByRole('tabpanel', { name: 'Board' })
@@ -1340,6 +2097,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
     await approveTodoIntent(page, fixture);
     await approveTodoDeliveryPlan(page, fixture);
     await approveDeveloperProfile(page, fixture);
+    await page.getByRole('tab', { name: 'Board' }).click();
 
     const beforeStart = await fixture.projectSnapshot();
     expect(beforeStart.developerAttempts).toEqual([]);
@@ -1357,7 +2115,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
     }
     const board = page.getByRole('tabpanel', { name: 'Board' });
     await board
-      .getByRole('button', { name: 'View Persist Todo items details' })
+      .getByRole('button', { name: 'Open Persist Todo items' })
       .click();
     await board
       .getByRole('button', { name: 'Start Developer attempt' })
@@ -1523,7 +2281,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
     await fixture.crashServer();
     await fixture.start({ holdAfterAdapterCursor: 3 });
     expect(fixture.serverPid).not.toBe(firstPid);
-    await page.goto(`${fixture.origin}/projects/${fixture.projectId}`);
+    await page.goto(`${fixture.origin}/projects/${fixture.projectId}/board`);
     const recoveryReplay = await fixture.subscribe(page, held.cursors);
     expect(recoveryReplay.at(-1)).toMatchObject({ type: 'v2.subscribed' });
     const recoveryDomainIndex = recoveryReplay.findIndex(
@@ -1571,7 +2329,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
     const recovered = await fixture.projectSnapshot();
     const recoveredBoard = page.getByRole('tabpanel', { name: 'Board' });
     await recoveredBoard
-      .getByRole('button', { name: 'View Persist Todo items details' })
+      .getByRole('button', { name: 'Open Persist Todo items' })
       .click();
     await expect(
       recoveredBoard.getByRole('button', { name: 'Start Developer attempt' }),
@@ -1676,7 +2434,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
     await fixture.crashServer();
     await fixture.start();
     expect(fixture.serverPid).not.toBe(secondPid);
-    await page.goto(`${fixture.origin}/projects/${fixture.projectId}`);
+    await page.goto(`${fixture.origin}/projects/${fixture.projectId}/board`);
     await expect
       .poll(
         async () =>
@@ -1780,7 +2538,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
 
     const completedBoard = page.getByRole('tabpanel', { name: 'Board' });
     await completedBoard
-      .getByRole('button', { name: 'View Persist Todo items details' })
+      .getByRole('button', { name: 'Open Persist Todo items' })
       .click();
     await expect(
       page.getByText('Todo persistence acceptance passed.').first(),
@@ -1790,8 +2548,8 @@ test('one Todo task completes with durable workspace evidence across restart', a
     expect(await fixture.gitWorktreeAddCount()).toBe(1);
 
     appSocket.holdNext(fixture.projectId);
-    await page.getByRole('button', { name: 'Deselect project' }).click();
-    await page.getByRole('button', { name: 'Select Todo' }).click();
+    await page.goto(`${fixture.origin}/projects`);
+    await page.goto(`${fixture.origin}/projects/${fixture.projectId}/board`);
     await appSocket.waitUntilHeld();
 
     const staleSnapshot = await fixture.projectSnapshot();
@@ -1803,17 +2561,19 @@ test('one Todo task completes with durable workspace evidence across restart', a
 
     const staleBoard = page.getByRole('tabpanel', { name: 'Board' });
     await staleBoard
-      .getByRole('button', { name: 'View Build Todo controls details' })
+      .getByRole('button', { name: 'Open Build Todo controls' })
       .click();
     await expect(
       staleBoard.getByRole('button', { name: 'Start Developer attempt' }),
     ).toBeDisabled();
 
     const actorPage = await page.context().newPage();
-    await actorPage.goto(`${fixture.origin}/projects/${fixture.projectId}`);
+    await actorPage.goto(
+      `${fixture.origin}/projects/${fixture.projectId}/board`,
+    );
     const actorBoard = actorPage.getByRole('tabpanel', { name: 'Board' });
     await actorBoard
-      .getByRole('button', { name: 'View Build Todo controls details' })
+      .getByRole('button', { name: 'Open Build Todo controls' })
       .click();
     await actorBoard
       .getByRole('button', { name: 'Start Developer attempt' })
@@ -1856,15 +2616,6 @@ test('one Todo task completes with durable workspace evidence across restart', a
     await expect(
       staleDeveloper.getByText('No Developer attempts yet.'),
     ).toBeVisible();
-    const workerActivity = page.getByRole('region', {
-      name: 'Worker activity',
-    });
-    await expect(
-      workerActivity.getByRole('heading', {
-        name: 'Build Todo controls',
-        exact: true,
-      }),
-    ).toHaveCount(0);
 
     const retainedWindows = await fixture.expireRetainedEventsThrough(
       staleSnapshot.cursors,
@@ -1906,7 +2657,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
       buildDeveloper.getByRole('heading', { name: 'Attempt 1', exact: true }),
     ).toHaveCount(1);
     await expect(
-      buildDeveloper.getByRole('region', {
+      buildDeveloper.getByRole('group', {
         name: 'Developer completion report',
       }),
     ).toHaveCount(1);
@@ -1917,18 +2668,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
       }),
     ).toHaveCount(1);
     await expect(
-      buildDeveloper.getByRole('region', {
-        name: 'Runtime activity for Build Todo controls',
-      }),
-    ).toHaveCount(1);
-    await expect(
-      workerActivity.getByRole('heading', {
-        name: 'Build Todo controls',
-        exact: true,
-      }),
-    ).toHaveCount(1);
-    await expect(
-      workerActivity.getByRole('region', {
+      buildDeveloper.getByRole('list', {
         name: 'Runtime activity for Build Todo controls',
       }),
     ).toHaveCount(1);
@@ -1943,9 +2683,9 @@ test('one Todo task completes with durable workspace evidence across restart', a
       });
     await expect(persistCard).toHaveCount(1);
     await persistCard
-      .getByRole('button', { name: 'View Persist Todo items details' })
+      .getByRole('button', { name: 'Open Persist Todo items' })
       .click();
-    const persistDeveloper = persistCard.getByRole('region', {
+    const persistDeveloper = staleBoard.getByRole('region', {
       name: 'Developer for Persist Todo items',
     });
     await expect(persistDeveloper).toHaveCount(1);
@@ -1956,7 +2696,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
       }),
     ).toHaveCount(1);
     await expect(
-      persistDeveloper.getByRole('region', {
+      persistDeveloper.getByRole('group', {
         name: 'Developer completion report',
       }),
     ).toHaveCount(1);
@@ -1967,20 +2707,7 @@ test('one Todo task completes with durable workspace evidence across restart', a
       }),
     ).toHaveCount(2);
     await expect(
-      persistDeveloper.getByRole('region', {
-        name: 'Runtime activity for Persist Todo items',
-      }),
-    ).toHaveCount(2);
-    await expect(
-      workerActivity.getByRole('heading', {
-        name: 'Persist Todo items',
-        exact: true,
-      }),
-    ).toHaveCount(2);
-    await expect(
-      workerActivity.getByRole('region', {
-        name: 'Runtime activity for Persist Todo items',
-      }),
+      persistDeveloper.getByText('Runtime activity · 0', { exact: true }),
     ).toHaveCount(2);
 
     expect(retainedWindows.domain.lowWater).toBeGreaterThan(
@@ -2051,6 +2778,7 @@ for (const scenario of ['blocked', 'malformed', 'duplicate'] as const) {
       await approveTodoIntent(page, fixture);
       await approveTodoDeliveryPlan(page, fixture);
       await approveDeveloperProfile(page, fixture);
+      await page.getByRole('tab', { name: 'Board' }).click();
 
       const beforeStart = await fixture.projectSnapshot();
       const cardBefore = beforeStart.board.cards.find(
@@ -2059,7 +2787,7 @@ for (const scenario of ['blocked', 'malformed', 'duplicate'] as const) {
       if (!cardBefore) throw new Error('Persist Todo task was not found');
       const board = page.getByRole('tabpanel', { name: 'Board' });
       await board
-        .getByRole('button', { name: 'View Persist Todo items details' })
+        .getByRole('button', { name: 'Open Persist Todo items' })
         .click();
       await board
         .getByRole('button', { name: 'Start Developer attempt' })
@@ -2121,7 +2849,7 @@ for (const scenario of ['blocked', 'malformed', 'duplicate'] as const) {
         });
         expect(reports).toHaveLength(1);
         await expect(
-          page.getByRole('region', { name: 'Developer blocker report' }),
+          page.getByRole('group', { name: 'Developer blocker report' }),
         ).toContainText('The deterministic fake Developer is blocked.');
         await expect(page.getByLabel('Developer attempt state')).toHaveText(
           'Blocked',

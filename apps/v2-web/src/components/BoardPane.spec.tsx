@@ -1,5 +1,12 @@
-import { render, screen, within } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState, type ComponentProps } from 'react';
 import {
   boardViewSchema,
   type BoardView,
@@ -7,7 +14,30 @@ import {
 } from '@mesh/v2-contracts';
 import { describe, expect, it, vi } from 'vitest';
 
-import { BoardPane } from './BoardPane';
+import { BoardPane as ControlledBoardPane } from './BoardPane';
+
+type BoardPaneProps = ComponentProps<typeof ControlledBoardPane> & {
+  selectedId?: string;
+  onSelectTask?(taskId?: string): void;
+};
+
+function BoardPane({
+  selectedId: initialSelectedId,
+  onSelectTask = vi.fn(),
+  ...props
+}: BoardPaneProps) {
+  const [selectedId, setSelectedId] = useState(initialSelectedId);
+  return (
+    <ControlledBoardPane
+      {...props}
+      selectedId={selectedId}
+      onSelectTask={(taskId) => {
+        setSelectedId(taskId);
+        onSelectTask(taskId);
+      }}
+    />
+  );
+}
 
 const projectId = '11111111-1111-4111-8111-111111111111';
 const milestoneOne = '22222222-2222-4222-8222-222222222222';
@@ -304,15 +334,55 @@ describe('BoardPane', () => {
     ).not.toBeInTheDocument();
 
     const details = screen.getByRole('button', {
-      name: 'View Show Todo details',
+      name: 'Open Show Todo',
     });
     await user.click(details);
-    expect(screen.getByRole('heading', { name: 'Task details' })).toHaveFocus();
-    expect(screen.getByText(/Acceptance: Todo items appear\./)).toBeVisible();
+    const detailRegion = screen.getByRole('region', { name: 'Task details' });
+    expect(
+      within(detailRegion).getByRole('heading', { name: 'Show Todo' }),
+    ).toHaveFocus();
+    expect(detailRegion).toHaveTextContent('Todo items appear.');
     await user.click(
       screen.getByRole('button', { name: 'Close task details' }),
     );
     expect(details).toHaveFocus();
+  });
+
+  it('shows one controlled task detail and restores its opener on Escape', async () => {
+    const user = userEvent.setup();
+    const onSelectTask = vi.fn();
+    render(
+      <BoardPane
+        board={board}
+        connection={{ status: 'ready' }}
+        submitting={false}
+        onApplyFilter={vi.fn()}
+        onSelectTask={onSelectTask}
+      />,
+    );
+
+    const persist = screen.getByRole('button', { name: 'Open Persist Todo' });
+    const show = screen.getByRole('button', { name: 'Open Show Todo' });
+    await user.click(persist);
+    expect(
+      screen.getAllByRole('region', { name: 'Task details' }),
+    ).toHaveLength(1);
+    expect(
+      screen.getByRole('region', { name: 'Task details' }),
+    ).toHaveTextContent('Persist Todo');
+    expect(persist).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(show);
+    const detail = screen.getByRole('region', { name: 'Task details' });
+    expect(detail).toHaveTextContent('Show Todo');
+    expect(detail).not.toHaveTextContent('Todo items are durable.');
+    expect(show).toHaveAttribute('aria-pressed', 'true');
+    expect(onSelectTask).toHaveBeenLastCalledWith(board.cards[1].taskId);
+
+    fireEvent.keyDown(detail, { key: 'Escape' });
+    expect(screen.queryByRole('region', { name: 'Task details' })).toBeNull();
+    expect(show).toHaveFocus();
+    expect(onSelectTask).toHaveBeenLastCalledWith(undefined);
   });
 
   it('renders every server blocker in order with its matching task name', () => {
@@ -390,9 +460,7 @@ describe('BoardPane', () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
     expect(
       screen.getByRole('region', { name: 'Developer for Persist Todo' }),
@@ -642,5 +710,32 @@ describe('BoardPane', () => {
     expect(
       screen.getByRole('button', { name: 'Apply filters' }),
     ).toBeDisabled();
+  });
+
+  it('clears a selected task when filtered Board truth no longer contains it', async () => {
+    const onSelectTask = vi.fn();
+    render(
+      <ControlledBoardPane
+        board={{
+          ...board,
+          emptyReason: 'filter_empty',
+          matchedTaskCount: 0,
+          cards: [],
+        }}
+        selectedId={board.cards[0].taskId}
+        connection={{ status: 'ready' }}
+        submitting={false}
+        onApplyFilter={vi.fn()}
+        onSelectTask={onSelectTask}
+      />,
+    );
+
+    expect(screen.queryByRole('region', { name: 'Task details' })).toBeNull();
+    expect(
+      screen.getByText('No tasks match the applied Board filters.'),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(onSelectTask).toHaveBeenCalledWith(undefined, 'replace'),
+    );
   });
 });

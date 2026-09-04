@@ -124,6 +124,72 @@ pause across restart, exact-once dependent launch, and Stop/drain. M5 does not
 perform QA, integrate or merge workspaces, complete milestones, or clean up
 worktrees; those release decisions remain M6 work.
 
+#### V2 attention-first browser composition
+
+The V2 browser has one global shell and these canonical routes:
+
+| Route | Projection |
+| --- | --- |
+| `/` | Global **Inbox / Needs attention** projection. |
+| `/runs` | Global active and historical run projection. |
+| `/projects` | Project registration and selection. |
+| `/projects/:projectId` | Project **Overview**. |
+| `/projects/:projectId/requirements` | Approved requirement ledger. |
+| `/projects/:projectId/plans` | Intent and delivery-plan history, proposal review, and approval. |
+| `/projects/:projectId/board` | Server-calculated Board; `?task=:taskId` selects task detail. |
+| `/projects/:projectId/runs` | Project run history and evidence; `?run=:executionId` selects one execution. |
+
+The initial system snapshot gates route rendering. Inbox and Runs then fan out
+cancellable reads of the projects already present in that snapshot. Their first
+aggregate shows a loading state only while no successful project snapshot is
+available; a refresh preserves the prior successful projection until the new
+aggregate settles. `Promise.allSettled` keeps healthy projects visible when one
+read fails, and the failure carries the system-snapshot project name for its
+alert. Inbox refreshes on entry, explicit refresh, and window focus without a
+timer. Runs uses the same entry and focus behavior plus a 5,000 ms poll only
+while the document is visible and the window is focused; blur, hiding, route
+exit, and a superseding refresh abort or stop that work. Project routes show
+`Loading project :projectId…` until their authoritative snapshot is available.
+
+Inbox is a client-only projection of successful project snapshots. It orders
+runtime attention, failures, pending human decisions, stale plans, and ready
+work, and its category/project filters never create durable state. A delivery
+proposal links to the canonical project Plans route, where approval remains an
+ordinary existing project command. Global Runs likewise projects existing
+execution truth; selecting a row can navigate to the project Runs route for
+the authoritative runtime evidence. Neither global page opens a per-project
+WebSocket or invents lifecycle state.
+
+```text
+global Inbox or Runs
+  -> existing system snapshot project list
+  -> cancellable existing project snapshot reads
+  -> client-only attention/run projection
+  -> navigation to authoritative project artifact
+
+project artifact
+  -> existing project snapshot and durable replay
+  -> existing project WebSocket subscription
+  -> existing command and resync behavior
+```
+
+All project artifacts for one project share the same project connection, so
+tab navigation changes the artifact route without remounting snapshot, replay,
+or WebSocket ownership. A retained gap still replaces the projection from a
+fresh project snapshot and runtime replay. Until that converges, the last
+durable snapshot remains visible and mutations are disabled; disconnect and
+the global audit barrier follow the same fail-closed rule.
+
+The project manager is also project-scoped UI. Its drawer survives navigation
+among that project's artifact routes and is absent on Inbox, global Runs, and
+Projects. On narrow viewports it is a modal overlay; on wider viewports it may
+be pinned. Intent and delivery-plan drafts use
+`mesh.v2.pm-draft:<projectId>:intent` and
+`mesh.v2.pm-draft:<projectId>:delivery_plan`; pin preference uses
+`mesh.v2.pm-pinned`. Theme choice is global, stored under `mesh.v2.theme` as
+`system`, `light`, or `dark`, and applied as the resolved `light` or `dark`
+value in `document.documentElement.dataset.theme`.
+
 ### Established V1 project workflow
 
 Project task-board state follows a parallel durable flow. Each imported project

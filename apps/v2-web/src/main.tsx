@@ -9,6 +9,9 @@ const location: AppLocation = {
   get pathname() {
     return window.location.pathname;
   },
+  get search() {
+    return window.location.search;
+  },
   get protocol() {
     return window.location.protocol;
   },

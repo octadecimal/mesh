@@ -71,7 +71,9 @@ export function RequirementsPane({
         aria-labelledby="requirements-heading"
       >
         <h2 id="requirements-heading">Requirements</h2>
-        <p role="alert">{error}</p>
+        <p className="v2-warning" role="alert">
+          {error}
+        </p>
       </section>
     );
   if (!intentLedger)
@@ -96,7 +98,7 @@ export function RequirementsPane({
       aria-labelledby="requirements-heading"
     >
       <h2 id="requirements-heading">Requirements</h2>
-      <section aria-label="Approved intent">
+      <section className="intent-ledger-approved" aria-label="Approved intent">
         <h3>
           Approved intent · revision {intentLedger.projectIntent.revision}
         </h3>
@@ -134,68 +136,185 @@ export function RequirementsPane({
             <dd>{intentLedger.projectIntent.content.rationale}</dd>
           </div>
         </dl>
-        <ul aria-label="Approved intent provenance">
-          {intentLedger.projectIntent.content.provenance.map((source) => (
-            <li key={`${source.turnId}-${source.rationale}`}>
-              {source.turnId} · {source.rationale}
-            </li>
-          ))}
-        </ul>
+        <details className="intent-ledger-history">
+          <summary>Approval history</summary>
+          <dl>
+            <div>
+              <dt>Intent ID</dt>
+              <dd>{intentLedger.projectIntent.id}</dd>
+            </div>
+            <div>
+              <dt>Project ID</dt>
+              <dd>{intentLedger.projectIntent.projectId}</dd>
+            </div>
+            <div>
+              <dt>Proposal ID</dt>
+              <dd>{intentLedger.projectIntent.proposalId}</dd>
+            </div>
+            <div>
+              <dt>Approved by</dt>
+              <dd>{intentLedger.projectIntent.approvedBy}</dd>
+            </div>
+            <div>
+              <dt>Approved at</dt>
+              <dd>
+                <time dateTime={intentLedger.projectIntent.approvedAt}>
+                  {intentLedger.projectIntent.approvedAt}
+                </time>
+              </dd>
+            </div>
+          </dl>
+          <ul aria-label="Approved intent provenance">
+            {intentLedger.projectIntent.content.provenance.map((source) => (
+              <li key={`${source.turnId}-${source.rationale}`}>
+                {source.turnId} · {source.rationale}
+              </li>
+            ))}
+          </ul>
+        </details>
       </section>
-      <p>Ledger revision {intentLedger.ledger.revision}</p>
+      <details className="intent-ledger-history">
+        <summary>Ledger revision {intentLedger.ledger.revision}</summary>
+        <dl>
+          <div>
+            <dt>Ledger ID</dt>
+            <dd>{intentLedger.ledger.id}</dd>
+          </div>
+          <div>
+            <dt>Project ID</dt>
+            <dd>{intentLedger.ledger.projectId}</dd>
+          </div>
+          <div>
+            <dt>Proposal ID</dt>
+            <dd>{intentLedger.ledger.proposalId}</dd>
+          </div>
+          <div>
+            <dt>Approved by</dt>
+            <dd>{intentLedger.ledger.approvedBy}</dd>
+          </div>
+          <div>
+            <dt>Approved at</dt>
+            <dd>
+              <time dateTime={intentLedger.ledger.approvedAt}>
+                {intentLedger.ledger.approvedAt}
+              </time>
+            </dd>
+          </div>
+        </dl>
+      </details>
       {intentLedger.records.length === 0 ? (
         <p>No ledger records are in this approved revision.</p>
-      ) : (
-        groups.map(([type, title]) => {
-          const records = intentLedger.records.filter(
-            (record) => record.content.type === type,
-          );
-          return (
-            <section key={type} aria-labelledby={`${type}-heading`}>
-              <h3 id={`${type}-heading`}>{title}</h3>
-              {records.length === 0 ? (
-                <p>No {title.toLowerCase()}.</p>
-              ) : (
-                <ul>
-                  {records.map((record) => (
-                    <li key={record.recordId} className="intent-ledger-card">
-                      <h4>{record.content.statement}</h4>
-                      <p>{record.content.rationale}</p>
-                      <p>{metadata(record)}</p>
-                      <p>Revision {record.revision}</p>
-                      <ul
-                        aria-label={`Provenance for ${record.content.statement}`}
+      ) : null}
+      {groups.map(([type, title]) => {
+        const records = intentLedger.records.filter(
+          (record) => record.content.type === type,
+        );
+        return (
+          <section key={type} aria-labelledby={`${type}-heading`}>
+            <h3 id={`${type}-heading`}>
+              {title} · {records.length}
+            </h3>
+            {records.length === 0 ? (
+              <p>No {title.toLowerCase()}.</p>
+            ) : (
+              <ul className="intent-ledger-records">
+                {records.map((record) => {
+                  const headingId = `${type}-${record.recordId}-heading`;
+                  return (
+                    <li key={record.recordId}>
+                      <article
+                        className="intent-ledger-card"
+                        aria-labelledby={headingId}
                       >
-                        {record.provenance.map((source) => (
-                          <li key={`${source.turnId}-${source.rationale}`}>
-                            {source.turnId} · {source.rationale}
-                          </li>
-                        ))}
-                      </ul>
+                        <h4 id={headingId}>{record.content.statement}</h4>
+                        <dl className="intent-ledger-metadata">
+                          <div>
+                            <dt>Rationale</dt>
+                            <dd>{record.content.rationale}</dd>
+                          </div>
+                          <div>
+                            <dt>Metadata</dt>
+                            <dd>{metadata(record)}</dd>
+                          </div>
+                        </dl>
+                        <details className="intent-ledger-history">
+                          <summary>Revision and provenance</summary>
+                          <p>Revision {record.revision}</p>
+                          <dl>
+                            <div>
+                              <dt>Record ID</dt>
+                              <dd>{record.recordId}</dd>
+                            </div>
+                            <div>
+                              <dt>Project ID</dt>
+                              <dd>{record.projectId}</dd>
+                            </div>
+                            <div>
+                              <dt>Proposal ID</dt>
+                              <dd>{record.proposalId}</dd>
+                            </div>
+                            <div>
+                              <dt>Approved by</dt>
+                              <dd>{record.approvedBy}</dd>
+                            </div>
+                            <div>
+                              <dt>Approved at</dt>
+                              <dd>
+                                <time dateTime={record.approvedAt}>
+                                  {record.approvedAt}
+                                </time>
+                              </dd>
+                            </div>
+                          </dl>
+                          <ul
+                            aria-label={`Provenance for ${record.content.statement}`}
+                          >
+                            {record.provenance.map((source) => (
+                              <li key={`${source.turnId}-${source.rationale}`}>
+                                {source.turnId} · {source.rationale}
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      </article>
                     </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-          );
-        })
-      )}
-      <section aria-labelledby="relationships-heading">
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        );
+      })}
+      <section
+        className="intent-ledger-relationships"
+        aria-labelledby="relationships-heading"
+      >
         <h3 id="relationships-heading">Relationships</h3>
         {intentLedger.relationships.length === 0 ? (
           <p>No relationships in this revision.</p>
         ) : (
           <ul>
-            {intentLedger.relationships.map((relationship) => (
-              <li
-                key={`${relationship.kind}-${relationship.fromRecordId}-${relationship.toRecordId}`}
-              >
-                {labels.get(relationship.fromRecordId) ??
-                  relationship.fromRecordId}{' '}
-                {relationshipLabels[relationship.kind]}{' '}
-                {labels.get(relationship.toRecordId) ?? relationship.toRecordId}
-              </li>
-            ))}
+            {intentLedger.relationships.map((relationship) => {
+              const target =
+                labels.get(relationship.toRecordId) ?? relationship.toRecordId;
+              return (
+                <li
+                  key={`${relationship.kind}-${relationship.fromRecordId}-${relationship.toRecordId}`}
+                >
+                  <span>
+                    {labels.get(relationship.fromRecordId) ??
+                      relationship.fromRecordId}
+                  </span>{' '}
+                  <span>
+                    {relationshipLabels[relationship.kind]}{' '}
+                    {relationship.toRecordId}
+                  </span>
+                  {target === relationship.toRecordId ? null : (
+                    <span>{target.slice(relationship.toRecordId.length)}</span>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

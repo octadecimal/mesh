@@ -1,8 +1,9 @@
 # Session platform development
 
-This guide documents the established V1 session platform. Its `server`, `web`,
-and `e2e` commands and `MESH_*` settings do not apply to V2. For the parallel V2
-Milestone 1 foundation, see [V2 foundation development](v2-foundation.md).
+This guide documents the established V1 session platform and the V2 browser
+operating model below. V1 `server`, `web`, and `e2e` commands and `MESH_*`
+settings do not apply to V2. For V2 process and storage commands, see
+[V2 foundation development](v2-foundation.md).
 
 ## Prerequisites and local flow
 
@@ -26,6 +27,67 @@ records its identity outside the configured workspace root, and is revalidated
 before each use. Runtime execution does not rediscover Git through `PATH`,
 `SystemRoot`, or repository configuration. Restart Mesh after changing the
 setting or installation.
+
+## V2 browser operation
+
+The V2 global navigation is route-owned; it does not keep an implicit selected
+project:
+
+| Route                               | Operator surface                                            |
+| ----------------------------------- | ----------------------------------------------------------- |
+| `/`                                 | **Inbox / Needs attention** across readable projects.       |
+| `/runs`                             | Active and historical runs across readable projects.        |
+| `/projects`                         | Register or select a project.                               |
+| `/projects/:projectId`              | Project **Overview**.                                       |
+| `/projects/:projectId/requirements` | Approved requirements.                                      |
+| `/projects/:projectId/plans`        | Intent and delivery-plan review and decisions.              |
+| `/projects/:projectId/board`        | Board; `?task=:taskId` opens task detail.                   |
+| `/projects/:projectId/runs`         | Project runs; `?run=:executionId` opens execution evidence. |
+
+The system snapshot loads before these routes resolve. A project artifact then
+shows `Loading project :projectId…` until its project snapshot is ready. Inbox
+and Runs instead read each project named by the system snapshot with cancellable
+HTTP requests. A partial failure produces a project-named alert and does not
+remove attention or runs from healthy projects. Inbox refreshes on route entry,
+manual refresh, and window focus; it does not poll. Runs also polls every five
+seconds, but only while the document is visible and the window is focused. It
+stops and aborts obsolete work on blur, hiding, route exit, or refresh.
+
+Inbox categories and filters are client-only views of existing snapshots. The
+priority is runtime attention, failures, human decisions, stale plans, then
+ready work. **Review in project** always crosses to the authoritative project
+artifact; delivery-plan approval is available on Plans, not in the global
+Inbox. A global run row similarly opens its project Runs route for durable
+runtime activity and cursor evidence. Global Inbox and Runs do not subscribe to
+every project WebSocket.
+
+The **Project manager** control exists only on project routes. Its drawer and
+unsent draft remain mounted while moving among Overview, Requirements, Plans,
+Board, and Runs for that project, then disappear when navigation returns to a
+global route. On a narrow viewport it opens as a keyboard-modal overlay; on a
+wide viewport it can be pinned. Drafts are isolated by project and purpose in
+`mesh.v2.pm-draft:<projectId>:intent` and
+`mesh.v2.pm-draft:<projectId>:delivery_plan`; pin preference is stored in
+`mesh.v2.pm-pinned`. Proposal review and approve/reject controls remain on the
+canonical Plans artifact.
+
+The header **Theme** selector stores `system`, `light`, or `dark` under
+`mesh.v2.theme`. Reload resolves `system` through the browser preference and
+sets `document.documentElement.dataset.theme` to `light` or `dark`. Project
+metadata wraps without creating page-level horizontal scrolling at 320 CSS
+pixels. Project tabs keep their left/right/Home/End keyboard model and scroll
+the focused tab into the narrow view. The PM overlay, Plans proposal actions,
+and Board task detail remain keyboard reachable at narrow width and 200% page
+scale.
+
+Project artifact navigation retains one project connection. It starts from the
+existing project snapshot and durable replay, follows the existing project
+WebSocket, and uses the existing command and retained-gap resync paths. During
+connect, disconnect, or resync, the last durable snapshot remains visible while
+project mutations are disabled. A tripped audit barrier remains visible in the
+global header and disables PM, Board, Developer, run, and registration
+mutations. These browser states do not weaken server lifecycle, persistence,
+origin, permission, billing, or audit authority.
 
 ## Project and task operation
 
@@ -406,13 +468,23 @@ an absent API-billing environment. It uses only the fake driver, a temporary Git
 repository, and a temporary SQLite database. Failure traces and screenshots are retained under
 `tmp/playwright/session-platform`.
 
-The parallel V2 M4 acceptance path has the same fake-only safety boundary. It
-uses a fixture-owned repository, database, managed-worktree root, ports, and
+The parallel V2 acceptance path has the same fake-only safety boundary. It uses
+a fixture-owned repository, database, managed-worktree root, ports, and
 processes to prove Developer reservation-before-Git ordering, restart recovery,
 interruption and replacement, strict report settlement, canonical task
-completion, retained-gap resync, and isolated blocked or invalid output. It does
-not invoke the installed Claude executable, use operator worktrees or runtime
-state, or exercise the M5 scheduler or M6 behavior.
+completion, finite-run scheduling and control, retained-gap resync, and isolated
+blocked or invalid output. The `attention-first UI` Chromium scenarios add the
+global Inbox and Runs projections, canonical project navigation, PM draft
+scope, theme reload, 320-pixel and 200% page-scale keyboard access, partial
+snapshot failure, stale command lockout, and audit-barrier lockout:
+
+```powershell
+corepack pnpm nx e2e v2-e2e -- --grep "attention-first UI"
+```
+
+These scenarios do not invoke the installed Claude executable, use operator
+worktrees or runtime state, set an API-billing credential, or exercise M6
+behavior.
 
 Windows Chromium is the required acceptance environment. The same test suite is the portable basis for future macOS/Linux matrix entries.
 

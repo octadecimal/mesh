@@ -17,9 +17,13 @@ import {
 } from '@mesh/v2-contracts';
 
 import { V2HttpError, type V2Api } from '../api/client';
+import { AppShell } from '../components/AppShell';
 import { FocusedProjectShell } from '../components/FocusedProjectShell';
 import type { ExecutionActivityProjection } from '../components/FocusedProjectShell';
 import type { ExecutionRunCommand } from '../components/ExecutionRunSection';
+import { GlobalRunsPage } from '../components/GlobalRunsPage';
+import { InboxPage } from '../components/InboxPage';
+import { ProjectsPage } from '../components/ProjectsPage';
 import { ProjectSelector } from '../components/ProjectSelector';
 import type {
   MutationAvailability,
@@ -30,9 +34,17 @@ import {
   useProjectConnection,
   type ProjectSocketFactory,
 } from './use-project-connection';
+import {
+  appHref,
+  parseAppRoute,
+  type AppRoute,
+  type ProjectArtifact,
+} from './routes';
+import { useGlobalProjectSnapshots } from './use-global-project-snapshots';
 
 export type AppLocation = {
   readonly pathname: string;
+  readonly search: string;
   readonly protocol: string;
   readonly host: string;
   addEventListener(type: 'popstate', listener: EventListener): void;
@@ -41,6 +53,7 @@ export type AppLocation = {
 
 export type AppHistory = {
   pushState(data: unknown, unused: string, url?: string | URL | null): void;
+  replaceState(data: unknown, unused: string, url?: string | URL | null): void;
 };
 
 type SystemState =
@@ -135,16 +148,6 @@ const planningCommandTypes = new Set<V2CommandEnvelope['command']['type']>([
   'board_filter.set',
 ]);
 
-const routeProjectId = (pathname: string) => {
-  const match = /^\/projects\/([^/]+)$/.exec(pathname);
-  if (!match) return undefined;
-  try {
-    return decodeURIComponent(match[1]);
-  } catch {
-    return undefined;
-  }
-};
-
 const availability = (
   enabled: boolean,
   disabledReason: string,
@@ -199,16 +202,24 @@ function ProjectConnection({
   socketFactory,
   location,
   auditHealthy,
+  artifact,
+  selectedId,
   onAuditBarrier,
   onDeselect,
+  onNavigateArtifact,
+  onNavigate,
 }: {
   api: V2Api;
   projectId: string;
   socketFactory: ProjectSocketFactory;
   location: AppLocation;
   auditHealthy: boolean;
+  artifact: ProjectArtifact;
+  selectedId?: string;
   onAuditBarrier: (message: string) => void;
   onDeselect: () => void;
+  onNavigateArtifact: (artifact: ProjectArtifact) => void;
+  onNavigate: (href: string, mode?: 'push' | 'replace') => void;
 }) {
   const { projection, error, resyncing, dispatch } = useProjectConnection({
     api,
@@ -611,8 +622,12 @@ function ProjectConnection({
       ) : null}
       <FocusedProjectShell
         model={model}
+        artifact={artifact}
+        selectedId={selectedId}
         onDeselect={onDeselect}
         onInterrupt={interruptExecution}
+        onNavigateArtifact={onNavigateArtifact}
+        onNavigate={onNavigate}
         activityByExecutionId={activityByExecutionId}
         planning={{
           submitting,
@@ -655,7 +670,9 @@ export function App({
   location: AppLocation;
   history: AppHistory;
 }) {
-  const [pathname, setPathname] = useState(location.pathname);
+  const [route, setRoute] = useState<AppRoute>(() =>
+    parseAppRoute(location.pathname, location.search),
+  );
   const [system, setSystem] = useState<SystemState>({ status: 'loading' });
   const [registrationError, setRegistrationError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
@@ -683,18 +700,26 @@ export function App({
     return () => controller.abort();
   }, [api]);
 
-  const takeRouteOwnership = useCallback((next: string) => {
+  const globalSnapshots = useGlobalProjectSnapshots({
+    api,
+    projects: system.status === 'ready' ? system.snapshot.projects : [],
+    enabled: route.page === 'inbox' || route.page === 'runs',
+    pollIntervalMs: route.page === 'runs' ? 5000 : 0,
+  });
+
+  const takeRouteOwnership = useCallback((next: AppRoute) => {
     routeGeneration.current += 1;
     activeCommand.current?.controller.abort();
     activeCommand.current = undefined;
     pending.current = undefined;
     setSubmitting(false);
     setRegistrationError(undefined);
-    setPathname(next);
+    setRoute(next);
   }, []);
 
   useEffect(() => {
-    const popstate = () => takeRouteOwnership(location.pathname);
+    const popstate = () =>
+      takeRouteOwnership(parseAppRoute(location.pathname, location.search));
     location.addEventListener('popstate', popstate);
     return () => {
       location.removeEventListener('popstate', popstate);
@@ -705,15 +730,20 @@ export function App({
   }, [location, takeRouteOwnership]);
 
   const navigate = useCallback(
-    (next: string) => {
-      history.pushState(null, '', next);
-      takeRouteOwnership(next);
+    (next: string, mode: 'push' | 'replace' = 'push') => {
+      history[mode === 'replace' ? 'replaceState' : 'pushState'](
+        null,
+        '',
+        next,
+      );
+      const url = new URL(next, `${location.protocol}//${location.host}`);
+      takeRouteOwnership(parseAppRoute(url.pathname, url.search));
     },
-    [history, takeRouteOwnership],
+    [history, location.host, location.protocol, takeRouteOwnership],
   );
   const selectProject = useCallback(
     (projectId: string) =>
-      navigate(`/projects/${encodeURIComponent(projectId)}`),
+      navigate(appHref({ page: 'project', projectId, artifact: 'overview' })),
     [navigate],
   );
   const tripAuditBarrier = useCallback((message: string) => {
@@ -860,30 +890,78 @@ export function App({
         submitting,
         registration,
       };
-  if (pathname === '/') return selector(selectorModel);
-
-  const projectId = routeProjectId(pathname);
-  if (
-    !projectId ||
-    !system.snapshot.projects.some(({ id }) => id === projectId)
-  ) {
-    return selector({
-      status: 'error',
-      snapshot: system.snapshot,
-      message: 'Unknown project URL.',
-      registration,
-    });
-  }
+  const project =
+    route.page === 'project'
+      ? system.snapshot.projects.find(({ id }) => id === route.projectId)
+      : undefined;
+  const routeError = (message: string) => (
+    <section className="v2-page" aria-labelledby="route-error-heading">
+      <header className="v2-page-heading">
+        <div>
+          <p className="v2-eyebrow">Navigation</p>
+          <h1 id="route-error-heading">Page unavailable</h1>
+        </div>
+      </header>
+      <p role="alert">{message}</p>
+      <a
+        href={appHref({ page: 'projects' })}
+        onClick={(event) => {
+          event.preventDefault();
+          navigate(appHref({ page: 'projects' }));
+        }}
+      >
+        Go to Projects
+      </a>
+    </section>
+  );
+  const content =
+    route.page === 'inbox' ? (
+      <InboxPage state={globalSnapshots} onNavigate={navigate} />
+    ) : route.page === 'runs' ? (
+      <GlobalRunsPage state={globalSnapshots} onNavigate={navigate} />
+    ) : route.page === 'projects' ? (
+      <ProjectsPage
+        model={selectorModel}
+        onAddAndSelectProject={register}
+        onSelectProject={selectProject}
+        v1GuidanceHref="/guidance/v1-session-platform.md"
+      />
+    ) : route.page === 'not_found' ? (
+      routeError('Page not found. Choose a registered project.')
+    ) : !project ? (
+      routeError('Unknown project. Choose a registered project.')
+    ) : (
+      <ProjectConnection
+        key={route.projectId}
+        api={api}
+        projectId={route.projectId}
+        socketFactory={socketFactory}
+        location={location}
+        auditHealthy={system.snapshot.health.status === 'ok'}
+        artifact={route.artifact}
+        selectedId={route.selectedId}
+        onAuditBarrier={tripAuditBarrier}
+        onDeselect={() => navigate(appHref({ page: 'inbox' }))}
+        onNavigateArtifact={(artifact) =>
+          navigate(
+            appHref({
+              page: 'project',
+              projectId: route.projectId,
+              artifact,
+            }),
+          )
+        }
+        onNavigate={navigate}
+      />
+    );
   return (
-    <ProjectConnection
-      key={projectId}
-      api={api}
-      projectId={projectId}
-      socketFactory={socketFactory}
-      location={location}
-      auditHealthy={system.snapshot.health.status === 'ok'}
-      onAuditBarrier={tripAuditBarrier}
-      onDeselect={() => navigate('/')}
-    />
+    <AppShell
+      route={route}
+      health={system.snapshot.health}
+      onNavigate={navigate}
+      project={project}
+    >
+      {content}
+    </AppShell>
   );
 }

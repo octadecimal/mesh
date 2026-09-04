@@ -1,14 +1,46 @@
-import { render, screen, within } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type {
-  PlanningCycleView,
-  V2ProjectSnapshot,
-  WorkerExecution,
-  WorkerExecutionLifecycle,
+import type { ComponentProps } from 'react';
+import {
+  deliveryPlanPlanningCycleViewSchema,
+  type DeliveryPlanPlanningCycleView,
+  type PlanningCycleView,
+  type V2ProjectSnapshot,
+  type WorkerExecution,
+  type WorkerExecutionLifecycle,
 } from '@mesh/v2-contracts';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
-import { FocusedProjectShell } from './FocusedProjectShell';
+import type { ProjectArtifact } from '../app/routes';
+import { FocusedProjectShell as ProjectShell } from './FocusedProjectShell';
+import { PM_PINNED_STORAGE_KEY } from './ProjectManagerDrawer';
+
+type ProjectShellProps = ComponentProps<typeof ProjectShell>;
+
+function FocusedProjectShell({
+  artifact = 'board',
+  onNavigateArtifact = vi.fn(),
+  onNavigate = vi.fn(),
+  ...props
+}: Omit<ProjectShellProps, 'artifact' | 'onNavigateArtifact' | 'onNavigate'> &
+  Partial<
+    Pick<ProjectShellProps, 'artifact' | 'onNavigateArtifact' | 'onNavigate'>
+  >) {
+  return (
+    <ProjectShell
+      {...props}
+      artifact={artifact}
+      onNavigateArtifact={onNavigateArtifact}
+      onNavigate={onNavigate}
+    />
+  );
+}
 
 const executionFixture = {
   id: '22222222-2222-4222-8222-222222222222',
@@ -73,6 +105,73 @@ const snapshot: V2ProjectSnapshot = {
     cards: [],
   },
   cursors: { domain: 4, runtime: 12 },
+};
+
+const boardTask = {
+  taskId: 'T-21',
+  taskContractRevision: 1,
+  taskCurrentRevision: 2,
+  milestoneId: 'M-1',
+  milestoneRevision: 1,
+  title: 'Build controls',
+  outcome: 'Operators can control a build.',
+  lifecycle: 'pending' as const,
+  priority: 'must' as const,
+  labels: ['web'],
+  readiness: { state: 'actionable' as const, blockers: [] },
+  dependencies: [],
+  detail: {
+    acceptanceCriteria: ['Build controls are operable.'],
+    verificationCriteria: ['Exercise the build controls.'],
+    ownedSurfaces: ['Build controls'],
+    prohibitedSurfaces: ['Runtime policy'],
+    expectedArtifacts: ['Focused component test'],
+    milestoneOutcome: 'Builds are controllable.',
+    milestoneStopCondition: 'The focused test passes.',
+    milestoneExclusions: [],
+    requirementTraces: [],
+  },
+};
+
+const snapshotWithBoardTask: V2ProjectSnapshot = {
+  ...snapshot,
+  board: {
+    ...snapshot.board,
+    deliveryPlanRevision: 1,
+    emptyReason: null,
+    filter: {
+      projectId: snapshot.project.id,
+      revision: 1,
+      milestoneIds: [],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirementRecordIds: [],
+      updatedAt: '2026-08-28T00:00:00.000Z',
+    },
+    totalTaskCount: 1,
+    matchedTaskCount: 1,
+    facets: {
+      milestones: [
+        {
+          value: boardTask.milestoneId,
+          label: 'Delivery',
+          selected: false,
+          matchingTaskCount: 1,
+          milestoneRevision: 1,
+          lifecycle: 'active',
+          historical: false,
+        },
+      ],
+      taskLifecycles: [],
+      readiness: [],
+      priorities: [],
+      labels: [],
+      requirements: [],
+    },
+    cards: [boardTask],
+  },
 };
 
 const pmProfile = {
@@ -202,7 +301,430 @@ const terminalPlanningCycle = (
   ],
 });
 
+const awaitingIntentReviewCycle = (() => {
+  const cycle = terminalPlanningCycle('approved');
+  return {
+    ...cycle,
+    cycle: {
+      ...cycle.cycle,
+      lifecycle: 'awaiting_approval',
+      endedAt: null,
+    },
+    proposals: cycle.proposals.map((proposal) => ({
+      ...proposal,
+      lifecycle: 'awaiting_approval' as const,
+      decidedAt: null,
+    })),
+  } as PlanningCycleView;
+})();
+
+const awaitingDeliveryReviewCycle: DeliveryPlanPlanningCycleView =
+  deliveryPlanPlanningCycleViewSchema.parse({
+    purpose: {
+      kind: 'delivery_plan',
+      baseDeliveryPlanId: null,
+      baseDeliveryPlanRevision: null,
+    },
+    cycle: {
+      ...planningCycle.cycle,
+      id: '70707070-7070-4070-8070-707070707070',
+      lifecycle: 'awaiting_approval',
+      baseProjectIntentRevision: 1,
+      baseLedgerRevision: 1,
+      latestProposalRevision: 1,
+    },
+    turns: [
+      {
+        id: '75757575-7575-4575-8575-757575757575',
+        projectId: snapshot.project.id,
+        planningCycleId: '70707070-7070-4070-8070-707070707070',
+        ordinal: 1,
+        actor: 'human',
+        message: 'Plan delivery.',
+        launchState: 'execution_bound',
+        executionId: executionFixture.id,
+        createdAt: '2026-08-28T00:00:01.000Z',
+      },
+      {
+        id: '74747474-7474-4474-8474-747474747474',
+        projectId: snapshot.project.id,
+        planningCycleId: '70707070-7070-4070-8070-707070707070',
+        ordinal: 2,
+        actor: 'pm',
+        message: 'Review this delivery plan.',
+        launchState: null,
+        executionId: executionFixture.id,
+        createdAt: '2026-08-28T00:00:02.000Z',
+      },
+    ],
+    questions: [],
+    proposals: [],
+    deliveryPlanProposals: [
+      {
+        id: '71717171-7171-4171-8171-717171717171',
+        projectId: snapshot.project.id,
+        planningCycleId: '70707070-7070-4070-8070-707070707070',
+        revision: 1,
+        lifecycle: 'awaiting_approval',
+        base: {
+          projectIntentId: '72727272-7272-4272-8272-727272727272',
+          projectIntentRevision: 1,
+          ledgerId: '73737373-7373-4373-8373-737373737373',
+          ledgerRevision: 1,
+          deliveryPlan: { id: null, revision: null },
+        },
+        proposedPlan: {
+          summary: 'Deliver the approved intent.',
+          milestones: [
+            {
+              operation: 'create',
+              key: 'delivery',
+              content: {
+                title: 'Delivery',
+                outcome: 'The approved intent is delivered.',
+                stopCondition: 'The delivery criteria pass.',
+                exclusions: [],
+                ordinal: 1,
+              },
+            },
+          ],
+          tasks: [
+            {
+              operation: 'create',
+              key: 'deliver-intent',
+              content: {
+                milestone: { kind: 'proposal', key: 'delivery' },
+                title: 'Deliver intent',
+                outcome: 'The approved intent works.',
+                acceptanceCriteria: ['The intent is delivered.'],
+                verificationCriteria: ['Verify the delivered intent.'],
+                priority: 'must',
+                labels: [],
+                ownedSurfaces: ['Delivery'],
+                prohibitedSurfaces: [],
+                expectedArtifacts: ['Focused test'],
+                ordinal: 1,
+              },
+            },
+          ],
+          dependencies: [],
+          traces: [
+            {
+              kind: 'milestone_covers',
+              milestone: { kind: 'proposal', key: 'delivery' },
+              requirement: {
+                recordId: '76767676-7676-4676-8676-767676767676',
+                recordRevision: 1,
+              },
+            },
+            {
+              kind: 'task_satisfies',
+              task: { kind: 'proposal', key: 'deliver-intent' },
+              requirement: {
+                recordId: '76767676-7676-4676-8676-767676767676',
+                recordRevision: 1,
+              },
+            },
+          ],
+        },
+        reservations: {
+          milestones: [
+            {
+              key: 'delivery',
+              id: '77777777-7777-4777-8777-777777777777',
+            },
+          ],
+          tasks: [
+            {
+              key: 'deliver-intent',
+              id: '78787878-7878-4878-8878-787878787878',
+            },
+          ],
+          dependencies: [],
+        },
+        diff: {
+          milestones: {
+            create: 1,
+            reuse: 0,
+            revise: 0,
+            retire: 0,
+            reactivate: 0,
+          },
+          tasks: {
+            create: 1,
+            reuse: 0,
+            revise: 0,
+            retire: 0,
+            reactivate: 0,
+          },
+          dependencies: {
+            create: 0,
+            reuse: 0,
+            revise: 0,
+            retire: 0,
+            reactivate: 0,
+          },
+          traceCreateCount: 2,
+          traceRemoveCount: 0,
+        },
+        createdByTurnId: '74747474-7474-4474-8474-747474747474',
+        createdByExecutionId: executionFixture.id,
+        createdAt: '2026-08-28T00:00:02.000Z',
+        decision: { kind: 'pending' },
+      },
+    ],
+  });
+
 describe('FocusedProjectShell', () => {
+  it('keeps the pinned project manager first in keyboard order', () => {
+    localStorage.setItem(PM_PINNED_STORAGE_KEY, 'true');
+
+    try {
+      const { container } = render(
+        <FocusedProjectShell
+          artifact="overview"
+          model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
+          onDeselect={vi.fn()}
+          onInterrupt={vi.fn()}
+          onNavigateArtifact={vi.fn()}
+          onNavigate={vi.fn()}
+        />,
+      );
+
+      const layout = container.querySelector('.v2-project-layout');
+      expect(layout?.children[0]).toHaveClass('v2-pm-drawer');
+      expect(layout?.children[1]).toHaveClass('v2-project-content');
+    } finally {
+      localStorage.removeItem(PM_PINNED_STORAGE_KEY);
+    }
+  });
+
+  it('uses URL-controlled project artifacts with roving keyboard navigation', async () => {
+    const user = userEvent.setup();
+    const onNavigateArtifact = vi.fn();
+    const onNavigate = vi.fn();
+
+    render(
+      <FocusedProjectShell
+        artifact="overview"
+        model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+        onNavigateArtifact={onNavigateArtifact}
+        onNavigate={onNavigate}
+      />,
+    );
+
+    expectTypeOf<
+      Parameters<typeof ProjectShell>[0]['artifact']
+    >().toEqualTypeOf<ProjectArtifact>();
+    expectTypeOf<'inbox'>().not.toMatchTypeOf<ProjectArtifact>();
+    expect(screen.getAllByRole('tab')).toHaveLength(5);
+    const overview = screen.getByRole('tab', { name: 'Overview' });
+    expect(overview).toHaveAttribute('aria-current', 'page');
+    expect(overview).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByText(snapshot.project.repositoryPath)).toBeVisible();
+    expect(screen.getByText('Connected')).toBeVisible();
+    expect(screen.getByText(/Domain cursor 4/)).toBeVisible();
+    expect(screen.getByText(/runtime cursor 12/)).toBeVisible();
+
+    await user.click(screen.getByRole('tab', { name: 'Requirements' }));
+    expect(onNavigateArtifact).toHaveBeenCalledWith('requirements');
+    overview.focus();
+    await user.keyboard('{ArrowRight}');
+    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
+    await user.keyboard('{End}');
+    expect(screen.getByRole('tab', { name: 'Runs' })).toHaveFocus();
+    await user.keyboard('{Home}');
+    expect(overview).toHaveFocus();
+    expect(onNavigateArtifact.mock.calls.map(([artifact]) => artifact)).toEqual(
+      ['requirements', 'requirements', 'runs', 'overview'],
+    );
+  });
+
+  it('renders the URL-selected project run with its live durable evidence', async () => {
+    const user = userEvent.setup();
+    const completed = {
+      ...executionFixture,
+      id: '99999999-9999-4999-8999-999999999999',
+      lifecycle: 'completed',
+      resolvedSkills: [
+        {
+          requested: { id: 'verification-before-completion' },
+          mode: 'required',
+          resolution: { kind: 'unavailable', reason: 'Not installed' },
+        },
+      ],
+      nativeHandle: 'opaque-completed-run',
+      updatedAt: '2026-08-28T00:00:10.000Z',
+      endedAt: '2026-08-28T00:00:10.000Z',
+    } as WorkerExecution;
+
+    render(
+      <FocusedProjectShell
+        artifact="runs"
+        selectedId={completed.id}
+        model={{
+          status: 'ready',
+          snapshot: {
+            ...snapshot,
+            executions: [executionFixture, completed],
+          },
+          interrupt: { enabled: true },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={vi.fn()}
+        activityByExecutionId={{
+          [completed.id]: {
+            diagnosticId: 'raw-completed-run',
+            childActivities: [
+              {
+                id: 'child-completed',
+                title: 'Verify completed build',
+                lifecycle: 'completed',
+              },
+            ],
+            runtimeActivity: [
+              {
+                id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+                projectId: snapshot.project.id,
+                executionId: completed.id,
+                diagnosticId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                sequence: 12,
+                adapterCursor: 8,
+                occurredAt: '2026-08-28T00:00:10.000Z',
+                type: 'worker_execution.completed',
+                payload: { outcome: 'completed' },
+              },
+            ],
+          },
+        }}
+      />,
+    );
+
+    const panel = screen.getByRole('tabpanel', { name: 'Runs' });
+    expect(within(panel).getByRole('tab', { name: 'History' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(
+      within(screen.getByRole('region', { name: 'Run details' })).getByText(
+        'Completed',
+      ),
+    ).toBeVisible();
+    const runList = within(panel).getByRole('list', { name: 'History runs' });
+    expect(within(runList).getAllByRole('listitem')).toHaveLength(1);
+    expect(runList).toHaveTextContent(snapshot.project.displayName);
+    const evidence = within(panel).getByRole('article', {
+      name: 'Todo foundation worker',
+    });
+    expect(within(panel).getAllByRole('article')).toHaveLength(1);
+    expect(evidence).toHaveTextContent('Required skill unavailable');
+    expect(evidence).toHaveTextContent('Verify completed build');
+    expect(evidence).toHaveTextContent('Execution completed');
+    await user.click(within(evidence).getByText('Diagnostics'));
+    expect(evidence).toHaveTextContent('raw-completed-run');
+    expect(
+      within(evidence).getByText('Domain cursor').nextElementSibling,
+    ).toHaveTextContent('4');
+    expect(
+      within(evidence).getByText('Runtime cursor').nextElementSibling,
+    ).toHaveTextContent('12');
+  });
+
+  it('routes controlled Board task selection through canonical project URLs', async () => {
+    const user = userEvent.setup();
+    const onNavigate = vi.fn();
+    const shell = (selectedId?: string) => (
+      <FocusedProjectShell
+        artifact="board"
+        selectedId={selectedId}
+        model={{
+          status: 'ready',
+          snapshot: snapshotWithBoardTask,
+          interrupt: { enabled: true },
+        }}
+        developer={{
+          onStart: vi.fn(),
+          onInterrupt: vi.fn(),
+          onReplace: vi.fn(),
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={onNavigate}
+      />
+    );
+    const view = render(shell());
+
+    await user.click(
+      screen.getByRole('button', { name: 'Open Build controls' }),
+    );
+    expect(onNavigate).toHaveBeenLastCalledWith(
+      `/projects/${snapshot.project.id}/board?task=T-21`,
+    );
+
+    view.rerender(shell(boardTask.taskId));
+    expect(
+      screen.getByRole('region', { name: 'Task details' }),
+    ).toHaveTextContent('Build controls');
+    expect(
+      screen.getByRole('region', { name: 'Developer for Build controls' }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole('button', { name: 'Close task details' }),
+    );
+    expect(onNavigate).toHaveBeenLastCalledWith(
+      `/projects/${snapshot.project.id}/board`,
+    );
+  });
+
+  it('clears the canonical Board task URL when filtered truth removes the selection', async () => {
+    const onNavigate = vi.fn();
+    const shell = (currentSnapshot: V2ProjectSnapshot) => (
+      <FocusedProjectShell
+        artifact="board"
+        selectedId={boardTask.taskId}
+        model={{
+          status: 'ready',
+          snapshot: currentSnapshot,
+          interrupt: { enabled: true },
+        }}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={onNavigate}
+      />
+    );
+    const view = render(shell(snapshotWithBoardTask));
+    expect(
+      screen.getByRole('region', { name: 'Task details' }),
+    ).toHaveTextContent('Build controls');
+
+    onNavigate.mockClear();
+    view.rerender(
+      shell({
+        ...snapshotWithBoardTask,
+        board: {
+          ...snapshotWithBoardTask.board,
+          emptyReason: 'filter_empty',
+          matchedTaskCount: 0,
+          cards: [],
+        },
+      }),
+    );
+
+    expect(screen.queryByRole('region', { name: 'Task details' })).toBeNull();
+    await waitFor(() =>
+      expect(onNavigate).toHaveBeenCalledWith(
+        `/projects/${snapshot.project.id}/board`,
+        'replace',
+      ),
+    );
+  });
+
   it.each([
     ['approved', 'Proposal approved.'],
     ['proposal_rejected', 'Proposal rejected.'],
@@ -227,16 +749,16 @@ describe('FocusedProjectShell', () => {
           onInterrupt={vi.fn()}
         />,
       );
+      fireEvent.click(screen.getByRole('button', { name: 'Project manager' }));
 
       expect(screen.getByText(status)).toBeVisible();
       expect(
         screen.getByText(`Visible ${lifecycle} planning transcript.`),
       ).toBeVisible();
-      expect(screen.getByText(`Visible ${lifecycle} proposal.`)).toBeVisible();
       expect(
-        screen.getByRole('heading', { name: 'PM Chat history' }),
+        screen.getByRole('heading', { name: 'Intent history' }),
       ).toBeVisible();
-      expect(screen.getByRole('heading', { name: 'PM Chat' })).toBeVisible();
+      expect(screen.getByRole('heading', { name: 'Intent' })).toBeVisible();
       expect(screen.getByLabelText('Project manager profile')).toBeVisible();
       expect(screen.getByLabelText('Message to project manager')).toBeVisible();
       const ids = [...container.querySelectorAll<HTMLElement>('[id]')].map(
@@ -280,6 +802,7 @@ describe('FocusedProjectShell', () => {
 
     render(
       <FocusedProjectShell
+        artifact="plans"
         model={{
           status: 'ready',
           interrupt: { enabled: true },
@@ -363,6 +886,7 @@ describe('FocusedProjectShell', () => {
           onInterrupt={vi.fn()}
         />,
       );
+      fireEvent.click(screen.getByRole('button', { name: 'Project manager' }));
 
       expect(screen.getAllByText(message)[0]).toBeVisible();
       expect(screen.getByLabelText('Message to project manager')).toBeVisible();
@@ -399,6 +923,7 @@ describe('FocusedProjectShell', () => {
 
     render(
       <FocusedProjectShell
+        artifact="plans"
         model={{
           status: 'ready',
           interrupt: { enabled: true },
@@ -438,39 +963,40 @@ describe('FocusedProjectShell', () => {
     ).toBeVisible();
   });
 
-  it('shows future panes, handles keyboard tabs, and calls deselect and interrupt callbacks', async () => {
+  it('preserves project callbacks and live execution activity', async () => {
     const user = userEvent.setup();
     const onDeselect = vi.fn();
     const onInterrupt = vi.fn();
-    render(
+    const activityByExecutionId = {
+      [executionFixture.id]: {
+        childActivities: [
+          {
+            id: 'child-1',
+            title: 'Read package.json',
+            lifecycle: 'running' as const,
+          },
+        ],
+        runtimeActivity: [
+          {
+            id: '55555555-5555-4555-8555-555555555555',
+            projectId: snapshot.project.id,
+            executionId: executionFixture.id,
+            diagnosticId: '66666666-6666-4666-8666-666666666666',
+            sequence: 13,
+            adapterCursor: 9,
+            occurredAt: '2026-08-28T00:00:09.000Z',
+            type: 'worker_execution.completed' as const,
+            payload: { outcome: 'completed' as const },
+          },
+        ],
+      },
+    };
+    const view = render(
       <FocusedProjectShell
         model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
         onDeselect={onDeselect}
         onInterrupt={onInterrupt}
-        activityByExecutionId={{
-          [executionFixture.id]: {
-            childActivities: [
-              {
-                id: 'child-1',
-                title: 'Read package.json',
-                lifecycle: 'running',
-              },
-            ],
-            runtimeActivity: [
-              {
-                id: '55555555-5555-4555-8555-555555555555',
-                projectId: snapshot.project.id,
-                executionId: executionFixture.id,
-                diagnosticId: '66666666-6666-4666-8666-666666666666',
-                sequence: 13,
-                adapterCursor: 9,
-                occurredAt: '2026-08-28T00:00:09.000Z',
-                type: 'worker_execution.completed',
-                payload: { outcome: 'completed' },
-              },
-            ],
-          },
-        }}
+        activityByExecutionId={activityByExecutionId}
       />,
     );
 
@@ -483,48 +1009,42 @@ describe('FocusedProjectShell', () => {
       ),
     ).toBeVisible();
     expect(
-      screen.getByRole('complementary', { name: 'PM Chat' }),
-    ).toHaveTextContent('Project manager');
-    const boardTab = screen.getByRole('tab', { name: 'Board' });
-    await user.click(boardTab);
-    await user.keyboard('{ArrowRight}');
-    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveAttribute(
-      'aria-selected',
-      'true',
-    );
-    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
-    expect(
-      screen.getByRole('tabpanel', { name: 'Requirements' }),
-    ).toHaveTextContent('No approved intent or requirements yet.');
-    await user.keyboard('{Home}');
-    expect(screen.getByRole('tab', { name: 'Board' })).toHaveFocus();
-    await user.keyboard('{End}');
-    expect(screen.getByRole('tab', { name: 'Requirements' })).toHaveFocus();
-    expect(boardTab).toHaveAttribute('id', 'project-pane-tab-board');
-    expect(boardTab).toHaveAttribute(
-      'aria-controls',
-      'project-pane-panel-board',
+      screen.getByRole('button', { name: 'Project manager' }),
+    ).toBeVisible();
+    expect(screen.getByRole('tab', { name: 'Board' })).toHaveAttribute(
+      'aria-current',
+      'page',
     );
     expect(
       screen.queryByRole('button', { name: /start|approve|create/i }),
     ).not.toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Deselect project' }));
+    view.rerender(
+      <FocusedProjectShell
+        artifact="runs"
+        selectedId={executionFixture.id}
+        model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
+        onDeselect={onDeselect}
+        onInterrupt={onInterrupt}
+        activityByExecutionId={activityByExecutionId}
+      />,
+    );
+    const runPanel = screen.getByRole('tabpanel', { name: 'Runs' });
     await user.click(
-      screen.getByRole('button', { name: 'Interrupt execution' }),
+      within(runPanel).getByRole('button', {
+        name: 'Interrupt execution',
+      }),
     );
     expect(onDeselect).toHaveBeenCalledOnce();
     expect(onInterrupt).toHaveBeenCalledWith(executionFixture);
     expect(
-      screen.getByRole('region', { name: 'Attention items' }),
-    ).toHaveTextContent('Required skill is unavailable.');
-    expect(
-      screen.getByRole('list', {
+      within(runPanel).getByRole('list', {
         name: 'Child activity for Todo foundation worker',
       }),
     ).toHaveTextContent('Read package.json');
     expect(
-      screen.getByRole('list', {
+      within(runPanel).getByRole('list', {
         name: 'Runtime activity for Todo foundation worker',
       }),
     ).toHaveTextContent('Execution completed');
@@ -544,6 +1064,8 @@ describe('FocusedProjectShell', () => {
     (lifecycle: WorkerExecutionLifecycle) => {
       render(
         <FocusedProjectShell
+          artifact="runs"
+          selectedId={executionFixture.id}
           model={{
             status: 'ready',
             interrupt: { enabled: true },
@@ -558,7 +1080,10 @@ describe('FocusedProjectShell', () => {
       );
       expect(
         within(
-          screen.getByRole('article', { name: 'Todo foundation worker' }),
+          within(screen.getByRole('tabpanel', { name: 'Runs' })).getByRole(
+            'article',
+            { name: 'Todo foundation worker' },
+          ),
         ).getByRole('status'),
       ).toHaveTextContent(lifecycle);
     },
@@ -576,6 +1101,8 @@ describe('FocusedProjectShell', () => {
 
     rerender(
       <FocusedProjectShell
+        artifact="runs"
+        selectedId={executionFixture.id}
         model={{ status: 'stale', snapshot, message: 'Resyncing project' }}
         onDeselect={vi.fn()}
         onInterrupt={vi.fn()}
@@ -593,6 +1120,8 @@ describe('FocusedProjectShell', () => {
 
     rerender(
       <FocusedProjectShell
+        artifact="runs"
+        selectedId={executionFixture.id}
         model={{ status: 'disconnected', snapshot, message: 'Connection lost' }}
         onDeselect={vi.fn()}
         onInterrupt={vi.fn()}
@@ -609,6 +1138,8 @@ describe('FocusedProjectShell', () => {
   it('uses the ready presentation reason when interrupting is unavailable', () => {
     render(
       <FocusedProjectShell
+        artifact="runs"
+        selectedId={executionFixture.id}
         model={{
           status: 'ready',
           snapshot,
@@ -643,8 +1174,10 @@ describe('FocusedProjectShell', () => {
       lifecycle: 'completed',
       revision: 5,
     } as WorkerExecution;
-    render(
+    const shell = (selectedId: string) => (
       <FocusedProjectShell
+        artifact="runs"
+        selectedId={selectedId}
         model={{
           status: 'ready',
           interrupt: { enabled: true },
@@ -655,35 +1188,144 @@ describe('FocusedProjectShell', () => {
         }}
         onDeselect={vi.fn()}
         onInterrupt={onInterrupt}
-      />,
+      />
     );
+    const view = render(shell(completedExecution.id));
+    const completedInterrupt = within(
+      screen.getByRole('region', { name: 'Selected run evidence' }),
+    ).getByRole('button', { name: 'Interrupt execution' });
 
-    const runningRow = screen
-      .getByRole('article', { name: 'Todo foundation worker' })
-      .closest('li');
-    const completedRow = screen
-      .getByRole('article', { name: 'Completed Todo worker' })
-      .closest('li');
-    expect(runningRow).not.toBeNull();
-    expect(completedRow).not.toBeNull();
-    if (runningRow === null || completedRow === null) {
-      throw new Error('Expected an execution list row for each execution');
-    }
-    const runningInterrupt = within(runningRow).getByRole('button', {
-      name: 'Interrupt execution',
-    });
-    const completedInterrupt = within(completedRow).getByRole('button', {
-      name: 'Interrupt execution',
-    });
-
-    expect(runningInterrupt).toBeEnabled();
     expect(completedInterrupt).toBeDisabled();
     expect(completedInterrupt).toHaveAccessibleDescription(
       'Only running executions can be interrupted.',
     );
     await user.click(completedInterrupt);
+
+    view.rerender(shell(executionFixture.id));
+    const runningInterrupt = within(
+      screen.getByRole('region', { name: 'Selected run evidence' }),
+    ).getByRole('button', { name: 'Interrupt execution' });
+    expect(runningInterrupt).toBeEnabled();
     await user.click(runningInterrupt);
     expect(onInterrupt).toHaveBeenCalledOnce();
     expect(onInterrupt).toHaveBeenCalledWith(executionFixture);
+  });
+
+  it('keeps one project manager drawer mounted beside every artifact', async () => {
+    const user = userEvent.setup();
+    const shell = (artifact: ProjectArtifact) => (
+      <ProjectShell
+        model={{ status: 'ready', snapshot, interrupt: { enabled: true } }}
+        artifact={artifact}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={vi.fn()}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />
+    );
+    const view = render(shell('overview'));
+
+    expect(
+      screen.getByRole('button', { name: 'Project manager' }),
+    ).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Project manager' }));
+    expect(
+      screen.getByRole('dialog', { name: 'Project manager · Todo' }),
+    ).toBeVisible();
+
+    view.rerender(shell('board'));
+    expect(
+      screen.getByRole('dialog', { name: 'Project manager · Todo' }),
+    ).toBeVisible();
+    await user.click(
+      screen.getByRole('button', { name: 'Close project manager' }),
+    );
+
+    view.rerender(shell('plans'));
+    expect(screen.getByRole('heading', { name: 'Plans' })).toBeVisible();
+    expect(
+      screen.queryByRole('textbox', { name: 'Message to project manager' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('routes pinned Plans revision requests to the sole matching drawer composer', async () => {
+    localStorage.setItem('mesh.v2.pm-pinned', 'true');
+    const user = userEvent.setup();
+    const { container } = render(
+      <ProjectShell
+        artifact="plans"
+        model={{
+          status: 'ready',
+          interrupt: { enabled: true },
+          snapshot: {
+            ...snapshot,
+            profiles: [pmProfile],
+            planningCycles: [
+              awaitingIntentReviewCycle,
+              awaitingDeliveryReviewCycle,
+            ],
+          },
+        }}
+        onNavigateArtifact={vi.fn()}
+        onNavigate={vi.fn()}
+        onDeselect={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const intentReview = screen
+      .getByRole('heading', { name: 'Intent' })
+      .closest('section');
+    const deliveryReview = screen
+      .getByRole('heading', { name: 'Planning' })
+      .closest('section');
+    if (!intentReview || !deliveryReview)
+      throw new Error('Expected both Plans review sections');
+
+    await user.click(
+      within(deliveryReview).getByRole('button', { name: 'Request revision' }),
+    );
+    let drawer = screen.getByRole('complementary', {
+      name: 'Project manager · Todo',
+    });
+    expect(
+      within(drawer).getByRole('tab', { name: 'Delivery Plan' }),
+    ).toHaveAttribute('aria-selected', 'true');
+    expect(
+      screen.getAllByRole('textbox', { name: 'Message to project manager' }),
+    ).toHaveLength(1);
+    expect(
+      within(drawer).getByRole('textbox', {
+        name: 'Message to project manager',
+      }),
+    ).toHaveFocus();
+    expect(
+      new Set([...container.querySelectorAll('[id]')].map(({ id }) => id)).size,
+    ).toBe(container.querySelectorAll('[id]').length);
+
+    await user.click(
+      within(drawer).getByRole('button', { name: 'Close project manager' }),
+    );
+    await user.click(
+      within(intentReview).getByRole('button', { name: 'Request revision' }),
+    );
+    drawer = screen.getByRole('complementary', {
+      name: 'Project manager · Todo',
+    });
+    expect(within(drawer).getByRole('tab', { name: 'Intent' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(
+      screen.getAllByRole('textbox', { name: 'Message to project manager' }),
+    ).toHaveLength(1);
+    expect(
+      within(drawer).getByRole('textbox', {
+        name: 'Message to project manager',
+      }),
+    ).toHaveFocus();
+    expect(
+      new Set([...container.querySelectorAll('[id]')].map(({ id }) => id)).size,
+    ).toBe(container.querySelectorAll('[id]').length);
+    localStorage.removeItem('mesh.v2.pm-pinned');
   });
 });

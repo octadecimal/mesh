@@ -7,6 +7,8 @@ import type {
   WorkerExecution,
 } from '@mesh/v2-contracts';
 
+import { assignmentLabel } from '../presentation/assignment-label';
+
 export type ChildActivity = {
   id: string;
   title: string;
@@ -15,12 +17,18 @@ export type ChildActivity = {
 
 function skillOutcome(skill: ResolvedSkillSnapshot) {
   if (skill.resolution.kind === 'mesh-native-fallback') {
-    return 'Preferred skill fallback';
+    return {
+      label: 'Preferred skill fallback',
+      className: 'v2-state v2-state-fallback',
+    };
   }
   if (skill.resolution.kind === 'unavailable') {
-    return 'Required skill unavailable';
+    return {
+      label: 'Required skill unavailable',
+      className: 'v2-state v2-state-unavailable',
+    };
   }
-  return 'Skill resolved';
+  return { label: 'Skill resolved', className: undefined };
 }
 
 function runtimeActivityLabel(activity: RuntimeEvent) {
@@ -43,19 +51,6 @@ function runtimeActivityLabel(activity: RuntimeEvent) {
       return `Structured output ${activity.payload.schema}`;
   }
 }
-
-const assignmentLabel = (execution: WorkerExecution) => {
-  switch (execution.assignment.kind) {
-    case 'foundation-check':
-      return execution.assignment.title;
-    case 'pm_discovery':
-      return 'Project manager discovery';
-    case 'pm_plan':
-      return 'Project manager delivery planning';
-    case 'developer_task':
-      return execution.assignment.title;
-  }
-};
 
 function ChildActivityTree({
   activities,
@@ -90,33 +85,56 @@ export function ExecutionActivity({
   projectCursors: ProjectEventCursors;
 }) {
   const headingId = useId();
-  const label = assignmentLabel(execution);
+  const label = assignmentLabel(execution.assignment);
   return (
     <article className="v2-execution" aria-labelledby={headingId}>
       <header>
         <h3 id={headingId}>{label}</h3>
-        <p role="status">{execution.lifecycle}</p>
+        <dl className="v2-execution-summary">
+          <div>
+            <dt>Lifecycle</dt>
+            <dd
+              role="status"
+              className={
+                execution.lifecycle === 'failed'
+                  ? 'v2-state v2-state-failure'
+                  : undefined
+              }
+            >
+              {execution.lifecycle}
+            </dd>
+          </div>
+        </dl>
       </header>
       <section aria-label="Skill outcomes">
         <h4>Skill outcomes</h4>
-        <ul>
-          {execution.resolvedSkills.map((skill) => (
-            <li key={`${skill.mode}-${skill.requested.id}`}>
-              <strong>{skill.requested.id}</strong>:{' '}
-              <span>{skillOutcome(skill)}</span>
-            </li>
-          ))}
-        </ul>
+        <dl className="v2-execution-skills">
+          {execution.resolvedSkills.map((skill) => {
+            const outcome = skillOutcome(skill);
+            return (
+              <div key={`${skill.mode}-${skill.requested.id}`}>
+                <dt>{skill.requested.id}</dt>
+                <dd className={outcome.className}>{outcome.label}</dd>
+              </div>
+            );
+          })}
+        </dl>
       </section>
-      <section aria-label={`Child activity for ${label}`}>
-        <h4>Child activity</h4>
+      <details
+        className="v2-execution-disclosure"
+        open={childActivities.length > 0}
+      >
+        <summary>Child activity · {childActivities.length}</summary>
         <ChildActivityTree
           activities={childActivities}
           label={`Child activity for ${label}`}
         />
-      </section>
-      <section aria-label={`Runtime activity for ${label}`}>
-        <h4>Runtime activity</h4>
+      </details>
+      <details
+        className="v2-execution-disclosure"
+        open={runtimeActivity.length > 0}
+      >
+        <summary>Runtime activity · {runtimeActivity.length}</summary>
         {runtimeActivity.length === 0 ? (
           <p>No runtime activity reported.</p>
         ) : (
@@ -126,7 +144,7 @@ export function ExecutionActivity({
             ))}
           </ul>
         )}
-      </section>
+      </details>
       <details>
         <summary>Diagnostics</summary>
         <dl>

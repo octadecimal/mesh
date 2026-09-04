@@ -18,18 +18,31 @@ import type {
 
 import { ExecutionActivity, type ChildActivity } from './ExecutionActivity';
 import { BoardPane } from './BoardPane';
-import { DeliveryPlanningPane, PlanningPane } from './PlanningPane';
 import { RequirementsPane } from './RequirementsPane';
 import type { ProjectShellViewModel } from './shell-state';
 import type { ExecutionRunCommand } from './ExecutionRunSection';
+import type { ProjectArtifact } from '../app/routes';
+import { appHref } from '../app/routes';
+import {
+  attentionFromSnapshots,
+  runsFromSnapshots,
+} from '../app/global-projection';
+import { ProjectOverview } from './ProjectOverview';
+import {
+  ProjectManagerDrawer,
+  PM_PINNED_STORAGE_KEY,
+  type ProjectManagerSection,
+} from './ProjectManagerDrawer';
+import { PlansPane } from './PlansPane';
+import { RunsView } from './RunsView';
 
-const futurePanes = [
-  { label: 'Board', slug: 'board' },
+const projectArtifacts = [
+  { label: 'Overview', slug: 'overview' },
   { label: 'Requirements', slug: 'requirements' },
+  { label: 'Plans', slug: 'plans' },
+  { label: 'Board', slug: 'board' },
+  { label: 'Runs', slug: 'runs' },
 ] as const;
-
-type FuturePane = (typeof futurePanes)[number];
-type FuturePaneSlug = FuturePane['slug'];
 
 export type ExecutionActivityProjection = {
   childActivities: readonly ChildActivity[];
@@ -98,38 +111,59 @@ function disabledInterruptReason(status: ProjectShellViewModel['status']) {
 
 export function FocusedProjectShell({
   model,
+  artifact,
+  selectedId,
   onDeselect,
   onInterrupt,
+  onNavigateArtifact,
+  onNavigate,
   activityByExecutionId = {},
   planning = inertPlanning,
   developer,
   executionRun,
 }: {
   model: ProjectShellViewModel;
+  artifact: ProjectArtifact;
+  selectedId?: string;
   onDeselect: () => void;
   onInterrupt: (execution: WorkerExecution) => void;
+  onNavigateArtifact(artifact: ProjectArtifact): void;
+  onNavigate(href: string, mode?: 'push' | 'replace'): void;
   activityByExecutionId?: Readonly<Record<string, ExecutionActivityProjection>>;
   planning?: PlanningCommandProjection;
   developer?: DeveloperCommandProjection;
   executionRun?: ExecutionRunCommandProjection;
 }) {
-  const [activePane, setActivePane] = useState<FuturePaneSlug>('board');
-  const tabRefs = useRef<Record<FuturePaneSlug, HTMLButtonElement | null>>({
+  const [pmOpen, setPmOpen] = useState(false);
+  const [pmPinned, setPmPinned] = useState(
+    () =>
+      typeof localStorage !== 'undefined' &&
+      localStorage.getItem(PM_PINNED_STORAGE_KEY) === 'true',
+  );
+  const [pmSectionSelection, setPmSectionSelection] = useState<{
+    projectId: string;
+    section: ProjectManagerSection;
+  }>();
+  const [pmComposerFocusRequest, setPmComposerFocusRequest] = useState(0);
+  const tabRefs = useRef<Record<ProjectArtifact, HTMLAnchorElement | null>>({
+    overview: null,
+    plans: null,
     board: null,
     requirements: null,
+    runs: null,
   });
   if (model.status === 'loading') {
     return (
-      <main className="v2-shell">
+      <div className="v2-shell">
         <p role="status">Loading project {model.projectId}…</p>
-      </main>
+      </div>
     );
   }
 
   const snapshot = model.snapshot;
   if (snapshot === undefined) {
     return (
-      <main className="v2-shell">
+      <div className="v2-shell">
         <p role="status">
           {model.status === 'disconnected'
             ? model.message
@@ -138,7 +172,7 @@ export function FocusedProjectShell({
         <button type="button" onClick={onDeselect}>
           Deselect project
         </button>
-      </main>
+      </div>
     );
   }
   const interruptReason =
@@ -199,6 +233,16 @@ export function FocusedProjectShell({
     deliveryCycles.find(
       ({ cycle }) => !terminalPlanningLifecycles.has(cycle.lifecycle),
     ) ?? deliveryCycles[0];
+  const defaultPmSection: ProjectManagerSection = activePlanningCycle
+    ? 'intent'
+    : deliveryCycle &&
+        !terminalPlanningLifecycles.has(deliveryCycle.cycle.lifecycle)
+      ? 'delivery-plan'
+      : 'intent';
+  const pmSection =
+    pmSectionSelection?.projectId === snapshot.project.id
+      ? pmSectionSelection.section
+      : defaultPmSection;
   const deliveryProfiles = snapshot.profiles
     .filter(
       (profile) =>
@@ -242,11 +286,75 @@ export function FocusedProjectShell({
     (activePlanningCycle.turns.filter(({ actor }) => actor === 'human')
       .length >= 32 ||
       activePlanningCycle.proposals.length >= 16);
-  function activatePane(pane: FuturePane) {
-    setActivePane(pane.slug);
-    tabRefs.current[pane.slug]?.focus();
+  const deliveryHistoryLimitReached =
+    deliveryCycle !== undefined &&
+    (deliveryCycle.turns.filter(({ actor }) => actor === 'human').length >=
+      32 ||
+      deliveryCycle.deliveryPlanProposals.length >= 16);
+  const intentHistory = terminalPlanningHistory
+    ? {
+        cycle: terminalPlanningHistory,
+        connection: { status: 'ready' } as const,
+        profiles: [],
+        submitting: false,
+        headingLabel: 'Intent history',
+        historyTruncated: snapshot.planningHistoryTruncated,
+        executions: snapshot.executions,
+        approvedIntentLedger: snapshot.intentLedger,
+        onSubmitTurn: planning.onSubmitTurn,
+        onApprove: planning.onApprove,
+        onReject: planning.onReject,
+        onAbandon: planning.onAbandon,
+      }
+    : undefined;
+  const intentPlanning = {
+    cycle: activePlanningCycle,
+    connection: planningConnection,
+    profiles: planningProfiles,
+    submitting: planning.submitting,
+    error: planning.error,
+    headingLabel: 'Intent',
+    historyTruncated: terminalPlanningHistory
+      ? false
+      : snapshot.planningHistoryTruncated,
+    historyLimitReached: planningHistoryLimitReached,
+    recovery: planningRecovery,
+    executions: snapshot.executions,
+    approvedIntentLedger: snapshot.intentLedger,
+    onSubmitTurn: planning.onSubmitTurn,
+    onApprove: planning.onApprove,
+    onReject: planning.onReject,
+    onAbandon: planning.onAbandon,
+  };
+  const deliveryPlanning = {
+    cycle: deliveryCycle,
+    approvedIntentLedger: snapshot.intentLedger,
+    deliveryPlan: snapshot.deliveryPlan,
+    planStale: snapshot.board.stale,
+    connection: planningConnection,
+    profiles: deliveryProfiles,
+    submitting: planning.submitting,
+    error: planning.error,
+    historyLimitReached: deliveryHistoryLimitReached,
+    onSubmit: planning.onSubmitPlan,
+    onApprove: planning.onApprovePlan,
+    onReject: planning.onRejectPlan,
+    onAbandon: planning.onAbandonPlan,
+  };
+  const focusedProjectId = snapshot.project.id;
+  function selectPmSection(section: ProjectManagerSection) {
+    setPmSectionSelection({ projectId: focusedProjectId, section });
   }
-  function moveTab(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+  function openPmForRevision(section: ProjectManagerSection) {
+    selectPmSection(section);
+    setPmComposerFocusRequest((request) => request + 1);
+    setPmOpen(true);
+  }
+  function activateArtifact(nextArtifact: ProjectArtifact) {
+    onNavigateArtifact(nextArtifact);
+    tabRefs.current[nextArtifact]?.focus();
+  }
+  function moveTab(event: KeyboardEvent<HTMLAnchorElement>, index: number) {
     const key = event.key;
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) return;
     event.preventDefault();
@@ -254,237 +362,227 @@ export function FocusedProjectShell({
       key === 'Home'
         ? 0
         : key === 'End'
-          ? futurePanes.length - 1
-          : (index + (key === 'ArrowRight' ? 1 : -1) + futurePanes.length) %
-            futurePanes.length;
-    activatePane(futurePanes[targetIndex]);
+          ? projectArtifacts.length - 1
+          : (index +
+              (key === 'ArrowRight' ? 1 : -1) +
+              projectArtifacts.length) %
+            projectArtifacts.length;
+    activateArtifact(projectArtifacts[targetIndex].slug);
   }
+  const selectedExecution =
+    artifact === 'runs' && selectedId
+      ? snapshot.executions.find(({ id }) => id === selectedId)
+      : undefined;
+  const selectedActivity = selectedExecution
+    ? activityByExecutionId[selectedExecution.id]
+    : undefined;
+  const selectedInterruptReason = selectedExecution
+    ? selectedExecution.lifecycle === 'running'
+      ? interruptReason
+      : 'Only running executions can be interrupted.'
+    : undefined;
 
   return (
-    <main className="v2-shell" aria-labelledby="focused-project-heading">
+    <div className="v2-shell" aria-labelledby="focused-project-heading">
       <header className="v2-shell-header">
         <div>
           <p className="v2-eyebrow">Focused project</p>
           <h1 id="focused-project-heading">{snapshot.project.displayName}</h1>
-          <p>{snapshot.project.repositoryPath}</p>
+          <div className="v2-project-metadata">
+            <p className="v2-project-path">{snapshot.project.repositoryPath}</p>
+            <p
+              role="status"
+              className={
+                model.status === 'ready' ? undefined : 'v2-connection-status'
+              }
+            >
+              {model.status === 'ready' ? 'Connected' : model.message}
+            </p>
+            <p className="v2-cursors">
+              Domain cursor {snapshot.cursors.domain}; runtime cursor{' '}
+              {snapshot.cursors.runtime}
+            </p>
+          </div>
         </div>
         <button type="button" onClick={onDeselect}>
           Deselect project
         </button>
       </header>
-      {model.status === 'stale' || model.status === 'disconnected' ? (
-        <p role="status" className="v2-connection-status">
-          {model.message}
-        </p>
-      ) : null}
-      <p className="v2-cursors">
-        Domain cursor {snapshot.cursors.domain}; runtime cursor{' '}
-        {snapshot.cursors.runtime}
-      </p>
       <div className="v2-project-layout">
-        <aside className="v2-pm-pane" aria-label="PM Chat">
-          {terminalPlanningHistory ? (
-            <PlanningPane
-              cycle={terminalPlanningHistory}
-              connection={{ status: 'ready' }}
-              profiles={[]}
-              submitting={false}
-              headingLabel="PM Chat history"
-              historyTruncated={snapshot.planningHistoryTruncated}
-              executions={snapshot.executions}
-              approvedIntentLedger={snapshot.intentLedger}
-              onSubmitTurn={planning.onSubmitTurn}
-              onApprove={planning.onApprove}
-              onReject={planning.onReject}
-              onAbandon={planning.onAbandon}
-            />
-          ) : null}
-          <PlanningPane
-            cycle={activePlanningCycle}
-            connection={planningConnection}
-            profiles={planningProfiles}
-            submitting={planning.submitting}
-            error={planning.error}
-            historyTruncated={
-              terminalPlanningHistory
-                ? false
-                : snapshot.planningHistoryTruncated
-            }
-            historyLimitReached={planningHistoryLimitReached}
-            recovery={planningRecovery}
-            executions={snapshot.executions}
-            approvedIntentLedger={snapshot.intentLedger}
-            onSubmitTurn={planning.onSubmitTurn}
-            onApprove={planning.onApprove}
-            onReject={planning.onReject}
-            onAbandon={planning.onAbandon}
-          />
-          <DeliveryPlanningPane
-            projectId={snapshot.project.id}
-            cycle={deliveryCycle}
-            approvedIntentLedger={snapshot.intentLedger}
-            deliveryPlan={snapshot.deliveryPlan}
-            planStale={snapshot.board.stale}
-            connection={planningConnection}
-            profiles={deliveryProfiles}
-            submitting={planning.submitting}
-            error={planning.error}
-            historyLimitReached={
-              deliveryCycle !== undefined &&
-              (deliveryCycle.turns.filter(({ actor }) => actor === 'human')
-                .length >= 32 ||
-                deliveryCycle.deliveryPlanProposals.length >= 16)
-            }
-            onSubmit={planning.onSubmitPlan}
-            onApprove={planning.onApprovePlan}
-            onReject={planning.onRejectPlan}
-            onAbandon={planning.onAbandonPlan}
-          />
-        </aside>
+        <ProjectManagerDrawer
+          projectId={snapshot.project.id}
+          projectName={snapshot.project.displayName}
+          open={pmOpen}
+          pinned={pmPinned}
+          section={pmSection}
+          composerFocusRequest={pmComposerFocusRequest}
+          onOpenChange={setPmOpen}
+          onPinnedChange={setPmPinned}
+          onSectionChange={selectPmSection}
+          onNavigate={onNavigate}
+          intent={intentPlanning}
+          intentHistory={intentHistory}
+          deliveryPlan={deliveryPlanning}
+        />
         <div className="v2-project-content">
-          <section aria-label="Future workflow panes">
-            <div role="tablist" aria-label="Project panes">
-              {futurePanes.map((pane, index) => (
-                <button
-                  key={pane.slug}
-                  ref={(element) => {
-                    tabRefs.current[pane.slug] = element;
-                  }}
-                  id={`project-pane-tab-${pane.slug}`}
-                  role="tab"
-                  type="button"
-                  aria-selected={activePane === pane.slug}
-                  aria-controls={`project-pane-panel-${pane.slug}`}
-                  tabIndex={activePane === pane.slug ? 0 : -1}
-                  onClick={() => activatePane(pane)}
-                  onKeyDown={(event) => moveTab(event, index)}
-                >
-                  {pane.label}
-                </button>
-              ))}
+          <section aria-label="Project workspace">
+            <div
+              role="tablist"
+              aria-label="Project artifacts"
+              className="v2-project-tabs"
+            >
+              {projectArtifacts.map((item, index) => {
+                const href = appHref({
+                  page: 'project',
+                  projectId: snapshot.project.id,
+                  artifact: item.slug,
+                });
+                return (
+                  <a
+                    key={item.slug}
+                    ref={(element) => {
+                      tabRefs.current[item.slug] = element;
+                    }}
+                    id={`project-pane-tab-${item.slug}`}
+                    role="tab"
+                    href={href}
+                    aria-selected={artifact === item.slug}
+                    aria-current={artifact === item.slug ? 'page' : undefined}
+                    aria-controls="project-artifact-panel"
+                    tabIndex={artifact === item.slug ? 0 : -1}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      activateArtifact(item.slug);
+                    }}
+                    onKeyDown={(event) => moveTab(event, index)}
+                  >
+                    {item.label}
+                  </a>
+                );
+              })}
             </div>
             <section
-              id="project-pane-panel-board"
+              id="project-artifact-panel"
               role="tabpanel"
-              aria-labelledby="project-pane-tab-board"
-              hidden={activePane !== 'board'}
+              aria-labelledby={`project-pane-tab-${artifact}`}
             >
-              <BoardPane
-                board={snapshot.board}
-                connection={planningConnection}
-                submitting={planning.submitting}
-                error={planning.error}
-                onApplyFilter={planning.onApplyFilter}
-                developer={
-                  developer
-                    ? {
-                        attempts: snapshot.developerAttempts ?? [],
-                        reports: snapshot.developerReports ?? [],
-                        executions: snapshot.executions,
-                        profiles: snapshot.profiles,
-                        projectCursors: snapshot.cursors,
-                        activityByExecutionId,
-                        error: developer.error,
-                        onStart: developer.onStart,
-                        onInterrupt: developer.onInterrupt,
-                        onReplace: developer.onReplace,
-                      }
-                    : undefined
-                }
-                executionRun={
-                  executionRun
-                    ? {
-                        deliveryPlan: snapshot.deliveryPlan,
-                        runs: snapshot.executionRuns ?? [],
-                        profiles: snapshot.profiles,
-                        error: executionRun.error,
-                        onCommand: executionRun.onCommand,
-                      }
-                    : undefined
-                }
-              />
-            </section>
-            <section
-              id="project-pane-panel-requirements"
-              role="tabpanel"
-              aria-labelledby="project-pane-tab-requirements"
-              hidden={activePane !== 'requirements'}
-            >
-              <RequirementsPane intentLedger={snapshot.intentLedger} />
-            </section>
-          </section>
-          <section aria-labelledby="profiles-heading">
-            <h2 id="profiles-heading">Approved profiles</h2>
-            <ul>
-              {snapshot.profiles.map((profile) => (
-                <li key={profile.profileId}>
-                  {profile.document.metadata.displayName} · revision{' '}
-                  {profile.profileRevision}
-                </li>
-              ))}
-            </ul>
-          </section>
-          <section aria-labelledby="activity-heading">
-            <h2 id="activity-heading">Worker activity</h2>
-            {snapshot.executions.length === 0 ? (
-              <p>No worker executions yet.</p>
-            ) : (
-              <ul className="v2-execution-list">
-                {snapshot.executions.map((execution) => {
-                  const activity = activityByExecutionId[execution.id];
-                  const rowInterruptReason =
-                    execution.lifecycle === 'running'
-                      ? interruptReason
-                      : 'Only running executions can be interrupted.';
-                  return (
-                    <li key={execution.id}>
+              {artifact === 'overview' ? (
+                <ProjectOverview
+                  snapshot={snapshot}
+                  attention={attentionFromSnapshots([snapshot])}
+                  onNavigate={onNavigate}
+                />
+              ) : artifact === 'requirements' ? (
+                <RequirementsPane intentLedger={snapshot.intentLedger} />
+              ) : artifact === 'plans' ? (
+                <PlansPane
+                  projectId={snapshot.project.id}
+                  intent={intentPlanning}
+                  intentHistory={intentHistory}
+                  deliveryPlan={deliveryPlanning}
+                  onRequestIntentRevision={() => openPmForRevision('intent')}
+                  onRequestDeliveryPlanRevision={() =>
+                    openPmForRevision('delivery-plan')
+                  }
+                />
+              ) : artifact === 'board' ? (
+                <BoardPane
+                  board={snapshot.board}
+                  connection={planningConnection}
+                  submitting={planning.submitting}
+                  error={planning.error}
+                  onApplyFilter={planning.onApplyFilter}
+                  selectedId={selectedId}
+                  onSelectTask={(taskId, mode) => {
+                    const href = appHref({
+                      page: 'project',
+                      projectId: snapshot.project.id,
+                      artifact: 'board',
+                      selectedId: taskId,
+                    });
+                    if (mode === undefined) onNavigate(href);
+                    else onNavigate(href, mode);
+                  }}
+                  developer={
+                    developer
+                      ? {
+                          attempts: snapshot.developerAttempts ?? [],
+                          reports: snapshot.developerReports ?? [],
+                          executions: snapshot.executions,
+                          profiles: snapshot.profiles,
+                          projectCursors: snapshot.cursors,
+                          activityByExecutionId,
+                          error: developer.error,
+                          onStart: developer.onStart,
+                          onInterrupt: developer.onInterrupt,
+                          onReplace: developer.onReplace,
+                        }
+                      : undefined
+                  }
+                  executionRun={
+                    executionRun
+                      ? {
+                          deliveryPlan: snapshot.deliveryPlan,
+                          runs: snapshot.executionRuns ?? [],
+                          profiles: snapshot.profiles,
+                          error: executionRun.error,
+                          onCommand: executionRun.onCommand,
+                        }
+                      : undefined
+                  }
+                />
+              ) : (
+                <div className="v2-project-runs">
+                  <RunsView
+                    runs={runsFromSnapshots([snapshot])}
+                    projectId={snapshot.project.id}
+                    selectedId={selectedId}
+                    onNavigate={onNavigate}
+                  />
+                  {selectedExecution ? (
+                    <section
+                      className="v2-run-evidence"
+                      aria-label="Selected run evidence"
+                    >
                       <ExecutionActivity
-                        execution={execution}
-                        childActivities={activity?.childActivities}
-                        diagnosticId={activity?.diagnosticId}
-                        runtimeActivity={activity?.runtimeActivity}
+                        execution={selectedExecution}
+                        childActivities={selectedActivity?.childActivities}
+                        diagnosticId={selectedActivity?.diagnosticId}
+                        runtimeActivity={selectedActivity?.runtimeActivity}
                         projectCursors={snapshot.cursors}
                       />
                       <button
                         type="button"
-                        disabled={rowInterruptReason !== undefined}
+                        disabled={selectedInterruptReason !== undefined}
                         aria-describedby={
-                          rowInterruptReason
-                            ? `interrupt-reason-${execution.id}`
+                          selectedInterruptReason
+                            ? `interrupt-reason-${selectedExecution.id}`
                             : undefined
                         }
                         onClick={() => {
-                          if (rowInterruptReason === undefined)
-                            onInterrupt(execution);
+                          if (selectedInterruptReason === undefined)
+                            onInterrupt(selectedExecution);
                         }}
                       >
                         Interrupt execution
                       </button>
-                      {rowInterruptReason ? (
-                        <p id={`interrupt-reason-${execution.id}`}>
-                          {rowInterruptReason}
+                      {selectedInterruptReason ? (
+                        <p id={`interrupt-reason-${selectedExecution.id}`}>
+                          {selectedInterruptReason}
                         </p>
                       ) : null}
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </section>
-          {snapshot.attentionItems.length > 0 ? (
-            <section aria-label="Attention items">
-              <h2>Attention items</h2>
-              <ul>
-                {snapshot.attentionItems.map((item) => (
-                  <li key={`${item.executionId}-${item.code}`}>
-                    {item.message}
-                  </li>
-                ))}
-              </ul>
+                    </section>
+                  ) : selectedId ? (
+                    <p role="status">
+                      Selected run is unavailable in current project truth.
+                    </p>
+                  ) : null}
+                </div>
+              )}
             </section>
-          ) : null}
+          </section>
         </div>
       </div>
-    </main>
+    </div>
   );
 }

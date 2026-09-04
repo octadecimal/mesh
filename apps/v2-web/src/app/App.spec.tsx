@@ -21,103 +21,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { V2HttpError, type V2Api } from '../api/client';
 import type { WebSocketLike } from '../api/socket';
+import {
+  projectFixture as project,
+  projectSnapshotFixture as projectSnapshot,
+  runningExecutionFixture as execution,
+} from '../test/project-snapshot-fixture';
 import { App, type AppHistory, type AppLocation } from './App';
 
-const projectId = '11111111-1111-4111-8111-111111111111';
-const executionId = '22222222-2222-4222-8222-222222222222';
-const profileId = '33333333-3333-4333-8333-333333333333';
-
-const project = {
-  id: projectId,
-  displayName: 'Todo',
-  repositoryIdentity: 'todo-identity',
-  repositoryPath: 'C:\\repos\\todo',
-  gitCommonDirectory: 'C:\\repos\\todo\\.git',
-  headCommit: 'a'.repeat(40),
-  revision: 1,
-  createdAt: '2026-08-28T00:00:00.000Z',
-  updatedAt: '2026-08-28T00:00:00.000Z',
-};
-
-const execution = workerExecutionSchema.parse({
-  id: executionId,
-  projectId,
-  profileId,
-  profileRevision: 1,
-  assignment: {
-    kind: 'foundation-check',
-    projectId,
-    title: 'Todo foundation worker',
-    instructions: 'Inspect the Todo repository.',
-    fakeScenario: 'todo-foundation-v1',
-  },
-  profileSnapshot: {
-    profileId,
-    projectId: null,
-    profileRevision: 1,
-    baseProfileId: null,
-    baseRevision: null,
-    document: {
-      apiVersion: 'mesh.dev/v1alpha1',
-      kind: 'WorkerProfile',
-      metadata: {
-        name: 'todo-worker',
-        displayName: 'Todo worker',
-        scope: 'global',
-      },
-      spec: {
-        assignmentKinds: ['foundation-check'],
-        preferredRuntime: { harness: 'fake', model: 'deterministic' },
-        alternatives: [],
-        requiredCapabilities: ['execution.stream'],
-        skills: {
-          preferred: [{ id: 'test-driven-development' }],
-          required: [{ id: 'verification-before-completion' }],
-        },
-        instructions: 'Inspect.',
-        outputSchema: 'mesh.dev/foundation-report/v1',
-      },
-    },
-    digest: 'b'.repeat(64),
-  },
-  skillRequests: {
-    preferred: [{ id: 'test-driven-development' }],
-    required: [{ id: 'verification-before-completion' }],
-  },
-  resolvedSkills: [
-    {
-      requested: { id: 'test-driven-development' },
-      mode: 'preferred',
-      resolution: {
-        kind: 'mesh-native-fallback',
-        workflow: 'mesh.foundation-check/v1',
-      },
-    },
-    {
-      requested: { id: 'verification-before-completion' },
-      mode: 'required',
-      resolution: { kind: 'unavailable', reason: 'Not installed' },
-    },
-  ],
-  capabilitySnapshot: {
-    adapterId: 'fake',
-    capabilities: ['execution.stream'],
-    skills: [],
-    exactResume: true,
-  },
-  adapterId: 'fake',
-  model: 'deterministic',
-  nativeHandle: 'opaque-handle',
-  lifecycle: 'running',
-  revision: 4,
-  lastAdapterCursor: 5,
-  lastRuntimeSequence: 5,
-  replacementForExecutionId: null,
-  failure: null,
-  createdAt: '2026-08-28T00:00:00.000Z',
-  updatedAt: '2026-08-28T00:00:05.000Z',
-  endedAt: null,
-});
+const projectId = project.id;
+const executionId = execution.id;
+const profileId = execution.profileId;
 
 const pmProfile = resolvedWorkerProfileSnapshotSchema.parse({
   ...execution.profileSnapshot,
@@ -152,43 +65,6 @@ const systemSnapshot = v2SystemSnapshotSchema.parse({
       approvedRevision: 1,
     },
   ],
-});
-
-const projectSnapshot = v2ProjectSnapshotSchema.parse({
-  protocolVersion: V2_PROTOCOL_VERSION,
-  project,
-  profiles: [execution.profileSnapshot],
-  executions: [execution],
-  attentionItems: [
-    {
-      executionId,
-      code: 'required_skill_unavailable',
-      message: 'Required verification skill is unavailable.',
-    },
-  ],
-  planningCycles: [],
-  planningHistoryTruncated: false,
-  intentLedger: null,
-  deliveryPlan: null,
-  board: {
-    projectId,
-    deliveryPlanRevision: null,
-    stale: false,
-    emptyReason: 'intent_required',
-    filter: null,
-    totalTaskCount: 0,
-    matchedTaskCount: 0,
-    facets: {
-      milestones: [],
-      taskLifecycles: [],
-      readiness: [],
-      priorities: [],
-      labels: [],
-      requirements: [],
-    },
-    cards: [],
-  },
-  cursors: { domain: 3, runtime: 5 },
 });
 
 const filteredBoard = boardViewSchema.parse({
@@ -708,6 +584,8 @@ const activePlanningCycle = planningCycleViewSchema.parse({
 });
 
 class FakeLocation extends EventTarget implements AppLocation {
+  search = '';
+
   constructor(
     public pathname = '/',
     public protocol = 'http:',
@@ -718,10 +596,36 @@ class FakeLocation extends EventTarget implements AppLocation {
 }
 
 const navigation = (pathname = '/') => {
-  const location = new FakeLocation(pathname);
-  const history: AppHistory = {
+  const initial = new URL(pathname, 'http://mesh.test');
+  const location = new FakeLocation(initial.pathname);
+  location.search = initial.search;
+  const entries = [`${initial.pathname}${initial.search}`];
+  let index = 0;
+  const apply = (href: string) => {
+    const next = new URL(href, 'http://mesh.test');
+    location.pathname = next.pathname;
+    location.search = next.search;
+  };
+  const history: AppHistory & { back(): void; forward(): void } = {
     pushState: vi.fn((_, __, url) => {
-      location.pathname = String(url);
+      entries.splice(index + 1);
+      entries.push(String(url));
+      index = entries.length - 1;
+      apply(entries[index]!);
+    }),
+    replaceState: vi.fn((_, __, url) => {
+      entries[index] = String(url);
+      apply(entries[index]!);
+    }),
+    back: vi.fn(() => {
+      if (index === 0) return;
+      apply(entries[--index]!);
+      location.dispatchEvent(new PopStateEvent('popstate'));
+    }),
+    forward: vi.fn(() => {
+      if (index === entries.length - 1) return;
+      apply(entries[++index]!);
+      location.dispatchEvent(new PopStateEvent('popstate'));
     }),
   };
   return { location, history };
@@ -830,9 +734,333 @@ const subscribed = (): ServerRealtimeMessage => ({
   cursors: projectSnapshot.cursors,
 });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 describe('App', () => {
+  it('composes global pages without opening a project connection or issuing commands', async () => {
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const user = userEvent.setup();
+    const app = renderApp();
+
+    expect(
+      await screen.findByRole('heading', { name: 'Needs attention', level: 1 }),
+    ).toBeVisible();
+    await waitFor(() => expect(app.api.projectSnapshot).toHaveBeenCalledOnce());
+    expect(app.socketFactory).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('link', { name: 'Runs' }));
+    expect(app.history.pushState).toHaveBeenLastCalledWith(null, '', '/runs');
+    expect(
+      await screen.findByRole('heading', { name: 'Runs', level: 1 }),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(app.api.projectSnapshot).toHaveBeenCalledTimes(2),
+    );
+
+    await user.click(screen.getByRole('link', { name: 'Projects' }));
+    expect(app.history.pushState).toHaveBeenLastCalledWith(
+      null,
+      '',
+      '/projects',
+    );
+    expect(await screen.findByLabelText('Repository path')).toBeVisible();
+    expect(app.socketFactory).not.toHaveBeenCalled();
+    expect(app.api.command).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole('button', { name: 'Project manager' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('refreshes Inbox on focus, polls Runs every five seconds, and leaves Projects idle', async () => {
+    const inboxApi = createApi();
+    const inbox = renderApp({ api: inboxApi });
+    await screen.findByRole('heading', { name: 'Needs attention', level: 1 });
+    await waitFor(() =>
+      expect(inboxApi.projectSnapshot).toHaveBeenCalledOnce(),
+    );
+
+    act(() => window.dispatchEvent(new Event('focus')));
+    await waitFor(() =>
+      expect(inboxApi.projectSnapshot).toHaveBeenCalledTimes(2),
+    );
+    inbox.unmount();
+
+    vi.useFakeTimers();
+    let visibilityState: DocumentVisibilityState = 'visible';
+    let focused = true;
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(
+      () => visibilityState,
+    );
+    vi.spyOn(document, 'hasFocus').mockImplementation(() => focused);
+    const signals: AbortSignal[] = [];
+    const runsApi = createApi();
+    runsApi.projectSnapshot = vi.fn(
+      (_: string, signal?: AbortSignal) =>
+        new Promise<V2ProjectSnapshot>(() => {
+          if (signal) signals.push(signal);
+        }),
+    );
+    const runs = renderApp({ pathname: '/runs', api: runsApi });
+    await act(() => vi.advanceTimersByTimeAsync(0));
+    expect(
+      screen.getByRole('heading', { name: 'Runs', level: 1 }),
+    ).toBeVisible();
+    expect(runsApi.projectSnapshot).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(1);
+
+    visibilityState = 'hidden';
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(signals[0]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(runsApi.projectSnapshot).toHaveBeenCalledOnce();
+
+    visibilityState = 'visible';
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+    expect(runsApi.projectSnapshot).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(1);
+
+    focused = false;
+    act(() => window.dispatchEvent(new Event('blur')));
+    expect(signals[1]?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(runsApi.projectSnapshot).toHaveBeenCalledTimes(2);
+
+    focused = true;
+    act(() => window.dispatchEvent(new Event('focus')));
+    expect(runsApi.projectSnapshot).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(1);
+    runs.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+
+    const projectsApi = createApi();
+    renderApp({ pathname: '/projects', api: projectsApi });
+    await screen.findByRole('heading', { name: 'Projects', level: 1 });
+    expect(projectsApi.projectSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('keeps successful Inbox data visible when another project snapshot fails', async () => {
+    const unavailableProject = {
+      ...project,
+      id: '99999999-9999-4999-8999-999999999999',
+      displayName: 'Notes',
+      repositoryIdentity: 'notes-identity',
+      repositoryPath: 'C:\\repos\\notes',
+      gitCommonDirectory: 'C:\\repos\\notes\\.git',
+    };
+    const api = createApi();
+    api.systemSnapshot = vi.fn(async () =>
+      v2SystemSnapshotSchema.parse({
+        ...systemSnapshot,
+        projects: [project, unavailableProject],
+      }),
+    );
+    api.projectSnapshot = vi.fn(async (requestedProjectId) => {
+      if (requestedProjectId === unavailableProject.id) {
+        throw new Error('Notes is offline.');
+      }
+      return projectSnapshot;
+    });
+    const app = renderApp({ api });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Some projects could not be refreshed.',
+    );
+    expect(screen.getByRole('alert')).toHaveTextContent('Notes');
+    expect(screen.getByRole('alert')).toHaveTextContent('Notes is offline.');
+    expect(
+      screen.getByRole('heading', { name: 'Attention queue' }),
+    ).toBeVisible();
+    expect(app.socketFactory).not.toHaveBeenCalled();
+  });
+
+  it('owns project artifact navigation without remounting the project connection', async () => {
+    const user = userEvent.setup();
+    const app = renderApp({ pathname: `/projects/${projectId}` });
+    const overview = await screen.findByRole('tab', { name: 'Overview' });
+
+    expect(screen.getAllByRole('main')).toHaveLength(1);
+    expect(overview).toHaveAttribute('aria-current', 'page');
+    expect(
+      screen.getByRole('button', { name: 'Project manager' }),
+    ).toBeVisible();
+    await user.click(screen.getByRole('tab', { name: 'Requirements' }));
+    expect(app.history.pushState).toHaveBeenCalledWith(
+      null,
+      '',
+      `/projects/${projectId}/requirements`,
+    );
+    expect(
+      await screen.findByRole('tab', { name: 'Requirements' }),
+    ).toHaveAttribute('aria-current', 'page');
+    expect(
+      screen.getByRole('tabpanel', { name: 'Requirements' }),
+    ).toHaveTextContent('No approved intent or requirements yet.');
+    for (const [label, path] of [
+      ['Plans', 'plans'],
+      ['Board', 'board'],
+      ['Runs', 'runs'],
+      ['Overview', ''],
+    ] as const) {
+      await user.click(screen.getByRole('tab', { name: label }));
+      expect(app.history.pushState).toHaveBeenLastCalledWith(
+        null,
+        '',
+        `/projects/${projectId}${path ? `/${path}` : ''}`,
+      );
+      expect(screen.getByRole('tab', { name: label })).toHaveAttribute(
+        'aria-current',
+        'page',
+      );
+      expect(
+        screen.getByRole('button', { name: 'Project manager' }),
+      ).toBeVisible();
+    }
+    expect(app.api.projectSnapshot).toHaveBeenCalledOnce();
+    expect(app.socketFactory).toHaveBeenCalledOnce();
+  });
+
+  it('round-trips encoded project and selected task and run routes through browser history', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => developerSnapshot);
+    const app = renderApp({
+      pathname: `/projects/%31${projectId.slice(1)}`,
+      api,
+    });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('tab', { name: 'Board' }));
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
+    const boardHref = `/projects/${projectId}/board?task=${developerTaskId}`;
+    expect(app.history.pushState).toHaveBeenLastCalledWith(null, '', boardHref);
+
+    await user.click(screen.getByRole('tab', { name: 'Runs' }));
+    await user.click(
+      within(screen.getByRole('list', { name: 'Active runs' })).getByRole(
+        'link',
+        { name: /Todo foundation worker/i },
+      ),
+    );
+    const runHref = `/projects/${projectId}/runs?run=${executionId}`;
+    expect(app.history.pushState).toHaveBeenLastCalledWith(null, '', runHref);
+
+    const popstate = (href: string) => {
+      const url = new URL(href, 'http://mesh.test');
+      app.location.pathname = url.pathname;
+      app.location.search = url.search;
+      app.location.dispatchEvent(new PopStateEvent('popstate'));
+    };
+    act(() => popstate(boardHref));
+    expect(
+      screen.getByRole('region', { name: 'Developer for Persist Todo' }),
+    ).toBeVisible();
+    act(() => popstate(runHref));
+    expect(
+      screen.getByRole('article', { name: 'Todo foundation worker' }),
+    ).toBeVisible();
+    expect(app.api.projectSnapshot).toHaveBeenCalledOnce();
+    expect(app.socketFactory).toHaveBeenCalledOnce();
+  });
+
+  it('replaces a disappeared task selection without poisoning Back or Forward', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.projectSnapshot = vi.fn(async () => developerSnapshot);
+    const app = renderApp({
+      pathname: `/projects/${projectId}/board`,
+      api,
+    });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
+    act(() => {
+      app.sockets[0]?.open();
+      app.sockets[0]?.message(subscribed());
+    });
+
+    const open = screen.getByRole('button', { name: 'Open Persist Todo' });
+    await user.click(open);
+    await user.click(
+      screen.getByRole('button', { name: 'Close task details' }),
+    );
+    await user.click(open);
+    expect(app.history.pushState).toHaveBeenCalledTimes(3);
+
+    const boardWithoutTask = boardViewSchema.parse({
+      ...developerBoard,
+      emptyReason: 'filter_empty',
+      matchedTaskCount: 0,
+      filter: {
+        ...developerBoard.filter!,
+        revision: developerBoard.filter!.revision + 1,
+      },
+      cards: [],
+    });
+    act(() =>
+      app.sockets[0]?.message({
+        type: 'v2.domain_event',
+        protocolVersion: V2_PROTOCOL_VERSION,
+        projectId,
+        event: {
+          id: '91919191-9191-4191-8191-919191919191',
+          projectId,
+          sequence: 4,
+          occurredAt: '2026-08-28T00:00:10.000Z',
+          type: 'board.filter_changed',
+          payload: { schemaVersion: 1, board: boardWithoutTask },
+        },
+      }),
+    );
+
+    await waitFor(() => expect(app.location.search).toBe(''));
+    expect(app.history.replaceState).toHaveBeenCalledWith(
+      null,
+      '',
+      `/projects/${projectId}/board`,
+    );
+    expect(app.history.pushState).toHaveBeenCalledTimes(3);
+
+    act(() => app.history.back());
+    expect(app.location.search).toBe('');
+    act(() => app.history.forward());
+    expect(app.location.search).toBe('');
+    expect(app.history.pushState).toHaveBeenCalledTimes(3);
+  });
+
+  it('renders explicit unknown-project and invalid-route recovery links', async () => {
+    const unknown = renderApp({
+      pathname: '/projects/99999999-9999-4999-8999-999999999999',
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Unknown project',
+    );
+    expect(
+      screen.getByRole('link', { name: 'Go to Projects' }),
+    ).toHaveAttribute('href', '/projects');
+    expect(unknown.api.projectSnapshot).not.toHaveBeenCalled();
+    expect(unknown.socketFactory).not.toHaveBeenCalled();
+    unknown.unmount();
+
+    const invalid = renderApp({ pathname: `/projects/${projectId}/unknown` });
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Page not found',
+    );
+    expect(
+      screen.getByRole('link', { name: 'Go to Projects' }),
+    ).toHaveAttribute('href', '/projects');
+    expect(invalid.api.projectSnapshot).not.toHaveBeenCalled();
+    expect(invalid.socketFactory).not.toHaveBeenCalled();
+  });
+
   it('targets only the actual active cycle when terminal history is newer', async () => {
     const user = userEvent.setup();
     const api = createApi();
@@ -843,8 +1071,10 @@ describe('App', () => {
         planningCycles: [terminalPlanningCycle, activePlanningCycle],
       }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/plans`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -888,12 +1118,15 @@ describe('App', () => {
       profiles: [...projectSnapshot.profiles, pmProfile],
       planningCycles: [terminalPlanningCycle],
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/plans`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
+    await user.click(screen.getByRole('button', { name: 'Project manager' }));
     await user.selectOptions(
       screen.getByLabelText('Project manager profile'),
       pmProfile.profileId,
@@ -937,8 +1170,10 @@ describe('App', () => {
       commandType: 'board_filter.set',
       board: clearedFilteredBoard,
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -990,8 +1225,10 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -1045,8 +1282,10 @@ describe('App', () => {
         message: 'Board filters changed elsewhere.',
       },
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -1061,6 +1300,13 @@ describe('App', () => {
     expect(
       screen.getByRole('button', { name: 'Apply filters' }),
     ).toBeDisabled();
+    await user.click(screen.getByRole('tab', { name: 'Runs' }));
+    await user.click(
+      within(screen.getByRole('list', { name: 'Active runs' })).getByRole(
+        'link',
+        { name: /Todo foundation worker/i },
+      ),
+    );
     expect(
       screen
         .getAllByRole('button', { name: 'Interrupt execution' })
@@ -1116,15 +1362,15 @@ describe('App', () => {
           return defaultCommand(envelope);
       }
     });
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
     await user.click(
       screen.getByRole('button', { name: 'Start Developer attempt' }),
@@ -1224,8 +1470,10 @@ describe('App', () => {
     const user = userEvent.setup();
     const api = createApi();
     api.projectSnapshot = vi.fn(async () => developerSnapshot);
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
@@ -1270,18 +1518,25 @@ describe('App', () => {
     const api = createApi();
     api.projectSnapshot = vi.fn(async () => ({
       ...developerSnapshot,
-      developerAttempts: [activeDeveloperAttempt],
+      developerAttempts: [
+        activeDeveloperAttempt,
+        developerAttemptSchema.parse({
+          ...activeDeveloperAttempt,
+          id: '28282828-2828-4282-8282-282828282828',
+          ordinal: 2,
+        }),
+      ],
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
 
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
-    const executionArticles = screen.getAllByRole('article', {
-      name: 'Persist Todo',
-    });
+    const executionArticles = within(
+      screen.getByRole('region', { name: 'Developer for Persist Todo' }),
+    ).getAllByRole('article', { name: 'Persist Todo' });
     expect(executionArticles).toHaveLength(2);
     const labelIds = executionArticles.map((article) =>
       article.getAttribute('aria-labelledby'),
@@ -1313,15 +1568,15 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
     const start = screen.getByRole('button', {
       name: 'Start Developer attempt',
@@ -1379,15 +1634,15 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
 
     const apply = screen.getByRole('button', { name: 'Apply filters' });
     await user.click(apply);
@@ -1439,15 +1694,15 @@ describe('App', () => {
         'Task changed. Refreshing current project truth.',
       );
     });
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    const app = renderApp({ pathname: `/projects/${projectId}/board`, api });
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     act(() => {
       app.sockets[0]?.open();
       app.sockets[0]?.message(subscribed());
     });
-    await user.click(
-      screen.getByRole('button', { name: 'View Persist Todo details' }),
-    );
+    await user.click(screen.getByRole('button', { name: 'Open Persist Todo' }));
     await user.click(
       screen.getByRole('button', { name: 'Start Developer attempt' }),
     );
@@ -1465,10 +1720,13 @@ describe('App', () => {
 
   it('registers a repository, navigates from the parsed success, and subscribes from snapshot cursors', async () => {
     const user = userEvent.setup();
-    const { api, history, sockets, urls } = renderApp();
+    const { api, history, sockets, urls } = renderApp({
+      pathname: '/projects',
+    });
 
+    await screen.findByRole('heading', { name: 'Projects', level: 1 });
     await user.type(
-      await screen.findByLabelText('Repository path'),
+      screen.getByLabelText('Repository path'),
       'C:\\repos\\todo',
     );
     await user.click(
@@ -1480,7 +1738,16 @@ describe('App', () => {
       '',
       `/projects/${projectId}`,
     );
-    expect(await screen.findByText('Todo foundation worker')).toBeVisible();
+    await user.click(await screen.findByRole('tab', { name: 'Runs' }));
+    await user.click(
+      within(screen.getByRole('list', { name: 'Active runs' })).getByRole(
+        'link',
+        { name: /Todo foundation worker/i },
+      ),
+    );
+    expect(
+      await screen.findByRole('article', { name: 'Todo foundation worker' }),
+    ).toBeVisible();
     expect(api.projectSnapshot).toHaveBeenCalledWith(
       projectId,
       expect.any(AbortSignal),
@@ -1496,7 +1763,9 @@ describe('App', () => {
 
   it('loads a direct project URL from system and project truth and rejects unknown projects locally', async () => {
     const direct = renderApp({ pathname: `/projects/${projectId}` });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     expect(direct.api.systemSnapshot).toHaveBeenCalledOnce();
     expect(direct.api.projectSnapshot).toHaveBeenCalledWith(
       projectId,
@@ -1555,7 +1824,10 @@ describe('App', () => {
       highWater: 5,
       events: retained.filter(({ sequence }) => sequence > after),
     }));
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    const app = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+      api,
+    });
 
     expect(await screen.findByText('child.started')).toBeVisible();
     const child = screen.getByRole('list', {
@@ -1576,22 +1848,27 @@ describe('App', () => {
   it('deselects and follows popstate without retaining the old project connection', async () => {
     const user = userEvent.setup();
     const app = renderApp({ pathname: `/projects/${projectId}` });
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     expect(app.sockets).toHaveLength(1);
 
     await user.click(screen.getByRole('button', { name: 'Deselect project' }));
     expect(app.history.pushState).toHaveBeenCalledWith(null, '', '/');
     expect(
-      await screen.findByRole('heading', { name: 'Choose a project' }),
+      await screen.findByRole('heading', { name: 'Needs attention' }),
     ).toBeVisible();
     expect(app.sockets[0]?.close).toHaveBeenCalledOnce();
 
+    await user.click(screen.getByRole('link', { name: 'Projects' }));
     await user.click(screen.getByRole('button', { name: 'Select Todo' }));
-    expect(await screen.findByRole('heading', { name: 'Todo' })).toBeVisible();
+    expect(
+      await screen.findByRole('heading', { name: 'Todo', level: 1 }),
+    ).toBeVisible();
     app.location.pathname = '/';
     act(() => app.location.dispatchEvent(new PopStateEvent('popstate')));
     expect(
-      await screen.findByRole('heading', { name: 'Choose a project' }),
+      await screen.findByRole('heading', { name: 'Needs attention' }),
     ).toBeVisible();
     expect(app.sockets[1]?.close).toHaveBeenCalledOnce();
   });
@@ -1608,10 +1885,11 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ api });
+    const app = renderApp({ pathname: '/projects', api });
 
+    await screen.findByRole('heading', { name: 'Projects', level: 1 });
     await user.type(
-      await screen.findByLabelText('Repository path'),
+      screen.getByLabelText('Repository path'),
       'C:\\repos\\deferred',
     );
     await user.click(
@@ -1650,7 +1928,10 @@ describe('App', () => {
           resolveCommand = resolve;
         }),
     );
-    const app = renderApp({ pathname: `/projects/${projectId}`, api });
+    const app = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+      api,
+    });
     const interrupt = await screen.findByRole('button', {
       name: 'Interrupt execution',
     });
@@ -1673,7 +1954,7 @@ describe('App', () => {
     );
 
     expect(
-      await screen.findByRole('heading', { name: 'Choose a project' }),
+      await screen.findByRole('heading', { name: 'Needs attention' }),
     ).toBeVisible();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
@@ -1687,7 +1968,7 @@ describe('App', () => {
           resolveSnapshot = resolve;
         }),
     );
-    const loading = renderApp({ api });
+    const loading = renderApp({ pathname: '/projects', api });
     expect(screen.getByRole('status')).toHaveTextContent('Loading projects');
     expect(
       screen.getByRole('button', { name: 'Add and select project' }),
@@ -1697,16 +1978,15 @@ describe('App', () => {
         v2SystemSnapshotSchema.parse({ ...systemSnapshot, projects: [] }),
       ),
     );
-    expect(
-      await screen.findByText('No projects have been added yet.'),
-    ).toBeVisible();
+    await screen.findByRole('heading', { name: 'Projects', level: 1 });
+    expect(screen.getByText('No projects have been added yet.')).toBeVisible();
     loading.unmount();
 
     const failedApi = createApi();
     vi.mocked(failedApi.systemSnapshot).mockRejectedValueOnce(
       new Error('Snapshot unavailable'),
     );
-    renderApp({ api: failedApi });
+    renderApp({ pathname: '/projects', api: failedApi });
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Snapshot unavailable',
     );
@@ -1765,7 +2045,7 @@ describe('App', () => {
         projects: [],
       }),
     );
-    const app = renderApp({ api: staleApi });
+    const app = renderApp({ pathname: '/projects', api: staleApi });
     const staleSignal = vi.mocked(staleApi.systemSnapshot).mock.calls[0]?.[0];
 
     app.rerender(
@@ -1776,9 +2056,8 @@ describe('App', () => {
         history={app.history}
       />,
     );
-    expect(
-      await screen.findByText('No projects have been added yet.'),
-    ).toBeVisible();
+    await screen.findByRole('heading', { name: 'Projects', level: 1 });
+    expect(screen.getByText('No projects have been added yet.')).toBeVisible();
     expect(
       screen.getByRole('button', { name: 'Add and select project' }),
     ).toBeDisabled();
@@ -1797,7 +2076,9 @@ describe('App', () => {
 
   it('disables interruption while disconnected or stale and sends the exact running revision', async () => {
     const user = userEvent.setup();
-    const disconnected = renderApp({ pathname: `/projects/${projectId}` });
+    const disconnected = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+    });
     const button = await screen.findByRole('button', {
       name: 'Interrupt execution',
     });
@@ -1821,7 +2102,9 @@ describe('App', () => {
     ).toBeVisible();
     disconnected.unmount();
 
-    const app = renderApp({ pathname: `/projects/${projectId}` });
+    const app = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+    });
     const activeButton = await screen.findByRole('button', {
       name: 'Interrupt execution',
     });
@@ -1872,16 +2155,24 @@ describe('App', () => {
   it('shows attention, activity, diagnostics, planning, and the Board', async () => {
     const user = userEvent.setup();
     const app = renderApp({ pathname: `/projects/${projectId}` });
-    expect(await screen.findByText('Preferred skill fallback')).toBeVisible();
-    expect(screen.getByText('Required skill unavailable')).toBeVisible();
     expect(
-      screen.getByText('Required verification skill is unavailable.'),
+      await screen.findByText('Required verification skill is unavailable.'),
     ).toBeVisible();
+    await user.click(screen.getByRole('tab', { name: 'Board' }));
     expect(screen.getByRole('heading', { name: 'Board' })).toBeVisible();
     expect(screen.getByText(/Showing 0 of 0 tasks/)).toBeVisible();
     expect(
       screen.queryByRole('button', { name: /start|approve|create/i }),
     ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Runs' }));
+    await user.click(
+      within(screen.getByRole('list', { name: 'Active runs' })).getByRole(
+        'link',
+        { name: /Todo foundation worker/i },
+      ),
+    );
+    expect(screen.getByText('Preferred skill fallback')).toBeVisible();
+    expect(screen.getByText('Required skill unavailable')).toBeVisible();
 
     act(() =>
       app.sockets[0]?.message({
@@ -1914,8 +2205,12 @@ describe('App', () => {
   });
 
   it('shows runtime completion, output, child, and adapter diagnostics before domain lifecycle catches up', async () => {
-    const app = renderApp({ pathname: `/projects/${projectId}` });
-    expect(await screen.findByText('Todo foundation worker')).toBeVisible();
+    const app = renderApp({
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
+    });
+    expect(
+      await screen.findByRole('article', { name: 'Todo foundation worker' }),
+    ).toBeVisible();
 
     const runtimeEvent = (
       sequence: number,
@@ -2043,8 +2338,9 @@ describe('App', () => {
           message: 'Repository is invalid.',
         },
       });
-    const app = renderApp({ api });
-    const input = await screen.findByLabelText('Repository path');
+    const app = renderApp({ pathname: '/projects', api });
+    await screen.findByRole('heading', { name: 'Projects', level: 1 });
+    const input = screen.getByLabelText('Repository path');
     const submit = screen.getByRole('button', {
       name: 'Add and select project',
     });
@@ -2095,8 +2391,9 @@ describe('App', () => {
       .mockRejectedValueOnce(
         new V2HttpError(503, 'audit_barrier_tripped', 'Audit writes failed.'),
       );
-    renderApp({ api });
-    const input = await screen.findByLabelText('Repository path');
+    renderApp({ pathname: '/projects', api });
+    await screen.findByRole('heading', { name: 'Projects', level: 1 });
+    const input = screen.getByLabelText('Repository path');
     const submit = screen.getByRole('button', {
       name: 'Add and select project',
     });
@@ -2116,6 +2413,7 @@ describe('App', () => {
 
   it('enables only running execution interrupts and disables all controls when audit health is unsafe', async () => {
     const user = userEvent.setup();
+    const completedExecutionId = '66666666-6666-4666-8666-666666666666';
     const terminalApi = createApi();
     vi.mocked(terminalApi.projectSnapshot).mockResolvedValueOnce(
       v2ProjectSnapshotSchema.parse({
@@ -2124,7 +2422,7 @@ describe('App', () => {
           execution,
           {
             ...execution,
-            id: '66666666-6666-4666-8666-666666666666',
+            id: completedExecutionId,
             lifecycle: 'completed',
             revision: 5,
             endedAt: '2026-08-28T00:00:08.000Z',
@@ -2133,25 +2431,42 @@ describe('App', () => {
       }),
     );
     const terminal = renderApp({
-      pathname: `/projects/${projectId}`,
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
       api: terminalApi,
     });
-    expect(await screen.findAllByText('Todo foundation worker')).toHaveLength(
-      2,
-    );
+    expect(
+      await screen.findByRole('article', {
+        name: 'Todo foundation worker',
+      }),
+    ).toBeVisible();
+    expect(
+      within(screen.getByRole('list', { name: 'Active runs' })).getAllByRole(
+        'listitem',
+      ),
+    ).toHaveLength(1);
     act(() => {
       terminal.sockets[0]?.open();
       terminal.sockets[0]?.message(subscribed());
     });
-    const buttons = screen.getAllByRole('button', {
+    const runningInterrupt = screen.getByRole('button', {
       name: 'Interrupt execution',
     });
-    expect(buttons[0]).toBeEnabled();
-    expect(buttons[1]).toBeDisabled();
-    await user.click(buttons[0]);
+    expect(runningInterrupt).toBeEnabled();
+    await user.click(runningInterrupt);
     expect(apiInterruptEnvelope(terminalApi)).toMatchObject({
       command: { expectedRevision: 4, executionId },
     });
+    await user.click(screen.getByRole('tab', { name: 'History' }));
+    const historyRuns = screen.getByRole('list', { name: 'History runs' });
+    expect(within(historyRuns).getAllByRole('listitem')).toHaveLength(1);
+    await user.click(
+      within(historyRuns).getByRole('link', {
+        name: /Todo foundation worker/i,
+      }),
+    );
+    expect(
+      screen.getByRole('button', { name: 'Interrupt execution' }),
+    ).toBeDisabled();
     terminal.unmount();
 
     const unsafeApi = createApi();
@@ -2168,10 +2483,10 @@ describe('App', () => {
       }),
     );
     const unsafe = renderApp({
-      pathname: `/projects/${projectId}`,
+      pathname: `/projects/${projectId}/runs?run=${executionId}`,
       api: unsafeApi,
     });
-    await screen.findByText('Todo foundation worker');
+    await screen.findByRole('article', { name: 'Todo foundation worker' });
     act(() => {
       unsafe.sockets[0]?.open();
       unsafe.sockets[0]?.message(subscribed());
@@ -2182,7 +2497,7 @@ describe('App', () => {
   });
 
   it('uses the accepted production V1 guidance route', async () => {
-    renderApp();
+    renderApp({ pathname: '/projects' });
     expect(
       await screen.findByRole('link', { name: 'V1 operating guidance' }),
     ).toHaveAttribute('href', '/guidance/v1-session-platform.md');

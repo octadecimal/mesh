@@ -153,6 +153,9 @@ external Claude traffic. Prefer the narrowest relevant Nx target during
 iteration. Run `corepack pnpm verify` for the normal complete local/CI gate when
 the scope warrants it.
 
+Fix every CI failure before merging. Never bypass, ignore, or merge around a
+failing check; diagnose the root cause and add appropriate regression proof.
+
 Backend behavior changes require focused tests. Test asynchronous behavior by
 waiting on observable events or drains, not arbitrary sleeps. For user-visible
 changes, exercise the integrated path when requested or when unit-level proof

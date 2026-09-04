@@ -287,14 +287,50 @@ describe('ExecutionActivity', () => {
     expect(
       screen.getByRole('article', { name: 'Todo foundation worker' }),
     ).toBeVisible();
-    expect(screen.getByText('Preferred skill fallback')).toBeVisible();
-    expect(screen.getByText('Required skill unavailable')).toBeVisible();
+    expect(screen.getByText('Preferred skill fallback')).toHaveClass(
+      'v2-state',
+      'v2-state-fallback',
+    );
+    expect(screen.getByText('Required skill unavailable')).toHaveClass(
+      'v2-state',
+      'v2-state-unavailable',
+    );
+    const executionSummary = screen.getByText('Lifecycle').closest('dl');
+    expect(executionSummary).not.toBeNull();
+    expect(screen.getByText('Lifecycle').tagName).toBe('DT');
+    expect(
+      screen
+        .getByRole('region', { name: 'Skill outcomes' })
+        .querySelector('dl'),
+    ).not.toBeNull();
+    expect(
+      screen.getByText('Child activity · 2').closest('details'),
+    ).toHaveAttribute('open');
     const childActivity = screen.getByRole('list', {
       name: 'Child activity for Todo foundation worker',
     });
     expect(childActivity).toHaveTextContent('Inspect package layout');
     expect(childActivity).toHaveTextContent('Read package.json');
     expect(screen.getByText('opaque-handle')).not.toBeVisible();
+  });
+
+  it('marks a failed execution lifecycle with the failure state', () => {
+    render(
+      <ExecutionActivity
+        execution={{
+          ...execution,
+          lifecycle: 'failed',
+          failure: { code: 'runtime_failed', message: 'Runtime failed.' },
+          endedAt: '2026-08-28T00:00:01.000Z',
+        }}
+        projectCursors={{ domain: 4, runtime: 12 }}
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveClass(
+      'v2-state',
+      'v2-state-failure',
+    );
   });
 
   it('keeps provider-specific details inside the diagnostics disclosure', () => {
