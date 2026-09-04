@@ -801,6 +801,10 @@ test('attention-first UI keeps project controls keyboard reachable at 320px and 
     await approveTodoIntent(page, fixture);
     await approveTodoDeliveryPlan(page, fixture, false);
     await page.reload();
+    // Stress platform font-metric differences without changing the viewport.
+    await page.addStyleTag({
+      content: '.v2-global-nav { letter-spacing: 0.08em; }',
+    });
 
     const reachByTab = async ({
       from,

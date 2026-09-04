@@ -648,6 +648,9 @@ button:disabled {
   .v2-global-nav {
     grid-template-columns: repeat(4, auto);
   }
+  .v2-global-nav a {
+    padding-inline: 0.5rem;
+  }
   .v2-app-header,
   .v2-shell-header {
     display: grid;
