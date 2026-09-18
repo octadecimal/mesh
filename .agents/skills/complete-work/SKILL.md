@@ -1,14 +1,14 @@
 ---
 name: complete-work
-description: Use when a Mesh development branch is finished and the user wants a pull request prepared for hands-on testing, then merged only after explicit post-test approval.
+description: Use when approved Mesh implementation is ready for delivery through an open pull request and current passing CI, or when resuming CI repair or an explicitly approved post-test merge.
 ---
 
 # Complete Work
 
 Close a finished Mesh branch with evidence. Run every step directly; there is no
-wrapper script. Create one todo per numbered step and work in order. Stop on the
-first unresolved failure, report it plainly, and never claim an action succeeded
-without checking its result.
+wrapper script. Work through PR preparation and CI repair until the current
+revision is ready for hands-on testing. Report a concrete blocker when safe
+progress is unavailable; never claim an action succeeded without checking it.
 
 ## 1. Prepare the branch and PR
 
@@ -24,9 +24,12 @@ git log --oneline origin/master..HEAD
 gh pr list --head <branch> --state open --json number,url,title,body,state,headRefName,baseRefName,mergeStateStatus,statusCheckRollup
 ```
 
-The primary checkout is `C:\code\mesh`. Before any mutation, require an explicit
-user request to complete the branch through commit, PR, merge, cleanup, and
-restart. Skill selection alone does not grant that authority. Stop if the branch
+The primary checkout is `C:\code\mesh`. Under `AGENTS.md`, an implementation
+request or approval authorizes normal verification, intended commits, push, PR
+creation/update, and CI repair without another publishing prompt. Preserve explicit
+plan-only, local-only, no-push, or no-PR limits; a mockup preference or visual
+approval alone does not authorize implementation. Skill selection alone does not
+authorize unrelated work, merge, cleanup, or restart. Stop if the branch
 is detached, is `master`, is rooted at the primary checkout, or is not a linked
 worktree distinct from the primary checkout. Stop if an existing open PR does
 not match the current branch.
@@ -51,8 +54,14 @@ If no open PR exists:
 4. Re-run `gh pr view` and require an open PR whose head is the current branch
    and whose base is `master`.
 
-The user's explicit complete-work request authorizes the normal commit, push,
-and PR creation needed to make the branch testable. It does **not** authorize
+If a matching PR already exists, push the intended commits normally with
+`git push origin <branch>` and update its description to match the final change.
+In both cases, compare `git rev-parse HEAD` with the PR's `headRefOid`; require
+equality before evaluating CI or handing off. A green remote PR that lacks the
+local commit is not verification of the finished work.
+
+The standing implementation-delivery authorization or an explicit complete-work
+request covers normal commit, push, and PR creation. It does **not** authorize
 merging, cleanup, or switching the test stack to `master`. Those actions require
 a later approval given after the user reports completing hands-on testing of
 this PR. Approval given before testing, urgency, a green local suite, or green CI
@@ -60,38 +69,68 @@ does not satisfy the post-test approval gate. It also does not authorize
 including unrelated changes, bypassing failed checks, force-pushing, or
 weakening branch protection.
 
-## 2. Apply the pre-merge gate
+## 2. Reach current passing CI
+
+As soon as the PR is open, start Step 3's stack preparation and draft Step 7's
+brief user checklist while CI runs. Do not wait for green CI to begin startup.
+If CI repairs or a base update change the revision, rebuild or refresh the
+task-owned stack as needed and recheck its revision and health before handoff.
 
 Require all of the following:
 
 - The working tree is clean (`git status --short`) after preparation.
 - The PR is open and mergeable.
-- No check is pending, queued, or in progress. Offer `gh pr checks --watch` and
-  re-evaluate if CI is still running.
-- No check concluded failure, error, or cancellation. On failure, ask the user to
-  choose: diagnose and fix, explicitly merge anyway, or abort. Never infer a CI
-  bypass from urgency or prior local verification.
-- If the branch is behind `master`, run `gh pr update-branch`, wait for checks, and
-  re-evaluate the complete gate.
+- Expected checks from the workflow and repository requirements exist and pass
+  for the current `headRefOid`, which equals local `HEAD`. Empty checks, stale
+  successes, and skipped required jobs are not a pass.
+- No check is pending, queued, or in progress. Run `gh pr checks --watch` and
+  re-evaluate current-head evidence when CI finishes; do not hand off while waiting.
+- No check concluded failure, error, or cancellation. Diagnose and repair ordinary
+  failures within scope, run affected local checks, commit/push the repair, and
+  observe the new head's checks. Delegate routine fixes to the implementation
+  worker when the active harness supports it. Do not offer a bypass as the normal
+  response, weaken checks, or treat prior local verification as CI evidence.
+- If the branch is behind `master`, run `gh pr update-branch`, then fetch the task
+  branch and fast-forward its clean worktree to `origin/<branch>`. If a safe
+  fast-forward is unavailable, reconcile the divergence without discarding work.
+  Verify the integrated revision, wait for its checks, and re-evaluate the gate.
 
-Do not rerun Mesh's full verification suite here. This gate trusts the fresh
-milestone verification already completed before invocation and verifies GitHub's
-current merge evidence.
+Reuse fresh local verification when its contents and environment remain unchanged;
+run the appropriate checks when evidence is missing or repairs invalidate it.
+Missing credentials, external CI outages, or repairs beyond the approved scope
+can require the maintainer. Report that exact blocker and completed evidence;
+never label the branch ready while expected current-head checks have not passed.
 
 ## 3. Make the PR available for hands-on testing
 
-When runtime behavior changed, start or restart Mesh from the feature worktree,
+For UI/runtime changes, start stack preparation as soon as the PR is open,
+concurrently with Step 2's CI wait. Handoff requires both current-head passing CI
+and a healthy stack with a clickable UI URL; do not ask whether to start it or
+merely supply startup commands. Honor an explicit no-run instruction and report
+that limitation. A blocked launch is not a ready-for-testing result: diagnose
+ordinary startup failures and report the concrete blocker if safe progress ends.
+
+Start or safely reuse Mesh from the feature worktree,
 not `master`, using the safe listener inspection, subscription-only checks,
 build, launch, and health-check procedure in Step 6, but substitute the verified
 feature-worktree root for build and process working directories. Set
 `MESH_WORKSPACE_ROOT` to the verified primary checkout root so the test server
 can safely import the primary repository and any linked worktree beneath it.
 Do not remove or switch the feature worktree while its test stack is running.
+Reuse an existing stack only after verifying its worktree, current PR revision,
+and UI plus API health. Do not restart an active operator stack to make room;
+preserve live sessions and data. Use an isolated preview data directory when
+startup could recover or mutate operator state, and disclose that isolated data
+will not contain existing sessions. Do not start live Claude work for health checks.
 For documentation-only changes, skip the runtime and provide a file/review
 walkthrough.
 
-Produce the tailored walkthrough from Step 7, including the PR URL and exact
-success criteria. Then stop and wait. The required gate is two facts from the
+Keep the verified stack running across the handoff using the available background
+process mechanism; report any actual lifetime limitation. Verify the UI page and
+both API paths in Step 6 immediately before reporting readiness.
+
+Produce the tailored walkthrough from Step 7, including clickable UI and PR URLs
+and exact success criteria. Then stop and wait. The required gate is two facts from the
 user after testing this PR:
 
 1. They completed the hands-on test.
@@ -103,9 +142,10 @@ worktree while waiting.
 
 ## 4. Re-check and merge after post-test approval
 
-After receiving both facts, re-run the complete pre-merge gate from Step 2 so
-the merge decision uses current GitHub state. Stop again if the PR is behind,
-checks are pending or failing, or mergeability changed.
+After receiving both facts for the current revision, re-run Step 2 so the merge
+decision uses current GitHub state. Repair or wait on outstanding checks before
+merging. If changes invalidate the tested revision, obtain renewed hands-on
+testing and explicit merge approval of the new revision.
 
 Use Mesh's standard merge method:
 
@@ -118,10 +158,10 @@ Confirm the PR reports `MERGED` before cleanup.
 ## 5. Sync main and clean up
 
 Run repository coordination commands from `C:\code\mesh`, never by switching the
-linked worktree itself to `main`:
+linked worktree itself to `master`:
 
 ```powershell
-git -C C:/code/mesh checkout main
+git -C C:/code/mesh checkout master
 git -C C:/code/mesh pull --ff-only
 git -C C:/code/mesh worktree remove <worktree-path>
 git -C C:/code/mesh worktree prune
@@ -137,7 +177,7 @@ expected self-rooted exception: continue, report both leftovers precisely, and
 give the later cleanup commands. It is not permission to force-remove any other
 path.
 
-## 6. Restart Mesh from main when runtime behavior changed
+## 6. Restart Mesh from master when runtime behavior changed
 
 Inspect the merged PR's file list before touching processes. Restart Mesh only
 when at least one changed path can affect the built application, runtime
@@ -167,8 +207,10 @@ Get-CimInstance Win32_Process -Filter "ProcessId = <pid>" |
   Select-Object ProcessId,ParentProcessId,Name,CommandLine
 ```
 
-Stop only processes whose command lines prove they are stale Mesh processes. If
-port 3737 belongs to an unrelated or ambiguous process, stop the skill and report
+Stop only processes whose command lines and observed state prove they are stale,
+task-owned Mesh processes with no live work. Never infer staleness from a port or
+another branch's path alone. If port 3737 belongs to an unrelated or ambiguous
+process, stop the skill and report
 the conflict. Never kill an unknown listener.
 
 Prefer UI port 4200. If it belongs to an unrelated process, choose the first free
@@ -194,8 +236,9 @@ Invoke-WebRequest http://127.0.0.1:3737/api/snapshot -Headers @{ Origin = 'http:
 Invoke-WebRequest http://127.0.0.1:<ui-port>/api/snapshot
 ```
 
-Both must return HTTP 200. Also confirm listener command lines point at the
-primary checkout. Background processes may terminate when the agent session ends;
+Both must return HTTP 200, and the UI root must load successfully. Also confirm
+listener command lines point at the primary checkout (feature worktree in Step 3).
+Background processes may terminate when the agent session ends;
 surface that lifecycle limitation.
 
 ## 7. Produce the manual walkthrough
@@ -206,6 +249,12 @@ Read the current PR title, body, files, and diff:
 gh pr view <number> --json title,body,files,url
 gh pr diff <number>
 ```
+
+Prepare a brief user-facing checklist while CI and stack preparation run, usually
+two to four actions with an expected visible result for each. Describe what to
+click, enter, or observe in the product; setup commands and internal verification
+details belong outside that checklist. Present it with the working URL once both
+CI and stack health pass.
 
 Give a concise walkthrough specific to that change. For a restart-skipped
 documentation or metadata change, give a file/review walkthrough instead of UI
@@ -220,7 +269,7 @@ instructions. Otherwise include:
 
 Before post-test approval, report the open PR, current CI state, preserved branch
 and worktree, test-stack status, and tailored walkthrough. After approval and
-merge, report the merged PR, synced `main` commit, worktree/branch cleanup or
+merge, report the merged PR, synced `master` commit, worktree/branch cleanup or
 exact self-rooted leftovers, and the post-merge restart decision. Include stack
 process/health status and UI URL only when the relevant runtime step ran.
 
@@ -231,11 +280,11 @@ process/health status and UI URL only when the relevant runtime step ran.
 | Finished changes uncommitted | Verify, review, stage intended paths, and commit |
 | No matching PR               | Push and create one against `master`             |
 | CI pending                   | Watch, then re-evaluate the full gate            |
-| CI failed                    | Ask: fix, explicit bypass, or abort              |
+| CI failed                    | Diagnose, repair, push, and watch current CI     |
 | PR behind                    | Update branch and re-check CI                    |
 | Human test not completed     | Preserve PR/worktree; provide walkthrough; wait  |
 | Human tested, no approval    | Preserve PR/worktree; wait for explicit approval |
-| Human tested and approved    | Re-check current gate, then squash merge          |
+| Human tested and approved    | Re-check current gate, then squash merge         |
 | Docs/metadata-only PR        | Skip restart; report file-scope evidence         |
 | Unknown port owner           | Stop; do not kill it                             |
 | API billing override present | Stop; subscription-only policy is not satisfied  |
