@@ -5,10 +5,12 @@ import type {
   Workspace,
 } from '@mesh-session-platform/contracts';
 
+import { useId, useState } from 'react';
+
 import { type CommandSender } from './PermissionCard';
 import { PromptComposer } from './PromptComposer';
 import { RawDiagnostics } from './RawDiagnostics';
-import { SessionActions } from './SessionActions';
+import { InterruptSessionButton, SessionActions } from './SessionActions';
 import { SessionHeader } from './SessionHeader';
 import { Transcript } from './Transcript';
 
@@ -33,6 +35,8 @@ export function SessionPanel({
   streamingAssistantText?: string;
   onPromptDraftChange?: (value: string) => void;
 }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = `session-details-${useId()}`;
   const unavailable = async () => {
     throw new Error('Session API is unavailable');
   };
@@ -43,27 +47,65 @@ export function SessionPanel({
       className="session-panel-content"
       aria-label={`${session.title} panel`}
     >
-      <SessionHeader session={session} workspace={workspace} />
-      <Transcript
-        events={events}
-        permissionMode={session.permissionMode}
-        send={send}
-        streamingAssistantText={streamingAssistantText}
-      />
-      <RawDiagnostics
-        sessionId={session.id}
-        load={(sessionId, options) =>
-          api ? api.diagnostics(sessionId, options) : unavailable()
-        }
-      />
-      <PromptComposer
+      <SessionHeader
         session={session}
-        auditAvailable={auditAvailable}
-        send={send}
-        draft={promptDraft}
-        onDraftChange={onPromptDraftChange}
+        detailsOpen={detailsOpen}
+        detailsId={detailsId}
+        onDetailsOpenChange={setDetailsOpen}
+        actions={<SessionActions sessionId={session.id} send={send} />}
       />
-      <SessionActions sessionId={session.id} send={send} />
+      <div
+        className="session-layout"
+        data-details-open={detailsOpen || undefined}
+      >
+        <div className="session-conversation">
+          <Transcript
+            events={events}
+            permissionMode={session.permissionMode}
+            send={send}
+            streamingAssistantText={streamingAssistantText}
+          />
+          <PromptComposer
+            session={session}
+            auditAvailable={auditAvailable}
+            send={send}
+            draft={promptDraft}
+            onDraftChange={onPromptDraftChange}
+            interruptAction={
+              <InterruptSessionButton session={session} send={send} />
+            }
+          />
+        </div>
+        {detailsOpen ? (
+          <aside
+            id={detailsId}
+            className="session-details"
+            aria-label="Session details"
+          >
+            <h3>Session details</h3>
+            <dl>
+              <div>
+                <dt>Repository</dt>
+                <dd>{workspace?.path ?? 'Unavailable'}</dd>
+              </div>
+              <div>
+                <dt>Workspace</dt>
+                <dd>{workspace?.type ?? 'Unavailable'}</dd>
+              </div>
+              <div>
+                <dt>Branch</dt>
+                <dd>{workspace?.gitBranch ?? 'Unavailable'}</dd>
+              </div>
+            </dl>
+            <RawDiagnostics
+              sessionId={session.id}
+              load={(sessionId, options) =>
+                api ? api.diagnostics(sessionId, options) : unavailable()
+              }
+            />
+          </aside>
+        ) : null}
+      </div>
     </section>
   );
 }

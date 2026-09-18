@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import type {
   MutatingCommand,
   Session,
@@ -15,12 +15,14 @@ export function PromptComposer({
   send,
   draft,
   onDraftChange,
+  interruptAction,
 }: {
   session: Session;
   auditAvailable: boolean;
   send: CommandSender;
   draft: string;
   onDraftChange: (value: string) => void;
+  interruptAction?: ReactNode;
 }) {
   const [sending, setSending] = useState(false);
   const disabled =
@@ -60,13 +62,16 @@ export function PromptComposer({
           Prompting is unavailable until the permission audit is available.
         </p>
       ) : null}
-      <button
-        className="button button-primary"
-        type="submit"
-        disabled={disabled}
-      >
-        Send prompt
-      </button>
+      <div className="prompt-composer-actions">
+        {interruptAction}
+        <button
+          className="button button-primary"
+          type="submit"
+          disabled={disabled}
+        >
+          Send prompt
+        </button>
+      </div>
     </form>
   );
 }
