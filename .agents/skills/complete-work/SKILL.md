@@ -85,8 +85,10 @@ Require all of the following:
   observe the new head's checks. Delegate routine fixes to the implementation
   worker when the active harness supports it. Do not offer a bypass as the normal
   response, weaken checks, or treat prior local verification as CI evidence.
-- If the branch is behind `master`, run `gh pr update-branch`, wait for checks, and
-  re-evaluate the complete gate.
+- If the branch is behind `master`, run `gh pr update-branch`, then fetch the task
+  branch and fast-forward its clean worktree to `origin/<branch>`. If a safe
+  fast-forward is unavailable, reconcile the divergence without discarding work.
+  Verify the integrated revision, wait for its checks, and re-evaluate the gate.
 
 Reuse fresh local verification when its contents and environment remain unchanged;
 run the appropriate checks when evidence is missing or repairs invalidate it.
