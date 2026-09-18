@@ -78,8 +78,10 @@ describe('SessionPanel', () => {
 
     expect(screen.getByText('Assistant reply')).toBeVisible();
     expect(diagnosticRequests).toHaveLength(0);
+    await user.click(screen.getByRole('button', { name: 'Details' }));
     await user.click(screen.getByRole('button', { name: 'Raw diagnostics' }));
     expect(diagnosticRequests).toEqual(['s1']);
+    await user.click(screen.getByText('Session actions'));
     await user.click(screen.getByRole('button', { name: 'Delete session' }));
     expect(commands).toHaveLength(0);
     await user.click(
@@ -89,6 +91,133 @@ describe('SessionPanel', () => {
       type: 'session.delete',
       payload: { sessionId: 's1', confirmed: true },
     });
+  });
+
+  it('keeps the conversation focused until details are requested', async () => {
+    const user = userEvent.setup();
+    const api = {
+      diagnostics: async (sessionId: string) => ({
+        protocolVersion: 1 as const,
+        sessionId,
+        diagnostics: [],
+      }),
+      command: async () => ({
+        protocolVersion: 1 as const,
+        commandType: 'ok',
+        result: {},
+      }),
+    };
+    render(
+      <SessionPanel
+        session={session}
+        workspace={workspace}
+        events={events}
+        api={api}
+        auditAvailable
+      />,
+    );
+
+    expect(screen.getByLabelText('Permission Bash')).toBeVisible();
+    expect(screen.queryByLabelText('Session details')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Interrupt session' }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'Delete session' }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Details' }));
+    expect(screen.getByLabelText('Session details')).toHaveTextContent('/mesh');
+    await user.click(screen.getByText('Session actions'));
+    expect(
+      screen.getByRole('button', { name: 'Delete session' }),
+    ).toBeVisible();
+  });
+
+  it('keeps deletion confirmation open when the command fails', async () => {
+    const user = userEvent.setup();
+    render(
+      <SessionPanel
+        session={session}
+        workspace={workspace}
+        events={events}
+        api={{
+          diagnostics: async (sessionId) => ({
+            protocolVersion: 1 as const,
+            sessionId,
+            diagnostics: [],
+          }),
+          command: async () => {
+            throw new Error('Delete failed');
+          },
+        }}
+      />,
+    );
+
+    await user.click(screen.getByText('Session actions'));
+    await user.click(screen.getByRole('button', { name: 'Delete session' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Delete permanently' }),
+    );
+    expect(screen.getByRole('alertdialog')).toBeVisible();
+    expect(screen.getByRole('alert')).toHaveTextContent('Delete failed');
+  });
+
+  it('isolates deletion confirmation and restores the actions trigger focus', async () => {
+    const user = userEvent.setup();
+    render(<SessionPanel session={session} events={events} auditAvailable />);
+
+    await user.click(screen.getByText('Session actions'));
+    await user.click(screen.getByRole('button', { name: 'Delete session' }));
+    expect(screen.getByRole('alertdialog')).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'Archive session' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Delete session' }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Cancel deletion' }));
+    expect(screen.getByText('Session actions')).toHaveFocus();
+    expect(
+      screen.getByRole('button', { name: 'Archive session' }),
+    ).toBeVisible();
+  });
+
+  it('keeps an interrupt failure visible beside the composer', async () => {
+    const user = userEvent.setup();
+    render(
+      <SessionPanel
+        session={session}
+        events={events}
+        api={{
+          diagnostics: async (sessionId) => ({
+            protocolVersion: 1 as const,
+            sessionId,
+            diagnostics: [],
+          }),
+          command: async () => {
+            throw new Error('Interrupt failed');
+          },
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Interrupt session' }));
+    expect(screen.getByRole('alert')).toHaveTextContent('Interrupt failed');
+  });
+
+  it('keeps interrupt available while waiting for a permission decision', () => {
+    render(
+      <SessionPanel
+        session={{ ...session, lifecycleState: 'waiting_for_approval' }}
+        events={events}
+      />,
+    );
+
+    expect(
+      screen.getByRole('button', { name: 'Interrupt session' }),
+    ).toBeVisible();
   });
 
   it('renders accumulated streaming text as one temporary assistant card', () => {
@@ -146,6 +275,7 @@ describe('SessionPanel', () => {
     );
 
     expect(requests).toEqual([]);
+    await user.click(screen.getByRole('button', { name: 'Details' }));
     await user.click(screen.getByRole('button', { name: 'Raw diagnostics' }));
     await waitFor(() => expect(requests).toEqual([['s1', { limit: 10 }]]));
     await user.click(
