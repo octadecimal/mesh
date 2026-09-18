@@ -172,9 +172,11 @@ pending, missing, skipped required, or stale checks are not a passing result.
 Report a concrete access, infrastructure, or scope blocker when progress requires
 the maintainer; do not ask for routine permission to publish or repair CI.
 
-For UI/runtime changes, completion also includes starting or safely reusing the
-feature-worktree stack, verifying the UI and API are reachable at the current PR
-revision, and giving the maintainer a clickable UI URL with focused test steps.
+For UI/runtime changes, start or safely reuse the feature-worktree stack as soon
+as the PR is open, while CI runs. Verify the UI and API at the current PR revision
+and prepare brief user-facing test steps. Once CI and stack health both pass,
+provide a clickable UI URL and the short checklist with expected results.
+Refresh and recheck the stack if CI repairs change the revision.
 Keep the stack available for testing. Follow the complete-work startup procedure;
 preserve live processes and operator data, honor explicit no-run instructions,
 and report startup blockers before claiming readiness. Docs-only work needs a

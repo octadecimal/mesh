@@ -71,6 +71,11 @@ weakening branch protection.
 
 ## 2. Reach current passing CI
 
+As soon as the PR is open, start Step 3's stack preparation and draft Step 7's
+brief user checklist while CI runs. Do not wait for green CI to begin startup.
+If CI repairs or a base update change the revision, rebuild or refresh the
+task-owned stack as needed and recheck its revision and health before handoff.
+
 Require all of the following:
 
 - The working tree is clean (`git status --short`) after preparation.
@@ -98,8 +103,9 @@ never label the branch ready while expected current-head checks have not passed.
 
 ## 3. Make the PR available for hands-on testing
 
-After current-head CI passes, UI/runtime changes require a running test stack
-and a clickable UI URL before handing off; do not ask whether to start it or
+For UI/runtime changes, start stack preparation as soon as the PR is open,
+concurrently with Step 2's CI wait. Handoff requires both current-head passing CI
+and a healthy stack with a clickable UI URL; do not ask whether to start it or
 merely supply startup commands. Honor an explicit no-run instruction and report
 that limitation. A blocked launch is not a ready-for-testing result: diagnose
 ordinary startup failures and report the concrete blocker if safe progress ends.
@@ -243,6 +249,12 @@ Read the current PR title, body, files, and diff:
 gh pr view <number> --json title,body,files,url
 gh pr diff <number>
 ```
+
+Prepare a brief user-facing checklist while CI and stack preparation run, usually
+two to four actions with an expected visible result for each. Describe what to
+click, enter, or observe in the product; setup commands and internal verification
+details belong outside that checklist. Present it with the working URL once both
+CI and stack health pass.
 
 Give a concise walkthrough specific to that change. For a restart-skipped
 documentation or metadata change, give a file/review walkthrough instead of UI
