@@ -1,33 +1,42 @@
-import type { Session, Workspace } from '@mesh-session-platform/contracts';
+import type { ReactNode } from 'react';
+import type { Session } from '@mesh-session-platform/contracts';
 
 export function SessionHeader({
   session,
-  workspace,
+  detailsOpen,
+  detailsId,
+  onDetailsOpenChange,
+  actions,
 }: {
   session: Session;
-  workspace?: Workspace;
+  detailsOpen: boolean;
+  detailsId: string;
+  onDetailsOpenChange: (open: boolean) => void;
+  actions: ReactNode;
 }) {
   return (
     <header className="session-header">
-      <h2>{session.title}</h2>
-      <dl>
+      <div className="session-header-summary">
         <div>
-          <dt>Repository</dt>
-          <dd>{workspace?.path ?? 'Unavailable'}</dd>
+          <h2>{session.title}</h2>
+          <p>Permission mode: {session.permissionMode}</p>
         </div>
-        <div>
-          <dt>Workspace</dt>
-          <dd>{workspace?.type ?? 'Unavailable'}</dd>
-        </div>
-        <div>
-          <dt>Permission mode</dt>
-          <dd>{session.permissionMode}</dd>
-        </div>
-        <div>
-          <dt>Status</dt>
-          <dd aria-live="polite">{session.lifecycleState}</dd>
-        </div>
-      </dl>
+        <span className="session-status" aria-live="polite">
+          {session.lifecycleState}
+        </span>
+      </div>
+      <div className="session-header-controls">
+        <button
+          className="button button-ghost"
+          type="button"
+          aria-controls={detailsId}
+          aria-expanded={detailsOpen}
+          onClick={() => onDetailsOpenChange(!detailsOpen)}
+        >
+          Details
+        </button>
+        {actions}
+      </div>
     </header>
   );
 }

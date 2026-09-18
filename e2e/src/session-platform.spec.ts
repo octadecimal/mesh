@@ -697,9 +697,76 @@ test('creates shared and worktree sessions with the production-built server', as
   if (visualSnapshotsSupported) {
     await expect(activePanel).toHaveScreenshot('active-session-panel.png', {
       animations: 'disabled',
-      mask: [activePanel.locator('.session-header dd').first()],
     });
   }
+  await activePanel.getByRole('button', { name: 'Details' }).click();
+  const details = activePanel.getByLabel('Session details');
+  await expect(details).toBeVisible();
+  const desktopLayout = await activePanel.evaluate((panel) => {
+    const conversation = panel.querySelector('.session-conversation');
+    const detailsPanel = panel.querySelector('.session-details');
+    if (!conversation || !detailsPanel)
+      throw new Error('Expected session layout');
+    return {
+      conversation: conversation.getBoundingClientRect(),
+      details: detailsPanel.getBoundingClientRect(),
+    };
+  });
+  expect(desktopLayout.details.left).toBeGreaterThanOrEqual(
+    desktopLayout.conversation.right,
+  );
+
+  await activePanel.evaluate((panel) => {
+    const container = panel.closest<HTMLElement>('.session-panel');
+    if (!container) throw new Error('Expected session panel container');
+    container.style.width = '390px';
+    container.style.height = '400px';
+  });
+  const narrowLayout = await activePanel.evaluate((panel) => {
+    const conversation = panel.querySelector('.session-conversation');
+    const detailsPanel = panel.querySelector('.session-details');
+    const composer = panel.querySelector('.prompt-composer');
+    const assistantText = panel.querySelector('.transcript-assistant p');
+    if (!conversation || !detailsPanel || !composer || !assistantText)
+      throw new Error('Expected narrow session layout');
+    return {
+      conversation: conversation.getBoundingClientRect(),
+      details: detailsPanel.getBoundingClientRect(),
+      composer: composer.getBoundingClientRect(),
+      panel: panel.getBoundingClientRect(),
+      assistantText: assistantText.getBoundingClientRect(),
+      controls: [...panel.querySelectorAll('textarea, button')]
+        .filter((element) => element.getClientRects().length > 0)
+        .map((element) => element.getBoundingClientRect()),
+    };
+  });
+  expect(narrowLayout.details.top).toBeGreaterThanOrEqual(
+    narrowLayout.conversation.bottom,
+  );
+  expect(narrowLayout.composer.bottom).toBeLessThanOrEqual(
+    narrowLayout.panel.bottom,
+  );
+  expect(narrowLayout.assistantText.top).toBeGreaterThanOrEqual(
+    narrowLayout.conversation.top,
+  );
+  expect(narrowLayout.assistantText.bottom).toBeLessThanOrEqual(
+    narrowLayout.conversation.bottom,
+  );
+  for (const control of narrowLayout.controls) {
+    expect(control.left).toBeGreaterThanOrEqual(narrowLayout.panel.left);
+    expect(control.right).toBeLessThanOrEqual(narrowLayout.panel.right);
+  }
+  await activePanel.screenshot({
+    path: 'tmp/playwright/session-focused-layout-narrow.png',
+  });
+  await activePanel.evaluate((panel) => {
+    const container = panel.closest<HTMLElement>('.session-panel');
+    if (!container) throw new Error('Expected session panel container');
+    container.style.height = '600px';
+  });
+  await activePanel.screenshot({
+    path: 'tmp/playwright/session-focused-layout-tall.png',
+  });
 
   await createThroughUi(page, harness, 'Worktree acceptance', 'worktree');
   const snapshot = await harness.snapshot();
@@ -866,6 +933,10 @@ test('restores tabs without duplicate events and renders tools plus raw diagnost
     page.getByLabel('Assistant message', { exact: true }),
   ).toHaveCount(1);
   await expect(page.getByLabel('Tool call Read')).toContainText('fixture');
+  await page
+    .getByLabel(`Session ${firstId}`)
+    .getByRole('button', { name: 'Details' })
+    .click();
   await page
     .getByLabel(`Session ${firstId}`)
     .getByRole('button', { name: 'Raw diagnostics' })

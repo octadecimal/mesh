@@ -27,6 +27,18 @@ before each use. Runtime execution does not rediscover Git through `PATH`,
 `SystemRoot`, or repository configuration. Restart Mesh after changing the
 setting or installation.
 
+## Session panel
+
+The session header shows its title, status, and permission mode. Open **Details**
+for the workspace path, type, branch, and **Raw diagnostics**. Details opens beside
+the conversation in wide panels and below it in narrow panels.
+
+The prompt composer stays below the scrolling transcript. **Interrupt session**
+is available beside it while the session can be interrupted, including while
+waiting for approval. Permission requests and errors remain in the transcript.
+Open **Session actions** to archive or delete a session; deletion still requires
+explicit confirmation.
+
 ## Project and task operation
 
 Use **Import repository** to create a durable project from a local Git
