@@ -54,6 +54,12 @@ If no open PR exists:
 4. Re-run `gh pr view` and require an open PR whose head is the current branch
    and whose base is `master`.
 
+If a matching PR already exists, push the intended commits normally with
+`git push origin <branch>` and update its description to match the final change.
+In both cases, compare `git rev-parse HEAD` with the PR's `headRefOid`; require
+equality before evaluating CI or handing off. A green remote PR that lacks the
+local commit is not verification of the finished work.
+
 The standing implementation-delivery authorization or an explicit complete-work
 request covers normal commit, push, and PR creation. It does **not** authorize
 merging, cleanup, or switching the test stack to `master`. Those actions require
@@ -70,8 +76,8 @@ Require all of the following:
 - The working tree is clean (`git status --short`) after preparation.
 - The PR is open and mergeable.
 - Expected checks from the workflow and repository requirements exist and pass
-  for the current `headRefOid`. Empty checks, stale successes, and skipped required
-  jobs are not a pass.
+  for the current `headRefOid`, which equals local `HEAD`. Empty checks, stale
+  successes, and skipped required jobs are not a pass.
 - No check is pending, queued, or in progress. Run `gh pr checks --watch` and
   re-evaluate current-head evidence when CI finishes; do not hand off while waiting.
 - No check concluded failure, error, or cancellation. Diagnose and repair ordinary
