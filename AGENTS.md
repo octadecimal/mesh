@@ -164,9 +164,21 @@ never enter default verification or CI. See
 
 ## Pull Requests and Commits
 
-Do not create or publish a pull request unless the maintainer explicitly asks.
+An implementation request or approval includes standing authorization to verify,
+commit the intended changes, push the task branch, and open or update its pull
+request. Continue through expected CI checks passing on the current PR head before
+handing work back for hands-on testing. Diagnose and repair ordinary CI failures;
+pending, missing, skipped required, or stale checks are not a passing result.
+Report a concrete access, infrastructure, or scope blocker when progress requires
+the maintainer; do not ask for routine permission to publish or repair CI.
+
+Honor explicit plan-only, local-only, no-push, or no-PR instructions. Brainstorming
+and visual approval alone do not authorize implementation. Do not offer local-only
+delivery as the default or add a separate PR approval gate. Merge still requires
+the maintainer's hands-on testing and explicit approval of that PR revision.
+
 Keep one concern per pull request; UI changes should include appropriate visual
-evidence when a pull request is requested. Do not commit temporary plans,
+evidence. Do not commit temporary plans,
 research notes, logs, screenshots, or agent scratch files unless they are an
 explicit project deliverable.
 

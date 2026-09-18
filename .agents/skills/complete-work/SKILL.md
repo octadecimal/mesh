@@ -1,14 +1,14 @@
 ---
 name: complete-work
-description: Use when a Mesh development branch is finished and the user wants a pull request prepared for hands-on testing, then merged only after explicit post-test approval.
+description: Use when approved Mesh implementation is ready for delivery through an open pull request and current passing CI, or when resuming CI repair or an explicitly approved post-test merge.
 ---
 
 # Complete Work
 
 Close a finished Mesh branch with evidence. Run every step directly; there is no
-wrapper script. Create one todo per numbered step and work in order. Stop on the
-first unresolved failure, report it plainly, and never claim an action succeeded
-without checking its result.
+wrapper script. Work through PR preparation and CI repair until the current
+revision is ready for hands-on testing. Report a concrete blocker when safe
+progress is unavailable; never claim an action succeeded without checking it.
 
 ## 1. Prepare the branch and PR
 
@@ -24,9 +24,12 @@ git log --oneline origin/master..HEAD
 gh pr list --head <branch> --state open --json number,url,title,body,state,headRefName,baseRefName,mergeStateStatus,statusCheckRollup
 ```
 
-The primary checkout is `C:\code\mesh`. Before any mutation, require an explicit
-user request to complete the branch through commit, PR, merge, cleanup, and
-restart. Skill selection alone does not grant that authority. Stop if the branch
+The primary checkout is `C:\code\mesh`. Under `AGENTS.md`, an implementation
+request or approval authorizes normal verification, intended commits, push, PR
+creation/update, and CI repair without another publishing prompt. Preserve explicit
+plan-only, local-only, no-push, or no-PR limits; a mockup preference or visual
+approval alone does not authorize implementation. Skill selection alone does not
+authorize unrelated work, merge, cleanup, or restart. Stop if the branch
 is detached, is `master`, is rooted at the primary checkout, or is not a linked
 worktree distinct from the primary checkout. Stop if an existing open PR does
 not match the current branch.
@@ -51,8 +54,8 @@ If no open PR exists:
 4. Re-run `gh pr view` and require an open PR whose head is the current branch
    and whose base is `master`.
 
-The user's explicit complete-work request authorizes the normal commit, push,
-and PR creation needed to make the branch testable. It does **not** authorize
+The standing implementation-delivery authorization or an explicit complete-work
+request covers normal commit, push, and PR creation. It does **not** authorize
 merging, cleanup, or switching the test stack to `master`. Those actions require
 a later approval given after the user reports completing hands-on testing of
 this PR. Approval given before testing, urgency, a green local suite, or green CI
@@ -60,23 +63,30 @@ does not satisfy the post-test approval gate. It also does not authorize
 including unrelated changes, bypassing failed checks, force-pushing, or
 weakening branch protection.
 
-## 2. Apply the pre-merge gate
+## 2. Reach current passing CI
 
 Require all of the following:
 
 - The working tree is clean (`git status --short`) after preparation.
 - The PR is open and mergeable.
-- No check is pending, queued, or in progress. Offer `gh pr checks --watch` and
-  re-evaluate if CI is still running.
-- No check concluded failure, error, or cancellation. On failure, ask the user to
-  choose: diagnose and fix, explicitly merge anyway, or abort. Never infer a CI
-  bypass from urgency or prior local verification.
+- Expected checks from the workflow and repository requirements exist and pass
+  for the current `headRefOid`. Empty checks, stale successes, and skipped required
+  jobs are not a pass.
+- No check is pending, queued, or in progress. Run `gh pr checks --watch` and
+  re-evaluate current-head evidence when CI finishes; do not hand off while waiting.
+- No check concluded failure, error, or cancellation. Diagnose and repair ordinary
+  failures within scope, run affected local checks, commit/push the repair, and
+  observe the new head's checks. Delegate routine fixes to the implementation
+  worker when the active harness supports it. Do not offer a bypass as the normal
+  response, weaken checks, or treat prior local verification as CI evidence.
 - If the branch is behind `master`, run `gh pr update-branch`, wait for checks, and
   re-evaluate the complete gate.
 
-Do not rerun Mesh's full verification suite here. This gate trusts the fresh
-milestone verification already completed before invocation and verifies GitHub's
-current merge evidence.
+Reuse fresh local verification when its contents and environment remain unchanged;
+run the appropriate checks when evidence is missing or repairs invalidate it.
+Missing credentials, external CI outages, or repairs beyond the approved scope
+can require the maintainer. Report that exact blocker and completed evidence;
+never label the branch ready while expected current-head checks have not passed.
 
 ## 3. Make the PR available for hands-on testing
 
@@ -103,9 +113,10 @@ worktree while waiting.
 
 ## 4. Re-check and merge after post-test approval
 
-After receiving both facts, re-run the complete pre-merge gate from Step 2 so
-the merge decision uses current GitHub state. Stop again if the PR is behind,
-checks are pending or failing, or mergeability changed.
+After receiving both facts for the current revision, re-run Step 2 so the merge
+decision uses current GitHub state. Repair or wait on outstanding checks before
+merging. If changes invalidate the tested revision, obtain renewed hands-on
+testing and explicit merge approval of the new revision.
 
 Use Mesh's standard merge method:
 
@@ -118,10 +129,10 @@ Confirm the PR reports `MERGED` before cleanup.
 ## 5. Sync main and clean up
 
 Run repository coordination commands from `C:\code\mesh`, never by switching the
-linked worktree itself to `main`:
+linked worktree itself to `master`:
 
 ```powershell
-git -C C:/code/mesh checkout main
+git -C C:/code/mesh checkout master
 git -C C:/code/mesh pull --ff-only
 git -C C:/code/mesh worktree remove <worktree-path>
 git -C C:/code/mesh worktree prune
@@ -137,7 +148,7 @@ expected self-rooted exception: continue, report both leftovers precisely, and
 give the later cleanup commands. It is not permission to force-remove any other
 path.
 
-## 6. Restart Mesh from main when runtime behavior changed
+## 6. Restart Mesh from master when runtime behavior changed
 
 Inspect the merged PR's file list before touching processes. Restart Mesh only
 when at least one changed path can affect the built application, runtime
@@ -220,7 +231,7 @@ instructions. Otherwise include:
 
 Before post-test approval, report the open PR, current CI state, preserved branch
 and worktree, test-stack status, and tailored walkthrough. After approval and
-merge, report the merged PR, synced `main` commit, worktree/branch cleanup or
+merge, report the merged PR, synced `master` commit, worktree/branch cleanup or
 exact self-rooted leftovers, and the post-merge restart decision. Include stack
 process/health status and UI URL only when the relevant runtime step ran.
 
@@ -231,7 +242,7 @@ process/health status and UI URL only when the relevant runtime step ran.
 | Finished changes uncommitted | Verify, review, stage intended paths, and commit |
 | No matching PR               | Push and create one against `master`             |
 | CI pending                   | Watch, then re-evaluate the full gate            |
-| CI failed                    | Ask: fix, explicit bypass, or abort              |
+| CI failed                    | Diagnose, repair, push, and watch current CI     |
 | PR behind                    | Update branch and re-check CI                    |
 | Human test not completed     | Preserve PR/worktree; provide walkthrough; wait  |
 | Human tested, no approval    | Preserve PR/worktree; wait for explicit approval |
