@@ -163,6 +163,27 @@ describe('SessionPanel', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Delete failed');
   });
 
+  it('isolates deletion confirmation and restores the actions trigger focus', async () => {
+    const user = userEvent.setup();
+    render(<SessionPanel session={session} events={events} auditAvailable />);
+
+    await user.click(screen.getByText('Session actions'));
+    await user.click(screen.getByRole('button', { name: 'Delete session' }));
+    expect(screen.getByRole('alertdialog')).toBeVisible();
+    expect(
+      screen.queryByRole('button', { name: 'Archive session' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Delete session' }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Cancel deletion' }));
+    expect(screen.getByText('Session actions')).toHaveFocus();
+    expect(
+      screen.getByRole('button', { name: 'Archive session' }),
+    ).toBeVisible();
+  });
+
   it('keeps an interrupt failure visible beside the composer', async () => {
     const user = userEvent.setup();
     render(

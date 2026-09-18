@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import type {
   MutatingCommand,
   Session,
@@ -17,6 +17,7 @@ export function SessionActions({
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const summaryRef = useRef<HTMLElement>(null);
   const dispatch = async (command: MutatingCommand) => {
     setBusy(true);
     setError(undefined);
@@ -32,6 +33,10 @@ export function SessionActions({
       setBusy(false);
     }
   };
+  const cancelDeletion = () => {
+    summaryRef.current?.focus();
+    setConfirmingDelete(false);
+  };
   return (
     <details
       className="session-actions"
@@ -39,24 +44,26 @@ export function SessionActions({
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
-      <summary>Session actions</summary>
-      <div className="session-actions-menu" hidden={!open}>
-        <button
-          disabled={busy}
-          onClick={() =>
-            void dispatch({
-              type: 'session.archive',
-              payload: { sessionId },
-            } as MutatingCommand)
-          }
-        >
-          Archive session
-        </button>
-        <button disabled={busy} onClick={() => setConfirmingDelete(true)}>
-          Delete session
-        </button>
-        {error && !confirmingDelete ? <p role="alert">{error}</p> : null}
-      </div>
+      <summary ref={summaryRef}>Session actions</summary>
+      {!confirmingDelete ? (
+        <div className="session-actions-menu" hidden={!open}>
+          <button
+            disabled={busy}
+            onClick={() =>
+              void dispatch({
+                type: 'session.archive',
+                payload: { sessionId },
+              } as MutatingCommand)
+            }
+          >
+            Archive session
+          </button>
+          <button disabled={busy} onClick={() => setConfirmingDelete(true)}>
+            Delete session
+          </button>
+          {error ? <p role="alert">{error}</p> : null}
+        </div>
+      ) : null}
       {confirmingDelete && open ? (
         <div role="alertdialog" aria-label="Confirm session deletion">
           <p>Delete this session permanently?</p>
@@ -75,7 +82,7 @@ export function SessionActions({
           >
             Delete permanently
           </button>
-          <button disabled={busy} onClick={() => setConfirmingDelete(false)}>
+          <button disabled={busy} onClick={cancelDeletion}>
             Cancel deletion
           </button>
         </div>
