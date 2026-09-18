@@ -91,6 +91,7 @@ const start = async () => {
   const connectedApi = {
     diagnostics: api.diagnostics.bind(api),
     discover: api.discover.bind(api),
+    selectDirectory: api.selectDirectory.bind(api),
     projectPlanDetails: api.projectPlanDetails.bind(api),
     projectPlanHistory: api.projectPlanHistory.bind(api),
     projectSnapshot: api.projectSnapshot.bind(api),
@@ -109,7 +110,10 @@ const start = async () => {
         throw error;
       }
       await coordinator.refresh();
-      if (args[0].type === 'project.import') {
+      if (
+        args[0].type === 'project.import' ||
+        args[0].type === 'project.create'
+      ) {
         const project = response.result as { id: string };
         await coordinator.refreshProject(project.id);
         socket.resubscribe();

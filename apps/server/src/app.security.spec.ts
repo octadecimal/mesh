@@ -9,6 +9,7 @@ import { buildApp, createOriginPolicy } from './app.js';
 import { SessionRegistry } from './runtime/session-registry.js';
 import { TaskService } from './tasks/task-service.js';
 import { createTestRepositories } from './test/create-test-database.js';
+import type { DirectoryPicker } from './platform/directory-picker.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -16,7 +17,11 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-const setup = (options?: { webRoot?: string; developmentOrigin?: string }) => {
+const setup = (options?: {
+  webRoot?: string;
+  developmentOrigin?: string;
+  directoryPicker?: Pick<DirectoryPicker, 'select'>;
+}) => {
   const repositories = createTestRepositories();
   const driver = new FakeClaudeSessionDriver();
   const registry = new SessionRegistry({
@@ -35,6 +40,7 @@ const setup = (options?: { webRoot?: string; developmentOrigin?: string }) => {
     pathOptions: { baseDirectory: process.cwd() },
     billingConflicts: [],
     originPolicy,
+    directoryPicker: options?.directoryPicker,
     webRoot: options?.webRoot,
   });
   cleanups.push(async () => {
@@ -144,5 +150,27 @@ describe('local application security', () => {
 
     expect(command.statusCode).toBe(503);
     expect(socket.statusCode).toBe(503);
+  });
+
+  it('applies origin and shutdown protections to folder selection', async () => {
+    const { app, originPolicy } = setup({
+      directoryPicker: { select: async () => 'C:/workspace' },
+    });
+
+    const crossOrigin = await app.inject({
+      method: 'POST',
+      url: '/api/directories/select',
+      headers: { origin: 'http://evil.example' },
+      payload: {},
+    });
+    originPolicy.stopAccepting();
+    const stopped = await app.inject({
+      method: 'POST',
+      url: '/api/directories/select',
+      payload: {},
+    });
+
+    expect(crossOrigin.statusCode).toBe(403);
+    expect(stopped.statusCode).toBe(503);
   });
 });

@@ -19,10 +19,13 @@ import {
   readHistory,
   type SnapshotDependencies,
 } from './snapshots.js';
+import type { DirectoryPicker } from '../platform/directory-picker.js';
 
 export type HttpDependencies = CommandDependencies &
   SnapshotDependencies &
-  ProjectSnapshotDependencies;
+  ProjectSnapshotDependencies & {
+    directoryPicker: Pick<DirectoryPicker, 'select'>;
+  };
 
 const sendError = (reply: FastifyReply, error: unknown) => {
   const mapped = toHttpError(error);
@@ -30,6 +33,7 @@ const sendError = (reply: FastifyReply, error: unknown) => {
 };
 
 const planHistoryQuerySchema = z.object({ before: idSchema.optional() });
+const directorySelectionRequestSchema = z.object({}).strict();
 
 const requireProject = (dependencies: HttpDependencies, projectId: string) => {
   const project = dependencies.projects.get(projectId);
@@ -46,6 +50,15 @@ export const registerRoutes = (
   app: FastifyInstance,
   dependencies: HttpDependencies,
 ): void => {
+  app.post('/api/directories/select', async (request, reply) => {
+    try {
+      directorySelectionRequestSchema.parse(request.body);
+      return { path: await dependencies.directoryPicker.select() };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post('/api/commands', async (request, reply) => {
     try {
       return await executeCommand(request.body, dependencies);

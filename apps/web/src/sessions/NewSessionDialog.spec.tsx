@@ -1,9 +1,35 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { vi } from 'vitest';
 
 import { NewSessionDialog } from './NewSessionDialog';
 
 describe('NewSessionDialog', () => {
+  it('directs an empty project list to repository import', async () => {
+    const user = userEvent.setup();
+    const onImportProject = vi.fn();
+    render(
+      <NewSessionDialog
+        open
+        projects={[]}
+        onCreate={() => undefined}
+        onImportProject={onImportProject}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        'Import a local Git repository or create a new project before starting a session.',
+      ),
+    ).toBeDefined();
+    expect(
+      screen.getByRole('button', { name: 'Create session' }),
+    ).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'Import project' }));
+    expect(onImportProject).toHaveBeenCalledOnce();
+  });
+
   it('submits an isolated worktree with an explicit permission mode', async () => {
     const user = userEvent.setup();
     const commands: unknown[] = [];

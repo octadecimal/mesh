@@ -1,4 +1,6 @@
 import type { Page } from '@playwright/test';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import {
   idSchema,
   projectSnapshotSchema,
@@ -131,7 +133,7 @@ const importTemporaryRepository = async (
   displayName: string,
 ) => {
   await page.goto(harness.origin);
-  await page.getByRole('button', { name: 'Import repository' }).click();
+  await page.getByRole('button', { name: 'Import project' }).click();
   const dialog = page.getByRole('dialog', { name: 'Import repository' });
   await dialog.getByLabel('Repository path').fill(harness.repositoryPath);
   await dialog.getByLabel('Project name (optional)').fill(displayName);
@@ -509,6 +511,39 @@ test('keeps the empty cockpit usable at a narrow viewport', async ({
       fullPage: true,
     });
   }
+});
+
+test('creates a local Git project through the onboarding form', async ({
+  page,
+  harness,
+}, testInfo) => {
+  const name = `new-project-${Date.now()}`;
+  await page.goto(harness.origin);
+  await page.getByRole('button', { name: 'New project' }).click();
+  const dialog = page.getByRole('dialog', { name: 'New project' });
+  await dialog.getByLabel('Project name').fill(name);
+  await dialog
+    .getByLabel('Parent directory')
+    .fill(dirname(harness.repositoryPath));
+  const screenshotPath = testInfo.outputPath('new-project-dialog.png');
+  await dialog.screenshot({ path: screenshotPath });
+  await testInfo.attach('new-project-dialog', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+  await dialog.getByRole('button', { name: 'Create project' }).click();
+
+  await expect(
+    page.getByRole('region', { name: `${name} board` }),
+  ).toBeVisible();
+  expect(existsSync(join(dirname(harness.repositoryPath), name, '.git'))).toBe(
+    true,
+  );
+  await page.reload();
+  await page.getByRole('button', { name: 'Board' }).click();
+  await expect(
+    page.getByRole('region', { name: `${name} board` }),
+  ).toBeVisible();
 });
 
 test('gives the project kanban the remaining board height', async ({

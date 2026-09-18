@@ -71,6 +71,10 @@ import {
   resolveRepositoryIdentity,
   type RepositoryIdentityResolver,
 } from '../projects/repository-identity.js';
+import {
+  createRepository,
+  RepositoryCreationError,
+} from '../projects/create-repository.js';
 import { CommandError } from './errors.js';
 
 const commandResponseSchema = z.object({
@@ -134,7 +138,10 @@ export interface CommandDependencies {
   taskDependencyService?: TaskDependencyBoundary;
   registry: SessionRegistry;
   driver: ClaudeSessionDriver;
-  git?: Pick<GitAdapter, 'createWorktree' | 'removeOwnedWorktree'>;
+  git?: Pick<
+    GitAdapter,
+    'initializeRepository' | 'createWorktree' | 'removeOwnedWorktree'
+  >;
   pathOptions?: ResolveWorkspacePathOptions;
   resolveIdentity?: RepositoryIdentityResolver;
   billingConflicts?: readonly { variable: string }[];
@@ -1124,6 +1131,48 @@ const reconcileLegacyProjectIdentities = async (
   }
 };
 
+const registerProject = async (
+  repositoryPath: string,
+  displayName: string | undefined,
+  dependencies: CommandDependencies,
+) => {
+  const pathOptions = dependencies.pathOptions;
+  if (!pathOptions) {
+    throw new CommandError(
+      'repository_invalid',
+      'Workspace path configuration is unavailable',
+    );
+  }
+  const resolveIdentity =
+    dependencies.resolveIdentity ?? resolveRepositoryIdentity;
+  const identity = await resolveIdentity(repositoryPath, pathOptions);
+  await reconcileLegacyProjectIdentities(dependencies);
+  const existing = dependencies.projects.getByRepositoryIdentity(
+    identity.repositoryIdentity,
+  );
+  if (existing) {
+    throw new CommandError(
+      'repository_already_imported',
+      'This Git repository is already imported',
+      { project: existing },
+    );
+  }
+  const now = (dependencies.now ?? (() => new Date().toISOString()))();
+  return dependencies.projects.create(
+    projectSchema.parse({
+      id: (dependencies.createId ?? randomUUID)(),
+      displayName:
+        displayName ?? basename(identity.canonicalPath) ?? 'Git repository',
+      repositoryPath: identity.canonicalPath,
+      repositoryIdentity: identity.repositoryIdentity,
+      discoveredAt: now,
+      discoveryMetadata: { source: 'explicit_import' },
+      createdAt: now,
+      updatedAt: now,
+    }),
+  );
+};
+
 const executeMutation = async (
   command: Extract<Command, { idempotencyKey: string }>['command'],
   dependencies: CommandDependencies,
@@ -1228,48 +1277,61 @@ const executeMutation = async (
         ),
       );
     case 'project.import': {
-      if (!dependencies.pathOptions) {
-        throw new CommandError(
-          'repository_invalid',
-          'Workspace path configuration is unavailable',
-        );
-      }
-      const resolveIdentity =
-        dependencies.resolveIdentity ?? resolveRepositoryIdentity;
-      const identity = await resolveIdentity(
-        command.payload.repositoryPath,
-        dependencies.pathOptions,
-      );
-      await reconcileLegacyProjectIdentities(dependencies);
-      const existing = dependencies.projects.getByRepositoryIdentity(
-        identity.repositoryIdentity,
-      );
-      if (existing) {
-        throw new CommandError(
-          'repository_already_imported',
-          'This Git repository is already imported',
-          { project: existing },
-        );
-      }
-      const now = (dependencies.now ?? (() => new Date().toISOString()))();
       return response(
         command.type,
-        dependencies.projects.create(
-          projectSchema.parse({
-            id: (dependencies.createId ?? randomUUID)(),
-            displayName:
-              command.payload.displayName ??
-              basename(identity.canonicalPath) ??
-              'Git repository',
-            repositoryPath: identity.canonicalPath,
-            repositoryIdentity: identity.repositoryIdentity,
-            discoveredAt: now,
-            discoveryMetadata: { source: 'explicit_import' },
-            createdAt: now,
-            updatedAt: now,
-          }),
+        await registerProject(
+          command.payload.repositoryPath,
+          command.payload.displayName,
+          dependencies,
         ),
       );
+    }
+    case 'project.create': {
+      if (!dependencies.pathOptions || !dependencies.git) {
+        throw new CommandError(
+          'repository_invalid',
+          'Project creation support is unavailable',
+        );
+      }
+      let repositoryPath: AbsolutePath;
+      try {
+        repositoryPath = await createRepository({
+          parentDirectory: command.payload.parentDirectory,
+          name: command.payload.name,
+          pathOptions: dependencies.pathOptions,
+          git: dependencies.git,
+        });
+      } catch (error) {
+        if (error instanceof RepositoryCreationError) {
+          throw new CommandError(
+            error.repositoryPath ? 'workspace_preserved' : 'repository_invalid',
+            error.message,
+            error.repositoryPath
+              ? { repositoryPath: error.repositoryPath }
+              : undefined,
+          );
+        }
+        throw error;
+      }
+      try {
+        return response(
+          command.type,
+          await registerProject(
+            repositoryPath,
+            command.payload.name,
+            dependencies,
+          ),
+        );
+      } catch (error) {
+        throw new CommandError(
+          'workspace_preserved',
+          `Project repository was created at ${repositoryPath}, but registration did not complete. Import this existing repository to recover.`,
+          {
+            repositoryPath,
+            message: error instanceof Error ? error.message : 'unknown error',
+          },
+        );
+      }
     }
     case 'project.rename': {
       const project = requireActiveProject(

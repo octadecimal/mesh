@@ -193,6 +193,14 @@ describe('session platform contracts', () => {
         payload: { repositoryPath: 'C:/code/mesh', actor },
       },
       {
+        type: 'project.create',
+        payload: {
+          parentDirectory: 'C:/code',
+          name: 'new-project',
+          actor,
+        },
+      },
+      {
         type: 'project.archive',
         payload: { projectId: 'project-1', expectedRevision: 1, actor },
       },

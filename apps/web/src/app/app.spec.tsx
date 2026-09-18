@@ -31,6 +31,24 @@ describe('App', () => {
     expect(screen.getByRole('dialog', { name: 'New session' })).toBeDefined();
   });
 
+  it('moves from an empty new-session dialog to repository import', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    api.discover.mockResolvedValue({ result: { suggestions: [] } });
+    render(<App api={api} />);
+
+    await user.click(
+      screen.getByRole('button', { name: 'Create your first session' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Import project' }));
+
+    expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull();
+    expect(
+      screen.getByRole('dialog', { name: 'Import repository' }),
+    ).toBeDefined();
+    expect(api.discover).toHaveBeenCalledOnce();
+  });
+
   it('hiding a panel does not send an interrupt command', async () => {
     const user = userEvent.setup();
     const store = createMeshStore(snapshot);

@@ -55,6 +55,63 @@ describe('ProjectImportDialog', () => {
     );
   });
 
+  it('keeps manual import available when discovery fails', async () => {
+    const user = userEvent.setup();
+    const onImport = vi.fn().mockResolvedValue(project);
+    render(
+      <ProjectImportDialog
+        open
+        suggestions={[]}
+        discoveryError="Repository discovery is unavailable."
+        onImport={onImport}
+      />,
+    );
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Repository discovery is unavailable.',
+    );
+    expect(
+      screen.getByText(
+        'Choose a repository with Browse or enter its absolute path.',
+      ),
+    ).toBeDefined();
+    await user.type(
+      screen.getByLabelText('Repository path'),
+      'C:\\\\code\\\\mesh',
+    );
+    await user.click(screen.getByRole('button', { name: 'Import project' }));
+
+    await waitFor(() => expect(onImport).toHaveBeenCalledOnce());
+  });
+
+  it('preserves a manual path when browsing is cancelled or fails', async () => {
+    const user = userEvent.setup();
+    const onBrowse = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error('Picker unavailable'));
+    render(
+      <ProjectImportDialog
+        open
+        suggestions={[]}
+        onBrowse={onBrowse}
+        onImport={vi.fn()}
+      />,
+    );
+
+    const path = screen.getByLabelText('Repository path');
+    await user.type(path, 'C:\\code\\mesh');
+    await user.click(
+      screen.getByRole('button', { name: 'Browse repository folder' }),
+    );
+    expect(path).toHaveValue('C:\\code\\mesh');
+    await user.click(
+      screen.getByRole('button', { name: 'Browse repository folder' }),
+    );
+    expect(path).toHaveValue('C:\\code\\mesh');
+    expect(screen.getByRole('alert')).toHaveTextContent('Picker unavailable');
+  });
+
   it('shows validation feedback instead of submitting a relative path', async () => {
     const user = userEvent.setup();
     const onImport = vi.fn();

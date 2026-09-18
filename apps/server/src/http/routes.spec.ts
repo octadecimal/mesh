@@ -17,6 +17,7 @@ import {
 
 import { FakeClaudeSessionDriver } from '../claude/fake-driver.js';
 import { GitAdapter } from '../platform/git.js';
+import type { DirectoryPicker } from '../platform/directory-picker.js';
 import { QaVerificationExecutableUnavailableError } from '../platform/qa-verification-runner.js';
 import { SessionRegistry } from '../runtime/session-registry.js';
 import { TaskService } from '../tasks/task-service.js';
@@ -63,6 +64,7 @@ const setup = (options?: {
   >;
   planApprovalService?: Pick<PlanApprovalService, 'approve' | 'reject'>;
   taskDependencyService?: Pick<TaskDependencyService, 'add' | 'remove'>;
+  directoryPicker?: Pick<DirectoryPicker, 'select'>;
 }) => {
   const repositories = createTestRepositories();
   const workspacePath = options?.useDatabaseDirectoryAsWorkspace
@@ -152,6 +154,7 @@ const setup = (options?: {
       driver,
       pathOptions,
       git,
+      directoryPicker: options?.directoryPicker,
       ...options,
       createId,
     }),
@@ -163,6 +166,56 @@ describe('HTTP command routes', () => {
 
   afterEach(async () => {
     await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  });
+
+  it('returns a selected workspace directory without launching a native dialog in tests', async () => {
+    const fixture = setup({
+      seedProject: false,
+      directoryPicker: { select: async () => 'C:/code/mesh' },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+
+    const response = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/directories/select',
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ path: fixture.workspacePath });
+  });
+
+  it('returns null on picker cancellation and rejects non-empty bodies', async () => {
+    const fixture = setup({
+      directoryPicker: { select: async () => null },
+    });
+    cleanups.push(async () => {
+      await fixture.app.close();
+      await fixture.registry.shutdown();
+      fixture.repositories.dispose();
+    });
+
+    const cancelled = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/directories/select',
+      payload: {},
+    });
+    const invalid = await fixture.app.inject({
+      method: 'POST',
+      url: '/api/directories/select',
+      payload: { unexpected: true },
+    });
+
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toEqual({ path: null });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json()).toMatchObject({
+      error: { code: 'invalid_command' },
+    });
   });
 
   it('maps a rejected QA capability to the stable forbidden envelope', async () => {
