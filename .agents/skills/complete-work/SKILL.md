@@ -272,7 +272,7 @@ process/health status and UI URL only when the relevant runtime step ran.
 | PR behind                    | Update branch and re-check CI                    |
 | Human test not completed     | Preserve PR/worktree; provide walkthrough; wait  |
 | Human tested, no approval    | Preserve PR/worktree; wait for explicit approval |
-| Human tested and approved    | Re-check current gate, then squash merge          |
+| Human tested and approved    | Re-check current gate, then squash merge         |
 | Docs/metadata-only PR        | Skip restart; report file-scope evidence         |
 | Unknown port owner           | Stop; do not kill it                             |
 | API billing override present | Stop; subscription-only policy is not satisfied  |
