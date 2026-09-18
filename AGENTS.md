@@ -172,6 +172,14 @@ pending, missing, skipped required, or stale checks are not a passing result.
 Report a concrete access, infrastructure, or scope blocker when progress requires
 the maintainer; do not ask for routine permission to publish or repair CI.
 
+For UI/runtime changes, completion also includes starting or safely reusing the
+feature-worktree stack, verifying the UI and API are reachable at the current PR
+revision, and giving the maintainer a clickable UI URL with focused test steps.
+Keep the stack available for testing. Follow the complete-work startup procedure;
+preserve live processes and operator data, honor explicit no-run instructions,
+and report startup blockers before claiming readiness. Docs-only work needs a
+file walkthrough instead.
+
 Honor explicit plan-only, local-only, no-push, or no-PR instructions. Brainstorming
 and visual approval alone do not authorize implementation. Do not offer local-only
 delivery as the default or add a separate PR approval gate. Merge still requires

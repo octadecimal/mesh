@@ -98,18 +98,33 @@ never label the branch ready while expected current-head checks have not passed.
 
 ## 3. Make the PR available for hands-on testing
 
-When runtime behavior changed, start or restart Mesh from the feature worktree,
+After current-head CI passes, UI/runtime changes require a running test stack
+and a clickable UI URL before handing off; do not ask whether to start it or
+merely supply startup commands. Honor an explicit no-run instruction and report
+that limitation. A blocked launch is not a ready-for-testing result: diagnose
+ordinary startup failures and report the concrete blocker if safe progress ends.
+
+Start or safely reuse Mesh from the feature worktree,
 not `master`, using the safe listener inspection, subscription-only checks,
 build, launch, and health-check procedure in Step 6, but substitute the verified
 feature-worktree root for build and process working directories. Set
 `MESH_WORKSPACE_ROOT` to the verified primary checkout root so the test server
 can safely import the primary repository and any linked worktree beneath it.
 Do not remove or switch the feature worktree while its test stack is running.
+Reuse an existing stack only after verifying its worktree, current PR revision,
+and UI plus API health. Do not restart an active operator stack to make room;
+preserve live sessions and data. Use an isolated preview data directory when
+startup could recover or mutate operator state, and disclose that isolated data
+will not contain existing sessions. Do not start live Claude work for health checks.
 For documentation-only changes, skip the runtime and provide a file/review
 walkthrough.
 
-Produce the tailored walkthrough from Step 7, including the PR URL and exact
-success criteria. Then stop and wait. The required gate is two facts from the
+Keep the verified stack running across the handoff using the available background
+process mechanism; report any actual lifetime limitation. Verify the UI page and
+both API paths in Step 6 immediately before reporting readiness.
+
+Produce the tailored walkthrough from Step 7, including clickable UI and PR URLs
+and exact success criteria. Then stop and wait. The required gate is two facts from the
 user after testing this PR:
 
 1. They completed the hands-on test.
@@ -186,8 +201,10 @@ Get-CimInstance Win32_Process -Filter "ProcessId = <pid>" |
   Select-Object ProcessId,ParentProcessId,Name,CommandLine
 ```
 
-Stop only processes whose command lines prove they are stale Mesh processes. If
-port 3737 belongs to an unrelated or ambiguous process, stop the skill and report
+Stop only processes whose command lines and observed state prove they are stale,
+task-owned Mesh processes with no live work. Never infer staleness from a port or
+another branch's path alone. If port 3737 belongs to an unrelated or ambiguous
+process, stop the skill and report
 the conflict. Never kill an unknown listener.
 
 Prefer UI port 4200. If it belongs to an unrelated process, choose the first free
@@ -213,8 +230,9 @@ Invoke-WebRequest http://127.0.0.1:3737/api/snapshot -Headers @{ Origin = 'http:
 Invoke-WebRequest http://127.0.0.1:<ui-port>/api/snapshot
 ```
 
-Both must return HTTP 200. Also confirm listener command lines point at the
-primary checkout. Background processes may terminate when the agent session ends;
+Both must return HTTP 200, and the UI root must load successfully. Also confirm
+listener command lines point at the primary checkout (feature worktree in Step 3).
+Background processes may terminate when the agent session ends;
 surface that lifecycle limitation.
 
 ## 7. Produce the manual walkthrough
