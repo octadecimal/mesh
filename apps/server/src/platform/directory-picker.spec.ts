@@ -65,6 +65,9 @@ describe('DirectoryPicker', () => {
     expect(powershellScript).toEqual(
       expect.stringContaining('$owner.TopMost = $true'),
     );
+    expect(powershellScript.indexOf('$owner.Show()')).toBeLessThan(
+      powershellScript.indexOf('$owner.TopMost = $true'),
+    );
   });
 
   it('returns null when the native dialog is cancelled', async () => {

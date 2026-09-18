@@ -132,9 +132,10 @@ $owner = New-Object System.Windows.Forms.Form
 $owner.Opacity = 0
 $owner.Size = New-Object System.Drawing.Size(1, 1)
 $owner.ShowInTaskbar = $false
-$owner.TopMost = $true
 try {
   $owner.Show()
+  # WinForms applies the native topmost style only after the hidden process creates the handle.
+  $owner.TopMost = $true
   $selected = [NativeFolderPicker]::Select(
     $env:MESH_DIRECTORY_PICKER_ROOT,
     $owner.Handle)
