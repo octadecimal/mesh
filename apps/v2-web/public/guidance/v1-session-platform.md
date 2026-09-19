@@ -27,6 +27,23 @@ before each use. Runtime execution does not rediscover Git through `PATH`,
 `SystemRoot`, or repository configuration. Restart Mesh after changing the
 setting or installation.
 
+## Project workspaces
+
+Choose a project in the shared header, then use the workspace for the job at hand:
+
+- **Plan**: describe an outcome, review the proposed tasks, and approve or revise
+  the plan. Approval creates backlog tasks; it does not start implementation.
+- **Board**: organize tasks, prepare ready work, start it, and review results.
+  Attention indicators point to decisions and recovery actions. A finished agent
+  session is not evidence that its task has passed review.
+- **Sessions**: follow task-linked conversations or start an independent session.
+  The session list appears here rather than beside every workspace.
+
+Open **Project settings** for Developer instructions, QA instructions, and the
+review policy. Those settings apply to future execution cycles; active cycles
+retain their original instruction and policy snapshots. Task drawers retain
+execution history and links to the sessions that produced the evidence.
+
 ## Session panel
 
 The session header shows its title, status, and permission mode. Open **Details**
@@ -78,7 +95,7 @@ action.
 
 ### PM planning and task dependencies
 
-Use **Start planning** to ask a PM role for a structured proposal against the
+In **Plan**, use **Start planning** to ask a PM role for a structured proposal against the
 current imported repository and task/policy base. Confirm the displayed Claude
 subscription-capacity warning before starting. The PM receives read-only
 repository access plus one scoped `submit_project_plan` control. It receives no
@@ -131,7 +148,8 @@ the next launch boundary and unsafe new work fails closed.
 
 ### Finite project runs
 
-Use **Start run** to authorize the current ordered set of eligible ready tasks.
+In **Board**, use **Start ready tasks** to inspect the current ordered set of
+eligible ready tasks, then explicitly authorize the run.
 Inspect the preview first: authorization sends the previewed task ids and
 revisions as `expectedTasks`, together with the displayed project QA policy
 revision and every task's review-automation status and generation. A task edit,
