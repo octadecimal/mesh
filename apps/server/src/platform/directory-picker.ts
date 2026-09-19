@@ -172,7 +172,7 @@ export interface DirectoryPickerOptions {
   platform?: NodeJS.Platform;
   runner?: DirectoryPickerRunner;
   fs?: DirectoryPickerFileSystem;
-  path?: Pick<typeof nodePath, 'isAbsolute' | 'relative'>;
+  path?: Pick<typeof nodePath, 'isAbsolute'>;
 }
 
 class PowerShellDirectoryPickerRunner implements DirectoryPickerRunner {
@@ -247,22 +247,6 @@ class PowerShellDirectoryPickerRunner implements DirectoryPickerRunner {
   }
 }
 
-const contains = (
-  root: string,
-  candidate: string,
-  path: NonNullable<DirectoryPickerOptions['path']>,
-) => {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === '' ||
-    (relative !== '..' &&
-      !relative.startsWith(`..${nodePath.sep}`) &&
-      !relative.startsWith('../') &&
-      !relative.startsWith('..\\') &&
-      !path.isAbsolute(relative))
-  );
-};
-
 export class DirectoryPicker {
   private active?: Promise<string | null>;
   private readonly platform: NodeJS.Platform;
@@ -305,12 +289,11 @@ export class DirectoryPicker {
       const canonical = await this.fs.realpath(selected);
       if (
         !this.pathOrNode().isAbsolute(canonical) ||
-        !contains(root, canonical, this.pathOrNode()) ||
         !(await this.fs.stat(canonical)).isDirectory()
       ) {
         throw new DirectoryPickerError(
           'directory_picker_invalid_path',
-          'The selected folder is outside the configured workspace. Choose a folder inside it.',
+          'The selected path is not an accessible directory. Choose another folder.',
         );
       }
       return canonical;

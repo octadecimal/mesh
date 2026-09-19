@@ -18,16 +18,6 @@ const gitPathOverrides = new Set([
   'GIT_OBJECT_DIRECTORY',
 ]);
 
-const isWithin = (candidate: string, root: string): boolean => {
-  const relative = nodePath.relative(root, candidate);
-  return (
-    relative === '' ||
-    (relative !== '..' &&
-      !relative.startsWith(`..${nodePath.sep}`) &&
-      !nodePath.isAbsolute(relative))
-  );
-};
-
 export class RepositoryCreationError extends Error {
   constructor(
     message: string,
@@ -83,14 +73,10 @@ export const createRepository = async ({
     );
   }
 
-  let baseDirectory: AbsolutePath;
   let parentPath: AbsolutePath;
   let repositoryPath: AbsolutePath;
   try {
-    [baseDirectory, parentPath] = await Promise.all([
-      resolveWorkspacePath(pathOptions.baseDirectory, pathOptions),
-      resolveWorkspacePath(parentDirectory, pathOptions),
-    ]);
+    parentPath = await resolveWorkspacePath(parentDirectory, pathOptions);
     repositoryPath = await resolveWorkspacePath(
       nodePath.join(parentPath, name),
       {
@@ -105,13 +91,9 @@ export const createRepository = async ({
       error,
     );
   }
-  if (
-    !isWithin(parentPath, baseDirectory) ||
-    !isWithin(repositoryPath, baseDirectory) ||
-    nodePath.dirname(repositoryPath) !== parentPath
-  ) {
+  if (nodePath.dirname(repositoryPath) !== parentPath) {
     throw new RepositoryCreationError(
-      'Project path is outside the configured workspace boundary',
+      'Project path must be a direct child of the selected parent directory',
     );
   }
 
@@ -132,14 +114,13 @@ export const createRepository = async ({
     );
     if (
       revalidatedPath !== repositoryPath ||
-      !isWithin(revalidatedPath, baseDirectory) ||
       nodePath.dirname(revalidatedPath) !== parentPath
     ) {
       throw new Error('Project path changed after folder creation');
     }
   } catch (error) {
     throw new RepositoryCreationError(
-      `Project folder was created at ${repositoryPath}, but its workspace boundary changed. The folder was preserved for inspection.`,
+      `Project folder was created at ${repositoryPath}, but its location changed. The folder was preserved for inspection.`,
       repositoryPath,
       error,
     );

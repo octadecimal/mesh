@@ -1982,10 +1982,50 @@ describe('executeCommand', () => {
     });
   });
 
-  it('creates and registers an empty Git repository once', async () => {
+  it('imports an external repository and starts a session in it', async () => {
+    const { repositoryPath } = await createRepository();
+    const baseDirectory = await mkdtemp(join(tmpdir(), 'mesh-command-base-'));
+    cleanups.push(() => rm(baseDirectory, { force: true, recursive: true }));
+    const { dependencies } = commandDependencies(baseDirectory);
+
+    const imported = await executeCommand(
+      projectCommand('project-import-external', {
+        type: 'project.import',
+        payload: {
+          repositoryPath,
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    );
+    const project = projectSchema.parse(imported.result);
+
+    await executeCommand(
+      projectCommand('session-create-external', {
+        type: 'session.create',
+        payload: {
+          projectId: project.id,
+          title: 'External repository session',
+          permissionMode: 'interactive',
+          workspace: { type: 'shared', path: repositoryPath },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(dependencies.driver.createdRequests).toEqual([
+      expect.objectContaining({ workspacePath: repositoryPath }),
+    ]);
+  });
+
+  it('creates and registers an external empty Git repository once', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'mesh-command-create-'));
-    cleanups.push(() => rm(directory, { force: true, recursive: true }));
-    const { repositories, dependencies } = commandDependencies(directory);
+    const baseDirectory = await mkdtemp(join(tmpdir(), 'mesh-command-base-'));
+    cleanups.push(
+      () => rm(directory, { force: true, recursive: true }),
+      () => rm(baseDirectory, { force: true, recursive: true }),
+    );
+    const { repositories, dependencies } = commandDependencies(baseDirectory);
     const command = projectCommand('project-create', {
       type: 'project.create',
       payload: {

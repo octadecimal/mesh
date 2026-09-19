@@ -40,12 +40,6 @@ const normalizeForComparison = (value: string): string => {
   return process.platform === 'win32' ? comparison.toLowerCase() : comparison;
 };
 
-const isWithin = (candidate: string, baseDirectory: string): boolean => {
-  const candidatePath = normalizeForComparison(candidate);
-  const basePath = normalizeForComparison(baseDirectory);
-  return candidatePath === basePath || candidatePath.startsWith(`${basePath}/`);
-};
-
 const resolveGitPath = async (
   value: string,
   pathOptions: ResolveWorkspacePathOptions,
@@ -159,12 +153,8 @@ export const resolveRepositoryIdentity = async (
   processRunner: ProcessRunner = new NodeProcessRunner(),
 ): Promise<RepositoryIdentity> => {
   let canonicalPath: AbsolutePath;
-  let canonicalBaseDirectory: AbsolutePath;
   try {
-    [canonicalPath, canonicalBaseDirectory] = await Promise.all([
-      resolveWorkspacePath(repositoryPath, pathOptions),
-      resolveWorkspacePath(pathOptions.baseDirectory, pathOptions),
-    ]);
+    canonicalPath = await resolveWorkspacePath(repositoryPath, pathOptions);
   } catch (error) {
     throw new RepositoryIdentityError(
       'repository_invalid',
@@ -173,13 +163,6 @@ export const resolveRepositoryIdentity = async (
       }`,
     );
   }
-  if (!isWithin(canonicalPath, canonicalBaseDirectory)) {
-    throw new RepositoryIdentityError(
-      'repository_invalid',
-      'Repository path is outside the configured workspace boundary',
-    );
-  }
-
   const result = await processRunner.run(
     'git',
     [
@@ -227,14 +210,11 @@ export const resolveRepositoryIdentity = async (
   }
 
   if (
-    normalizeForComparison(topLevel) !==
-      normalizeForComparison(canonicalPath) ||
-    !isWithin(topLevel, canonicalBaseDirectory) ||
-    !isWithin(commonDirectory, canonicalBaseDirectory)
+    normalizeForComparison(topLevel) !== normalizeForComparison(canonicalPath)
   ) {
     throw new RepositoryIdentityError(
       'repository_ambiguous',
-      'Repository identity does not resolve to one workspace-safe working tree',
+      'Repository identity does not resolve to the selected working tree',
     );
   }
 

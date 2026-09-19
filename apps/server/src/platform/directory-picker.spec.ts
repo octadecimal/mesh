@@ -136,12 +136,26 @@ describe('DirectoryPicker', () => {
     await expect(picker.select()).resolves.toBe('C:/workspace/project');
   });
 
-  it('rejects an escaped selection from the native dialog', async () => {
+  it('returns a canonical selection outside the configured workspace', async () => {
     const picker = new DirectoryPicker({
       workspaceRoot: 'C:/workspace',
       platform: 'win32',
       fs: filesystem,
       runner: { run: async () => 'C:/outside' },
+    });
+
+    await expect(picker.select()).resolves.toBe('C:/outside');
+  });
+
+  it('rejects a selected path that is not a directory', async () => {
+    const picker = new DirectoryPicker({
+      workspaceRoot: 'C:/workspace',
+      platform: 'win32',
+      fs: {
+        ...filesystem,
+        stat: async () => ({ isDirectory: () => false }),
+      },
+      runner: { run: async () => 'C:/outside/file.txt' },
     });
 
     await expect(picker.select()).rejects.toMatchObject({

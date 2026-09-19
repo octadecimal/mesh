@@ -44,7 +44,7 @@ describe('createRepository', () => {
     expect((await stat(repositoryPath)).isDirectory()).toBe(true);
   });
 
-  it('rejects a parent junction that escapes the workspace before creating', async () => {
+  it('creates a direct child of a canonical parent outside the workspace', async () => {
     const directory = await createRoot();
     const workspace = join(directory, 'workspace');
     const outside = join(directory, 'outside');
@@ -62,8 +62,8 @@ describe('createRepository', () => {
         pathOptions: { baseDirectory: workspace },
         git,
       }),
-    ).rejects.toThrow('outside the configured workspace boundary');
-    await expect(stat(join(outside, 'new-project'))).rejects.toThrow();
+    ).resolves.toBe(join(outside, 'new-project'));
+    expect((await stat(join(outside, 'new-project'))).isDirectory()).toBe(true);
   });
 
   it('rejects relative parents before creating a folder', async () => {

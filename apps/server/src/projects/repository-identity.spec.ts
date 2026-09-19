@@ -267,21 +267,35 @@ describe('resolveRepositoryIdentity', () => {
     ).rejects.toMatchObject({ code: 'repository_invalid' });
   });
 
-  it('rejects a repository outside the configured workspace boundary', async () => {
-    const { repositoryPath } = await createRepository();
+  it('resolves a repository and linked worktree outside the configured workspace', async () => {
+    const { directory, repositoryPath } = await createRepository();
+    const worktreePath = join(directory, 'linked-worktree');
+    await runGit(
+      repositoryPath,
+      'worktree',
+      'add',
+      '--detach',
+      worktreePath,
+      'HEAD',
+    );
     const allowedDirectory = await mkdtemp(
       join(tmpdir(), 'mesh-allowed-base-'),
     );
     temporaryDirectories.push(allowedDirectory);
 
-    await expect(
-      resolveRepositoryIdentity(
-        repositoryPath,
-        {
-          baseDirectory: allowedDirectory,
-        },
-        processRunner,
-      ),
-    ).rejects.toMatchObject({ code: 'repository_invalid' });
+    const repository = await resolveRepositoryIdentity(
+      repositoryPath,
+      { baseDirectory: allowedDirectory },
+      processRunner,
+    );
+    const worktree = await resolveRepositoryIdentity(
+      worktreePath,
+      { baseDirectory: allowedDirectory },
+      processRunner,
+    );
+
+    expect(repository.canonicalPath).toBe(await realpath(repositoryPath));
+    expect(worktree.canonicalPath).toBe(await realpath(worktreePath));
+    expect(worktree.repositoryIdentity).toBe(repository.repositoryIdentity);
   });
 });
