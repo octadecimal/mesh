@@ -139,6 +139,69 @@ export const selectEligibleRunPreview = (
     );
 };
 
+export const selectBoardAttention = (
+  state: MeshProjection,
+  projectId: string,
+) => {
+  const repairs = selectProjectRepairConditions(state, projectId);
+  return Object.values(state.tasksById).flatMap((task) => {
+    if (
+      task.projectId !== projectId ||
+      ['done', 'cancelled'].includes(task.lifecycleState)
+    )
+      return [];
+    const repair = repairs.find((candidate) => candidate.taskId === task.id);
+    if (repair)
+      return [
+        { task, reason: `Repair needed: ${repair.reason.replace(/_/g, ' ')}.` },
+      ];
+    if (task.blocked)
+      return [{ task, reason: `Blocked: ${task.blocked.reason}` }];
+    if (task.lifecycleState !== 'review') return [];
+    const project = selectProject(state, projectId);
+    const automation =
+      state.reviewAutomationByTaskId[task.id]?.status ??
+      task.reviewAutomation.status;
+    if (
+      project?.qaConfiguration?.reviewPolicy === 'autonomous_review' &&
+      automation === 'enabled'
+    )
+      return [];
+    const attempts = selectTaskAttempts(state, task.id);
+    const qaCycles = attempts.flatMap(
+      ({ attempt }) => state.qaCyclesByAttemptId[attempt.id] ?? [],
+    );
+    if (qaCycles.some((cycle) => cycle.endedAt === null)) return [];
+    const latestDeveloperReport = attempts
+      .flatMap(({ attempt }) =>
+        (state.developerCyclesByAttemptId[attempt.id] ?? []).flatMap(
+          (cycle) => state.developerCompletionReportsByCycleId[cycle.id] ?? [],
+        ),
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .at(-1);
+    const latestQaCycle = qaCycles
+      .filter(
+        (cycle) =>
+          cycle.developerCompletionReportId === latestDeveloperReport?.id,
+      )
+      .sort((left, right) => left.startedAt.localeCompare(right.startedAt))
+      .at(-1);
+    const qaReport = latestQaCycle
+      ? state.qaReportsByCycleId[latestQaCycle.id]
+      : undefined;
+    const reason =
+      qaReport?.disposition === 'verified'
+        ? 'QA verified the work. Accept the result.'
+        : qaReport?.disposition === 'rejected'
+          ? 'QA rejected the work. Review feedback and resume rework.'
+          : latestDeveloperReport
+            ? 'Developer submitted work. Start QA review.'
+            : 'Review this task and choose its next action.';
+    return [{ task, reason }];
+  });
+};
+
 const layoutSpecificity = ({
   projectId,
   workspaceId,

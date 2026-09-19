@@ -13,7 +13,10 @@ import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import type { MeshProjection } from '../state/reducer';
 import {
   selectBoardTasks,
+  selectBoardAttention,
+  selectActiveProjectRun,
   selectDependentTaskIds,
+  selectEligibleRunPreview,
   selectProjectRepairConditions,
   selectTaskAttempts,
   selectTaskTransitions,
@@ -31,6 +34,7 @@ type TaskBoardProps = {
   onCommand: (command: MutatingCommand) => Promise<unknown> | void;
   onSelectTask?: (taskId: string) => void;
   onOpenSession?: (sessionId: string) => void;
+  onOpenBoard?: () => void;
   loadPlanDetails?: (
     projectId: string,
     planId: string,
@@ -40,6 +44,9 @@ type TaskBoardProps = {
     before?: string,
   ) => Promise<ProjectPlanHistoryPage>;
   connected?: boolean;
+  workspace?: 'plan' | 'board';
+  visible?: boolean;
+  openTaskRequest?: { taskId: string; id: number };
 };
 
 type BoardView = 'active' | 'done' | 'cancelled';
@@ -135,9 +142,13 @@ export function TaskBoard({
   onCommand,
   onSelectTask,
   onOpenSession,
+  onOpenBoard,
   loadPlanDetails,
   loadPlanHistory,
   connected = true,
+  workspace = 'board',
+  visible = true,
+  openTaskRequest,
 }: TaskBoardProps) {
   const [view, setView] = useState<BoardView>('active');
   const [draggedTaskId, setDraggedTaskId] = useState<string>();
@@ -146,11 +157,15 @@ export function TaskBoard({
   );
   const [moveErrors, setMoveErrors] = useState<Record<string, string>>({});
   const [drawerTaskId, setDrawerTaskId] = useState<string>();
+  const handledTaskRequestId = useRef<number | undefined>(undefined);
   const [creatingTask, setCreatingTask] = useState(false);
   const [drawerProjectId, setDrawerProjectId] = useState<string>();
+  const [showRun, setShowRun] = useState(false);
   const moveSequence = useRef(0);
   const activeMoveIds = useRef<Record<string, number>>({});
   const columns = selectBoardTasks(projection, project.id);
+  const eligibleTasks = selectEligibleRunPreview(projection, project.id);
+  const attention = selectBoardAttention(projection, project.id);
   const readOnly = Boolean(project.archivedAt);
   const selectedDrawerTask = drawerTaskId
     ? projection.tasksById[drawerTaskId]
@@ -203,6 +218,23 @@ export function TaskBoard({
         .sort((left, right) => left.rank.localeCompare(right.rank)),
     };
   }, [project.id, projection.tasksById]);
+  const boardCounts = {
+    ready: eligibleTasks.length,
+    active: columns.in_progress.length,
+    review: columns.review.length,
+  };
+  const activeRun = selectActiveProjectRun(projection, project.id);
+
+  useEffect(() => {
+    if (
+      openTaskRequest &&
+      openTaskRequest.id !== handledTaskRequestId.current &&
+      projection.tasksById[openTaskRequest.taskId]?.projectId === project.id
+    ) {
+      handledTaskRequestId.current = openTaskRequest.id;
+      selectTask(openTaskRequest.taskId);
+    }
+  }, [openTaskRequest?.id]);
 
   useEffect(() => {
     const settled = Object.entries(pendingMoves).filter(([taskId, move]) => {
@@ -422,147 +454,214 @@ export function TaskBoard({
 
   return (
     <>
-      <ProjectPlanningPanel
-        key={`${project.id}:planning`}
-        project={project}
-        projection={projection}
-        connected={connected}
-        loadDetails={loadPlanDetails ?? unavailablePlanDetails}
-        loadHistory={loadPlanHistory}
-        onCommand={onCommand}
-        onOpenSession={onOpenSession}
-      />
-      <ProjectRunPanel
-        key={project.id}
-        project={project}
-        projection={projection}
-        connected={connected}
-        maxConcurrency={
-          projection.projectRunMaxConcurrencyByProjectId[project.id]
-        }
-        onCommand={onCommand}
-        onSelectTask={selectTask}
-      />
-      <div
-        className="task-board"
-        data-read-only={readOnly ? 'true' : undefined}
-      >
-        <div className="task-board-toolbar">
-          <div
-            className="task-board-tabs"
-            role="group"
-            aria-label="Task filters"
-          >
+      <div hidden={workspace !== 'plan'}>
+        <ProjectPlanningPanel
+          key={`${project.id}:planning`}
+          project={project}
+          projection={projection}
+          connected={connected}
+          loadDetails={loadPlanDetails ?? unavailablePlanDetails}
+          loadHistory={loadPlanHistory}
+          onCommand={onCommand}
+          onOpenSession={onOpenSession}
+          onOpenBoard={onOpenBoard}
+        />
+      </div>
+      <div hidden={workspace !== 'board'}>
+        <div
+          className="task-board"
+          data-read-only={readOnly ? 'true' : undefined}
+        >
+          <header className="task-board-overview">
+            <div>
+              <span className="eyebrow">Board</span>
+              <h3>
+                {boardCounts.ready} ready · {boardCounts.active} working ·{' '}
+                {boardCounts.review} in review
+              </h3>
+              <p>
+                {attention.length > 0
+                  ? `${attention.length} ${attention.length === 1 ? 'task needs' : 'tasks need'} your attention.`
+                  : 'Prepare tasks, start a batch, and review the results.'}
+              </p>
+            </div>
             <button
+              className={`button ${activeRun || eligibleTasks.length > 0 ? 'button-primary' : 'button-secondary'}`}
               type="button"
-              aria-label="Show active tasks"
-              aria-pressed={view === 'active'}
-              onClick={() => setView('active')}
+              title={
+                !activeRun && eligibleTasks.length === 0
+                  ? 'No eligible ready tasks. Check dependencies, blocked tasks, and linked attempts.'
+                  : undefined
+              }
+              onClick={() => setShowRun((current) => !current)}
             >
-              Active
+              {showRun
+                ? 'Hide run controls'
+                : activeRun
+                  ? 'Manage running work'
+                  : eligibleTasks.length > 0
+                    ? 'Start ready tasks'
+                    : 'Run details'}
             </button>
-            <button
-              type="button"
-              aria-label="Show completed tasks"
-              aria-pressed={view === 'done'}
-              onClick={() => setView('done')}
-            >
-              Completed {terminalTasks.done.length}
-            </button>
-            <button
-              type="button"
-              aria-label="Show cancelled tasks"
-              aria-pressed={view === 'cancelled'}
-              onClick={() => setView('cancelled')}
-            >
-              Cancelled {terminalTasks.cancelled.length}
-            </button>
-          </div>
-          <div className="task-board-toolbar-actions">
-            {readOnly ? (
-              <p className="task-board-read-only-note">Read-only task board</p>
-            ) : (
-              <>
-                <p className="task-board-drag-help">
-                  Drag cards or use each card’s move controls.
-                </p>
-                <button
-                  className="button button-primary task-board-add"
-                  type="button"
-                  onClick={() => {
-                    setDrawerTaskId(undefined);
-                    setCreatingTask(true);
-                    setDrawerProjectId(project.id);
-                  }}
-                >
-                  Add task
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-        {view === 'active' ? (
-          <div className="task-board-columns">
-            {activeColumns.map(({ id, label }) => {
-              const tasks = columns[id];
-              return (
-                <section
-                  key={id}
-                  className="task-column"
-                  aria-label={`${label} tasks`}
-                  onDragOver={(event) => {
-                    if (!readOnly) event.preventDefault();
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    const source = draggedTask(event);
-                    setDraggedTaskId(undefined);
-                    if (!source || readOnly) return;
-                    moveTask(source, id);
-                  }}
-                >
-                  <header>
-                    <h3>{label}</h3>
-                    <span aria-label={`${tasks.length} tasks`}>
-                      {tasks.length}
-                    </span>
-                  </header>
-                  <div className="task-column-cards">
-                    {tasks.length > 0 ? (
-                      tasks.map((task) => renderCard(task, tasks))
-                    ) : (
-                      <p className="task-column-empty">No tasks</p>
-                    )}
+          </header>
+          {attention.length > 0 ? (
+            <section className="task-board-attention" aria-label="Needs you">
+              <div className="eyebrow">
+                Needs you · {attention.length}{' '}
+                {attention.length === 1 ? 'task' : 'tasks'}
+              </div>
+              {attention.map(({ task, reason }) => (
+                <div className="task-board-attention-row" key={task.id}>
+                  <div>
+                    <strong>{task.title}</strong>
+                    <p>{reason}</p>
                   </div>
-                </section>
-              );
-            })}
-          </div>
-        ) : (
-          <section
-            className="task-column task-column-terminal"
-            aria-label={view === 'done' ? 'Completed tasks' : 'Cancelled tasks'}
-          >
-            <header>
-              <h3>{view === 'done' ? 'Completed' : 'Cancelled'}</h3>
-              <span>{terminalTasks[view].length}</span>
-            </header>
-            <div className="task-column-cards">
-              {terminalTasks[view].length > 0 ? (
-                terminalTasks[view].map((task) =>
-                  renderCard(task, terminalTasks[view]),
-                )
+                  <button
+                    className="button button-secondary"
+                    type="button"
+                    onClick={() => selectTask(task.id)}
+                    aria-label={`Open attention for ${task.title}`}
+                  >
+                    Review task
+                  </button>
+                </div>
+              ))}
+            </section>
+          ) : null}
+          {showRun ? (
+            <ProjectRunPanel
+              key={project.id}
+              project={project}
+              projection={projection}
+              connected={connected}
+              maxConcurrency={
+                projection.projectRunMaxConcurrencyByProjectId[project.id]
+              }
+              onCommand={onCommand}
+              onSelectTask={selectTask}
+            />
+          ) : null}
+          <div className="task-board-toolbar">
+            <div
+              className="task-board-tabs"
+              role="group"
+              aria-label="Task filters"
+            >
+              <button
+                type="button"
+                aria-label="Show active tasks"
+                aria-pressed={view === 'active'}
+                onClick={() => setView('active')}
+              >
+                Active
+              </button>
+              <button
+                type="button"
+                aria-label="Show completed tasks"
+                aria-pressed={view === 'done'}
+                onClick={() => setView('done')}
+              >
+                Completed {terminalTasks.done.length}
+              </button>
+              <button
+                type="button"
+                aria-label="Show cancelled tasks"
+                aria-pressed={view === 'cancelled'}
+                onClick={() => setView('cancelled')}
+              >
+                Cancelled {terminalTasks.cancelled.length}
+              </button>
+            </div>
+            <div className="task-board-toolbar-actions">
+              {readOnly ? (
+                <p className="task-board-read-only-note">
+                  Read-only task board
+                </p>
               ) : (
-                <p className="task-column-empty">No tasks</p>
+                <>
+                  <p className="task-board-drag-help">
+                    Drag cards or use each card’s move controls.
+                  </p>
+                  <button
+                    className="button button-secondary task-board-add"
+                    type="button"
+                    onClick={() => {
+                      setDrawerTaskId(undefined);
+                      setCreatingTask(true);
+                      setDrawerProjectId(project.id);
+                    }}
+                  >
+                    Add task
+                  </button>
+                </>
               )}
             </div>
-          </section>
-        )}
+          </div>
+          {view === 'active' ? (
+            <div className="task-board-columns">
+              {activeColumns.map(({ id, label }) => {
+                const tasks = columns[id];
+                return (
+                  <section
+                    key={id}
+                    className="task-column"
+                    aria-label={`${label} tasks`}
+                    onDragOver={(event) => {
+                      if (!readOnly) event.preventDefault();
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const source = draggedTask(event);
+                      setDraggedTaskId(undefined);
+                      if (!source || readOnly) return;
+                      moveTask(source, id);
+                    }}
+                  >
+                    <header>
+                      <h3>{label}</h3>
+                      <span aria-label={`${tasks.length} tasks`}>
+                        {tasks.length}
+                      </span>
+                    </header>
+                    <div className="task-column-cards">
+                      {tasks.length > 0 ? (
+                        tasks.map((task) => renderCard(task, tasks))
+                      ) : (
+                        <p className="task-column-empty">No tasks</p>
+                      )}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+          ) : (
+            <section
+              className="task-column task-column-terminal"
+              aria-label={
+                view === 'done' ? 'Completed tasks' : 'Cancelled tasks'
+              }
+            >
+              <header>
+                <h3>{view === 'done' ? 'Completed' : 'Cancelled'}</h3>
+                <span>{terminalTasks[view].length}</span>
+              </header>
+              <div className="task-column-cards">
+                {terminalTasks[view].length > 0 ? (
+                  terminalTasks[view].map((task) =>
+                    renderCard(task, terminalTasks[view]),
+                  )
+                ) : (
+                  <p className="task-column-empty">No tasks</p>
+                )}
+              </div>
+            </section>
+          )}
+        </div>
       </div>
       {creatingTaskForProject || drawerTask ? (
         <TaskDrawer
           key={creatingTaskForProject ? 'create' : drawerTask?.id}
-          open
+          open={visible}
           project={project}
           task={drawerTask}
           attempts={drawerAttempts}

@@ -39,6 +39,8 @@ type SessionWorkspaceContextValue = {
   promptDrafts: Record<string, string>;
   streamingAssistantTextBySession: Record<string, string>;
   onPromptDraftChange?: (sessionId: string, value: string) => void;
+  linkedTasksBySessionId: Record<string, { id: string; title: string }>;
+  onOpenTask?: (taskId: string) => void;
 };
 
 const SessionWorkspaceContext = createContext<
@@ -58,6 +60,7 @@ function DockviewSessionPanel({
       title: api.title ?? params.sessionId,
     },
   );
+  const linkedTask = context.linkedTasksBySessionId[params.sessionId];
   return (
     <section
       className="session-panel"
@@ -70,6 +73,15 @@ function DockviewSessionPanel({
       >
         Close
       </button>
+      {linkedTask && context.onOpenTask ? (
+        <button
+          className="session-linked-task button button-ghost"
+          type="button"
+          onClick={() => context.onOpenTask?.(linkedTask.id)}
+        >
+          Open task: {linkedTask.title}
+        </button>
+      ) : null}
       <SessionPanel
         session={panelSession}
         workspace={context.workspaces.find(
@@ -121,6 +133,8 @@ export function SessionWorkspace({
   onPromptDraftChange,
   onNewSession,
   onResumeSession,
+  linkedTasksBySessionId = {},
+  onOpenTask,
 }: {
   sessions: WorkspaceSession[];
   savedLayout?: SavedLayout;
@@ -137,6 +151,8 @@ export function SessionWorkspace({
   onPromptDraftChange?: (sessionId: string, value: string) => void;
   onNewSession?: () => void;
   onResumeSession?: () => void;
+  linkedTasksBySessionId?: Record<string, { id: string; title: string }>;
+  onOpenTask?: (taskId: string) => void;
 }) {
   const apiRef = useRef<DockviewApi | null>(null);
   const restoringRef = useRef(false);
@@ -248,6 +264,8 @@ export function SessionWorkspace({
           promptDrafts,
           streamingAssistantTextBySession,
           onPromptDraftChange,
+          linkedTasksBySessionId,
+          onOpenTask,
         }}
       >
         <DockviewReact

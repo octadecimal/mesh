@@ -31,6 +31,7 @@ export type ProjectPlanningPanelProps = {
   ) => Promise<ProjectPlanHistoryPage>;
   onCommand: (command: MutatingCommand) => Promise<unknown> | void;
   onOpenSession?: (sessionId: string) => void;
+  onOpenBoard?: () => void;
 };
 
 const operator = taskActorSchema.parse({
@@ -462,6 +463,7 @@ export function ProjectPlanningPanel({
   loadHistory,
   onCommand,
   onOpenSession,
+  onOpenBoard,
 }: ProjectPlanningPanelProps) {
   const activePlan = projection.activePlanByProjectId[project.id];
   const recentPlans = projection.planSummariesByProjectId[project.id] ?? [];
@@ -543,9 +545,17 @@ export function ProjectPlanningPanel({
   }, [recentPlans]);
 
   useEffect(() => {
-    if (nextBefore !== undefined) return;
+    if (
+      nextBefore !== undefined &&
+      !(
+        nextBefore === null &&
+        accumulatedPlans.length === 0 &&
+        recentPlans.length >= 20
+      )
+    )
+      return;
     setNextBefore(recentPlans.length >= 20 ? recentPlans.at(-1)?.id : null);
-  }, [nextBefore, recentPlans]);
+  }, [accumulatedPlans.length, nextBefore, recentPlans]);
 
   const execute = async (
     label: string,
@@ -792,17 +802,19 @@ export function ProjectPlanningPanel({
 
   return (
     <section className="project-planning-panel" aria-label="Project planning">
-      <div className="task-section-heading planning-heading">
-        <div>
-          <span className="eyebrow">Project management</span>
-          <h3>Planning</h3>
+      {activePlan ? (
+        <div className="task-section-heading planning-heading">
+          <div>
+            <span className="eyebrow">Project management</span>
+            <h3>Planning</h3>
+          </div>
+          {activePlan ? (
+            <span className="planning-revision">
+              Plan revision {activePlan.revision}
+            </span>
+          ) : null}
         </div>
-        {activePlan ? (
-          <span className="planning-revision">
-            Plan revision {activePlan.revision}
-          </span>
-        ) : null}
-      </div>
+      ) : null}
 
       <p className="planning-disclosure">
         The PM can read this repository but cannot edit files, change tasks,
@@ -826,64 +838,114 @@ export function ProjectPlanningPanel({
       ) : null}
 
       {!activePlan ? (
-        <form className="planning-start-form" onSubmit={startPlanning}>
-          <label>
-            <span>Project goal</span>
-            <textarea
-              value={goal}
-              onChange={(event) => setGoal(event.target.value)}
-              disabled={controlsDisabled}
-              rows={3}
-              required
-            />
-          </label>
-          <div className="planning-form-columns">
-            <label>
-              <span>Planning constraints</span>
-              <textarea
-                value={constraints}
-                onChange={(event) => setConstraints(event.target.value)}
-                disabled={controlsDisabled}
-                rows={4}
-                placeholder="One constraint per line"
-              />
-            </label>
-            <label>
-              <span>Planning non-goals</span>
-              <textarea
-                value={nonGoals}
-                onChange={(event) => setNonGoals(event.target.value)}
-                disabled={controlsDisabled}
-                rows={4}
-                placeholder="One non-goal per line"
-              />
-            </label>
+        <div className="planning-start-layout">
+          <div className="planning-start-main">
+            <div className="planning-intro">
+              <span className="eyebrow">Plan your project</span>
+              <h2>What would you like to build?</h2>
+              <p>
+                Describe the outcome. Review the proposed tasks before approving
+                them into the backlog.
+              </p>
+            </div>
+            {recentPlans.some((plan) => plan.status === 'approved') &&
+            onOpenBoard ? (
+              <div className="planning-board-handoff">
+                <span>An approved plan created backlog tasks.</span>
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  onClick={onOpenBoard}
+                >
+                  Open Board
+                </button>
+              </div>
+            ) : null}
+            <form className="planning-start-form" onSubmit={startPlanning}>
+              <label>
+                <span>Project goal</span>
+                <textarea
+                  value={goal}
+                  onChange={(event) => setGoal(event.target.value)}
+                  disabled={controlsDisabled}
+                  rows={3}
+                  placeholder="Describe the outcome you want in plain language…"
+                  required
+                />
+              </label>
+              <details className="planning-advanced">
+                <summary>Advanced planning details</summary>
+                <div className="planning-form-columns">
+                  <label>
+                    <span>Planning constraints</span>
+                    <textarea
+                      value={constraints}
+                      onChange={(event) => setConstraints(event.target.value)}
+                      disabled={controlsDisabled}
+                      rows={4}
+                      placeholder="One constraint per line"
+                    />
+                  </label>
+                  <label>
+                    <span>Planning non-goals</span>
+                    <textarea
+                      value={nonGoals}
+                      onChange={(event) => setNonGoals(event.target.value)}
+                      disabled={controlsDisabled}
+                      rows={4}
+                      placeholder="One non-goal per line"
+                    />
+                  </label>
+                </div>
+              </details>
+              <label className="planning-subscription-confirmation">
+                <input
+                  type="checkbox"
+                  checked={subscriptionConfirmed}
+                  onChange={(event) =>
+                    setSubscriptionConfirmed(event.target.checked)
+                  }
+                  disabled={controlsDisabled}
+                />
+                <span>
+                  I understand planning consumes Claude subscription capacity.
+                </span>
+              </label>
+              <button
+                type="submit"
+                className="button button-primary"
+                disabled={
+                  controlsDisabled || !goal.trim() || !subscriptionConfirmed
+                }
+              >
+                {pendingAction?.label === 'start'
+                  ? 'Starting planning…'
+                  : 'Start planning'}
+              </button>
+            </form>
           </div>
-          <label className="planning-subscription-confirmation">
-            <input
-              type="checkbox"
-              checked={subscriptionConfirmed}
-              onChange={(event) =>
-                setSubscriptionConfirmed(event.target.checked)
-              }
-              disabled={controlsDisabled}
-            />
-            <span>
-              I understand planning consumes Claude subscription capacity.
-            </span>
-          </label>
-          <button
-            type="submit"
-            className="button button-primary"
-            disabled={
-              controlsDisabled || !goal.trim() || !subscriptionConfirmed
-            }
-          >
-            {pendingAction?.label === 'start'
-              ? 'Starting planning…'
-              : 'Start planning'}
-          </button>
-        </form>
+          <aside className="planning-steps" aria-label="Planning steps">
+            <h3>How it works</h3>
+            <ol>
+              <li>
+                <strong>Describe</strong>
+                <span>Tell the PM the outcome and any constraints.</span>
+              </li>
+              <li>
+                <strong>Review and approve</strong>
+                <span>Check the proposed tasks and ask for changes.</span>
+              </li>
+              <li>
+                <strong>Prepare and start</strong>
+                <span>Tasks enter Backlog; you choose when work starts.</span>
+              </li>
+              <li>
+                <strong>Review the result</strong>
+                <span>Check the QA evidence and final task outcome.</span>
+              </li>
+            </ol>
+          </aside>
+        </div>
       ) : (
         <div className="planning-active">
           <ActivePlanSummary

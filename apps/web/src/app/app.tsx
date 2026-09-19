@@ -15,6 +15,9 @@ import {
 import type { MeshApi } from '../api/client';
 import type { MeshProjection } from '../state/reducer';
 import {
+  selectBoardAttention,
+  selectEligibleRunPreview,
+  selectPendingApprovals,
   selectProjects,
   savedLayoutMatchesSession,
   selectSavedLayout,
@@ -137,13 +140,33 @@ function ConnectedApp({
   const sessions = selectSessions(projection);
   const selectedSessionId = selectSelectedSessionId(projection);
   const savedLayout = selectSavedLayout(projection);
-  const filter = selectSessionFilter(projection, savedLayout);
   const unread = new Set(selectUnreadSessionIds(projection));
   const selected = sessions.find(({ id }) => id === selectedSessionId);
   const [activeProjectId, setActiveProjectId] = useState<string | undefined>(
     selected?.projectId ?? projects[0]?.id,
   );
-  const [view, setView] = useState<'board' | 'sessions'>('sessions');
+  const [view, setView] = useState<'plan' | 'board' | 'sessions' | 'settings'>(
+    projects[0] ? 'plan' : 'sessions',
+  );
+  const [visitedProjectIds, setVisitedProjectIds] = useState<string[]>(
+    activeProjectId ? [activeProjectId] : [],
+  );
+  const lastViewByProjectId = useRef<Record<string, typeof view>>({});
+  const selectedSessionByProjectId = useRef<Record<string, string>>(
+    selected?.projectId ? { [selected.projectId]: selected.id } : {},
+  );
+  const [sessionFiltersByProjectId, setSessionFiltersByProjectId] = useState<
+    Record<string, string>
+  >(
+    activeProjectId
+      ? { [activeProjectId]: selectSessionFilter(projection, savedLayout) }
+      : {},
+  );
+  const [openTaskRequest, setOpenTaskRequest] = useState<{
+    taskId: string;
+    id: number;
+  }>();
+  const taskRequestId = useRef(0);
   const [projectImportOpen, setProjectImportOpen] = useState(false);
   const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<ProjectImportSuggestion[]>([]);
@@ -155,6 +178,7 @@ function ConnectedApp({
     ProjectLoadError | undefined
   >();
   const projectLoadId = useRef(0);
+  const automaticallyLoadedProjectIds = useRef(new Set<string>());
   const [newSessionOpen, setNewSessionOpen] = useState(false);
   const [resumeSessionOpen, setResumeSessionOpen] = useState(false);
   const [flowError, setFlowError] = useState<SessionFlowError>();
@@ -169,14 +193,78 @@ function ConnectedApp({
     workspaces.map((workspace) => [workspace.id, workspace]),
   );
   const activeProject = projects.find(({ id }) => id === activeProjectId);
+  const activeSessions = sessions.filter(
+    (session) => session.projectId === activeProjectId,
+  );
+  const activeSelected =
+    selected?.projectId === activeProjectId ? selected : undefined;
+  const activeSavedLayout = activeSelected ? savedLayout : undefined;
+  const filter = activeProjectId
+    ? (sessionFiltersByProjectId[activeProjectId] ??
+      selectSessionFilter(projection, activeSavedLayout))
+    : selectSessionFilter(projection, savedLayout);
+  const boardAttention = activeProjectId
+    ? selectBoardAttention(projection, activeProjectId)
+    : [];
+  const readyCount = activeProjectId
+    ? selectEligibleRunPreview(projection, activeProjectId).length
+    : 0;
+  const planAttention = Boolean(
+    activeProjectId &&
+      ['awaiting_review', 'attention_required'].includes(
+        projection.activePlanByProjectId[activeProjectId]?.status ?? '',
+      ),
+  );
+  const pendingSessionCount = selectPendingApprovals(projection).filter(
+    (approval) =>
+      sessions.find((session) => session.id === approval.sessionId)
+        ?.projectId === activeProjectId,
+  ).length;
   const projectLoadTarget = projects.find(
     ({ id }) => id === projectLoadTargetId,
   );
   useEffect(() => {
-    if (!activeProjectId && projects[0]) setActiveProjectId(projects[0].id);
+    if (!activeProjectId && projects[0]) {
+      setActiveProjectId(projects[0].id);
+      setVisitedProjectIds((current) =>
+        current.includes(projects[0].id)
+          ? current
+          : [...current, projects[0].id],
+      );
+      setView('plan');
+    }
     if (activeProjectId && !projects.some(({ id }) => id === activeProjectId))
       setActiveProjectId(projects[0]?.id);
   }, [activeProjectId, projects]);
+  const navigate = (destination: typeof view) => {
+    if (activeProjectId)
+      lastViewByProjectId.current[activeProjectId] = destination;
+    setView(destination);
+    if (
+      destination !== 'sessions' &&
+      activeProjectId &&
+      api?.projectSnapshot &&
+      !automaticallyLoadedProjectIds.current.has(activeProjectId)
+    )
+      selectProject(activeProjectId);
+  };
+  const activateProject = (projectId: string, taskCount: number) => {
+    setActiveProjectId(projectId);
+    setVisitedProjectIds((current) =>
+      current.includes(projectId) ? current : [...current, projectId],
+    );
+    setSessionFiltersByProjectId((current) =>
+      projectId in current ? current : { ...current, [projectId]: '' },
+    );
+    const sessionId =
+      selectedSessionByProjectId.current[projectId] ??
+      sessions.find((session) => session.projectId === projectId)?.id;
+    if (sessionId) store.selectSession(sessionId);
+    setView(
+      lastViewByProjectId.current[projectId] ??
+        (taskCount > 0 ? 'board' : 'plan'),
+    );
+  };
   const submit = (command: MutatingCommand) => {
     onCommand?.({ type: command.type, payload: command.payload });
     const execute = api ? api.command(command) : Promise.resolve(undefined);
@@ -204,14 +292,21 @@ function ConnectedApp({
     return api ? api.command(command) : Promise.resolve(undefined);
   };
   const selectProject = (projectId: string) => {
+    if (projectLoadTargetId)
+      automaticallyLoadedProjectIds.current.delete(projectLoadTargetId);
+    automaticallyLoadedProjectIds.current.add(projectId);
     const target = projects.find(({ id }) => id === projectId);
     const loadId = ++projectLoadId.current;
     setProjectLoadTargetId(projectId);
     setProjectLoadError(undefined);
     if (!api?.projectSnapshot) {
-      setActiveProjectId(projectId);
+      activateProject(
+        projectId,
+        Object.values(projection.tasksById).filter(
+          (task) => task.projectId === projectId,
+        ).length,
+      );
       setProjectLoadTargetId(undefined);
-      setView('board');
       return;
     }
     void api
@@ -219,9 +314,8 @@ function ConnectedApp({
       .then((snapshot) => {
         if (loadId !== projectLoadId.current) return;
         store.replaceProjectSnapshot(snapshot);
-        setActiveProjectId(projectId);
+        activateProject(projectId, snapshot.tasks.length);
         setProjectLoadTargetId(undefined);
-        setView('board');
       })
       .catch((caught: unknown) => {
         if (loadId !== projectLoadId.current) return;
@@ -231,22 +325,63 @@ function ConnectedApp({
           displayName: target?.displayName ?? 'project',
           message: failure.message ?? 'The project board could not be loaded.',
         });
-        setView('board');
+        setView(lastViewByProjectId.current[projectId] ?? 'board');
       });
   };
+  useEffect(() => {
+    if (
+      !activeProjectId ||
+      !api?.projectSnapshot ||
+      automaticallyLoadedProjectIds.current.has(activeProjectId)
+    )
+      return;
+    selectProject(activeProjectId);
+  }, [activeProjectId]);
   const returnToSessions = () => {
     projectLoadId.current += 1;
+    if (projectLoadTargetId)
+      automaticallyLoadedProjectIds.current.delete(projectLoadTargetId);
     setProjectLoadTargetId(undefined);
     setProjectLoadError(undefined);
-    setView('sessions');
+    navigate('sessions');
   };
   const openSession = (sessionId: string) => {
     projectLoadId.current += 1;
+    if (projectLoadTargetId)
+      automaticallyLoadedProjectIds.current.delete(projectLoadTargetId);
     store.selectSession(sessionId);
-    setActiveProjectId(sessions.find(({ id }) => id === sessionId)?.projectId);
+    const sessionProjectId = sessions.find(
+      ({ id }) => id === sessionId,
+    )?.projectId;
+    if (sessionProjectId) {
+      selectedSessionByProjectId.current[sessionProjectId] = sessionId;
+      setActiveProjectId(sessionProjectId);
+      setVisitedProjectIds((current) =>
+        current.includes(sessionProjectId)
+          ? current
+          : [...current, sessionProjectId],
+      );
+      setSessionFiltersByProjectId((current) =>
+        sessionProjectId in current
+          ? current
+          : { ...current, [sessionProjectId]: '' },
+      );
+      lastViewByProjectId.current[sessionProjectId] = 'sessions';
+    }
     setProjectLoadTargetId(undefined);
     setProjectLoadError(undefined);
     setView('sessions');
+  };
+  const openLinkedTask = (taskId: string) => {
+    const task = projection.tasksById[taskId];
+    if (!task) return;
+    setActiveProjectId(task.projectId);
+    setVisitedProjectIds((current) =>
+      current.includes(task.projectId) ? current : [...current, task.projectId],
+    );
+    lastViewByProjectId.current[task.projectId] = 'board';
+    setOpenTaskRequest({ taskId, id: ++taskRequestId.current });
+    setView('board');
   };
   const discoverSuggestions = () => {
     setDiscoveryError(undefined);
@@ -357,7 +492,8 @@ function ConnectedApp({
       await api.command(command);
     } finally {
       setPendingDeveloperInstructionsByProjectId((current) => {
-        const { [projectId]: _, ...remaining } = current;
+        const remaining = { ...current };
+        delete remaining[projectId];
         return remaining;
       });
     }
@@ -403,30 +539,61 @@ function ConnectedApp({
   };
   const projectPlanDetails = api?.projectPlanDetails?.bind(api);
   const projectPlanHistory = api?.projectPlanHistory?.bind(api);
+  const linkedTasksBySessionId = Object.fromEntries([
+    ...Object.values(projection.attemptsById)
+      .filter(
+        (attempt) =>
+          attempt.unlinkedAt === null && projection.tasksById[attempt.taskId],
+      )
+      .map(
+        (attempt) =>
+          [attempt.sessionId, projection.tasksById[attempt.taskId]] as const,
+      ),
+    ...Object.values(projection.qaCyclesByAttemptId)
+      .flat()
+      .filter(
+        (cycle) =>
+          projection.attemptsById[cycle.attemptId]?.unlinkedAt === null &&
+          projection.tasksById[cycle.taskId],
+      )
+      .map(
+        (cycle) =>
+          [cycle.sessionId, projection.tasksById[cycle.taskId]] as const,
+      ),
+  ]);
 
   return (
     <div className="app-shell">
-      <SessionSidebar
-        projects={projects}
-        workspaces={workspaces}
-        sessions={sessions}
-        selectedSessionId={selectedSessionId}
-        filter={filter}
-        unreadSessionIds={Object.fromEntries(
-          sessions.map(({ id }) => [id, unread.has(id)]),
-        )}
-        onFilterChange={(value) => store.setFilter('sessions', value)}
-        onOpenSession={openSession}
-        onNewSession={() => {
-          setFlowError(undefined);
-          setCollisionWarning(undefined);
-          setNewSessionOpen(true);
-        }}
-        onResumeSession={() => {
-          setFlowError(undefined);
-          setResumeSessionOpen(true);
-        }}
-      />
+      {view === 'sessions' ? (
+        <SessionSidebar
+          projects={activeProject ? [activeProject] : []}
+          workspaces={workspaces}
+          sessions={activeSessions}
+          selectedSessionId={activeSelected?.id}
+          filter={filter}
+          unreadSessionIds={Object.fromEntries(
+            sessions.map(({ id }) => [id, unread.has(id)]),
+          )}
+          onFilterChange={(value) => {
+            if (activeProjectId)
+              setSessionFiltersByProjectId((current) => ({
+                ...current,
+                [activeProjectId]: value,
+              }));
+            store.setFilter('sessions', value);
+          }}
+          onOpenSession={openSession}
+          onNewSession={() => {
+            setFlowError(undefined);
+            setCollisionWarning(undefined);
+            setNewSessionOpen(true);
+          }}
+          onResumeSession={() => {
+            setFlowError(undefined);
+            setResumeSessionOpen(true);
+          }}
+        />
+      ) : null}
       <NewSessionDialog
         open={newSessionOpen}
         onOpenChange={setNewSessionOpen}
@@ -458,11 +625,16 @@ function ConnectedApp({
         })}
         onResume={(command) => submit(command as MutatingCommand)}
       />
-      <aside className="project-navigation" aria-label="Project navigation">
+      <header className="project-navigation" aria-label="Project navigation">
         <div className="project-navigation-heading">
-          <span className="eyebrow">Projects</span>
+          <h1 className="project-navigation-brand">
+            <span className="brand-mark" aria-hidden="true">
+              M
+            </span>
+            Mesh
+          </h1>
           <label>
-            Selected project
+            <span className="sr-only">Selected project</span>
             <select
               aria-label="Selected project"
               value={projectLoadTargetId ?? activeProjectId ?? ''}
@@ -491,18 +663,53 @@ function ConnectedApp({
         >
           <button
             className="button button-ghost"
-            aria-current={view === 'board' ? 'page' : undefined}
+            aria-label="Plan"
+            aria-current={view === 'plan' ? 'page' : undefined}
             disabled={!activeProject}
-            onClick={() => activeProject && selectProject(activeProject.id)}
+            onClick={() => activeProject && navigate('plan')}
           >
-            Board
+            Plan
+            {planAttention ? (
+              <span className="project-nav-badge" aria-hidden="true">
+                !
+              </span>
+            ) : null}
           </button>
           <button
             className="button button-ghost"
+            aria-label="Board"
+            aria-current={view === 'board' ? 'page' : undefined}
+            disabled={!activeProject}
+            title={`${readyCount} ready to start`}
+            onClick={() => activeProject && navigate('board')}
+          >
+            Board
+            {boardAttention.length > 0 ? (
+              <span className="project-nav-badge" aria-hidden="true">
+                {boardAttention.length}
+              </span>
+            ) : null}
+          </button>
+          <button
+            className="button button-ghost"
+            aria-label="Sessions"
             aria-current={view === 'sessions' ? 'page' : undefined}
             onClick={returnToSessions}
           >
             Sessions
+            {pendingSessionCount > 0 ? (
+              <span className="project-nav-badge" aria-hidden="true">
+                {pendingSessionCount}
+              </span>
+            ) : null}
+          </button>
+          <button
+            className="button button-ghost"
+            aria-current={view === 'settings' ? 'page' : undefined}
+            disabled={!activeProject}
+            onClick={() => activeProject && navigate('settings')}
+          >
+            Project settings
           </button>
         </div>
         <button className="button button-secondary" onClick={openProjectImport}>
@@ -511,15 +718,11 @@ function ConnectedApp({
         <button className="button button-secondary" onClick={openProjectCreate}>
           New project
         </button>
-      </aside>
+      </header>
       <div className="project-view">
-        <div
-          hidden={
-            view === 'board' && Boolean(activeProject || projectLoadError)
-          }
-        >
+        <div hidden={view !== 'sessions'}>
           <SessionWorkspace
-            sessions={sessions}
+            sessions={activeSessions}
             events={projection.events}
             workspaces={workspaces}
             api={api}
@@ -538,11 +741,19 @@ function ConnectedApp({
               setFlowError(undefined);
               setResumeSessionOpen(true);
             }}
-            savedLayout={savedLayout}
-            selectedSessionId={selectedSessionId}
+            savedLayout={activeSavedLayout}
+            selectedSessionId={activeSelected?.id}
+            linkedTasksBySessionId={linkedTasksBySessionId}
+            onOpenTask={openLinkedTask}
             sidebar={{ filter }}
             onSaveLayout={(layout) =>
-              saveLayout(api, onCommand, savedLayout, selected, layout)
+              saveLayout(
+                api,
+                onCommand,
+                activeSavedLayout,
+                activeSelected,
+                layout,
+              )
             }
           />
         </div>
@@ -573,83 +784,93 @@ function ConnectedApp({
               </div>
             </div>
           </section>
-        ) : view === 'board' && activeProject && !projectLoadTargetId ? (
-          <section
-            className={`project-board-boundary project-board-mobile-scroller${
-              activeProject.archivedAt ? ' project-board-read-only' : ''
-            }`}
-            aria-label={`${activeProject.displayName} board`}
-            aria-describedby={
-              activeProject.archivedAt
-                ? `project-${activeProject.id}-archived-description`
-                : undefined
-            }
-          >
-            <header className="project-board-header">
-              <div>
-                <span className="eyebrow">Project board</span>
-                <h2>{activeProject.displayName}</h2>
-              </div>
-              {activeProject.archivedAt ? (
+        ) : null}
+        {visitedProjectIds.map((projectId) => {
+          const project = projects.find(({ id }) => id === projectId);
+          if (!project) return null;
+          const current = projectId === activeProjectId;
+          const visible =
+            current &&
+            view !== 'sessions' &&
+            !projectLoadTargetId &&
+            !projectLoadError;
+          return (
+            <section
+              key={projectId}
+              hidden={!visible}
+              className={`project-board-boundary${project.archivedAt ? ' project-board-read-only' : ''}`}
+              aria-label={`${project.displayName} board`}
+              aria-describedby={
+                project.archivedAt
+                  ? `project-${project.id}-archived-description`
+                  : undefined
+              }
+            >
+              {project.archivedAt ? (
                 <div className="project-board-archive-state">
-                  <p id={`project-${activeProject.id}-archived-description`}>
+                  <p id={`project-${project.id}-archived-description`}>
                     This project is read-only until restored.
                   </p>
-                  <button
-                    className="button button-primary"
-                    onClick={restoreProject}
-                  >
-                    Restore project
-                  </button>
+                  {current ? (
+                    <button
+                      className="button button-primary"
+                      onClick={restoreProject}
+                    >
+                      Restore project
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
-            </header>
-            <DeveloperInstructions
-              key={activeProject.id}
-              project={activeProject}
-              disabled={
-                Boolean(activeProject.archivedAt) ||
-                projection.connectionHealth !== 'connected' ||
-                !api
-              }
-              saving={Boolean(
-                pendingDeveloperInstructionsByProjectId[activeProject.id],
-              )}
-              onSave={saveDeveloperInstructions}
-            />
-            <QaSettings
-              key={`${activeProject.id}:qa`}
-              project={activeProject}
-              disabled={
-                Boolean(activeProject.archivedAt) ||
-                projection.connectionHealth !== 'connected' ||
-                !api
-              }
-              saving={Boolean(pendingQaSettingsByProjectId[activeProject.id])}
-              onSave={saveQaSettings}
-            />
-            <TaskBoard
-              project={activeProject}
-              projection={projection}
-              onCommand={submitProjectCommand}
-              onSelectTask={onSelectTask}
-              onOpenSession={openSession}
-              loadPlanDetails={
-                projectPlanDetails
-                  ? (projectId, planId) => projectPlanDetails(projectId, planId)
-                  : undefined
-              }
-              loadPlanHistory={
-                projectPlanHistory
-                  ? (projectId, before) => projectPlanHistory(projectId, before)
-                  : undefined
-              }
-              connected={
-                projection.connectionHealth === 'connected' && Boolean(api)
-              }
-            />
-          </section>
-        ) : null}
+              {view === 'settings' && current ? (
+                <div className="project-settings-workspace">
+                  <h2>Project settings</h2>
+                  <DeveloperInstructions
+                    key={project.id}
+                    project={project}
+                    disabled={
+                      Boolean(project.archivedAt) ||
+                      projection.connectionHealth !== 'connected' ||
+                      !api
+                    }
+                    saving={Boolean(
+                      pendingDeveloperInstructionsByProjectId[project.id],
+                    )}
+                    onSave={saveDeveloperInstructions}
+                  />
+                  <QaSettings
+                    key={`${project.id}:qa`}
+                    project={project}
+                    disabled={
+                      Boolean(project.archivedAt) ||
+                      projection.connectionHealth !== 'connected' ||
+                      !api
+                    }
+                    saving={Boolean(pendingQaSettingsByProjectId[project.id])}
+                    onSave={saveQaSettings}
+                  />
+                </div>
+              ) : null}
+              <div hidden={view === 'settings'}>
+                <TaskBoard
+                  project={project}
+                  projection={projection}
+                  onCommand={submitProjectCommand}
+                  onSelectTask={onSelectTask}
+                  onOpenSession={openSession}
+                  onOpenBoard={() => navigate('board')}
+                  loadPlanDetails={projectPlanDetails}
+                  loadPlanHistory={projectPlanHistory}
+                  connected={
+                    projection.connectionHealth === 'connected' && Boolean(api)
+                  }
+                  workspace={current && view === 'plan' ? 'plan' : 'board'}
+                  visible={visible && view === 'board'}
+                  openTaskRequest={current ? openTaskRequest : undefined}
+                />
+              </div>
+            </section>
+          );
+        })}
       </div>
       <ProjectImportDialog
         open={projectImportOpen}

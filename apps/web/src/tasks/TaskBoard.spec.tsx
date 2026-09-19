@@ -28,6 +28,97 @@ import { createProjection, replaceProjectSnapshot } from '../state/reducer';
 import { TaskBoard } from './TaskBoard';
 
 describe('TaskBoard', () => {
+  it('shows exact human attention and excludes a linked ready attempt from launch count', async () => {
+    const user = userEvent.setup();
+    const projection = boardProjection([
+      task({
+        id: 'ready',
+        title: 'Ready task',
+        lifecycleState: 'ready',
+        blocked: null,
+      }),
+      task({
+        id: 'review',
+        title: 'Review task',
+        lifecycleState: 'review',
+        blocked: null,
+      }),
+    ]);
+    projection.attemptsById['ready-attempt'] = taskAttemptSchema.parse({
+      id: 'ready-attempt',
+      taskId: 'ready',
+      sessionId: 'session-1',
+      ordinal: 1,
+      source: 'linked',
+      actor,
+      createdAt: timestamp,
+      unlinkedAt: null,
+      unlinkedBy: null,
+      unlinkReason: null,
+    });
+    render(
+      <TaskBoard
+        project={project}
+        projection={projection}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole('heading', { name: /0 ready/ })).toBeVisible();
+    const attention = screen.getByRole('region', { name: 'Needs you' });
+    expect(
+      within(attention).getByText('Review task', { selector: 'strong' }),
+    ).toBeVisible();
+    expect(
+      within(attention).getByText(
+        'Review this task and choose its next action.',
+      ),
+    ).toBeVisible();
+    await user.click(
+      within(attention).getByRole('button', {
+        name: 'Open attention for Review task',
+      }),
+    );
+    expect(screen.getByRole('dialog', { name: 'Review task' })).toBeVisible();
+  });
+
+  it('does not ask for a human decision while autonomous review is enabled', () => {
+    const automaticProject = projectSchema.parse({
+      ...project,
+      qaConfiguration: {
+        ...project.qaConfiguration,
+        reviewPolicy: 'autonomous_review',
+      },
+    });
+    const reviewTask = task({
+      id: 'review',
+      title: 'Review task',
+      lifecycleState: 'review',
+      blocked: null,
+      reviewAutomation: { ...task().reviewAutomation, status: 'enabled' },
+    });
+    const projection = boardProjection([reviewTask]);
+    projection.projectsById[project.id] = automaticProject;
+    projection.projects = [automaticProject];
+    expect(automaticProject.qaConfiguration.reviewPolicy).toBe(
+      'autonomous_review',
+    );
+    expect(reviewTask.reviewAutomation.status).toBe('enabled');
+    expect(projection.reviewAutomationByTaskId.review?.status).toBe('enabled');
+    render(
+      <TaskBoard
+        project={automaticProject}
+        projection={projection}
+        onCommand={vi.fn()}
+      />,
+    );
+    expect(
+      within(screen.getByRole('region', { name: 'Needs you' })).queryByText(
+        'Review task',
+        { selector: 'strong' },
+      ),
+    ).toBeNull();
+  });
   it('renders four manually ordered active columns with task summaries', () => {
     renderBoard();
 
@@ -387,6 +478,9 @@ describe('TaskBoard', () => {
     });
     renderBoard({ onSelectTask, runs: [activeRun] });
 
+    await user.click(
+      screen.getByRole('button', { name: 'Manage running work' }),
+    );
     const controls = screen.getByRole('region', { name: 'Project run' });
     const board = screen.getByRole('region', { name: 'Backlog tasks' });
     expect(
@@ -401,20 +495,19 @@ describe('TaskBoard', () => {
     expect(screen.getByRole('dialog', { name: 'Ready task' })).toBeVisible();
   });
 
-  it('mounts project planning above orchestration and the task board', () => {
+  it('keeps run details accessible when no task can start', async () => {
+    const user = userEvent.setup();
     renderBoard();
 
-    const planning = screen.getByRole('region', { name: 'Project planning' });
-    const orchestration = screen.getByRole('region', { name: 'Project run' });
     const board = screen.getByRole('region', { name: 'Backlog tasks' });
+    expect(screen.queryByRole('region', { name: 'Project run' })).toBeNull();
+    expect(board).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Run details' })).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Run details' }));
+    expect(screen.getByRole('region', { name: 'Project run' })).toBeVisible();
     expect(
-      planning.compareDocumentPosition(orchestration) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
-    expect(
-      orchestration.compareDocumentPosition(board) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+      screen.getByText('No eligible ready tasks are available.'),
+    ).toBeVisible();
   });
 
   it('opens lightweight backlog creation from the board toolbar', async () => {

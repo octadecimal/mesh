@@ -1,17 +1,17 @@
 @import 'tailwindcss';
 
 :root {
-  --background: #090c11;
-  --panel: #11161e;
-  --raised: #171d27;
-  --hover: #1c2430;
-  --border: #273142;
-  --strong: #39465a;
-  --text: #e7edf7;
-  --muted: #8f9bad;
-  --subtle: #657186;
-  --accent: #2563eb;
-  --focus: #60a5fa;
+  --background: #111316;
+  --panel: #181b1f;
+  --raised: #20242a;
+  --hover: #292f37;
+  --border: #30353c;
+  --strong: #4d535e;
+  --text: #edf0f5;
+  --muted: #a0a9b5;
+  --subtle: #7f8995;
+  --accent: #c1cdfd;
+  --focus: #9aaeff;
   --success: #34d399;
   --warning: #fbbf24;
   --danger: #fb7185;
@@ -37,9 +37,7 @@ body,
   margin: 0;
 }
 body {
-  background:
-    radial-gradient(circle at 70% -20%, #15213a 0, transparent 35rem),
-    var(--background);
+  background: var(--background);
 }
 button,
 input,
@@ -68,126 +66,153 @@ textarea:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 19rem 13rem minmax(0, 1fr);
-  height: 100vh;
-  overflow: hidden;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 100dvh;
+}
+.app-shell:has(.session-sidebar) {
+  grid-template-columns: 17.2rem minmax(0, 1fr);
 }
 .session-sidebar {
+  grid-column: 1;
+  grid-row: 2;
   z-index: 2;
-  padding: 1.1rem;
+  padding: 1rem;
+  max-height: calc(100dvh - 7.7rem);
   overflow: auto;
-  background: var(--panel);
+  background: #15181c;
   border-right: 1px solid var(--border);
-  box-shadow: 12px 0 40px #0003;
 }
 .project-navigation {
+  grid-column: 1 / -1;
+  grid-row: 1;
   display: grid;
-  align-content: start;
-  gap: 1rem;
-  padding: 1.1rem;
-  overflow: auto;
-  background: #0d1219;
-  border-right: 1px solid var(--border);
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  column-gap: 0.8rem;
+  padding: 0 2rem;
+  min-width: 0;
+  background: var(--background);
+  border-bottom: 1px solid var(--border);
 }
 .project-navigation-heading {
+  display: flex;
+  align-items: center;
+  gap: 1.4rem;
+  min-height: 4.4rem;
+}
+.project-navigation-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0;
+  font-size: 1.25rem;
+  letter-spacing: -0.04em;
+}
+.project-navigation-brand .brand-mark {
   display: grid;
-  gap: 0.7rem;
+  place-items: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  border: 1px solid #8599df;
+  border-radius: 0.55rem;
+  color: var(--accent);
+  font-size: 1.1rem;
 }
 .project-navigation label {
-  display: grid;
-  gap: 0.38rem;
-  color: #b9c4d4;
-  font-size: 0.76rem;
-  font-weight: 650;
+  display: block;
+  min-width: 11rem;
 }
 .project-navigation select {
-  width: 100%;
+  width: min(18rem, 100%);
   color: var(--text);
-  background: #090e15;
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 0.45rem;
-  padding: 0.6rem;
+  padding: 0.4rem 0.6rem;
 }
 .project-navigation-actions {
-  display: grid;
-  gap: 0.45rem;
+  display: flex;
+  grid-column: 1 / -1;
+  grid-row: 2;
+  gap: 1.5rem;
+  border-top: 1px solid var(--border);
 }
 .project-load-status {
-  margin: -0.35rem 0 0;
+  margin: 0;
   color: var(--muted);
   font-size: 0.76rem;
   line-height: 1.45;
 }
 .project-navigation-actions .button {
-  justify-content: flex-start;
+  justify-content: center;
+  min-height: 3.2rem;
+  padding: 0 0.25rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
 }
 .project-navigation-actions .button[aria-current='page'] {
-  color: #dbeafe;
-  background: #17243b;
-  border-color: #31558b;
+  color: var(--text);
+  border-color: var(--focus);
+}
+.project-navigation-actions .button:last-child {
+  margin-left: auto;
+}
+.project-nav-badge {
+  margin-left: 0.4rem;
+  padding: 0.12rem 0.35rem;
+  border-radius: 0.25rem;
+  background: var(--raised);
+  font-size: 0.66rem;
 }
 .project-board-boundary {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: auto auto auto minmax(0, 1fr);
   min-width: 0;
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
-  background: linear-gradient(145deg, #0b1017, #101824 55%, #0a0e14);
+  padding: 2.2rem clamp(1rem, 3vw, 2.7rem) 4rem;
 }
 
-.project-board-header,
-.project-board-boundary > .task-board {
-  grid-column: 1 / -1;
-}
-
-.project-board-boundary > .project-planning-panel,
-.project-board-boundary > .project-run-panel {
-  max-height: min(12rem, 24vh);
-  overflow: auto;
-}
-
-.project-board-boundary > .developer-instructions,
-.project-board-boundary > .qa-settings {
-  align-self: start;
-  max-height: 18rem;
-  overflow: auto;
-}
 .project-view {
+  grid-column: 1 / -1;
+  grid-row: 2;
   min-width: 0;
   min-height: 0;
+}
+.app-shell:has(.session-sidebar) .project-view {
+  grid-column: 2;
 }
 .project-view > div:not([hidden]) {
-  height: 100%;
-  min-height: 0;
+  min-height: 42rem;
 }
 .project-view .session-workspace {
-  height: 100%;
+  height: calc(100dvh - 7.7rem);
+  min-height: 35rem;
 }
-.project-board-header {
+.task-board-overview {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  border-bottom: 1px solid var(--border);
-  padding: 1rem 1.25rem;
-  background: #0d131bea;
+  margin-bottom: 1.4rem;
+}
+.task-board-overview h3 {
+  margin: 0.25rem 0;
+  font-size: clamp(1.5rem, 2.5vw, 2rem);
+  letter-spacing: -0.04em;
+}
+.task-board-overview p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 .project-board-boundary h2 {
   margin: 0.35rem 0 0;
   font-size: clamp(1.35rem, 2.5vw, 2rem);
   letter-spacing: -0.04em;
 }
-.project-board-header p {
-  max-width: 34rem;
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.78rem;
-  line-height: 1.45;
-}
 .project-board-read-only {
-  background: linear-gradient(145deg, #17120d, #111720 55%, #0a0e14);
+  background: #1b1915;
 }
 .project-board-archive-state {
   display: flex;
@@ -201,11 +226,33 @@ textarea:focus-visible {
   gap: 0.6rem;
 }
 .task-board {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
-  min-height: 0;
-  overflow: hidden;
+}
+.task-board-attention {
+  margin-bottom: 1.1rem;
+  border: 1px solid #5e5140;
+  border-radius: 0.6rem;
+  padding: 1rem 1.2rem;
+  background: #29251f;
+}
+.task-board-attention .eyebrow {
+  color: #edc88b;
+}
+.task-board-attention-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-top: 0.6rem;
+}
+.task-board-attention-row + .task-board-attention-row {
+  border-top: 1px solid var(--border);
+  margin-top: 0.6rem;
+}
+.task-board-attention-row p {
+  margin: 0.2rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 .project-run-panel {
   display: grid;
@@ -405,12 +452,106 @@ textarea:focus-visible {
 }
 .project-planning-panel {
   display: grid;
-  gap: 1rem;
-  border-top: 1px solid var(--border);
+  gap: 1.4rem;
+  max-width: 74rem;
+  margin: 0 auto;
+}
+.planning-start-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 17rem;
+  gap: clamp(2rem, 5vw, 4.3rem);
+  margin: 1.5rem auto 2rem;
+}
+.planning-start-main {
+  min-width: 0;
+}
+.planning-intro h2 {
+  margin: 0.6rem 0 0.8rem;
+  font-size: clamp(2rem, 3.3vw, 2.6rem);
+  line-height: 1.18;
+}
+.planning-intro p {
+  max-width: 38rem;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.planning-steps {
+  border-left: 1px solid var(--border);
+  padding-left: 1.8rem;
+  margin-top: 1.5rem;
+}
+.planning-steps h3 {
+  font-size: 0.85rem;
+  margin-bottom: 1.3rem;
+}
+.planning-steps ol {
+  display: grid;
+  gap: 1.3rem;
+  list-style: none;
+  counter-reset: steps;
+  padding: 0;
+}
+.planning-steps li {
+  display: grid;
+  grid-template-columns: 1.55rem 1fr;
+  column-gap: 0.75rem;
+  counter-increment: steps;
+  font-size: 0.8rem;
+}
+.planning-steps li::before {
+  content: counter(steps);
+  display: grid;
+  place-items: center;
+  width: 1.55rem;
+  height: 1.55rem;
+  border: 1px solid var(--strong);
+  border-radius: 50%;
+  color: var(--focus);
+  font-size: 0.72rem;
+}
+.planning-steps li span {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.planning-start-form {
+  margin-top: 1.5rem;
+}
+.planning-start-form > label:first-child textarea {
+  min-height: 8.5rem;
+  border-color: #4d586b;
+  background: var(--panel);
+  font-size: 1rem;
   padding: 1rem;
-  background:
-    radial-gradient(circle at 88% 0%, #312e8160, transparent 35%),
-    linear-gradient(145deg, #111827, #0c1420 58%, #0a1018);
+}
+.planning-advanced {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+.planning-advanced summary {
+  cursor: pointer;
+  padding: 0.45rem 0;
+}
+.planning-advanced .planning-form-columns {
+  margin-top: 0.7rem;
+}
+.planning-board-handoff {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.3rem;
+  border: 1px solid var(--border);
+  border-radius: 0.55rem;
+  padding: 0.8rem 1rem;
+  background: var(--panel);
+  font-size: 0.8rem;
+}
+.project-settings-workspace {
+  display: grid;
+  gap: 1.25rem;
+  max-width: 62rem;
+  margin: 0 auto;
 }
 .project-planning-panel h3,
 .project-planning-panel h4,
@@ -444,12 +585,16 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 .planning-disclosure {
-  border-left: 3px solid #818cf8;
-  padding: 0.65rem 0.8rem;
-  color: #dbeafe;
-  background: #1e1b4b66;
-  font-size: 0.82rem;
+  order: 2;
+  max-width: 46rem;
+  color: var(--muted);
+  font-size: 0.76rem;
   line-height: 1.5;
+}
+.planning-history {
+  order: 3;
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
 }
 .planning-start-form,
 .planning-active,
@@ -674,9 +819,7 @@ textarea:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  border-bottom: 1px solid var(--border);
-  padding: 0.7rem 1rem;
-  background: #0b1017;
+  margin-bottom: 1.1rem;
 }
 .task-board-tabs {
   display: flex;
@@ -720,37 +863,21 @@ textarea:focus-visible {
 }
 .task-board-columns {
   display: grid;
-  grid-auto-columns: minmax(17rem, 1fr);
-  grid-auto-flow: column;
-  gap: 0.8rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1.1rem;
   min-width: 0;
-  min-height: 0;
-  overflow: auto;
-  padding: 1rem;
-  scroll-padding: 1rem;
 }
 .task-column {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-width: 17rem;
-  min-height: 0;
-  border: 1px solid var(--border);
-  border-radius: 0.65rem;
-  background: #0d131b;
-  box-shadow: 0 10px 28px #0002;
-  scroll-snap-align: start;
+  min-width: 0;
 }
 .task-column-terminal {
-  width: min(34rem, calc(100% - 2rem));
-  margin: 1rem;
-  overflow: hidden;
+  max-width: 32rem;
 }
 .task-column > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--border);
-  padding: 0.75rem 0.8rem;
+  padding: 0.2rem 0 0.9rem;
 }
 .task-column > header h3 {
   margin: 0;
@@ -767,9 +894,7 @@ textarea:focus-visible {
   text-align: center;
 }
 .task-column-cards {
-  min-height: 8rem;
-  overflow-y: auto;
-  padding: 0.65rem;
+  min-height: 0;
 }
 .task-column-empty {
   margin: 0.35rem;
@@ -1508,15 +1633,12 @@ textarea:focus-visible {
   transform: translateY(1px);
 }
 .button-primary {
-  color: white;
+  color: #17203d;
   background: var(--accent);
-  border-color: #3b74e7;
-  box-shadow:
-    inset 0 1px #ffffff24,
-    0 5px 16px #2563eb2e;
+  border-color: var(--accent);
 }
 .button-primary:hover:not(:disabled) {
-  background: #3473f5;
+  background: #d0d9ff;
 }
 .button-secondary {
   background: var(--raised);
@@ -1870,6 +1992,14 @@ textarea:focus-visible {
   padding: 0.35rem 0.58rem;
   color: var(--muted);
   background: #0d131c;
+  font-size: 0.72rem;
+}
+.session-linked-task {
+  position: absolute;
+  z-index: 4;
+  top: 0.65rem;
+  right: 5rem;
+  padding: 0.35rem 0.6rem;
   font-size: 0.72rem;
 }
 .panel-close:hover {
@@ -2251,82 +2381,53 @@ textarea:focus-visible {
   }
 }
 @media (max-width: 760px) {
-  .project-board-boundary {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
-  }
-
-  .project-board-mobile-scroller {
-    overflow-y: auto;
-    overscroll-behavior-y: contain;
-  }
-
-  .project-board-header,
-  .project-board-boundary > .project-planning-panel,
-  .project-board-boundary > .project-run-panel,
-  .project-board-boundary > .task-board {
-    grid-column: 1;
-  }
-
-  .project-board-boundary > .project-planning-panel,
-  .project-board-boundary > .project-run-panel {
-    max-height: none;
-    overflow: visible;
-  }
-
-  .project-board-boundary > .task-board {
-    grid-template-rows: auto auto;
-    overflow: visible;
-  }
-
-  .project-board-boundary .task-board-columns {
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-
-  .project-board-boundary .task-column-cards {
-    overflow-y: visible;
-  }
-
-  .project-board-boundary > .developer-instructions,
-  .project-board-boundary > .qa-settings {
-    max-height: none;
-    overflow: visible;
-  }
-
   .app-shell {
     grid-template-columns: 1fr;
     grid-template-rows: auto auto minmax(0, 1fr);
-    height: 100dvh;
+  }
+  .app-shell:has(.session-sidebar) {
+    grid-template-columns: 1fr;
   }
   .session-sidebar {
+    grid-column: 1;
+    grid-row: 2;
     max-height: 42vh;
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
+  .app-shell:has(.session-sidebar) .project-view {
+    grid-column: 1;
+    grid-row: 3;
+  }
+  .project-view .session-workspace {
+    height: 60dvh;
+    min-height: 25rem;
+  }
   .project-navigation {
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    align-items: end;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
+    padding: 0 1rem;
   }
   .project-navigation-actions {
-    grid-template-columns: repeat(2, auto);
+    gap: 0.8rem;
+    overflow-x: auto;
   }
-  .project-navigation-heading {
-    gap: 0.45rem;
+  .project-navigation-actions .button {
+    flex: 0 0 auto;
   }
-  .project-board-header {
-    align-items: flex-start;
-    padding: 0.8rem 1rem;
+  .task-board-columns {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .planning-start-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+  }
+  .planning-steps {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding: 1rem 0 0;
   }
   .project-board-archive-state {
     align-items: flex-end;
     flex-direction: column;
-  }
-  .task-board-columns {
-    grid-auto-columns: minmax(16rem, 82vw);
-    scroll-snap-type: x proximity;
   }
   .empty-details {
     gap: 1rem;
@@ -2345,12 +2446,23 @@ textarea:focus-visible {
     grid-template-columns: 1fr;
   }
   .project-navigation {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .project-navigation-heading {
+    grid-column: 1 / -1;
+    gap: 0.7rem;
+  }
+  .project-navigation > .button {
+    grid-row: 2;
+    margin-bottom: 0.45rem;
   }
   .project-navigation-actions {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-row: 3;
   }
-  .project-board-header,
+  .task-board-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .task-board-overview,
   .task-board-toolbar {
     align-items: stretch;
     flex-direction: column;
@@ -2384,8 +2496,8 @@ textarea:focus-visible {
     grid-column: 1 / -1;
   }
   .task-board-tabs {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: flex;
+    flex-wrap: wrap;
   }
   .task-board-tabs button {
     padding-inline: 0.3rem;
@@ -2396,14 +2508,8 @@ textarea:focus-visible {
   .task-board-toolbar-actions {
     justify-content: flex-end;
   }
-  .task-board-columns {
-    grid-auto-columns: minmax(15rem, calc(100vw - 2rem));
-    padding: 0.75rem;
-    scroll-padding: 0.75rem;
-  }
   .task-column-terminal {
-    width: calc(100% - 1.5rem);
-    margin: 0.75rem;
+    width: 100%;
   }
   .empty-actions {
     flex-direction: column;
@@ -2454,6 +2560,14 @@ textarea:focus-visible {
   gap: 0.75rem;
 }
 
+.project-settings-workspace textarea {
+  width: 100%;
+  border: 1px solid var(--strong);
+  border-radius: 0.5rem;
+  padding: 0.7rem;
+  color: var(--text);
+  background: var(--panel);
+}
 .qa-settings textarea {
   min-height: 7rem;
 }
