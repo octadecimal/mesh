@@ -57,6 +57,28 @@ export class GitAdapter {
     private readonly pathOptions: ResolveWorkspacePathOptions,
   ) {}
 
+  async initializeRepository(
+    repositoryPath: AbsolutePath,
+  ): Promise<{ created: true }> {
+    const resolvedPath = await this.resolve(repositoryPath);
+    const result = await this.processRunner.run(
+      'git',
+      [
+        '-c',
+        'credential.interactive=false',
+        '-C',
+        resolvedPath,
+        'init',
+        '--template=',
+      ],
+      { cwd: resolvedPath },
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`Git repository initialization failed: ${result.stderr}`);
+    }
+    return { created: true };
+  }
+
   async createWorktree(
     request: CreateWorktreeRequest,
   ): Promise<{ created: true }> {

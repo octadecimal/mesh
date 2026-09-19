@@ -1,5 +1,12 @@
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -35,6 +42,7 @@ import {
   NodeProcessRunner,
   resolveGitExecutableAtStartup,
 } from '../platform/process-runner.js';
+import { GitAdapter } from '../platform/git.js';
 import { QaVerificationRunner } from '../platform/qa-verification-runner.js';
 import {
   resolveRepositoryIdentity,
@@ -77,6 +85,7 @@ const runGit = async (cwd: string, ...args: string[]) => {
 describe('executeCommand', () => {
   const cleanups: Array<() => Promise<void> | void> = [];
   let resolveIdentity: RepositoryIdentityResolver;
+  let processRunner: NodeProcessRunner;
 
   beforeAll(async () => {
     const trustedGitExecutable = await resolveGitExecutableAtStartup({
@@ -86,7 +95,7 @@ describe('executeCommand', () => {
     if (!trustedGitExecutable) {
       throw new Error('Expected an approved test Git executable');
     }
-    const processRunner = new NodeProcessRunner({ trustedGitExecutable });
+    processRunner = new NodeProcessRunner({ trustedGitExecutable });
     resolveIdentity = (repositoryPath, pathOptions) =>
       resolveRepositoryIdentity(repositoryPath, pathOptions, processRunner);
   });
@@ -220,6 +229,7 @@ describe('executeCommand', () => {
         projectRunService,
         registry,
         driver,
+        git: new GitAdapter(processRunner, pathOptions),
         pathOptions,
         resolveIdentity,
         now: () => now,
@@ -1970,6 +1980,119 @@ describe('executeCommand', () => {
       code: 'repository_already_imported',
       details: { project: expect.objectContaining({ id: 'project-created' }) },
     });
+  });
+
+  it('imports an external repository and starts a session in it', async () => {
+    const { repositoryPath } = await createRepository();
+    const baseDirectory = await mkdtemp(join(tmpdir(), 'mesh-command-base-'));
+    cleanups.push(() => rm(baseDirectory, { force: true, recursive: true }));
+    const { dependencies } = commandDependencies(baseDirectory);
+
+    const imported = await executeCommand(
+      projectCommand('project-import-external', {
+        type: 'project.import',
+        payload: {
+          repositoryPath,
+          actor: { type: 'human', id: 'operator' },
+        },
+      }),
+      dependencies,
+    );
+    const project = projectSchema.parse(imported.result);
+
+    await executeCommand(
+      projectCommand('session-create-external', {
+        type: 'session.create',
+        payload: {
+          projectId: project.id,
+          title: 'External repository session',
+          permissionMode: 'interactive',
+          workspace: { type: 'shared', path: repositoryPath },
+        },
+      }),
+      dependencies,
+    );
+
+    expect(dependencies.driver.createdRequests).toEqual([
+      expect.objectContaining({ workspacePath: repositoryPath }),
+    ]);
+  });
+
+  it('creates and registers an external empty Git repository once', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mesh-command-create-'));
+    const baseDirectory = await mkdtemp(join(tmpdir(), 'mesh-command-base-'));
+    cleanups.push(
+      () => rm(directory, { force: true, recursive: true }),
+      () => rm(baseDirectory, { force: true, recursive: true }),
+    );
+    const { repositories, dependencies } = commandDependencies(baseDirectory);
+    const command = projectCommand('project-create', {
+      type: 'project.create',
+      payload: {
+        parentDirectory: directory,
+        name: 'new project',
+        actor: { type: 'human', id: 'operator' },
+      },
+    });
+
+    const created = await executeCommand(command, dependencies);
+    const repositoryPath = join(directory, 'new project');
+
+    expect(created.result).toMatchObject({
+      id: 'project-created',
+      displayName: 'new project',
+      repositoryPath,
+    });
+    expect(await readdir(repositoryPath)).toEqual(['.git']);
+    await expect(
+      exec('git', ['-C', repositoryPath, 'rev-parse', '--verify', 'HEAD']),
+    ).rejects.toThrow();
+    await expect(executeCommand(command, dependencies)).resolves.toEqual(
+      created,
+    );
+    expect(repositories.projects.list()).toHaveLength(1);
+  });
+
+  it('rejects invalid or existing project folders without changing them', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'mesh-command-create-'));
+    cleanups.push(() => rm(directory, { force: true, recursive: true }));
+    const existingPath = join(directory, 'existing');
+    await mkdir(existingPath);
+    await writeFile(join(existingPath, 'keep.txt'), 'keep\n');
+    const { dependencies } = commandDependencies(directory);
+
+    for (const name of ['../escape', 'CON', 'trailing.']) {
+      await expect(
+        executeCommand(
+          projectCommand(`project-create-${name}`, {
+            type: 'project.create',
+            payload: {
+              parentDirectory: directory,
+              name,
+              actor: { type: 'human', id: 'operator' },
+            },
+          }),
+          dependencies,
+        ),
+      ).rejects.toMatchObject({ code: 'repository_invalid' });
+    }
+    await expect(
+      executeCommand(
+        projectCommand('project-create-existing', {
+          type: 'project.create',
+          payload: {
+            parentDirectory: directory,
+            name: 'existing',
+            actor: { type: 'human', id: 'operator' },
+          },
+        }),
+        dependencies,
+      ),
+    ).rejects.toMatchObject({ code: 'repository_invalid' });
+
+    expect(await readFile(join(existingPath, 'keep.txt'), 'utf8')).toBe(
+      'keep\n',
+    );
   });
 
   it('rejects an import represented by duplicate upgraded legacy repository paths', async () => {

@@ -41,9 +41,15 @@ explicit confirmation.
 
 ## Project and task operation
 
-Use **Import repository** to create a durable project from a local Git
-repository. Repository discovery only supplies suggestions; it never creates a
-project. A project owns its tasks and ordered project-event stream. Each task
+Use **Import project** to create a durable project from any local Git
+repository you explicitly select. On Windows, **Browse** opens the native
+folder picker for any folder; you can always enter an absolute path manually.
+Repository discovery only supplies suggestions; it never creates a project. Use
+**New project** to create one new child folder and empty Git repository beneath
+any parent directory you explicitly select. Mesh does not overwrite an existing
+folder, add files, or make an initial commit. The configured workspace root
+remains the default location for suggestions and Mesh-managed worktrees.
+A project owns its tasks and ordered project-event stream. Each task
 attempt remains in immutable history and links the task to one session, while
 the session keeps its own lifecycle and event stream.
 

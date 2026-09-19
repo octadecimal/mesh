@@ -4,6 +4,10 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { detectBillingOverrides } from './config.js';
 import { registerRoutes, type HttpDependencies } from './http/routes.js';
 import { registerSocketHub } from './realtime/socket-hub.js';
+import {
+  DirectoryPicker,
+  DirectoryPickerError,
+} from './platform/directory-picker.js';
 
 export interface OriginPolicy {
   readonly accepting: boolean;
@@ -33,7 +37,8 @@ export const createOriginPolicy = (
   };
 };
 
-type AppDependencies = HttpDependencies & {
+type AppDependencies = Omit<HttpDependencies, 'directoryPicker'> & {
+  directoryPicker?: Pick<DirectoryPicker, 'select'>;
   servedOrigin?: string;
   originPolicy?: OriginPolicy;
   webRoot?: string;
@@ -50,7 +55,9 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
 
   app.addHook('onRequest', async (request, reply) => {
     const isCommand =
-      request.method === 'POST' && request.url.startsWith('/api/commands');
+      request.method === 'POST' &&
+      (request.url.startsWith('/api/commands') ||
+        request.url.startsWith('/api/directories/select'));
     const isUpgrade = request.url.startsWith('/api/socket');
     if (!originPolicy.accepting && (isCommand || isUpgrade)) {
       return reply.code(503).send();
@@ -71,15 +78,26 @@ export const buildApp = (dependencies: AppDependencies): FastifyInstance => {
     }
   });
 
-  registerRoutes(
-    app,
-    dependencies.billingConflicts === undefined
-      ? {
-          ...dependencies,
-          billingConflicts: detectBillingOverrides(process.env),
-        }
-      : dependencies,
-  );
+  registerRoutes(app, {
+    ...dependencies,
+    directoryPicker:
+      dependencies.directoryPicker ??
+      (dependencies.pathOptions
+        ? new DirectoryPicker({
+            workspaceRoot: dependencies.pathOptions.baseDirectory,
+          })
+        : {
+            select: async () => {
+              throw new DirectoryPickerError(
+                'directory_picker_unavailable',
+                'Workspace path configuration is unavailable. Enter the directory manually.',
+              );
+            },
+          }),
+    ...(dependencies.billingConflicts === undefined
+      ? { billingConflicts: detectBillingOverrides(process.env) }
+      : {}),
+  });
   registerSocketHub(app, {
     events: dependencies.events,
     projectEvents: dependencies.projectEvents,

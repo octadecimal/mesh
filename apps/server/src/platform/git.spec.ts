@@ -79,6 +79,39 @@ afterEach(() => {
 });
 
 describe('GitAdapter', () => {
+  it('initializes a repository without loading external templates', async () => {
+    const calls: Array<{
+      executable: string;
+      args: readonly string[];
+      cwd: string;
+    }> = [];
+    const runner: ProcessRunner = {
+      run: async (executable, args, options) => {
+        calls.push({ executable, args, cwd: options.cwd });
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    };
+    const git = new GitAdapter(runner, windowsPathOptions);
+
+    await expect(
+      git.initializeRepository('C:\\repo' as AbsolutePath),
+    ).resolves.toEqual({ created: true });
+    expect(calls).toEqual([
+      {
+        executable: 'git',
+        args: [
+          '-c',
+          'credential.interactive=false',
+          '-C',
+          'C:\\repo',
+          'init',
+          '--template=',
+        ],
+        cwd: 'C:\\repo',
+      },
+    ]);
+  });
+
   it('creates a worktree with argv arguments, preserving spaces in its path', async () => {
     const calls: Array<{
       executable: string;

@@ -27,6 +27,7 @@ const commandResponseSchema = z.object({
     .array(z.object({ code: z.string(), message: z.string() }))
     .default([]),
 });
+const directorySelectionSchema = z.object({ path: z.string().nullable() });
 
 export type MeshApiOptions = {
   baseUrl?: string;
@@ -161,6 +162,16 @@ export class MeshApi {
         body: JSON.stringify(command),
       }),
     );
+  }
+
+  async selectDirectory(): Promise<string | null> {
+    return directorySelectionSchema.parse(
+      await this.request('/api/directories/select', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+    ).path;
   }
 
   private async request(path: string, init?: RequestInit): Promise<unknown> {

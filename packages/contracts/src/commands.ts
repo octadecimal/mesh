@@ -102,6 +102,14 @@ export const projectCommandSchema = z.discriminatedUnion('type', [
     }),
   }),
   z.object({
+    type: z.literal('project.create'),
+    payload: z.object({
+      parentDirectory: z.string().trim().min(1),
+      name: z.string().trim().min(1),
+      actor: taskActorSchema,
+    }),
+  }),
+  z.object({
     type: z.literal('project.rename'),
     payload: z.object({
       projectId: idSchema,

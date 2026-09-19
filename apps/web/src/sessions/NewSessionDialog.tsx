@@ -45,6 +45,8 @@ export function NewSessionDialog({
   collisionWarning,
   error,
   onCreate,
+  onImportProject,
+  onNewProject,
 }: {
   open: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -52,6 +54,8 @@ export function NewSessionDialog({
   collisionWarning?: string;
   error?: SessionFlowError;
   onCreate: (command: SessionCreateCommand) => void;
+  onImportProject?: () => void;
+  onNewProject?: () => void;
 }) {
   const [projectId, setProjectId] = useState('');
   const [title, setTitle] = useState('New session');
@@ -149,6 +153,30 @@ export function NewSessionDialog({
                 ))}
               </select>
             </label>
+            <div className="dialog-actions">
+              <button
+                className="button button-secondary"
+                type="button"
+                onClick={onImportProject}
+                disabled={!onImportProject}
+              >
+                Import project
+              </button>
+              <button
+                className="button button-secondary"
+                type="button"
+                onClick={onNewProject}
+                disabled={!onNewProject}
+              >
+                New project
+              </button>
+            </div>
+            {projects.length === 0 ? (
+              <p>
+                Import a local Git repository or create a new project before
+                starting a session.
+              </p>
+            ) : null}
             <label>
               Session title
               <input
@@ -179,7 +207,11 @@ export function NewSessionDialog({
                   Cancel
                 </button>
               </Dialog.Close>
-              <button className="button button-primary" type="submit">
+              <button
+                className="button button-primary"
+                type="submit"
+                disabled={!projects.length}
+              >
                 Create session
               </button>
             </div>

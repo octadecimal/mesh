@@ -59,6 +59,9 @@ export type StableErrorCode =
   | 'attempt_start_failed'
   | 'attempt_reconciliation_required'
   | 'command_reconciliation_required'
+  | 'directory_picker_unavailable'
+  | 'directory_picker_busy'
+  | 'directory_picker_invalid_path'
   | 'internal_error';
 
 export class CommandError extends Error {
@@ -142,6 +145,9 @@ const statusCodes: Record<StableErrorCode, number> = {
   unsafe_qa_workspace: 409,
   developer_resume_unavailable: 409,
   command_reconciliation_required: 409,
+  directory_picker_unavailable: 503,
+  directory_picker_busy: 409,
+  directory_picker_invalid_path: 400,
   internal_error: 500,
 };
 

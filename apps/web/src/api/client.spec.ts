@@ -7,6 +7,21 @@ import { vi } from 'vitest';
 import { MeshApi } from './client';
 
 describe('MeshApi', () => {
+  it('requests a native directory selection', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ path: 'C:\\code\\projects' }),
+    });
+    const api = new MeshApi({ fetch: fetcher });
+
+    await expect(api.selectDirectory()).resolves.toBe('C:\\code\\projects');
+    expect(fetcher).toHaveBeenCalledWith('/api/directories/select', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+  });
+
   it('preserves a duplicate-import error and the existing project for the import flow', async () => {
     const api = new MeshApi({
       fetch: vi.fn().mockResolvedValue({

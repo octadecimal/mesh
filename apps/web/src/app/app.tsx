@@ -38,6 +38,7 @@ import {
   type ImportedProject,
   type ProjectImportSuggestion,
 } from '../projects/ProjectImportDialog';
+import { ProjectCreateDialog } from '../projects/ProjectCreateDialog';
 import { DeveloperInstructions } from '../projects/DeveloperInstructions';
 import { QaSettings } from '../projects/QaSettings';
 import { TaskBoard } from '../tasks/TaskBoard';
@@ -66,7 +67,12 @@ type AppProps = {
     MeshApi,
     'command' | 'diagnostics' | 'discover' | 'projectSnapshot'
   > &
-    Partial<Pick<MeshApi, 'projectPlanDetails' | 'projectPlanHistory'>>;
+    Partial<
+      Pick<
+        MeshApi,
+        'projectPlanDetails' | 'projectPlanHistory' | 'selectDirectory'
+      >
+    >;
 };
 
 const snapshotFor = ({
@@ -139,7 +145,9 @@ function ConnectedApp({
   );
   const [view, setView] = useState<'board' | 'sessions'>('sessions');
   const [projectImportOpen, setProjectImportOpen] = useState(false);
+  const [projectCreateOpen, setProjectCreateOpen] = useState(false);
   const [suggestions, setSuggestions] = useState<ProjectImportSuggestion[]>([]);
+  const [discoveryError, setDiscoveryError] = useState<string>();
   const [projectLoadTargetId, setProjectLoadTargetId] = useState<
     string | undefined
   >();
@@ -241,6 +249,7 @@ function ConnectedApp({
     setView('sessions');
   };
   const discoverSuggestions = () => {
+    setDiscoveryError(undefined);
     if (!api?.discover) return;
     void api
       .discover({ protocolVersion: 1, type: 'projects.discover', payload: {} })
@@ -250,7 +259,22 @@ function ConnectedApp({
         };
         setSuggestions(result.suggestions ?? []);
       })
-      .catch(() => setSuggestions([]));
+      .catch((caught: unknown) => {
+        const failure = caught as { message?: string };
+        setSuggestions([]);
+        setDiscoveryError(
+          failure.message ?? 'Repository discovery is unavailable.',
+        );
+      });
+  };
+  const openProjectImport = () => {
+    setNewSessionOpen(false);
+    setProjectImportOpen(true);
+    discoverSuggestions();
+  };
+  const openProjectCreate = () => {
+    setNewSessionOpen(false);
+    setProjectCreateOpen(true);
   };
   const importProject = async ({
     repositoryPath,
@@ -274,6 +298,21 @@ function ConnectedApp({
   const openImportedProject = (project: ImportedProject) => {
     setProjectImportOpen(false);
     selectProject(project.id);
+  };
+  const createProject = async ({
+    parentDirectory,
+    name,
+  }: {
+    parentDirectory: string;
+    name: string;
+  }): Promise<ImportedProject> => {
+    if (!api)
+      throw new Error('Project creation is unavailable while disconnected.');
+    const response = await api.command({
+      type: 'project.create',
+      payload: { parentDirectory, name, actor: operator },
+    });
+    return response.result as ImportedProject;
   };
   const restoreProject = () => {
     if (!activeProject) return;
@@ -395,6 +434,8 @@ function ConnectedApp({
         collisionWarning={collisionWarning}
         error={flowError}
         onCreate={(command) => submit(command as MutatingCommand)}
+        onImportProject={openProjectImport}
+        onNewProject={openProjectCreate}
       />
       <ResumeSessionDialog
         open={resumeSessionOpen}
@@ -464,14 +505,11 @@ function ConnectedApp({
             Sessions
           </button>
         </div>
-        <button
-          className="button button-secondary"
-          onClick={() => {
-            setProjectImportOpen(true);
-            discoverSuggestions();
-          }}
-        >
-          Import repository
+        <button className="button button-secondary" onClick={openProjectImport}>
+          Import project
+        </button>
+        <button className="button button-secondary" onClick={openProjectCreate}>
+          New project
         </button>
       </aside>
       <div className="project-view">
@@ -617,8 +655,17 @@ function ConnectedApp({
         open={projectImportOpen}
         onOpenChange={setProjectImportOpen}
         suggestions={suggestions}
+        discoveryError={discoveryError}
+        onBrowse={api?.selectDirectory?.bind(api)}
         onImport={importProject}
         onImported={openImportedProject}
+      />
+      <ProjectCreateDialog
+        open={projectCreateOpen}
+        onOpenChange={setProjectCreateOpen}
+        onBrowse={api?.selectDirectory?.bind(api)}
+        onCreate={createProject}
+        onCreated={openImportedProject}
       />
       <p className="sr-only">Session platform</p>
     </div>
