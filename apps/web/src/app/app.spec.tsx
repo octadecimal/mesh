@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import {
   projectPlanSchema,
   projectPlanSummarySchema,
+  qaExecutionCycleSchema,
   taskActorSchema,
   taskAttemptSchema,
   taskSchema,
@@ -55,7 +56,13 @@ describe('App', () => {
     const api = createApi();
     render(<App store={store} api={api} />);
 
-    await user.click(screen.getByRole('button', { name: /Session A/ }));
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
+    await user.click(
+      within(screen.getByRole('complementary', { name: 'Sessions' })).getByRole(
+        'button',
+        { name: /Session A/ },
+      ),
+    );
     await user.click(
       screen.getByRole('button', { name: 'Close Session A panel' }),
     );
@@ -87,6 +94,7 @@ describe('App', () => {
     );
     render(<App store={store} api={api} />);
 
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
     await user.click(screen.getByRole('button', { name: 'New session' }));
     await user.selectOptions(screen.getByLabelText('Project'), 'p1');
     await user.type(screen.getByLabelText('Shared folder path'), '/mesh');
@@ -115,11 +123,17 @@ describe('App', () => {
     const api = createApi();
     render(<App store={store} api={api} />);
 
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
     await user.type(
       screen.getByRole('searchbox', { name: 'Filter sessions' }),
       'Session',
     );
-    await user.click(screen.getByRole('button', { name: /Session A/ }));
+    await user.click(
+      within(screen.getByRole('complementary', { name: 'Sessions' })).getByRole(
+        'button',
+        { name: /Session A/ },
+      ),
+    );
 
     await waitFor(() =>
       expect(api.command).toHaveBeenCalledWith(
@@ -145,8 +159,16 @@ describe('App', () => {
     const api = createApi();
     render(<App store={store} api={api} />);
 
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
     expect(await screen.findByRole('tab', { name: 'Session A' })).toBeDefined();
-    await user.click(screen.getByRole('button', { name: /Session B/ }));
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
+    await user.click(
+      within(screen.getByRole('complementary', { name: 'Sessions' })).getByRole(
+        'button',
+        { name: /Session B/ },
+      ),
+    );
 
     expect(await screen.findByRole('tab', { name: 'Session B' })).toBeDefined();
     await waitFor(() =>
@@ -188,13 +210,290 @@ describe('App', () => {
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
 
-    expect(screen.getByRole('region', { name: 'Mesh board' })).toHaveClass(
-      'project-board-mobile-scroller',
-    );
+    await user.click(screen.getByRole('button', { name: 'Board' }));
+    expect(screen.getByRole('region', { name: 'Mesh board' })).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Sessions' }));
     expect(
       screen.getByRole('main', { name: 'Session workspace' }),
     ).toBeDefined();
+  });
+
+  it('separates plan, board, and sessions workspaces', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    render(<App store={store} api={createApi()} />);
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Plan' }));
+
+    expect(
+      screen.getByRole('region', { name: 'Project planning' }),
+    ).toBeVisible();
+    expect(screen.queryByRole('group', { name: 'Task filters' })).toBeNull();
+    expect(
+      screen.queryByRole('complementary', { name: 'Sessions' }),
+    ).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Board' }));
+    expect(screen.getByRole('group', { name: 'Task filters' })).toBeVisible();
+
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
+    expect(
+      screen.getByRole('complementary', { name: 'Sessions' }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole('main', { name: 'Session workspace' }),
+    ).toBeVisible();
+  });
+
+  it('opens an empty project in Plan and restores its goal and Board filter after project switching', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore({ ...crossProjectSnapshot, sessions: [] });
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockImplementation(async (id: string) => ({
+      protocolVersion: 1 as const,
+      project: id === 'p1' ? project : projectB,
+      tasks: [],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    }));
+    render(<App store={store} api={api} />);
+
+    expect(
+      await screen.findByRole('region', { name: 'Project planning' }),
+    ).toBeVisible();
+    const goal = screen.getByRole('textbox', { name: 'Project goal' });
+    await user.type(goal, 'Keep this draft');
+    expect(goal).toHaveValue('Keep this draft');
+    await user.click(screen.getByRole('button', { name: 'Board' }));
+    expect(goal).toHaveValue('Keep this draft');
+    await user.click(
+      screen.getByRole('button', { name: 'Show completed tasks' }),
+    );
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    expect(goal).toHaveValue('Keep this draft');
+    expect(
+      await screen.findByRole('region', { name: 'Project planning' }),
+    ).toBeVisible();
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Plan' }));
+    expect(screen.getByRole('textbox', { name: 'Project goal' })).toHaveValue(
+      'Keep this draft',
+    );
+    await user.click(screen.getByRole('button', { name: 'Board' }));
+    expect(
+      screen.getByRole('button', { name: 'Show completed tasks' }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('returns from a linked session to its exact task', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(snapshot);
+    const api = createApi();
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [boardTask],
+      attempts: [boardAttempt],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
+    await user.click(
+      within(screen.getByRole('complementary', { name: 'Sessions' })).getByRole(
+        'button',
+        { name: /Session A/ },
+      ),
+    );
+    await user.click(
+      await screen.findByRole('button', { name: 'Open task: Board task' }),
+    );
+    expect(screen.getByRole('dialog', { name: 'Board task' })).toBeVisible();
+    expect(
+      screen.getByRole('button', { name: 'Board', hidden: true }),
+    ).toHaveAttribute('aria-current', 'page');
+  });
+
+  it('reloads a project when Sessions interrupts its initial snapshot', async () => {
+    const user = userEvent.setup();
+    const api = createApi();
+    const pending = deferred<Awaited<ReturnType<typeof api.projectSnapshot>>>();
+    const loaded = {
+      protocolVersion: 1 as const,
+      project,
+      tasks: [boardTask],
+      attempts: [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    };
+    api.projectSnapshot
+      .mockImplementationOnce(() => pending.promise)
+      .mockResolvedValueOnce(loaded);
+    render(<App store={createMeshStore(snapshot)} api={api} />);
+    await waitFor(() => expect(api.projectSnapshot).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
+    await act(async () => pending.resolve(loaded));
+    await user.click(screen.getByRole('button', { name: 'Board' }));
+
+    expect(
+      await screen.findByRole('button', { name: 'Open Board task' }),
+    ).toBeVisible();
+    expect(api.projectSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns from a QA session to its task without linking independent sessions', async () => {
+    const user = userEvent.setup();
+    const qaSession = { ...session, id: 'qa-session', title: 'QA session' };
+    const independentSession = {
+      ...session,
+      id: 'independent-session',
+      title: 'Independent session',
+    };
+    const store = createMeshStore({
+      ...snapshot,
+      sessions: [session, qaSession, independentSession],
+    });
+    const api = createApi();
+    const qaCycle = qaExecutionCycleSchema.parse({
+      id: 'qa-cycle',
+      taskId: boardTask.id,
+      attemptId: boardAttempt.id,
+      sessionId: qaSession.id,
+      ordinal: 1,
+      authorizedBy: { type: 'human', id: 'operator' },
+      authorizationCommandId: 'qa-launch',
+      policyVersion: 'qa-policy-v1',
+      qaInstructions: { content: 'Verify the board.', revision: 1 },
+      taskSnapshot: {
+        revision: 1,
+        title: boardTask.title,
+        description: boardTask.description,
+        acceptanceCriteria: [
+          { id: 'criterion-1', text: 'The board is visible.' },
+        ],
+      },
+      developerCompletionReportId: 'completion-report',
+      workspaceId: workspace.id,
+      reviewPolicy: 'manual',
+      reviewPolicyRevision: 1,
+      automationGeneration: 0,
+      rejectionOrdinal: 0,
+      startedAt: session.createdAt,
+      endedAt: null,
+      terminalDisposition: null,
+      reportId: null,
+      terminalCommandId: null,
+      terminalEventId: null,
+    });
+    api.projectSnapshot.mockResolvedValue({
+      protocolVersion: 1,
+      project,
+      tasks: [boardTask],
+      attempts: [boardAttempt],
+      transitions: [],
+      repairs: [],
+      qaCycles: [qaCycle],
+      cursor: 1,
+    });
+    render(<App store={store} api={api} />);
+    await screen.findByRole('button', { name: 'Open Board task' });
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
+    const sidebar = screen.getByRole('complementary', { name: 'Sessions' });
+    await user.click(
+      within(sidebar).getByRole('button', { name: /QA session/ }),
+    );
+    expect(
+      await screen.findByRole('button', { name: 'Open task: Board task' }),
+    ).toBeVisible();
+    await user.click(
+      within(sidebar).getByRole('button', { name: /Independent session/ }),
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Open task: Board task' }),
+    ).toBeNull();
+  });
+
+  it('keeps the selected task and session message draft through views and projects', async () => {
+    const user = userEvent.setup();
+    const store = createMeshStore(crossProjectSnapshot);
+    store.setConnectionHealth('connected');
+    const api = createApi();
+    api.projectSnapshot.mockImplementation(async (id: string) => ({
+      protocolVersion: 1 as const,
+      project: id === 'p1' ? project : projectB,
+      tasks: id === 'p1' ? [boardTask] : [],
+      attempts: id === 'p1' ? [boardAttempt] : [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    }));
+    render(<App store={store} api={api} />);
+
+    await user.click(
+      await screen.findByRole('button', { name: 'Open Board task' }),
+    );
+    await user.clear(screen.getByRole('textbox', { name: 'Description' }));
+    await user.type(
+      screen.getByRole('textbox', { name: 'Description' }),
+      'Unsaved task draft',
+    );
+    await user.click(screen.getByRole('button', { name: 'Open Session A' }));
+    expect(screen.queryByRole('dialog', { name: 'Board task' })).toBeNull();
+    await user.type(
+      screen.getByRole('textbox', { name: 'Prompt' }),
+      'Keep guidance',
+    );
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    expect(screen.getByRole('textbox', { name: 'Prompt' })).toHaveValue(
+      'Keep guidance',
+    );
+    await user.click(screen.getByRole('button', { name: 'Board' }));
+    expect(screen.getByRole('dialog', { name: 'Board task' })).toBeVisible();
+    expect(screen.getByRole('textbox', { name: 'Description' })).toHaveValue(
+      'Unsaved task draft',
+    );
+  });
+
+  it('does not replay an old session task request after changing projects', async () => {
+    const user = userEvent.setup();
+    const secondTask = taskSchema.parse({
+      ...boardTask,
+      id: 'second-task',
+      title: 'Second task',
+      rank: 'b',
+    });
+    const api = createApi();
+    api.projectSnapshot.mockImplementation(async (id: string) => ({
+      protocolVersion: 1 as const,
+      project: id === 'p1' ? project : projectB,
+      tasks: id === 'p1' ? [boardTask, secondTask] : [],
+      attempts: id === 'p1' ? [boardAttempt] : [],
+      transitions: [],
+      repairs: [],
+      cursor: 1,
+    }));
+    render(<App store={createMeshStore(crossProjectSnapshot)} api={api} />);
+    await screen.findByRole('button', { name: 'Open Board task' });
+    await user.click(screen.getByRole('button', { name: 'Sessions' }));
+    await user.click(
+      await screen.findByRole('button', { name: 'Open task: Board task' }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(screen.getByRole('button', { name: 'Open Second task' }));
+    expect(screen.getByRole('dialog', { name: 'Second task' })).toBeVisible();
+
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    expect(screen.getByRole('dialog', { name: 'Second task' })).toBeVisible();
   });
 
   it('keeps the MeshApi receiver for planning reads', async () => {
@@ -279,11 +578,13 @@ describe('App', () => {
     render(<App store={store} api={api} />);
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Plan' }));
     await user.click(screen.getByRole('button', { name: 'Review proposal' }));
     expect(
       await screen.findByText('No proposal revisions were recorded.'),
     ).toBeVisible();
 
+    expect(await screen.findByText('20 loaded')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Load older plans' }));
     expect(
       await screen.findByRole('button', { name: 'View Plan history 20' }),
@@ -358,6 +659,9 @@ describe('App', () => {
     render(<App store={store} api={api} />);
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(
+      await screen.findByRole('button', { name: 'Start ready tasks' }),
+    );
     await user.click(await screen.findByRole('button', { name: 'Start run' }));
     expect(screen.getByLabelText('Concurrency')).toHaveAttribute('max', '2');
     await user.click(
@@ -408,6 +712,7 @@ describe('App', () => {
     render(<App store={store} api={api} />);
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Project settings' }));
     const instructions = await screen.findByLabelText('Developer instructions');
     await user.clear(instructions);
     await user.type(instructions, 'Run focused web tests.');
@@ -452,6 +757,7 @@ describe('App', () => {
     render(<App store={store} api={api} />);
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Project settings' }));
     const instructions = await screen.findByLabelText('QA instructions');
     await user.clear(instructions);
     await user.type(instructions, 'Run the focused web gate.');
@@ -565,6 +871,7 @@ describe('App', () => {
     render(<App store={store} api={api} />);
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Project settings' }));
     const projectAInstructions = await screen.findByLabelText(
       'Developer instructions',
     );
@@ -575,6 +882,7 @@ describe('App', () => {
     ).toBeDisabled();
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    await user.click(screen.getByRole('button', { name: 'Project settings' }));
     const projectBInstructions = await screen.findByLabelText(
       'Developer instructions',
     );
@@ -625,17 +933,20 @@ describe('App', () => {
     render(<App store={store} api={api} />);
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Project settings' }));
     await user.type(
       await screen.findByLabelText('Developer instructions'),
       'Pending A.',
     );
     await user.click(screen.getByRole('button', { name: 'Save instructions' }));
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p2');
+    await user.click(screen.getByRole('button', { name: 'Project settings' }));
     expect(
       await screen.findByLabelText('Developer instructions'),
     ).toBeEnabled();
 
     await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
+    await user.click(screen.getByRole('button', { name: 'Project settings' }));
     const returnedProjectAInstructions = await screen.findByLabelText(
       'Developer instructions',
     );
@@ -696,9 +1007,8 @@ describe('App', () => {
     expect(
       within(board).getByRole('combobox', { name: 'Move Board task to' }),
     ).toBeDisabled();
-    expect(
-      within(board).getByLabelText('Developer instructions'),
-    ).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Project settings' }));
+    expect(screen.getByLabelText('Developer instructions')).toBeDisabled();
     expect(
       within(board).getByRole('button', { name: 'Restore project' }),
     ).toBeDefined();
@@ -781,7 +1091,6 @@ describe('App', () => {
       .mockImplementationOnce(() => nextProject.promise);
     render(<App store={store} api={api} />);
 
-    await user.selectOptions(screen.getByLabelText('Selected project'), 'p1');
     expect(
       await screen.findByRole('region', { name: 'Mesh board' }),
     ).toBeDefined();
@@ -820,6 +1129,15 @@ describe('App', () => {
     const store = createMeshStore(crossProjectSnapshot);
     const api = createApi();
     api.projectSnapshot
+      .mockResolvedValueOnce({
+        protocolVersion: 1,
+        project,
+        tasks: [],
+        attempts: [],
+        transitions: [],
+        repairs: [],
+        cursor: 1,
+      })
       .mockRejectedValueOnce(new Error('Project snapshot is unavailable'))
       .mockResolvedValueOnce({
         protocolVersion: 1,
@@ -844,7 +1162,7 @@ describe('App', () => {
       await screen.findByRole('region', { name: 'Other board' }),
     ).toBeDefined();
     expect(screen.queryByRole('alert')).toBeNull();
-    expect(api.projectSnapshot).toHaveBeenCalledTimes(2);
+    expect(api.projectSnapshot).toHaveBeenCalledTimes(3);
   });
 });
 

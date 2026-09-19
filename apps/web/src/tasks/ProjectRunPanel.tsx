@@ -452,9 +452,14 @@ export function ProjectRunPanel({
                 onClick={() => control('pause')}
               >
                 {pendingAction?.label === 'pause'
-                  ? 'Pausing run…'
-                  : 'Pause run'}
+                  ? 'Pausing new launches…'
+                  : 'Pause new launches'}
               </button>
+            ) : null}
+            {activeRun.state === 'running' ? (
+              <p className="project-run-pause-effect">
+                Active sessions continue when new launches are paused.
+              </p>
             ) : null}
             {activeRun.state === 'paused' ? (
               <button

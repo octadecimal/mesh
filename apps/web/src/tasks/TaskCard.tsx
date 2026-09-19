@@ -112,7 +112,6 @@ export function TaskCard({
         <span>
           {attempts.length} {attempts.length === 1 ? 'attempt' : 'attempts'}
         </span>
-        <span aria-label={`Manual rank ${task.rank}`}>Rank {task.rank}</span>
       </div>
       {unmetPrerequisiteCount > 0 ? (
         <p className="task-dependency-count">

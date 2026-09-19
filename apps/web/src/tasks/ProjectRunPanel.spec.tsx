@@ -523,7 +523,9 @@ describe('ProjectRunPanel', () => {
     const onCommand = vi.fn().mockResolvedValue(undefined);
     const rendered = renderPanel({ runs: [run()], onCommand });
 
-    await user.click(screen.getByRole('button', { name: 'Pause run' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Pause new launches' }),
+    );
     expect(onCommand).toHaveBeenLastCalledWith({
       type: 'project.run.pause',
       payload: { runId: 'run-1', expectedRevision: 4, actor: operator },
@@ -583,13 +585,17 @@ describe('ProjectRunPanel', () => {
       }),
     });
 
-    await user.click(screen.getByRole('button', { name: 'Pause run' }));
+    await user.click(
+      screen.getByRole('button', { name: 'Pause new launches' }),
+    );
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'Run revision 4 is stale.',
     );
     expect(screen.getByText('Running')).toBeVisible();
-    expect(screen.getByRole('button', { name: 'Pause run' })).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Pause new launches' }),
+    ).toBeEnabled();
   });
 
   it('opens attention evidence and preserves completed history in frozen order', async () => {

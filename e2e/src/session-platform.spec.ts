@@ -50,6 +50,31 @@ const openSessionsView = async (page: Page) => {
     .click();
 };
 
+const openProjectWorkspace = async (
+  page: Page,
+  name: 'Plan' | 'Board' | 'Project settings',
+) => {
+  await page
+    .getByRole('navigation', { name: 'Project destinations' })
+    .getByRole('button', { name, exact: true })
+    .click();
+};
+
+const openPlanView = (page: Page) => openProjectWorkspace(page, 'Plan');
+const openBoardView = (page: Page) => openProjectWorkspace(page, 'Board');
+const openSettingsView = (page: Page) =>
+  openProjectWorkspace(page, 'Project settings');
+
+const openRunPanel = async (page: Page) => {
+  await openBoardView(page);
+  await page
+    .getByRole('button', {
+      name: /^(Start ready tasks|Manage running work|Run details)$/,
+    })
+    .click();
+  return page.getByRole('region', { name: 'Project run', exact: true });
+};
+
 const createThroughUi = async (
   page: Page,
   harness: FakeClaudeHarness,
@@ -151,6 +176,7 @@ const createReadyTask = async (
     acceptanceCriteria: readonly string[];
   },
 ) => {
+  await openBoardView(page);
   await page.getByRole('button', { name: 'Add task' }).click();
   const createDialog = page.getByRole('dialog', { name: 'Create task' });
   await createDialog.getByLabel('Task title').fill(input.title);
@@ -254,6 +280,7 @@ const saveDeveloperInstructions = async (
   harness: FakeClaudeHarness,
   content: string,
 ) => {
+  await openSettingsView(page);
   await page
     .getByRole('textbox', { name: 'Developer instructions' })
     .fill(content);
@@ -276,6 +303,7 @@ const saveQaSettings = async (
     reviewPolicy: 'manual' | 'autonomous_review';
   },
 ) => {
+  await openSettingsView(page);
   const settings = page.getByRole('region', { name: 'QA settings' });
   await settings.getByLabel('QA instructions').fill(input.content);
   await settings.getByLabel('Review policy').selectOption(input.reviewPolicy);
@@ -451,6 +479,7 @@ const startProjectPlanning = async (
   goal: string,
   expectedRuntimeCount = 1,
 ) => {
+  await openPlanView(page);
   const panel = page.getByRole('region', { name: 'Project planning' });
   await panel.getByLabel('Project goal').fill(goal);
   await panel
@@ -464,6 +493,7 @@ const startProjectPlanning = async (
 };
 
 const reviewCurrentProposal = async (page: Page) => {
+  await openPlanView(page);
   const panel = page.getByRole('region', { name: 'Project planning' });
   const review = panel.getByRole('button', { name: 'Review proposal' });
   await expect(review).toBeVisible();
@@ -498,12 +528,11 @@ test('keeps the empty cockpit usable at a narrow viewport', async ({
     `,
   });
 
-  await expect(page.getByRole('button', { name: 'New session' })).toBeVisible();
   await expect(
-    page.getByRole('heading', { name: 'Start a Claude session' }),
+    page.getByRole('heading', { name: 'What would you like to build?' }),
   ).toBeVisible();
   await expect(
-    page.getByRole('button', { name: 'Create your first session' }),
+    page.getByRole('button', { name: 'Start planning' }),
   ).toBeVisible();
   if (visualSnapshotsSupported) {
     await expect(page).toHaveScreenshot('empty-cockpit-narrow.png', {
@@ -546,101 +575,74 @@ test('creates a local Git project through the onboarding form', async ({
   ).toBeVisible();
 });
 
-test('gives the project kanban the remaining board height', async ({
+test('separates the compact project workspaces at desktop and narrow widths', async ({
   page,
   harness,
 }) => {
-  await page.setViewportSize({ width: 1600, height: 900 });
+  await page.setViewportSize({ width: 1440, height: 900 });
   await ensureImportedProject(harness, 'repository');
   await harness.snapshot();
   await page.goto(harness.origin);
-  await page.getByRole('button', { name: 'Board' }).click();
+  await openPlanView(page);
+  await expect(
+    page.getByRole('region', { name: 'Project planning' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'What would you like to build?' }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await expect(
+    page.getByRole('region', { name: 'Backlog tasks' }),
+  ).toBeHidden();
 
-  const instructions = page.getByRole('region', {
-    name: 'Developer instructions editor',
-  });
-  const columns = page.locator('.task-board-columns');
-  await expect(instructions).toBeVisible();
-  await expect(columns).toBeVisible();
-
-  const layout = await page.evaluate(() => ({
-    instructionsHeight: document
-      .querySelector('.developer-instructions')!
-      .getBoundingClientRect().height,
-    columnsHeight: document
-      .querySelector('.task-board-columns')!
-      .getBoundingClientRect().height,
-    columnsBottom: document
-      .querySelector('.task-board-columns')!
-      .getBoundingClientRect().bottom,
-    viewportHeight: window.innerHeight,
-  }));
-  expect(layout.columnsHeight).toBeGreaterThan(layout.instructionsHeight);
-  const bottomGap = layout.viewportHeight - layout.columnsBottom;
-  expect(bottomGap).toBeGreaterThanOrEqual(0);
-  expect(bottomGap).toBeLessThanOrEqual(20);
-});
-
-test('gives every mobile project board section an explicit row without nested planning overflow', async ({
-  page,
-  harness,
-}) => {
-  await page.setViewportSize({ width: 700, height: 900 });
-  await ensureImportedProject(harness, 'repository');
-  await harness.snapshot();
-  await page.goto(harness.origin);
-  await page.getByRole('button', { name: 'Board' }).click();
-
-  const planning = page.getByRole('region', { name: 'Project planning' });
-  const taskBoard = page.locator('.task-board');
-  await expect(planning).toBeVisible();
-  await expect(taskBoard).toBeAttached();
-
-  const layout = await page.evaluate(() => {
-    const boundary = document.querySelector('.project-board-boundary');
-    const planningPanel = document.querySelector('.project-planning-panel');
-    const runPanel = document.querySelector('.project-run-panel');
-    const board = document.querySelector('.task-board');
-    if (!boundary || !planningPanel || !runPanel || !board) {
-      throw new Error('Expected all mobile project board sections');
-    }
-    const flattenRules = (rules: CSSRuleList): CSSRule[] =>
-      [...rules].flatMap((rule) =>
-        'cssRules' in rule && rule.cssRules instanceof CSSRuleList
-          ? [rule, ...flattenRules(rule.cssRules)]
-          : [rule],
-      );
-    const boundaryRule = [...document.styleSheets]
-      .flatMap((sheet) => flattenRules(sheet.cssRules))
-      .filter(
-        (rule): rule is CSSStyleRule =>
-          rule instanceof CSSStyleRule &&
-          rule.selectorText === '.project-board-boundary' &&
-          Boolean(rule.style.gridTemplateRows),
-      )
-      .at(-1);
-    if (!boundaryRule) {
-      throw new Error('Expected the mobile project board grid rule');
-    }
-    const rows =
-      boundaryRule.style.gridTemplateRows.match(/auto|minmax\([^)]*\)/g) ?? [];
+  await openBoardView(page);
+  await expect(
+    page.getByRole('region', { name: 'Backlog tasks' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('region', { name: 'Project planning' }),
+  ).toBeHidden();
+  await expect(page.getByRole('region', { name: 'Project run' })).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Run details' })).toBeVisible();
+  const desktopBoard = await page.evaluate(() => {
+    const toolbar = document.querySelector('.task-board-toolbar');
+    const columns = document.querySelector('.task-board-columns');
+    if (!toolbar || !columns)
+      throw new Error('Expected board toolbar and columns');
     return {
-      directChildCount: boundary.children.length,
-      explicitRowCount: rows.length,
-      planningClientHeight: planningPanel.clientHeight,
-      planningScrollHeight: planningPanel.scrollHeight,
-      planningOverflow: getComputedStyle(planningPanel).overflow,
-      planningBottom: planningPanel.getBoundingClientRect().bottom,
-      runTop: runPanel.getBoundingClientRect().top,
-      runBottom: runPanel.getBoundingClientRect().bottom,
-      boardTop: board.getBoundingClientRect().top,
+      gap:
+        columns.getBoundingClientRect().top -
+        toolbar.getBoundingClientRect().bottom,
+      overflows: document.documentElement.scrollWidth > window.innerWidth,
     };
   });
-  expect(layout.explicitRowCount).toBe(layout.directChildCount);
-  expect(layout.planningOverflow).toBe('visible');
-  expect(layout.planningClientHeight).toBe(layout.planningScrollHeight);
-  expect(layout.runTop).toBeGreaterThanOrEqual(layout.planningBottom);
-  expect(layout.boardTop).toBeGreaterThanOrEqual(layout.runBottom);
+  expect(desktopBoard.gap).toBeLessThan(80);
+  expect(desktopBoard.overflows).toBe(false);
+
+  await page.setViewportSize({ width: 700, height: 900 });
+  await expect(
+    page.getByRole('region', { name: 'Backlog tasks' }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+
+  await openSessionsView(page);
+  await expect(
+    page.getByRole('complementary', { name: 'Sessions' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('main', { name: 'Session workspace' }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('region', { name: 'Backlog tasks' }),
+  ).toBeHidden();
 });
 
 test('creates shared and worktree sessions with the production-built server', async ({
@@ -679,7 +681,7 @@ test('creates shared and worktree sessions with the production-built server', as
     .first();
   await expect(newSessionButton).toHaveCSS(
     'background-color',
-    'rgb(37, 99, 235)',
+    'rgb(193, 205, 253)',
   );
   await newSessionButton.click();
   const newSessionDialog = page.getByRole('dialog', { name: 'New session' });
@@ -1045,7 +1047,10 @@ test('persists interactive approval across browser reconnect while backend conti
   const reconnected = await browser.newPage();
   await reconnected.goto(harness.origin);
   await openSessionsView(reconnected);
-  await reconnected.getByRole('button', { name: /Approval session/ }).click();
+  await reconnected
+    .getByRole('complementary', { name: 'Sessions' })
+    .getByRole('button', { name: /Approval session/ })
+    .click();
   await expect(reconnected.getByLabel('Permission Write')).toContainText(
     'Status: pending',
   );
@@ -1053,7 +1058,10 @@ test('persists interactive approval across browser reconnect while backend conti
   await expect.poll(() => driverSession.permissionDecisions.length).toBe(1);
   await reconnected.reload();
   await openSessionsView(reconnected);
-  await reconnected.getByRole('button', { name: /Approval session/ }).click();
+  await reconnected
+    .getByRole('complementary', { name: 'Sessions' })
+    .getByRole('button', { name: /Approval session/ })
+    .click();
   await expect(reconnected.getByLabel('Permission Write')).toContainText(
     'Status: approved',
   );
@@ -1067,8 +1075,9 @@ test('discovers and resumes a Claude session and records restart interruption tr
   const originalId = await createThroughApi(harness, 'Discovery seed');
   expect((await harness.discovery()).status).toBe(200);
   await page.goto(harness.origin);
+  await openSessionsView(page);
   await page.getByRole('button', { name: 'Resume session' }).click();
-  await page.getByLabel(/Discovered Claude session/).check();
+  await page.getByRole('radio', { name: 'Discovered Claude session' }).check();
   await page.getByLabel('Resume permission mode').selectOption('safe_auto');
   await page
     .getByRole('button', { name: 'Resume session', exact: true })
@@ -1696,8 +1705,9 @@ test('imports a project and preserves an attempted task across refresh', async (
   await taskDialog.getByRole('button', { name: `Open ${title}` }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeVisible();
   await expect(page.getByText('Live after task launch')).toBeVisible();
-  await page.getByRole('button', { name: 'Board' }).click();
-  await page.getByRole('button', { name: `Open ${title}` }).click();
+  await page
+    .getByRole('button', { name: `Open task: ${title}`, exact: true })
+    .click();
 
   const refreshedTaskDialog = page.getByRole('dialog', { name: title });
   await refreshedTaskDialog
@@ -1856,10 +1866,7 @@ test('finite project run preserves bounded progress and durable history', async 
     hold: true,
   });
 
-  const runPanel = page.getByRole('region', {
-    name: 'Project run',
-    exact: true,
-  });
+  const runPanel = await openRunPanel(page);
   await runPanel.getByRole('button', { name: 'Start run' }).click();
   const preview = runPanel.getByRole('list', { name: 'Eligible run order' });
   await expect(preview.getByRole('listitem')).toHaveCount(taskTitles.length);
@@ -1889,7 +1896,7 @@ test('finite project run preserves bounded progress and durable history', async 
     taskTitles,
   );
 
-  await runPanel.getByRole('button', { name: 'Pause run' }).click();
+  await runPanel.getByRole('button', { name: 'Pause new launches' }).click();
   const paused = await waitForProjectSnapshot(
     harness,
     projectId,
@@ -1943,10 +1950,7 @@ test('finite project run preserves bounded progress and durable history', async 
 
   await page.reload();
   await page.getByRole('button', { name: 'Board' }).click();
-  const refreshedRunPanel = page.getByRole('region', {
-    name: 'Project run',
-    exact: true,
-  });
+  const refreshedRunPanel = await openRunPanel(page);
   await expect(refreshedRunPanel).toContainText('Paused');
   await expect(refreshedRunPanel).toContainText('1 of 2 occupied');
   const afterRefresh = await readProjectSnapshot(harness, projectId);
@@ -2011,10 +2015,7 @@ test('finite project run preserves bounded progress and durable history', async 
     beforeRestart.developerCycles.length,
   );
   expect(afterRestart.qaReports).toHaveLength(beforeRestart.qaReports.length);
-  const restartedRunPanel = page.getByRole('region', {
-    name: 'Project run',
-    exact: true,
-  });
+  const restartedRunPanel = await openRunPanel(page);
   await expect(restartedRunPanel).toContainText('0 of 2 occupied');
 
   await restartedRunPanel.getByRole('button', { name: 'Resume run' }).click();
@@ -2151,6 +2152,7 @@ test('plans and approves dependency-aware work with fake pm planning', async ({
 }) => {
   await importTemporaryRepository(page, harness, 'Dependency planning');
   const projectId = await page.getByLabel('Selected project').inputValue();
+  await openPlanView(page);
   const planning = page.getByRole('region', { name: 'Project planning' });
   await expect(planning).toContainText(
     'The PM can read this repository but cannot edit files, change tasks, approve plans, or launch work.',
@@ -2327,10 +2329,7 @@ test('plans and approves dependency-aware work with fake pm planning', async ({
   ).toContainText('ready');
   await featureDialog.getByRole('button', { name: 'Close' }).click();
 
-  const runPanel = page.getByRole('region', {
-    name: 'Project run',
-    exact: true,
-  });
+  const runPanel = await openRunPanel(page);
   await runPanel.getByRole('button', { name: 'Start run' }).click();
   const preview = runPanel.getByRole('list', { name: 'Eligible run order' });
   await expect(preview.getByRole('listitem')).toHaveCount(1);
@@ -2353,6 +2352,7 @@ test('pm planning rejects stale approval without proposal rows', async ({
     'The stale-test proposal did not become reviewable',
   );
 
+  await openBoardView(page);
   const addTask = page.getByRole('button', { name: 'Add task' });
   await addTask.focus();
   await addTask.press('Enter');
@@ -2411,7 +2411,7 @@ test('pm planning awaiting review survives restart without a live pm', async ({
 
   await harness.restart({ recoverSessionId: sessionId });
   await page.goto(harness.origin);
-  await page.getByRole('button', { name: 'Board' }).click();
+  await openPlanView(page);
   const afterRestart = await readProjectSnapshot(harness, projectId);
   expect(afterRestart.activePlan).toMatchObject({
     id: beforeRestart.activePlan?.id,
@@ -2442,7 +2442,7 @@ test('pm planning marks a formerly live runtime for attention', async ({
 
   await harness.restart({ recoverSessionId: sessionId });
   await page.goto(harness.origin);
-  await page.getByRole('button', { name: 'Board' }).click();
+  await openPlanView(page);
   const recovered = await readProjectSnapshot(harness, projectId);
   expect(recovered.activePlan).toMatchObject({
     id: planning.activePlan?.id,

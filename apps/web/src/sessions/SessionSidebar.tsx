@@ -49,17 +49,6 @@ export function SessionSidebar({
     session.title.toLocaleLowerCase().includes(filter.toLocaleLowerCase());
   return (
     <aside className="session-sidebar" aria-label="Sessions">
-      <header className="sidebar-brand">
-        <div>
-          <span className="brand-mark" aria-hidden="true">
-            M
-          </span>
-          <div>
-            <h1>Mesh</h1>
-            <p>Session cockpit</p>
-          </div>
-        </div>
-      </header>
       <div className="sidebar-actions">
         <button className="button button-primary" onClick={onNewSession}>
           New session
