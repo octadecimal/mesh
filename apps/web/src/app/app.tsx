@@ -731,6 +731,8 @@ function ConnectedApp({
             streamingAssistantTextBySession={
               projection.streamingAssistantTextBySession
             }
+            lastLiveActivityAtBySession={projection.lastLiveActivityAtBySession}
+            connectionHealth={projection.connectionHealth}
             onPromptDraftChange={store.setPromptDraft}
             onNewSession={() => {
               setFlowError(undefined);

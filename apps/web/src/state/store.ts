@@ -85,6 +85,10 @@ export const createMeshStore = (snapshot: SessionSnapshot) => {
         [sessionId]:
           (current.streamingAssistantTextBySession[sessionId] ?? '') + text,
       });
+      state.lastLiveActivityAtBySession.set({
+        ...current.lastLiveActivityAtBySession,
+        [sessionId]: new Date().toISOString(),
+      });
     },
   };
 };

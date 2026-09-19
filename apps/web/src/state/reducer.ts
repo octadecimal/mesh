@@ -71,6 +71,7 @@ export type MeshProjection = {
   filters: Record<string, string>;
   promptDrafts: Record<string, string>;
   streamingAssistantTextBySession: Record<string, string>;
+  lastLiveActivityAtBySession: Record<string, string>;
   unreadSessionIds: Record<string, boolean>;
   connectionHealth: ConnectionHealth;
   notifications: Notification[];
@@ -154,6 +155,7 @@ export const createProjection = (
   filters: {},
   promptDrafts: {},
   streamingAssistantTextBySession: {},
+  lastLiveActivityAtBySession: {},
   unreadSessionIds: {},
   connectionHealth: 'disconnected',
   notifications: [],
@@ -186,6 +188,10 @@ export const applyEvent = (
       ...state,
       events,
       streamingAssistantTextBySession,
+      lastLiveActivityAtBySession: {
+        ...state.lastLiveActivityAtBySession,
+        [event.sessionId]: new Date().toISOString(),
+      },
       sessions: sessionsAfter(state.sessions, event),
       pendingApprovals: pendingApprovals(events),
       lastSequenceBySession: {
@@ -255,6 +261,7 @@ export const replaceSnapshot = (
     selectedSessionId: state.selectedSessionId,
     filters: state.filters,
     promptDrafts: state.promptDrafts,
+    lastLiveActivityAtBySession: state.lastLiveActivityAtBySession,
     unreadSessionIds: state.unreadSessionIds,
     connectionHealth: state.connectionHealth,
     notifications: state.notifications,

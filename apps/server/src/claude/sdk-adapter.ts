@@ -16,6 +16,7 @@ import {
 import {
   developerBlockerReportInputSchema,
   developerCompletionReportInputSchema,
+  idSchema,
   projectPlanProposalInputSchema,
 } from '@mesh-session-platform/contracts';
 import { z } from 'zod';
@@ -98,6 +99,11 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === 'object' && value !== null
     ? (value as Record<string, unknown>)
     : undefined;
+
+const validToolCallId = (value: string) => {
+  const parsed = idSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+};
 
 const safeDeveloperControlErrorCodes = new Set([
   'invalid_input',
@@ -434,6 +440,11 @@ const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
         kind: 'started',
         sessionId: message.session_id,
         apiKeySource: message.apiKeySource,
+        model: message.model,
+        claudeCodeVersion: message.claude_code_version,
+        cwd: message.cwd,
+        tools: message.tools,
+        sourceEventId: message.uuid,
       },
     ];
   }
@@ -509,6 +520,201 @@ const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
       : [];
   }
 
+  if (message.type === 'tool_progress')
+    return [
+      {
+        kind: 'activity',
+        sourceEventId: message.uuid,
+        activity: {
+          kind: 'tool_progress',
+          summary: `${message.tool_name} is running`,
+          ...(validToolCallId(message.tool_use_id)
+            ? { toolCallId: validToolCallId(message.tool_use_id) }
+            : {}),
+          elapsedSeconds: message.elapsed_time_seconds,
+          details: message.subagent_retry
+            ? { retry: message.subagent_retry }
+            : undefined,
+        },
+      },
+    ];
+
+  if (message.type === 'system') {
+    switch (message.subtype) {
+      case 'status':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'status',
+              summary: message.status ?? 'Claude status cleared',
+              details: {
+                ...(message.permissionMode
+                  ? { permissionMode: message.permissionMode }
+                  : {}),
+                ...(message.compact_result
+                  ? { compactResult: message.compact_result }
+                  : {}),
+                ...(message.compact_error
+                  ? { compactError: message.compact_error }
+                  : {}),
+              },
+            },
+          },
+        ];
+      case 'api_retry':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'retry',
+              summary: `API retry ${message.attempt} of ${message.max_retries}`,
+              details: {
+                retryDelayMs: message.retry_delay_ms,
+                errorStatus: message.error_status,
+                error: message.error,
+              },
+            },
+          },
+        ];
+      case 'compact_boundary':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'compaction',
+              summary: `Context compaction (${message.compact_metadata.trigger})`,
+              details: {
+                preTokens: message.compact_metadata.pre_tokens,
+                ...(message.compact_metadata.post_tokens === undefined
+                  ? {}
+                  : { postTokens: message.compact_metadata.post_tokens }),
+                ...(message.compact_metadata.duration_ms === undefined
+                  ? {}
+                  : { durationMs: message.compact_metadata.duration_ms }),
+              },
+            },
+          },
+        ];
+      case 'hook_started':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'hook',
+              summary: `${message.hook_name} started`,
+              details: {
+                hookId: message.hook_id,
+                hookEvent: message.hook_event,
+              },
+            },
+          },
+        ];
+      case 'hook_progress':
+      case 'hook_response':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'hook',
+              summary: `${message.hook_name} ${message.subtype === 'hook_progress' ? 'running' : message.outcome}`,
+              details: {
+                hookId: message.hook_id,
+                hookEvent: message.hook_event,
+                stdout: message.stdout,
+                stderr: message.stderr,
+                output: message.output,
+                ...(message.subtype === 'hook_response' &&
+                message.exit_code !== undefined
+                  ? { exitCode: message.exit_code }
+                  : {}),
+              },
+            },
+          },
+        ];
+      case 'task_started':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'subagent',
+              summary: message.description,
+              ...(message.tool_use_id && validToolCallId(message.tool_use_id)
+                ? { toolCallId: validToolCallId(message.tool_use_id) }
+                : {}),
+              details: {
+                taskId: message.task_id,
+                ...(message.subagent_type
+                  ? { subagentType: message.subagent_type }
+                  : {}),
+                ...(message.task_type ? { taskType: message.task_type } : {}),
+              },
+            },
+          },
+        ];
+      case 'task_progress':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'subagent',
+              summary: message.summary ?? message.description,
+              ...(message.tool_use_id && validToolCallId(message.tool_use_id)
+                ? { toolCallId: validToolCallId(message.tool_use_id) }
+                : {}),
+              details: {
+                taskId: message.task_id,
+                usage: message.usage,
+                ...(message.last_tool_name
+                  ? { lastToolName: message.last_tool_name }
+                  : {}),
+              },
+            },
+          },
+        ];
+      case 'task_updated':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'subagent',
+              summary: `Task ${message.task_id} updated`,
+              details: { taskId: message.task_id, ...message.patch },
+            },
+          },
+        ];
+      case 'task_notification':
+        return [
+          {
+            kind: 'activity',
+            sourceEventId: message.uuid,
+            activity: {
+              kind: 'subagent',
+              summary: message.summary,
+              ...(message.tool_use_id && validToolCallId(message.tool_use_id)
+                ? { toolCallId: validToolCallId(message.tool_use_id) }
+                : {}),
+              details: {
+                taskId: message.task_id,
+                status: message.status,
+                ...(message.usage ? { usage: message.usage } : {}),
+              },
+            },
+          },
+        ];
+      default:
+        return [];
+    }
+  }
+
   if (message.type === 'rate_limit_event') {
     const info = message.rate_limit_info;
     if (info.status === 'allowed') return [];
@@ -527,12 +733,49 @@ const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
   }
 
   if (message.type === 'result') {
-    if (message.subtype === 'success') return [{ kind: 'completed' }];
+    const perModel = Object.entries(message.modelUsage).map(
+      ([model, usage]) => ({
+        kind: 'usage' as const,
+        sourceEventId: `${message.uuid}-${model}`,
+        usage: {
+          scope: 'query' as const,
+          model,
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadInputTokens,
+          cacheCreationTokens: usage.cacheCreationInputTokens,
+          contextWindow: usage.contextWindow,
+        },
+      }),
+    );
+    const usage = message.usage;
+    const reportedUsage = [
+      {
+        kind: 'usage' as const,
+        sourceEventId: `${message.uuid}-turn`,
+        usage: {
+          scope: 'turn' as const,
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          ...(usage.cache_read_input_tokens === null
+            ? {}
+            : { cacheReadTokens: usage.cache_read_input_tokens }),
+          ...(usage.cache_creation_input_tokens === null
+            ? {}
+            : { cacheCreationTokens: usage.cache_creation_input_tokens }),
+          durationMs: message.duration_ms,
+        },
+      },
+      ...perModel,
+    ];
+    if (message.subtype === 'success')
+      return [...reportedUsage, { kind: 'completed' }];
     if (
       message.subtype === 'error_max_turns' ||
       message.subtype === 'error_max_budget_usd'
     ) {
       return [
+        ...reportedUsage,
         {
           kind: 'limit',
           capability: message.subtype,
@@ -542,6 +785,7 @@ const messageEvents = (message: SDKMessage): SdkStreamEvent[] => {
       ];
     }
     return [
+      ...reportedUsage,
       {
         kind: 'error',
         code: message.subtype,
@@ -639,6 +883,7 @@ export const createClaudeSdkFacade = (): SdkFacade => ({
         resume: options.resume,
         sessionId: options.resume ? undefined : sessionId,
         includePartialMessages: true,
+        includeHookEvents: true,
         permissionMode: 'default',
         ...(options.role
           ? {

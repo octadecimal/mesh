@@ -63,6 +63,27 @@ describe('normalizeDriverEvent', () => {
     });
   });
 
+  it('normalizes validated activity and usage while quarantining invalid metrics', () => {
+    expect(
+      normalizeDriverEvent({
+        kind: 'activity',
+        sourceEventId: 'sdk-progress',
+        activity: {
+          kind: 'tool_progress',
+          summary: 'Read is running',
+          elapsedSeconds: 1,
+        },
+      }),
+    ).toMatchObject({ kind: 'event', event: { type: 'session.activity' } });
+    expect(
+      normalizeDriverEvent({
+        kind: 'usage',
+        sourceEventId: 'sdk-result',
+        usage: { inputTokens: -1 },
+      }),
+    ).toMatchObject({ kind: 'unsupported', error: { capability: 'usage' } });
+  });
+
   it('quarantines status events outside the lifecycle contract', () => {
     expect(
       normalizeDriverEvent({

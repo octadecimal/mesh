@@ -50,6 +50,30 @@ The session header shows its title, status, and permission mode. Open **Details*
 for the workspace path, type, branch, and **Raw diagnostics**. Details opens beside
 the conversation in wide panels and below it in narrow panels.
 
+The transcript uses the **Verbose timeline** by default. This preference is stored
+in the browser and changes only the presentation: Mesh continues to capture the
+same durable session history in compact view. Verbose mode adds timestamps,
+received text, lifecycle and recognized Claude activity, tool input and final
+result, plus the latest reported model, usage, duration, and last activity. Compact
+mode keeps messages, summaries, errors, and permission requests visible.
+
+Reported turn usage covers only the current main-loop turn, not the whole
+session. Query usage is cumulative per model for the current Claude Query;
+the provider's counters reset on session start, resume, or clear. The timeline
+displays the latest report for each scope and model.
+
+While a session is live, the timeline follows new events until you scroll away.
+Use **Jump to latest** to resume following. Refreshing or reconnecting replays
+durable messages, tool calls and results, permissions, errors, activity, and
+reported usage; transient streamed text is shown live and is replaced by its one
+durable completed message when it arrives.
+
+Claude's installed SDK reports supported tool progress and final structured tool
+results. It does not provide arbitrary subprocess stdout or stderr as an
+incremental stream, so Mesh does not label final output as live output or invent
+missing progress. Where a normalized event has details, verbose timeline rows
+use native expandable details. **Raw diagnostics** remains a separate lazy view.
+
 The prompt composer stays below the scrolling transcript. **Interrupt session**
 is available beside it while the session can be interrupted, including while
 waiting for approval. Permission requests and errors remain in the transcript.

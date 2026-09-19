@@ -1,8 +1,9 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 import { useHookstate } from '@hookstate/core';
 import type { SessionEvent } from '@mesh-session-platform/contracts';
+import { afterEach, vi } from 'vitest';
 
 import { SessionPanel } from './SessionPanel';
 import { createMeshStore } from '../state/store';
@@ -51,6 +52,36 @@ const events: SessionEvent[] = [
 ];
 
 describe('SessionPanel', () => {
+  afterEach(() => vi.useRealTimers());
+  it('defaults to a verbose timestamped timeline and remembers compact mode', async () => {
+    const user = userEvent.setup();
+    localStorage.removeItem('mesh.verboseTimeline');
+    const view = render(
+      <SessionPanel session={session} workspace={workspace} events={events} />,
+    );
+
+    expect(
+      screen.getByRole('checkbox', { name: 'Verbose timeline' }),
+    ).toBeChecked();
+    expect(screen.getAllByText(/^\d{2}:\d{2}:\d{2}$/).length).toBeGreaterThan(
+      0,
+    );
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Verbose timeline' }),
+    );
+    expect(localStorage.getItem('mesh.verboseTimeline')).toBe('false');
+
+    view.unmount();
+    render(
+      <SessionPanel session={session} workspace={workspace} events={events} />,
+    );
+    expect(
+      screen.getByRole('checkbox', { name: 'Verbose timeline' }),
+    ).not.toBeChecked();
+    expect(screen.getByText('Assistant reply')).toBeVisible();
+    localStorage.removeItem('mesh.verboseTimeline');
+  });
+
   it('renders normalized content, lazily loads diagnostics, and confirms deletion', async () => {
     const user = userEvent.setup();
     const diagnosticRequests: string[] = [];
@@ -236,6 +267,96 @@ describe('SessionPanel', () => {
     expect(screen.getAllByText('Response in progress')).toHaveLength(1);
   });
 
+  it('keeps a prompt-started elapsed clock while streamed text receipts update activity', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:05.000Z'));
+    render(
+      <SessionPanel
+        session={session}
+        connectionHealth="connected"
+        lastLiveActivityAt="2026-08-24T00:00:05.000Z"
+        streamingAssistantText="still receiving"
+        events={[
+          {
+            protocolVersion: 1,
+            id: 'prompt-1',
+            sessionId: 's1',
+            sequence: 1,
+            occurredAt: '2026-08-24T00:00:00.000Z',
+            type: 'message.user',
+            payload: { text: 'work' },
+          },
+          usageEvent('init-model', 2, { model: 'claude-opus' }),
+        ]}
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Receiving Claude response',
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('5s elapsed');
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Last activity just now',
+    );
+    expect(screen.queryByText('Ready for prompt')).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(2000));
+    expect(screen.getByRole('status')).toHaveTextContent('7s elapsed');
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Last activity 2s ago',
+    );
+  });
+
+  it('keeps completed and failed state over stale transport status', () => {
+    const view = render(
+      <SessionPanel
+        session={{ ...session, lifecycleState: 'completed' }}
+        events={events}
+        connectionHealth="connected"
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('Session completed');
+    view.rerender(
+      <SessionPanel
+        session={{ ...session, lifecycleState: 'failed' }}
+        events={events}
+        connectionHealth="disconnected"
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Connection unavailable',
+    );
+    expect(screen.queryByText('Waiting for response')).not.toBeInTheDocument();
+  });
+
+  it('keeps normalized event details closed until requested and pairs tool events', async () => {
+    const user = userEvent.setup();
+    const paired = [
+      toolRequested('e3', 'call-a', 'Read', { path: 'a.ts' }),
+      toolCompleted('e4', 'call-a', { content: 'done' }, false),
+      {
+        protocolVersion: 1 as const,
+        id: 'e5',
+        sessionId: 's1',
+        sequence: 5,
+        occurredAt: '2026-08-24T00:00:00.000Z',
+        type: 'message.assistant' as const,
+        payload: { text: 'done' },
+      },
+    ];
+    render(<SessionPanel session={session} events={paired} />);
+
+    const tool = screen.getByLabelText('Tool call Read');
+    const toolDetails = tool.querySelector('details');
+    expect(toolDetails).not.toHaveAttribute('open');
+    await user.click(toolDetails?.querySelector('summary') as HTMLElement);
+    expect(tool).toHaveTextContent('tool.requested');
+    expect(tool).toHaveTextContent('tool.completed');
+    const assistant = screen.getByLabelText('Assistant message');
+    await user.click(assistant.querySelector('summary') as HTMLElement);
+    expect(assistant).toHaveTextContent('message.assistant');
+    expect(assistant).toHaveTextContent('e5');
+  });
+
   it('loads diagnostics one cursor page at a time only after opening and appends the next page', async () => {
     const user = userEvent.setup();
     const requests: Array<[string, unknown]> = [];
@@ -354,6 +475,169 @@ describe('SessionPanel', () => {
     ).toBeDisabled();
   });
 
+  it('renders reported activity and per-turn usage without inventing metrics', () => {
+    render(
+      <SessionPanel
+        session={session}
+        events={[
+          {
+            protocolVersion: 1,
+            id: 'e-activity',
+            sessionId: 's1',
+            sequence: 1,
+            occurredAt: '2026-08-24T00:00:00.000Z',
+            type: 'session.activity',
+            payload: {
+              kind: 'tool_progress',
+              summary: 'Searching source',
+              toolCallId: 'call-a',
+              elapsedSeconds: 2,
+              details: { path: 'apps/web' },
+            },
+          },
+          {
+            protocolVersion: 1,
+            id: 'e-usage',
+            sessionId: 's1',
+            sequence: 2,
+            occurredAt: '2026-08-24T00:00:02.000Z',
+            type: 'session.usage',
+            payload: { model: 'Claude Sonnet', inputTokens: 123 },
+          },
+        ]}
+        connectionHealth="connected"
+      />,
+    );
+
+    expect(screen.getByText('Searching source')).toBeVisible();
+    expect(screen.getByText('Claude Sonnet · input 123')).toBeVisible();
+    expect(screen.queryByText(/context used/i)).not.toBeInTheDocument();
+  });
+
+  it('stops claiming a live response after terminal or disconnected state', () => {
+    const view = render(
+      <SessionPanel
+        session={{ ...session, lifecycleState: 'completed' }}
+        events={events}
+        streamingAssistantText="stale text"
+        connectionHealth="connected"
+      />,
+    );
+
+    expect(screen.getByRole('status')).toHaveTextContent('Session completed');
+    expect(
+      screen.queryByLabelText('Streaming assistant message'),
+    ).not.toBeInTheDocument();
+
+    view.rerender(
+      <SessionPanel
+        session={session}
+        events={events}
+        streamingAssistantText="stale text"
+        connectionHealth="disconnected"
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Connection unavailable',
+    );
+    expect(
+      screen.queryByLabelText('Streaming assistant message'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('prioritizes approval and a newer prompt over old usage, and labels pending tools honestly', () => {
+    const pending = toolRequested('e3', 'call-a', 'Read', { path: 'a.ts' });
+    const view = render(
+      <SessionPanel
+        session={{ ...session, lifecycleState: 'waiting_for_approval' }}
+        events={[pending, events[1]]}
+        connectionHealth="connected"
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Waiting for approval',
+    );
+
+    view.rerender(
+      <SessionPanel
+        session={session}
+        events={[pending]}
+        connectionHealth="disconnected"
+      />,
+    );
+    expect(screen.getByLabelText('Tool request Read')).toHaveTextContent(
+      'Last known running',
+    );
+
+    view.rerender(
+      <SessionPanel
+        session={session}
+        connectionHealth="connected"
+        events={[
+          {
+            protocolVersion: 1,
+            id: 'e-usage-turn',
+            sessionId: 's1',
+            sequence: 1,
+            occurredAt: '2026-08-24T00:00:00.000Z',
+            type: 'session.usage',
+            payload: { scope: 'turn', durationMs: 100 },
+          },
+          {
+            protocolVersion: 1,
+            id: 'e-new-prompt',
+            sessionId: 's1',
+            sequence: 2,
+            occurredAt: '2026-08-24T00:00:01.000Z',
+            type: 'message.user',
+            payload: { text: 'again' },
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Waiting for response',
+    );
+  });
+
+  it('keeps the latest usage for each scope and model without merging records', () => {
+    render(
+      <SessionPanel
+        session={session}
+        connectionHealth="connected"
+        events={[
+          usageEvent('u1', 1, { scope: 'query', model: 'A', inputTokens: 1 }),
+          usageEvent('u2', 2, { scope: 'query', model: 'A', inputTokens: 2 }),
+          usageEvent('u3', 3, {
+            scope: 'query',
+            model: 'B',
+            cacheReadTokens: 3,
+          }),
+          usageEvent('u4', 4, { scope: 'turn', model: 'A', outputTokens: 4 }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText('A · input 1')).not.toBeInTheDocument();
+    expect(screen.getByText('A · input 2')).toBeVisible();
+    expect(screen.getByText('B · cache read 3')).toBeVisible();
+    expect(screen.getByText('A · output 4')).toBeVisible();
+  });
+
+  it('renders undefined tool output safely and keeps error output in compact mode', async () => {
+    const user = userEvent.setup();
+    render(
+      <SessionPanel
+        session={session}
+        events={[toolCompleted('e9', 'orphan', undefined, true)]}
+      />,
+    );
+    expect(screen.getByText('No output reported')).toBeVisible();
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Verbose timeline' }),
+    );
+    expect(screen.getByText('No output reported')).toBeVisible();
+  });
+
   it('pairs interleaved tool results with their matching requests and shows policy mode while deciding permissions', async () => {
     const user = userEvent.setup();
     let resolveCommand: (() => void) | undefined;
@@ -437,6 +721,19 @@ const toolCompleted = (
   occurredAt: '2026-08-24T00:00:00.000Z',
   type: 'tool.completed',
   payload: { toolCallId, output, isError },
+});
+const usageEvent = (
+  id: string,
+  sequence: number,
+  payload: Extract<SessionEvent, { type: 'session.usage' }>['payload'],
+): SessionEvent => ({
+  protocolVersion: 1,
+  id,
+  sessionId: 's1',
+  sequence,
+  occurredAt: '2026-08-24T00:00:00.000Z',
+  type: 'session.usage',
+  payload,
 });
 const snapshot = () => ({
   protocolVersion: 1 as const,

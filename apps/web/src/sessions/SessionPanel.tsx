@@ -24,6 +24,8 @@ export function SessionPanel({
   auditAvailable = true,
   promptDraft = '',
   streamingAssistantText,
+  connectionHealth = 'connected',
+  lastLiveActivityAt,
   onPromptDraftChange = () => undefined,
 }: {
   session: Session;
@@ -33,9 +35,18 @@ export function SessionPanel({
   auditAvailable?: boolean;
   promptDraft?: string;
   streamingAssistantText?: string;
+  connectionHealth?: 'connected' | 'degraded' | 'disconnected';
+  lastLiveActivityAt?: string;
   onPromptDraftChange?: (value: string) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [verbose, setVerbose] = useState(() => {
+    try {
+      return localStorage.getItem('mesh.verboseTimeline') !== 'false';
+    } catch {
+      return true;
+    }
+  });
   const detailsId = `session-details-${useId()}`;
   const unavailable = async () => {
     throw new Error('Session API is unavailable');
@@ -54,6 +65,28 @@ export function SessionPanel({
         onDetailsOpenChange={setDetailsOpen}
         actions={<SessionActions sessionId={session.id} send={send} />}
       />
+      <div className="timeline-toolbar">
+        <label>
+          <input
+            type="checkbox"
+            aria-label="Verbose timeline"
+            checked={verbose}
+            onChange={(event) => {
+              const next = event.target.checked;
+              setVerbose(next);
+              try {
+                localStorage.setItem('mesh.verboseTimeline', String(next));
+              } catch {
+                // Browser storage is optional for the presentation preference.
+              }
+            }}
+          />
+          Verbose
+        </label>
+        <span className={`connection-${connectionHealth}`}>
+          {connectionHealth}
+        </span>
+      </div>
       <div
         className="session-layout"
         data-details-open={detailsOpen || undefined}
@@ -64,6 +97,10 @@ export function SessionPanel({
             permissionMode={session.permissionMode}
             send={send}
             streamingAssistantText={streamingAssistantText}
+            verbose={verbose}
+            connectionHealth={connectionHealth}
+            lastLiveActivityAt={lastLiveActivityAt}
+            lifecycleState={session.lifecycleState}
           />
           <PromptComposer
             session={session}
