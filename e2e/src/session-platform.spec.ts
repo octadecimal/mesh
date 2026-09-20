@@ -727,13 +727,17 @@ test('creates shared and worktree sessions with the production-built server', as
     )
     .toBe(true);
   await expect(
-    page.getByText('Created after the socket connected'),
+    page.getByText('Created after the socket connected', { exact: true }),
   ).toBeVisible();
   const activePanel = page.locator('.session-panel-content');
   await expect(activePanel).toBeVisible();
   if (visualSnapshotsSupported) {
     await expect(activePanel).toHaveScreenshot('active-session-panel.png', {
       animations: 'disabled',
+      mask: [
+        activePanel.locator('time'),
+        activePanel.locator('.timeline-progress small'),
+      ],
     });
   }
   await activePanel.getByRole('button', { name: 'Details' }).click();
@@ -825,9 +829,9 @@ test('streams one live assistant card before persisting the final reply', async 
   const liveMessage = page.getByLabel('Streaming assistant message');
 
   driverSession.enqueue({ kind: 'text_delta', text: 'Streaming ' });
-  await expect(liveMessage).toHaveText('AssistantStreaming');
+  await expect(liveMessage).toContainText('Streaming');
   driverSession.enqueue({ kind: 'text_delta', text: 'works' });
-  await expect(liveMessage).toHaveText('AssistantStreaming works');
+  await expect(liveMessage).toContainText('Streaming works');
   expect(
     (await harness.snapshot()).events.some(
       (event) =>
@@ -842,7 +846,174 @@ test('streams one live assistant card before persisting the final reply', async 
   await expect(liveMessage).toHaveCount(0);
   await expect(
     page.getByLabel('Assistant message', { exact: true }),
-  ).toHaveText('AssistantStreaming works');
+  ).toContainText('Streaming works');
+});
+
+test('replays the verbose timeline without duplicating streamed text and resumes follow on demand', async ({
+  page,
+  harness,
+}) => {
+  const sessionId = await createThroughApi(harness, 'Verbose timeline session');
+  await harness.waitForCreated();
+  const driverSession = harness.driver.createdSessions[0];
+  if (!driverSession) throw new Error('Expected fake driver session');
+
+  await page.goto(harness.origin);
+  await openSessionsView(page);
+  await page.getByRole('button', { name: /Verbose timeline session/ }).click();
+  const timeline = page.getByLabel('Session timeline');
+  const verbose = page.getByRole('checkbox', { name: 'Verbose timeline' });
+  await expect(verbose).toBeChecked();
+  driverSession.enqueue({
+    kind: 'activity',
+    sourceEventId: 'timeline-initialized',
+    activity: {
+      kind: 'initialization',
+      summary: 'Claude initialized',
+      details: { model: 'claude-opus' },
+    },
+  });
+  driverSession.enqueue({
+    kind: 'usage',
+    sourceEventId: 'timeline-usage',
+    usage: {
+      scope: 'turn',
+      model: 'claude-opus',
+      inputTokens: 12,
+      outputTokens: 4,
+    },
+  });
+  driverSession.enqueue({ kind: 'text_delta', text: 'Live timeline ' });
+  await expect(page.getByLabel('Streaming assistant message')).toContainText(
+    'Live timeline',
+  );
+  await expect(timeline).toContainText('Claude initialized');
+  await expect(timeline).toContainText('claude-opus');
+
+  driverSession.enqueue({
+    kind: 'tool_requested',
+    toolCallId: 'timeline-read',
+    name: 'Read',
+    input: { path: 'README.md' },
+  });
+  driverSession.enqueue({
+    kind: 'activity',
+    sourceEventId: 'timeline-progress',
+    activity: {
+      kind: 'tool_progress',
+      summary: 'Read is running',
+      toolCallId: 'timeline-read',
+      elapsedSeconds: 1,
+    },
+  });
+  driverSession.enqueue({
+    kind: 'tool_completed',
+    toolCallId: 'timeline-read',
+    output: { text: 'fixture result' },
+    isError: false,
+  });
+  driverSession.enqueue({ kind: 'text_delta', text: 'done' });
+  driverSession.enqueue({ kind: 'text_completed', text: 'Live timeline done' });
+  await waitForHistory(harness, sessionId, (events) =>
+    events.some(({ type }) => type === 'tool.completed'),
+  );
+  await waitForHistory(
+    harness,
+    sessionId,
+    (events) =>
+      events.filter(
+        ({ type, payload }) =>
+          type === 'message.assistant' && payload.text === 'Live timeline done',
+      ).length === 1,
+  );
+
+  await expect(page.getByLabel('Streaming assistant message')).toHaveCount(0);
+  await expect(page.getByLabel('Assistant message')).toContainText(
+    'Live timeline done',
+  );
+  await expect(page.getByLabel('Tool call Read')).toContainText(
+    'fixture result',
+  );
+
+  await verbose.uncheck();
+  await expect(page.getByLabel('Session activity')).not.toBeVisible();
+  await expect(page.getByLabel('Reported usage')).not.toBeVisible();
+  await expect
+    .poll(() =>
+      page
+        .locator('.tool-output')
+        .evaluateAll((items) =>
+          items.every((item) => getComputedStyle(item).display === 'none'),
+        ),
+    )
+    .toBe(true);
+  await page.reload();
+  await openSessionsView(page);
+  await expect(verbose).not.toBeChecked();
+  await expect(page.getByLabel('Tool call Read')).toContainText('Completed');
+  await expect(page.getByLabel('Session activity')).not.toBeVisible();
+
+  await verbose.check();
+  await expect(
+    page
+      .getByLabel('Session activity')
+      .filter({ hasText: 'Claude initialized' }),
+  ).toBeVisible();
+  await expect(page.getByLabel('Tool call Read')).toContainText(
+    'fixture result',
+  );
+  for (let index = 0; index < 20; index += 1) {
+    driverSession.enqueue({
+      kind: 'activity',
+      sourceEventId: `timeline-scroll-${index}`,
+      activity: { kind: 'status', summary: `Timeline activity ${index}` },
+    });
+  }
+  await expect(timeline).toContainText('Timeline activity 19');
+  await timeline.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  driverSession.enqueue({
+    kind: 'activity',
+    sourceEventId: 'timeline-after-scroll',
+    activity: { kind: 'status', summary: 'Activity after scroll pause' },
+  });
+  await expect(timeline).toContainText('Activity after scroll pause');
+  await expect(
+    page.getByRole('button', { name: 'Jump to latest' }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          element.scrollTop + element.clientHeight < element.scrollHeight,
+      ),
+    )
+    .toBe(true);
+  await page.getByRole('button', { name: 'Jump to latest' }).click();
+  await expect
+    .poll(() =>
+      timeline.evaluate(
+        (element) =>
+          element.scrollTop + element.clientHeight >= element.scrollHeight,
+      ),
+    )
+    .toBe(true);
+  await verbose.uncheck();
+  driverSession.enqueue({
+    kind: 'permission_requested',
+    permissionId: 'timeline-permission',
+    name: 'Write',
+    input: { path: 'timeline.md' },
+  });
+  driverSession.enqueue({
+    kind: 'terminal_error',
+    code: 'timeline_error',
+    message: 'Timeline error remains visible',
+  });
+  await expect(page.getByLabel('Permission Write')).toBeVisible();
+  await expect(timeline).toContainText('Timeline error remains visible');
 });
 
 test('blocks prompting when the subscription limit is reached', async ({
@@ -1704,7 +1875,9 @@ test('imports a project and preserves an attempted task across refresh', async (
 
   await taskDialog.getByRole('button', { name: `Open ${title}` }).click();
   await expect(page.getByRole('textbox', { name: 'Prompt' })).toBeVisible();
-  await expect(page.getByText('Live after task launch')).toBeVisible();
+  await expect(
+    page.getByText('Live after task launch', { exact: true }),
+  ).toBeVisible();
   await page
     .getByRole('button', { name: `Open task: ${title}`, exact: true })
     .click();

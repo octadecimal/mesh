@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { idSchema } from '@mesh-session-platform/contracts';
 
 import {
   SdkClaudeSessionDriver,
@@ -178,6 +179,113 @@ describe('SdkClaudeSessionDriver contract', () => {
         toolCallId: 'tool-1',
         output: 'ok',
         isError: false,
+      },
+    ]);
+  });
+
+  it('preserves SDK event identities for repeated activity and reported usage', async () => {
+    const sdk = new ScriptedFacade([
+      {
+        kind: 'started',
+        sessionId: 'resume-activity',
+        apiKeySource: 'none',
+        model: 'claude-opus',
+        sourceEventId: 'sdk-init',
+      },
+      {
+        kind: 'activity',
+        sourceEventId: 'sdk-progress-1',
+        activity: {
+          kind: 'tool_progress',
+          summary: 'Read is running',
+          toolCallId: idSchema.parse('tool-1'),
+          elapsedSeconds: 1,
+        },
+      },
+      {
+        kind: 'activity',
+        sourceEventId: 'sdk-progress-2',
+        activity: {
+          kind: 'tool_progress',
+          summary: 'Read is running',
+          toolCallId: idSchema.parse('tool-1'),
+          elapsedSeconds: 1,
+        },
+      },
+      {
+        kind: 'usage',
+        sourceEventId: 'sdk-result',
+        usage: { model: 'claude-opus', inputTokens: 12, durationMs: 5 },
+      },
+    ]);
+    const session = await new SdkClaudeSessionDriver(sdk).create({
+      title: 'Session',
+    });
+
+    await expect(collect(session.events())).resolves.toEqual([
+      {
+        kind: 'activity',
+        sourceEventId: 'sdk-init',
+        activity: {
+          kind: 'initialization',
+          summary: 'Claude initialized',
+          details: { model: 'claude-opus' },
+        },
+      },
+      {
+        kind: 'usage',
+        sourceEventId: 'sdk-init-model',
+        usage: { model: 'claude-opus' },
+      },
+      {
+        kind: 'activity',
+        sourceEventId: 'sdk-progress-1',
+        activity: {
+          kind: 'tool_progress',
+          summary: 'Read is running',
+          toolCallId: idSchema.parse('tool-1'),
+          elapsedSeconds: 1,
+        },
+      },
+      {
+        kind: 'activity',
+        sourceEventId: 'sdk-progress-2',
+        activity: {
+          kind: 'tool_progress',
+          summary: 'Read is running',
+          toolCallId: idSchema.parse('tool-1'),
+          elapsedSeconds: 1,
+        },
+      },
+      {
+        kind: 'usage',
+        sourceEventId: 'sdk-result',
+        usage: { model: 'claude-opus', inputTokens: 12, durationMs: 5 },
+      },
+    ]);
+  });
+
+  it('emits initialized model usage when the facade already knows the session id', async () => {
+    const sdk = new ScriptedFacade([
+      {
+        kind: 'started',
+        sessionId: 'known-session',
+        apiKeySource: 'none',
+        model: 'claude-opus',
+        sourceEventId: 'sdk-init',
+      },
+    ]);
+    Object.defineProperty(sdk.query, 'sessionId', { value: 'known-session' });
+    const session = await new SdkClaudeSessionDriver(sdk).create({
+      title: 'Session',
+    });
+
+    await expect(collect(session.events())).resolves.toEqual([
+      expect.objectContaining({ kind: 'activity', sourceEventId: 'sdk-init' }),
+      {
+        kind: 'usage',
+        sourceEventId: 'sdk-init-model',
+        usage: { model: 'claude-opus' },
       },
     ]);
   });

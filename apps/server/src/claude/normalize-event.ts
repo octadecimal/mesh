@@ -1,6 +1,11 @@
 import {
   lifecycleStateSchema,
+  idSchema,
+  sessionActivitySchema,
+  sessionUsageSchema,
   type LifecycleState,
+  type SessionActivity,
+  type SessionUsage,
 } from '@mesh-session-platform/contracts';
 
 import type { DriverEvent } from './driver.js';
@@ -31,7 +36,9 @@ export type DriverEventDraft =
   | {
       type: 'session.error';
       payload: { code: string; message: string; details?: unknown };
-    };
+    }
+  | { type: 'session.activity'; payload: SessionActivity }
+  | { type: 'session.usage'; payload: SessionUsage };
 
 export interface UnsupportedClaudeCapability {
   code: 'unsupported_claude_capability';
@@ -70,6 +77,26 @@ export const normalizeDriverEvent = (raw: unknown): NormalizedDriverEvent => {
             event: { type: 'message.assistant', payload: { text: raw.text } },
           }
         : unsupported(raw, raw.kind);
+    case 'activity': {
+      const sourceEventId = idSchema.safeParse(raw.sourceEventId);
+      const activity = sessionActivitySchema.safeParse(raw.activity);
+      return sourceEventId.success && activity.success
+        ? {
+            kind: 'event',
+            event: { type: 'session.activity', payload: activity.data },
+          }
+        : unsupported(raw, raw.kind);
+    }
+    case 'usage': {
+      const sourceEventId = idSchema.safeParse(raw.sourceEventId);
+      const usage = sessionUsageSchema.safeParse(raw.usage);
+      return sourceEventId.success && usage.success
+        ? {
+            kind: 'event',
+            event: { type: 'session.usage', payload: usage.data },
+          }
+        : unsupported(raw, raw.kind);
+    }
     case 'tool_requested': {
       const { toolCallId, name, input } = raw;
       return typeof toolCallId === 'string' &&

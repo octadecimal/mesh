@@ -5,6 +5,16 @@
   "projectType": "application",
   "tags": ["type:app", "version:v2"],
   "targets": {
+    "test": {
+      "inputs": [
+        "default",
+        "^production",
+        "{workspaceRoot}/docs/development/session-platform.md",
+        "{workspaceRoot}/docs/development/v2-foundation.md",
+        "{workspaceRoot}/apps/v2-web/public/guidance/v1-session-platform.md",
+        "{workspaceRoot}/apps/v2-web/public/guidance/v2-foundation.md"
+      ]
+    },
     "build": {
       "executor": "@nx/esbuild:esbuild",
       "outputs": ["{options.outputPath}"],

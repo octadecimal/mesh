@@ -32,6 +32,7 @@ type QueryInput = {
     allowedTools?: string[];
     disallowedTools?: string[];
     includePartialMessages?: boolean;
+    includeHookEvents?: boolean;
     mcpServers?: Record<string, unknown>;
     settingSources?: string[];
     strictMcpConfig?: boolean;
@@ -50,7 +51,8 @@ type QueryInput = {
   };
 };
 
-const { createSdkMcpServer, query, tool } = vi.hoisted(() => ({
+const { createSdkMcpServer, emittedMessages, query, tool } = vi.hoisted(() => ({
+  emittedMessages: [] as unknown[],
   createSdkMcpServer: vi.fn((options: unknown) => ({
     type: 'sdk',
     name: 'mesh_developer',
@@ -60,7 +62,7 @@ const { createSdkMcpServer, query, tool } = vi.hoisted(() => ({
     void options;
     return {
       async *[Symbol.asyncIterator]() {
-        yield* [];
+        yield* emittedMessages;
       },
       interrupt: async () => undefined,
       close: () => undefined,
@@ -94,6 +96,7 @@ describe('createClaudeSdkFacade', () => {
     createSdkMcpServer.mockClear();
     query.mockClear();
     tool.mockClear();
+    emittedMessages.splice(0);
   });
 
   it('requests partial SDK messages for live assistant text', () => {
@@ -103,6 +106,333 @@ describe('createClaudeSdkFacade', () => {
     });
 
     expect(query.mock.calls[0]?.[0].options.includePartialMessages).toBe(true);
+    expect(query.mock.calls[0]?.[0].options.includeHookEvents).toBe(true);
+  });
+
+  it('maps recognized SDK activity and reported per-model usage', async () => {
+    emittedMessages.push(
+      {
+        type: 'system',
+        subtype: 'init',
+        uuid: 'init-1',
+        session_id: 'sdk-1',
+        apiKeySource: 'none',
+        model: 'claude-opus',
+        claude_code_version: '1.0',
+        cwd: 'C:/repo',
+        tools: ['Read'],
+        mcp_servers: [],
+        slash_commands: [],
+        permissionMode: 'default',
+        output_style: 'default',
+        skills: [],
+        plugins: [],
+      },
+      {
+        type: 'tool_progress',
+        uuid: 'progress-1',
+        session_id: 'sdk-1',
+        tool_use_id: 'tool-1',
+        tool_name: 'Read',
+        parent_tool_use_id: null,
+        elapsed_time_seconds: 2,
+      },
+      {
+        type: 'system',
+        subtype: 'hook_progress',
+        uuid: 'hook-1',
+        session_id: 'sdk-1',
+        hook_id: 'hook-a',
+        hook_name: 'format',
+        hook_event: 'PostToolUse',
+        stdout: 'formatted',
+        stderr: '',
+        output: 'ok',
+      },
+      {
+        type: 'system',
+        subtype: 'api_retry',
+        uuid: 'retry-1',
+        session_id: 'sdk-1',
+        attempt: 1,
+        max_retries: 3,
+        retry_delay_ms: 100,
+        error_status: 529,
+        error: 'overloaded',
+      },
+      {
+        type: 'system',
+        subtype: 'compact_boundary',
+        uuid: 'compact-1',
+        session_id: 'sdk-1',
+        compact_metadata: {
+          trigger: 'auto',
+          pre_tokens: 100,
+          post_tokens: 20,
+          duration_ms: 4,
+        },
+      },
+      {
+        type: 'system',
+        subtype: 'task_progress',
+        uuid: 'task-1',
+        session_id: 'sdk-1',
+        task_id: 'task-1',
+        tool_use_id: 'tool-1',
+        description: 'Inspect code',
+        usage: { total_tokens: 9, tool_uses: 1, duration_ms: 3 },
+        last_tool_name: 'Read',
+        summary: 'Reading',
+      },
+      {
+        type: 'result',
+        subtype: 'success',
+        uuid: 'result-1',
+        session_id: 'sdk-1',
+        duration_ms: 20,
+        duration_api_ms: 10,
+        is_error: false,
+        num_turns: 1,
+        result: 'done',
+        stop_reason: 'end_turn',
+        total_cost_usd: 0,
+        usage: {
+          input_tokens: 1,
+          output_tokens: 2,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+        modelUsage: {
+          'claude-opus': {
+            inputTokens: 1,
+            outputTokens: 2,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0,
+            contextWindow: 200000,
+            maxOutputTokens: 8192,
+          },
+        },
+        permission_denials: [],
+      },
+      {
+        type: 'result',
+        subtype: 'error_max_turns',
+        uuid: 'result-2',
+        session_id: 'sdk-1',
+        duration_ms: 21,
+        duration_api_ms: 11,
+        is_error: true,
+        num_turns: 2,
+        stop_reason: null,
+        total_cost_usd: 0,
+        errors: ['turn cap'],
+        usage: {
+          input_tokens: 3,
+          output_tokens: 4,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+        modelUsage: {
+          'claude-sonnet': {
+            inputTokens: 3,
+            outputTokens: 4,
+            cacheReadInputTokens: 0,
+            cacheCreationInputTokens: 0,
+            webSearchRequests: 0,
+            costUSD: 0,
+            contextWindow: 100000,
+            maxOutputTokens: 8192,
+          },
+        },
+        permission_denials: [],
+      },
+    );
+    const stream = createClaudeSdkFacade().startQuery({ title: 'Streaming' });
+    const events = [] as unknown[];
+    for await (const event of stream.events()) events.push(event);
+
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'started', model: 'claude-opus' }),
+        expect.objectContaining({
+          kind: 'activity',
+          activity: expect.objectContaining({
+            kind: 'tool_progress',
+            elapsedSeconds: 2,
+          }),
+        }),
+        expect.objectContaining({
+          kind: 'activity',
+          activity: expect.objectContaining({
+            kind: 'hook',
+            details: expect.objectContaining({ stdout: 'formatted' }),
+          }),
+        }),
+        expect.objectContaining({
+          kind: 'activity',
+          activity: expect.objectContaining({ kind: 'retry' }),
+        }),
+        expect.objectContaining({
+          kind: 'activity',
+          activity: expect.objectContaining({ kind: 'compaction' }),
+        }),
+        expect.objectContaining({
+          kind: 'activity',
+          activity: expect.objectContaining({
+            kind: 'subagent',
+            summary: 'Reading',
+          }),
+        }),
+        expect.objectContaining({
+          kind: 'usage',
+          usage: expect.objectContaining({
+            model: 'claude-opus',
+            contextWindow: 200000,
+            scope: 'query',
+          }),
+        }),
+        expect.objectContaining({
+          kind: 'usage',
+          usage: expect.objectContaining({
+            model: 'claude-sonnet',
+            contextWindow: 100000,
+            scope: 'query',
+          }),
+        }),
+        expect.objectContaining({
+          kind: 'limit',
+          capability: 'error_max_turns',
+        }),
+      ]),
+    );
+  });
+
+  it('keeps turn usage separate from cumulative per-model query usage', async () => {
+    const result = (
+      uuid: string,
+      inputTokens: number,
+      modelUsage: Record<string, unknown>,
+    ) => ({
+      type: 'result',
+      subtype: 'success',
+      uuid,
+      session_id: 'sdk-1',
+      duration_ms: 25,
+      duration_api_ms: 10,
+      is_error: false,
+      num_turns: 1,
+      result: 'done',
+      stop_reason: 'end_turn',
+      total_cost_usd: 0,
+      usage: {
+        input_tokens: inputTokens,
+        output_tokens: 2,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+      modelUsage,
+      permission_denials: [],
+    });
+    const model = (inputTokens: number) => ({
+      inputTokens,
+      outputTokens: 2,
+      cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0,
+      webSearchRequests: 0,
+      costUSD: 0,
+      contextWindow: 200000,
+      maxOutputTokens: 8192,
+    });
+    emittedMessages.push(
+      {
+        type: 'system',
+        subtype: 'init',
+        uuid: 'init-1',
+        session_id: 'sdk-1',
+        apiKeySource: 'none',
+        model: 'claude-opus',
+        claude_code_version: '1.0',
+        cwd: 'C:/repo',
+        tools: [],
+        mcp_servers: [],
+        slash_commands: [],
+        permissionMode: 'default',
+        output_style: 'default',
+        skills: [],
+        plugins: [],
+      },
+      result('turn-1', 10, { 'claude-opus': model(10) }),
+      result('turn-2', 10, {
+        'claude-opus': model(20),
+        'claude-sonnet': model(5),
+      }),
+    );
+    const events: Array<{
+      kind?: string;
+      sourceEventId?: string;
+      usage?: Record<string, unknown>;
+    }> = [];
+    for await (const event of createClaudeSdkFacade()
+      .startQuery({ title: 'Usage' })
+      .events())
+      events.push(event);
+
+    expect(events.filter(({ usage }) => usage?.scope === 'turn')).toEqual([
+      expect.objectContaining({
+        sourceEventId: 'turn-1-turn',
+        usage: expect.objectContaining({
+          scope: 'turn',
+          inputTokens: 10,
+          outputTokens: 2,
+          durationMs: 25,
+        }),
+      }),
+      expect.objectContaining({
+        sourceEventId: 'turn-2-turn',
+        usage: expect.objectContaining({
+          scope: 'turn',
+          inputTokens: 10,
+          outputTokens: 2,
+          durationMs: 25,
+        }),
+      }),
+    ]);
+    expect(events.filter(({ usage }) => usage?.scope === 'query')).toEqual([
+      expect.objectContaining({
+        sourceEventId: 'turn-1-claude-opus',
+        usage: expect.objectContaining({
+          model: 'claude-opus',
+          inputTokens: 10,
+          contextWindow: 200000,
+        }),
+      }),
+      expect.objectContaining({
+        sourceEventId: 'turn-2-claude-opus',
+        usage: expect.objectContaining({
+          model: 'claude-opus',
+          inputTokens: 20,
+          contextWindow: 200000,
+        }),
+      }),
+      expect.objectContaining({
+        sourceEventId: 'turn-2-claude-sonnet',
+        usage: expect.objectContaining({
+          model: 'claude-sonnet',
+          inputTokens: 5,
+          contextWindow: 200000,
+        }),
+      }),
+    ]);
+    expect(
+      events
+        .filter(({ usage }) => usage?.scope === 'query')
+        .every(({ usage }) => usage?.durationMs === undefined),
+    ).toBe(true);
+    expect(events.find(({ kind }) => kind === 'started')).toMatchObject({
+      model: 'claude-opus',
+    });
   });
 
   it('does not install Mesh MCP tools for ordinary sessions', () => {

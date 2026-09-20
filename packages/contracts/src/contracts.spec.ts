@@ -826,6 +826,63 @@ describe('session platform contracts', () => {
     ).toThrow();
   });
 
+  it('accepts reported session activity and usage while rejecting invented metrics', () => {
+    const base = {
+      protocolVersion: 1,
+      id: 'event-activity',
+      sessionId: 's1',
+      sequence: 1,
+      occurredAt: now,
+    };
+    expect(
+      sessionEventSchema.parse({
+        ...base,
+        type: 'session.activity',
+        payload: {
+          kind: 'tool_progress',
+          summary: 'Read is running',
+          toolCallId: 'tool-1',
+          elapsedSeconds: 2,
+          details: { heartbeat: true },
+        },
+      }).payload,
+    ).toMatchObject({ kind: 'tool_progress', elapsedSeconds: 2 });
+    expect(
+      sessionEventSchema.parse({
+        ...base,
+        id: 'event-usage',
+        type: 'session.usage',
+        payload: {
+          scope: 'turn',
+          model: 'claude-opus',
+          inputTokens: 12,
+          durationMs: 5,
+        },
+      }).payload,
+    ).toMatchObject({ model: 'claude-opus', inputTokens: 12 });
+    expect(() =>
+      sessionEventSchema.parse({
+        ...base,
+        type: 'session.activity',
+        payload: { kind: 'stderr', summary: 'not supported' },
+      }),
+    ).toThrow();
+    expect(() =>
+      sessionEventSchema.parse({
+        ...base,
+        type: 'session.usage',
+        payload: { inputTokens: -1 },
+      }),
+    ).toThrow();
+    expect(() =>
+      sessionEventSchema.parse({
+        ...base,
+        type: 'session.usage',
+        payload: { scope: 'session' },
+      }),
+    ).toThrow();
+  });
+
   it('accepts the complete lifecycle vocabulary', () => {
     for (const lifecycleState of [
       'idle',

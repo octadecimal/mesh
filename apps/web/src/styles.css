@@ -2008,7 +2008,7 @@ textarea:focus-visible {
 }
 .session-panel-content {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   overflow: hidden;
@@ -2054,6 +2054,42 @@ textarea:focus-visible {
   padding: 0.35rem 0.55rem;
   font-size: 0.7rem;
 }
+.timeline-toolbar,
+.timeline-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.5rem 1rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.timeline-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--text);
+}
+.timeline-toolbar input {
+  accent-color: var(--focus);
+}
+.connection-connected {
+  color: var(--success);
+}
+.connection-degraded {
+  color: var(--warning);
+}
+.connection-disconnected {
+  color: var(--danger);
+}
+.timeline-progress {
+  padding-block: 0.4rem;
+  background: #111a27;
+}
+.timeline-progress small {
+  color: var(--subtle);
+}
 .session-layout {
   display: grid;
   min-width: 0;
@@ -2069,6 +2105,13 @@ textarea:focus-visible {
   min-width: 0;
   min-height: 0;
 }
+.timeline-container {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
 .session-panel-content h2,
 .session-panel-content h3 {
   margin: 0;
@@ -2081,7 +2124,54 @@ textarea:focus-visible {
   overflow: auto;
   padding: 1rem;
 }
+.transcript-item time {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--subtle);
+  font:
+    0.64rem ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+}
+.transcript-compact .transcript-activity,
+.transcript-compact .transcript-usage,
+.transcript-compact .transcript-diagnostic {
+  display: none;
+}
+.transcript-compact .transcript-tool details {
+  display: none;
+}
+.transcript-compact .transcript-tool .tool-output {
+  display: none;
+}
+.transcript-compact .transcript-tool .tool-output-error {
+  display: block;
+}
+.transcript-compact .transcript-tool .tool-output-error + details {
+  display: block;
+}
+.tool-output {
+  margin-top: 0.45rem;
+}
+.tool-output pre {
+  max-height: 12rem;
+  margin: 0.25rem 0 0;
+}
+.timeline-jump {
+  position: absolute;
+  right: 1rem;
+  bottom: 5.5rem;
+  z-index: 2;
+  border: 1px solid var(--strong);
+  border-radius: 999px;
+  padding: 0.35rem 0.65rem;
+  color: var(--text);
+  background: #1a2534;
+  font-size: 0.7rem;
+}
 .transcript-item {
+  position: relative;
   max-width: min(52rem, 88%);
   margin: 0.65rem 0;
   border: 1px solid var(--border);
@@ -2089,6 +2179,26 @@ textarea:focus-visible {
   padding: 0.7rem 0.8rem;
   background: var(--raised);
   box-shadow: 0 4px 16px #0002;
+}
+.transcript-verbose .transcript-item::before {
+  position: absolute;
+  top: 1.15rem;
+  bottom: -0.7rem;
+  left: -0.7rem;
+  width: 1px;
+  background: var(--border);
+  content: '';
+}
+.transcript-verbose .transcript-item::after {
+  position: absolute;
+  top: 0.75rem;
+  left: -0.94rem;
+  width: 0.42rem;
+  height: 0.42rem;
+  border: 2px solid #75a7ff;
+  border-radius: 50%;
+  background: var(--panel);
+  content: '';
 }
 .transcript-item strong {
   display: block;
@@ -2322,7 +2432,8 @@ textarea:focus-visible {
   }
   .session-layout[data-details-open] {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) minmax(0, 30%);
+    grid-template-rows: 100% max-content;
+    overflow: auto;
   }
   .session-details {
     border-left: 0;

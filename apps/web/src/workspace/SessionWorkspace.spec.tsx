@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import { useLayoutEffect } from 'react';
 import { vi } from 'vitest';
 import type { Session } from '@mesh-session-platform/contracts';
 
@@ -33,6 +34,47 @@ describe('SessionWorkspace', () => {
         visiblePanels: ['s1'],
       }),
     );
+  });
+
+  it('keeps a deferred layout save with the callback that scheduled it', () => {
+    vi.useFakeTimers();
+    const saveA = vi.fn();
+    const saveB = vi.fn();
+    function Harness({ phase }: { phase: 'A' | 'B' }) {
+      useLayoutEffect(() => {
+        if (phase === 'B') vi.advanceTimersByTime(300);
+      }, [phase]);
+      return (
+        <SessionWorkspace
+          sessions={phase === 'A' ? sessions.slice(0, 1) : sessions.slice(1, 2)}
+          selectedSessionId={phase === 'A' ? 's1' : 's2'}
+          sidebar={{ filter: phase }}
+          onSaveLayout={phase === 'A' ? saveA : saveB}
+        />
+      );
+    }
+    try {
+      const view = render(<Harness phase="A" />);
+      view.rerender(<Harness phase="B" />);
+
+      expect(saveA).toHaveBeenCalledWith(
+        expect.objectContaining({
+          visiblePanels: ['s1'],
+          sidebar: { filter: 'A' },
+        }),
+      );
+      expect(saveB).not.toHaveBeenCalled();
+      act(() => vi.advanceTimersByTime(300));
+      expect(saveB).toHaveBeenCalledWith(
+        expect.objectContaining({
+          visiblePanels: ['s2'],
+          sidebar: { filter: 'B' },
+        }),
+      );
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('updates an open panel when the session lifecycle changes', async () => {

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   projectSchema,
+  idSchema,
   sessionSchema,
   workspaceSchema,
   type Session,
@@ -152,6 +153,63 @@ describe('session runtime', () => {
 
     await vi.waitFor(() => expect(deltas).toEqual(['Hel', 'lo']));
     expect(repos.events.after('s1', 0)).toEqual(eventsBeforeDelta);
+  });
+
+  it('persists repeated source-identified activity and reported usage before publication', async () => {
+    const { repos, driverSession, publisher, registry } = setup();
+    disposers.push(repos.dispose);
+    const observedPersisted: boolean[] = [];
+    publisher.subscribe('s1', (event) => {
+      if (event.type === 'session.activity' || event.type === 'session.usage')
+        observedPersisted.push(
+          repos.events.after('s1', 0).some(({ id }) => id === event.id),
+        );
+    });
+    await registry.create('s1');
+
+    driverSession.enqueue({
+      kind: 'activity',
+      sourceEventId: 'sdk-progress-1',
+      activity: {
+        kind: 'tool_progress',
+        summary: 'Read is running',
+        toolCallId: idSchema.parse('tool-1'),
+        elapsedSeconds: 1,
+      },
+    });
+    driverSession.enqueue({
+      kind: 'activity',
+      sourceEventId: 'sdk-progress-2',
+      activity: {
+        kind: 'tool_progress',
+        summary: 'Read is running',
+        toolCallId: idSchema.parse('tool-1'),
+        elapsedSeconds: 1,
+      },
+    });
+    driverSession.enqueue({
+      kind: 'usage',
+      sourceEventId: 'sdk-result',
+      usage: { model: 'claude-opus', inputTokens: 12, durationMs: 5 },
+    });
+
+    await vi.waitFor(() =>
+      expect(
+        repos.events
+          .after('s1', 0)
+          .filter(
+            (event) =>
+              event.type === 'session.activity' ||
+              event.type === 'session.usage',
+          ),
+      ).toHaveLength(3),
+    );
+    expect(observedPersisted).toEqual([true, true, true]);
+    expect(
+      repos.events
+        .after('s1', 0)
+        .filter((event) => event.type === 'session.activity'),
+    ).toHaveLength(2);
   });
 
   it('isolates a throwing subscriber while other subscribers receive persisted events', async () => {

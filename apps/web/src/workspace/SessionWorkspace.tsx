@@ -10,6 +10,7 @@ import type {
   SessionEvent,
   Workspace,
 } from '@mesh-session-platform/contracts';
+import type { ConnectionHealth } from '../state/reducer';
 
 import type { SessionPanelApi } from '../sessions/SessionPanel';
 import { SessionPanel } from '../sessions/SessionPanel';
@@ -38,6 +39,8 @@ type SessionWorkspaceContextValue = {
   auditAvailable: boolean;
   promptDrafts: Record<string, string>;
   streamingAssistantTextBySession: Record<string, string>;
+  lastLiveActivityAtBySession: Record<string, string>;
+  connectionHealth: ConnectionHealth;
   onPromptDraftChange?: (sessionId: string, value: string) => void;
   linkedTasksBySessionId: Record<string, { id: string; title: string }>;
   onOpenTask?: (taskId: string) => void;
@@ -96,6 +99,10 @@ function DockviewSessionPanel({
         streamingAssistantText={
           context.streamingAssistantTextBySession[params.sessionId]
         }
+        lastLiveActivityAt={
+          context.lastLiveActivityAtBySession[params.sessionId]
+        }
+        connectionHealth={context.connectionHealth}
         onPromptDraftChange={(value) =>
           context.onPromptDraftChange?.(params.sessionId, value)
         }
@@ -130,6 +137,8 @@ export function SessionWorkspace({
   auditAvailable = true,
   promptDrafts = {},
   streamingAssistantTextBySession = {},
+  lastLiveActivityAtBySession = {},
+  connectionHealth = 'disconnected',
   onPromptDraftChange,
   onNewSession,
   onResumeSession,
@@ -148,6 +157,8 @@ export function SessionWorkspace({
   auditAvailable?: boolean;
   promptDrafts?: Record<string, string>;
   streamingAssistantTextBySession?: Record<string, string>;
+  lastLiveActivityAtBySession?: Record<string, string>;
+  connectionHealth?: ConnectionHealth;
   onPromptDraftChange?: (sessionId: string, value: string) => void;
   onNewSession?: () => void;
   onResumeSession?: () => void;
@@ -165,6 +176,7 @@ export function SessionWorkspace({
     () => sessions.map(({ id, title }) => `${id}:${title}`).join('|'),
     [sessions],
   );
+  const sidebarKey = JSON.stringify(sidebar);
   const components = useMemo(
     () => ({
       [SESSION_COMPONENT]: DockviewSessionPanel,
@@ -180,8 +192,10 @@ export function SessionWorkspace({
     if (restoringRef.current || !onSaveRef.current) return;
     if (saveTimerRef.current !== undefined)
       window.clearTimeout(saveTimerRef.current);
+    const onSave = onSaveRef.current;
+    const layout = serializeDockview(api, sidebarRef.current);
     saveTimerRef.current = window.setTimeout(() => {
-      onSaveRef.current?.(serializeDockview(api, sidebarRef.current));
+      onSave(layout);
     }, 300);
   };
 
@@ -198,6 +212,11 @@ export function SessionWorkspace({
     restoringRef.current = false;
     scheduleSave(api);
   }, [sessionsKey, selectedSessionId, savedLayout?.id]);
+
+  useEffect(() => {
+    const api = apiRef.current;
+    if (api) scheduleSave(api);
+  }, [sidebarKey]);
 
   useEffect(
     () => () => {
@@ -263,6 +282,8 @@ export function SessionWorkspace({
           auditAvailable,
           promptDrafts,
           streamingAssistantTextBySession,
+          lastLiveActivityAtBySession,
+          connectionHealth,
           onPromptDraftChange,
           linkedTasksBySessionId,
           onOpenTask,

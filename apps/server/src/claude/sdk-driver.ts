@@ -1,4 +1,8 @@
-import type { PermissionMode } from '@mesh-session-platform/contracts';
+import type {
+  PermissionMode,
+  SessionActivity,
+  SessionUsage,
+} from '@mesh-session-platform/contracts';
 
 import type {
   ClaudeSessionDriver,
@@ -14,9 +18,20 @@ import type {
 import { permissionPolicy } from './permission-policy.js';
 
 export type SdkStreamEvent =
-  | { kind: 'started'; sessionId: string; apiKeySource?: string }
+  | {
+      kind: 'started';
+      sessionId: string;
+      apiKeySource?: string;
+      model?: string;
+      claudeCodeVersion?: string;
+      cwd?: string;
+      tools?: string[];
+      sourceEventId?: string;
+    }
   | { kind: 'assistant_delta'; text: string }
   | { kind: 'assistant_text'; text: string }
+  | { kind: 'activity'; sourceEventId: string; activity: SessionActivity }
+  | { kind: 'usage'; sourceEventId: string; usage: SessionUsage }
   | { kind: 'tool_requested'; toolCallId: string; name: string; input: unknown }
   | {
       kind: 'tool_completed';
@@ -135,6 +150,7 @@ class SdkDriverSession implements DriverSession {
         if (next.value.kind === 'started') {
           this.claudeResumeId = next.value.sessionId;
           apiKeySource = next.value.apiKeySource;
+          this.bufferedSdkEvents.push(next.value);
           break;
         }
         this.bufferedSdkEvents.push(next.value);
@@ -260,11 +276,38 @@ class SdkDriverSession implements DriverSession {
     switch (event.kind) {
       case 'started':
         this.claudeResumeId = event.sessionId;
-        return undefined;
+        if (event.model && event.sourceEventId)
+          this.sideEvents.push({
+            kind: 'usage',
+            sourceEventId: `${event.sourceEventId}-model`,
+            usage: { model: event.model },
+          });
+        return event.sourceEventId
+          ? {
+              kind: 'activity',
+              sourceEventId: event.sourceEventId,
+              activity: {
+                kind: 'initialization',
+                summary: 'Claude initialized',
+                details: {
+                  ...(event.model ? { model: event.model } : {}),
+                  ...(event.claudeCodeVersion
+                    ? { claudeCodeVersion: event.claudeCodeVersion }
+                    : {}),
+                  ...(event.cwd ? { cwd: event.cwd } : {}),
+                  ...(event.tools ? { tools: event.tools } : {}),
+                },
+              },
+            }
+          : undefined;
       case 'assistant_delta':
         return { kind: 'text_delta', text: event.text };
       case 'assistant_text':
         return { kind: 'text_completed', text: event.text };
+      case 'activity':
+        return event;
+      case 'usage':
+        return event;
       case 'tool_requested':
         return event;
       case 'tool_completed':

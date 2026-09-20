@@ -4,6 +4,8 @@ import type {
   LifecycleState,
   PermissionMode,
   ProjectPlanProposalInput,
+  SessionActivity,
+  SessionUsage,
 } from '@mesh-session-platform/contracts';
 import type { ZodType } from 'zod';
 
@@ -92,6 +94,12 @@ export interface ResumeClaudeSessionRequest {
 export type DriverEvent =
   | { kind: 'text_delta'; text: string }
   | { kind: 'text_completed'; text: string }
+  | {
+      kind: 'activity';
+      sourceEventId: string;
+      activity: SessionActivity;
+    }
+  | { kind: 'usage'; sourceEventId: string; usage: SessionUsage }
   | { kind: 'tool_requested'; toolCallId: string; name: string; input: unknown }
   | {
       kind: 'tool_completed';
